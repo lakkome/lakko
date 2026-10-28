@@ -177,7 +177,24 @@ export type RegisterEdit =
     }
   | { readonly t: "pins"; readonly folderIdHex: string; readonly pinned: readonly ConversationRef[] }
   | { readonly t: "removed"; readonly folderIdHex: string }
-  | { readonly t: "order"; readonly folderIdsHex: readonly string[] };
+  | { readonly t: "order"; readonly folderIdsHex: readonly string[] }
+  /** ADR-0065 section 4 — save a message (the snapshot a row is drawn from
+   *  before the message is held, and its blob ids for the keeps). */
+  | {
+      readonly t: "saved";
+      readonly ref: ConversationRef;
+      readonly messageId: bigint;
+      readonly savedAtMs: bigint;
+      /** The message's own time, unix ms; `0n` when not known. */
+      readonly sentAtMs: bigint;
+      readonly author: string;
+      readonly excerpt: string;
+      readonly attachmentKind: string;
+      readonly blobIdsHex: readonly string[];
+    }
+  /** Remove a message from saved (a tombstone; saving it again brings it
+   *  back). */
+  | { readonly t: "saved-removed"; readonly ref: ConversationRef; readonly messageId: bigint };
 
 /** A register edit with its own HLC stamp. */
 export type StampedEdit = RegisterEdit & { readonly hlc: bigint };

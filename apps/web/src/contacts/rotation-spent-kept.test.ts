@@ -17,15 +17,12 @@ import {
 import {
   decodeMintedLink,
   encodeMintedLink,
-  inlineLinkSlug,
-  isInlineLinkSlug,
   parseMintedRowKey,
 } from "./minted-links";
 import {
   clearSpendOwed,
   decodeSpendOwed,
   installSpentRunners,
-  localLinkRevokeOutcome,
   localLinkSpent,
   markSpendOwed,
   readSpendOwed,
@@ -170,19 +167,22 @@ describe("the links this device minted itself", () => {
     expect(localLinkSpent(null, 1000)).toBe(true);
   });
 
-  it("revoked or already gone is done; only an unreachable ledger keeps it owed; no ledger row is done", () => {
-    expect(localLinkRevokeOutcome(["revoked"])).toBe("done");
-    expect(localLinkRevokeOutcome(["gone", "gone"])).toBe("done");
-    expect(localLinkRevokeOutcome(["gone", "unreachable"])).toBe("unreachable");
-    expect(localLinkRevokeOutcome(["gone", "revoked"])).toBe("done");
-    expect(localLinkRevokeOutcome([])).toBe("done");
-  });
-
-  it("a row keeps the mint time; a row written before it was kept reads as no time", () => {
-    const link = { linkSecret: new Uint8Array(12).fill(1), linkId: new Uint8Array(16).fill(2) };
+  it("a row keeps the mint time, the revocation seed and the list facts (ADR-0078 section 10)", () => {
+    const link = {
+      linkSecret: new Uint8Array(12).fill(1),
+      linkId: new Uint8Array(16).fill(2),
+      revocationSeed: new Uint8Array(32).fill(3),
+      facts: { label: "L", expiryMs: 5, maxUses: 10, bootstrapReferral: true },
+    };
     const decoded = decodeMintedLink(encodeMintedLink(link, 1234.9));
     expect(decoded?.mintedAtMs).toBe(1234);
     expect(Array.from(decoded?.linkId ?? [])).toEqual(Array.from(link.linkId));
+    expect(Array.from(decoded?.revocationSeed ?? [])).toEqual(Array.from(link.revocationSeed));
+    expect(decoded?.facts).toEqual(link.facts);
+    // A row kept before ADR-0078 has no seed and no facts: it cannot be revoked.
+    const old = decodeMintedLink(JSON.stringify({ s: "AQ==", l: "Ag==", t: 5 }));
+    expect(old?.revocationSeed).toBeNull();
+    expect(old?.facts).toBeNull();
     expect(decodeMintedLink(JSON.stringify({ s: "AQ==", l: "Ag==" }))?.mintedAtMs).toBeNull();
     expect(decodeMintedLink(JSON.stringify({ s: 1, l: "Ag==" }))).toBeNull();
     expect(decodeMintedLink("{")).toBeNull();
@@ -192,15 +192,9 @@ describe("the links this device minted itself", () => {
     expect(parseMintedRowKey(`${ACCOUNT}|call|abc_DEF-1`, ACCOUNT)).toEqual({ kind: "call", blobIdSlug: "abc_DEF-1" });
     expect(parseMintedRowKey(`${ACCOUNT}|contact|slug`, ACCOUNT)).toEqual({ kind: "contact", blobIdSlug: "slug" });
     expect(parseMintedRowKey(`other|call|slug`, ACCOUNT)).toBeNull();
-    expect(parseMintedRowKey(`${ACCOUNT}|group|slug`, ACCOUNT)).toBeNull();
+    expect(parseMintedRowKey(`${ACCOUNT}|group|slug`, ACCOUNT)).toEqual({ kind: "group", blobIdSlug: "slug" });
+    expect(parseMintedRowKey(`${ACCOUNT}|other|slug`, ACCOUNT)).toBeNull();
     expect(parseMintedRowKey(`${ACCOUNT}|call|`, ACCOUNT)).toBeNull();
-  });
-
-  it("a call link minted while the ledger was unreachable has a row with no ledger id", () => {
-    const slug = inlineLinkSlug("AAAA");
-    expect(isInlineLinkSlug(slug)).toBe(true);
-    expect(isInlineLinkSlug("AAAA")).toBe(false);
-    expect(parseMintedRowKey(`${ACCOUNT}|call|${slug}`, ACCOUNT)).toEqual({ kind: "call", blobIdSlug: slug });
   });
 });
 

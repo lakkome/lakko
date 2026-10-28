@@ -1,82 +1,203 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Content-addressable blob handlers.
+//! Content-addressed blob routes (ADR-0065).
 //!
-//! Blobs are stored at `<root>/<hex[0:2]>/<hex[2:4]>/<hex>`. The two
-//! 256-way fan-out levels keep the per-directory file count bounded
-//! (~1.5M blobs spread across 65k leaf directories ≈ 23 files/dir
-//! before any single directory hits the typical ext4 readdir slowdown
-//! threshold).
+//! Blobs are stored at `<root>/<hex[0:2]>/<hex[2:4]>/<hex>`; the two 256-way
+//! fan-out levels keep the per-directory file count bounded. Every request
+//! is answered from the index ([`crate::index`]): a file with no row does not
+//! exist for a client.
 //!
-//! On PUT the body is streamed through a SHA-256 hasher into a
-//! tempfile in the same parent directory; if the final hash matches
-//! the URL parameter the tempfile is atomically renamed into place.
-//! Otherwise the tempfile is dropped (cleaned up by `tempfile::NamedTempFile`).
-//! Re-uploading an already-present blob is idempotent (same content
-//! by definition of content addressing).
+//! # Routes
 //!
-//! GET / HEAD just check filesystem existence and serve via tokio's
-//! async file IO — `axum::body::Body::from_stream` keeps memory flat
-//! regardless of blob size.
+//! | Route | Credential | Success |
+//! |---|---|---|
+//! | `POST /blob/pass/upload` | one `blob-upload` anonymous token (`x-lakko-anon-token`) | 200 pass |
+//! | `POST /blob/pass/read` | one `blob-read` anonymous token | 200 pass |
+//! | `PUT /blob/{hex}` | upload pass (`x-lakko-blob-pass`), `x-lakko-blob-delete-key`, `Content-Length` | 201 new / 200 existed |
+//! | `GET /blob/{hex}` | read pass | 200 streamed |
+//! | `HEAD /blob/{hex}` | read pass | 200, `Content-Length` |
+//! | `POST /blob/keep` | read pass | 204 |
+//! | `DELETE /blob/{hex}` | `x-lakko-storage-proof` under the row's delete key | 204 |
+//!
+//! Every refusal is `{"error": code}` (HEAD: status only). Codes are listed
+//! on [`ApiError`]. The order of checks on a pass route is: the pass secret
+//! is configured, the pass verifies, the request is well formed, the budget
+//! is charged, then the index is consulted - so a request without a pass
+//! learns nothing about which blobs exist, and a probe costs budget whether
+//! the blob exists or not.
+//!
+//! # Access
+//!
+//! A download, a keep and a repeated upload are accesses: each raises the
+//! row's last access day to today, written at most once per blob per day. A
+//! `HEAD` is not an access. The daily sweep ([`crate::sweep`]) deletes a blob
+//! whose last access is more than the lifetime (365 days by default) back.
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path as AxumPath, State};
-use axum::http::{header, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Json, Response};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use futures::StreamExt as _;
+use lakko_anon_token::TokenContext;
+use lakko_anon_token_server::now_unix_secs;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt as _;
 
+use crate::index::{today, BlobId, BlobRow, IndexError, UploadOutcome};
+use crate::pass::{Pass, PassError, PassKind, PASS_HEADER};
 use crate::AppState;
 
-/// SHA-256 hex length: 32 bytes × 2 hex chars.
+/// SHA-256 hex length: 32 bytes x 2 hex chars.
 const HEX_LEN: usize = 64;
 
-/// Validate that `hex` is exactly 64 lowercase hex characters. Rejects
-/// uppercase too, so the URL has a single canonical form (avoids
-/// path-traversal-via-case-insensitive-filesystem and double-stored
-/// blobs that differ only in casing).
-fn validate_hex(hex: &str) -> Result<(), (StatusCode, String)> {
-    if hex.len() != HEX_LEN {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("blob hash must be {HEX_LEN} hex chars"),
-        ));
-    }
-    if !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "blob hash must be lowercase hex [0-9a-f]".to_string(),
-        ));
-    }
-    Ok(())
+/// The upload header carrying the blob's delete public key: base64url
+/// without padding of 32 bytes (43 characters).
+pub(crate) const DELETE_KEY_HEADER: &str = "x-lakko-blob-delete-key";
+
+/// Most ids one `POST /blob/keep` may carry. Chosen, not measured: a
+/// conversation's pinned and saved files fit in one request.
+pub(crate) const MAX_KEEP_IDS: usize = 256;
+
+/// Body ceiling of `POST /blob/keep`: 256 ids of 66 JSON bytes plus slack.
+pub(crate) const MAX_KEEP_BODY: usize = 32 * 1024;
+
+/// A coded refusal. Status and `{"error": code}`:
+///
+/// | Status | Code | When |
+/// |---|---|---|
+/// | 503 | `blob-pass-disabled` | `LAKKO_STORAGE_PASS_SECRET` unset: no pass can be issued or checked |
+/// | 401 | `blob-pass-required` | no `x-lakko-blob-pass` header |
+/// | 401 | `blob-pass-invalid` | not a pass, a wrong tag, or a pass of the other kind |
+/// | 401 | `blob-pass-expired` | a genuine pass past its hour |
+/// | 429 | `blob-upload-budget-exhausted` | the upload pass has no files or bytes left for this upload |
+/// | 429 | `blob-read-budget-exhausted` | the read pass has no downloads or keeps left |
+/// | 400 | `blob-id-malformed` | the path is not 64 lower-case hex |
+/// | 400 | `blob-delete-key-required` / `blob-delete-key-invalid` | upload without a usable delete key |
+/// | 411 | `blob-length-required` | upload without `Content-Length` |
+/// | 413 | `blob-too-large` | `Content-Length` above the 50 MiB ceiling |
+/// | 400 | `blob-hash-mismatch` | the body does not hash to the path |
+/// | 400 | `blob-length-mismatch` | the body is not `Content-Length` bytes |
+/// | 400 | `keep-malformed` | the keep body is not `{"ids": [hex, ...]}` with 1..=256 ids |
+/// | 404 | `blob-not-found` | no such blob (never stored, deleted, or expired) |
+/// | 403 | `blob-delete-refused` | any delete refusal (no row, no key, bad or stale proof) |
+/// | 503 | `blob-node-unavailable` | the row names another storage node (forwarding is not built) |
+/// | 500 | `internal` | index or file failure |
+///
+/// Token refusals on the pass routes are the shared gate's codes
+/// (`anon-token-*`, `anon-tokens-disabled`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApiError {
+    PassDisabled,
+    PassRequired,
+    PassInvalid,
+    PassExpired,
+    UploadBudget,
+    ReadBudget,
+    IdMalformed,
+    DeleteKeyRequired,
+    DeleteKeyInvalid,
+    LengthRequired,
+    TooLarge,
+    HashMismatch,
+    LengthMismatch,
+    KeepMalformed,
+    NotFound,
+    DeleteRefused,
+    NodeUnavailable,
+    Internal,
 }
 
-/// Resolve `<root>/<hex[0:2]>/<hex[2:4]>/<hex>`. Caller must have
-/// validated `hex` first.
-fn blob_path(root: &Path, hex: &str) -> PathBuf {
+impl ApiError {
+    pub(crate) const fn status(self) -> StatusCode {
+        match self {
+            Self::PassDisabled | Self::NodeUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::PassRequired | Self::PassInvalid | Self::PassExpired => StatusCode::UNAUTHORIZED,
+            Self::UploadBudget | Self::ReadBudget => StatusCode::TOO_MANY_REQUESTS,
+            Self::IdMalformed
+            | Self::DeleteKeyRequired
+            | Self::DeleteKeyInvalid
+            | Self::HashMismatch
+            | Self::LengthMismatch
+            | Self::KeepMalformed => StatusCode::BAD_REQUEST,
+            Self::LengthRequired => StatusCode::LENGTH_REQUIRED,
+            Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::DeleteRefused => StatusCode::FORBIDDEN,
+            Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::PassDisabled => "blob-pass-disabled",
+            Self::PassRequired => "blob-pass-required",
+            Self::PassInvalid => "blob-pass-invalid",
+            Self::PassExpired => "blob-pass-expired",
+            Self::UploadBudget => "blob-upload-budget-exhausted",
+            Self::ReadBudget => "blob-read-budget-exhausted",
+            Self::IdMalformed => "blob-id-malformed",
+            Self::DeleteKeyRequired => "blob-delete-key-required",
+            Self::DeleteKeyInvalid => "blob-delete-key-invalid",
+            Self::LengthRequired => "blob-length-required",
+            Self::TooLarge => "blob-too-large",
+            Self::HashMismatch => "blob-hash-mismatch",
+            Self::LengthMismatch => "blob-length-mismatch",
+            Self::KeepMalformed => "keep-malformed",
+            Self::NotFound => "blob-not-found",
+            Self::DeleteRefused => "blob-delete-refused",
+            Self::NodeUnavailable => "blob-node-unavailable",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (
+            self.status(),
+            Json(serde_json::json!({ "error": self.code() })),
+        )
+            .into_response()
+    }
+}
+
+impl From<IndexError> for ApiError {
+    fn from(e: IndexError) -> Self {
+        tracing::error!(error = %e, "blob index failure");
+        Self::Internal
+    }
+}
+
+/// Parse `hex` as a blob id: exactly 64 lower-case hex characters, one
+/// canonical form (no case-insensitive-filesystem double storage, no path
+/// traversal).
+pub(crate) fn parse_id(hex: &str) -> Result<BlobId, ApiError> {
+    if hex.len() != HEX_LEN || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(ApiError::IdMalformed);
+    }
+    let v = hex::decode(hex).map_err(|_| ApiError::IdMalformed)?;
+    BlobId::try_from(v.as_slice()).map_err(|_| ApiError::IdMalformed)
+}
+
+/// Resolve `<root>/<hex[0:2]>/<hex[2:4]>/<hex>`.
+pub(crate) fn blob_path(root: &Path, id: &BlobId) -> PathBuf {
+    let hex = hex::encode(id);
     let mut p = root.to_path_buf();
     p.push(&hex[0..2]);
     p.push(&hex[2..4]);
-    p.push(hex);
-    p
-}
-
-/// Parent directory of the blob path (where the tempfile is created so
-/// the final rename stays on the same filesystem).
-fn blob_parent(root: &Path, hex: &str) -> PathBuf {
-    let mut p = root.to_path_buf();
-    p.push(&hex[0..2]);
-    p.push(&hex[2..4]);
+    p.push(&hex);
     p
 }
 
 /// Probe that the blob root is writable by creating and deleting a
-/// uniquely-named temp file. Used by the `/ready` probe and by
-/// `main()` at startup.
+/// uniquely-named temp file. Used by `/ready` and at startup.
 pub(crate) async fn probe_writable(root: &Path) -> std::io::Result<()> {
     tokio::fs::create_dir_all(root).await?;
     let probe = tempfile::Builder::new()
@@ -86,58 +207,153 @@ pub(crate) async fn probe_writable(root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Check the pass of `kind` on a request and charge `(a, b)` to it.
+fn take_pass(
+    state: &AppState,
+    headers: &HeaderMap,
+    kind: PassKind,
+    a: u64,
+    b: u64,
+) -> Result<Pass, ApiError> {
+    let secret = state.pass_secret.as_ref().ok_or(ApiError::PassDisabled)?;
+    let value = headers
+        .get(PASS_HEADER)
+        .ok_or(ApiError::PassRequired)?
+        .to_str()
+        .map_err(|_| ApiError::PassInvalid)?;
+    let now = now_unix_secs();
+    let pass = secret.verify(value, kind, now).map_err(|e| match e {
+        PassError::Invalid => ApiError::PassInvalid,
+        PassError::Expired => ApiError::PassExpired,
+    })?;
+    charge(state, &pass, a, b, now)?;
+    Ok(pass)
+}
+
+fn charge(state: &AppState, pass: &Pass, a: u64, b: u64, now: u64) -> Result<(), ApiError> {
+    state
+        .ledger
+        .charge(pass, a, b, &state.limits, now)
+        .map_err(|()| match pass.kind {
+            PassKind::Upload => ApiError::UploadBudget,
+            PassKind::Read => ApiError::ReadBudget,
+        })
+}
+
+// ============================================================================
+// POST /blob/pass/{upload,read}
+// ============================================================================
+
+async fn issue_pass(state: &AppState, headers: &HeaderMap, kind: PassKind) -> Response {
+    // The secret is checked before the token so a service that cannot issue
+    // a pass never takes a token for one.
+    let Some(secret) = state.pass_secret.as_ref() else {
+        return ApiError::PassDisabled.into_response();
+    };
+    let context = match kind {
+        PassKind::Upload => TokenContext::BlobUpload,
+        PassKind::Read => TokenContext::BlobRead,
+    };
+    if let Err(rejection) = state.tokens.spend_header(headers, context).await {
+        return rejection.into_response();
+    }
+    let expires_at = now_unix_secs().saturating_add(state.limits.ttl_secs);
+    let (_, value) = secret.issue(kind, expires_at);
+    let budget = match kind {
+        PassKind::Upload => serde_json::json!({
+            "files": state.limits.upload_files,
+            "bytes": state.limits.upload_bytes,
+        }),
+        PassKind::Read => serde_json::json!({
+            "downloads": state.limits.read_downloads,
+            "keeps": state.limits.read_keeps,
+        }),
+    };
+    Json(serde_json::json!({
+        "pass": value,
+        "kind": kind.name(),
+        "expires_at_unix_secs": expires_at,
+        "budget": budget,
+    }))
+    .into_response()
+}
+
+/// `POST /blob/pass/upload` - spend one `blob-upload` token for an upload
+/// pass.
+pub(crate) async fn pass_upload(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    issue_pass(&state, &headers, PassKind::Upload).await
+}
+
+/// `POST /blob/pass/read` - spend one `blob-read` token for a read pass.
+pub(crate) async fn pass_read(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    issue_pass(&state, &headers, PassKind::Read).await
+}
+
 // ============================================================================
 // PUT /blob/{hex}
 // ============================================================================
 
-/// Create a tempfile in `parent` so the final rename stays on the
-/// same filesystem (rename is atomic only within one mount). Runs the
-/// blocking call on the dedicated tokio pool.
-async fn make_tempfile_in(
-    parent: PathBuf,
-) -> Result<tempfile::NamedTempFile, (StatusCode, String)> {
-    let parent_for_log = parent.clone();
-    tokio::task::spawn_blocking(move || {
-        tempfile::Builder::new()
-            .prefix(".lakko-blob-")
-            .tempfile_in(&parent)
-    })
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "spawn_blocking for tempfile");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal error".to_string(),
-        )
-    })?
-    .map_err(|e| {
-        tracing::error!(error = %e, dir = %parent_for_log.display(), "create tempfile");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal io error".to_string(),
-        )
-    })
+fn delete_key(headers: &HeaderMap) -> Result<[u8; 32], ApiError> {
+    let value = headers
+        .get(DELETE_KEY_HEADER)
+        .ok_or(ApiError::DeleteKeyRequired)?
+        .to_str()
+        .map_err(|_| ApiError::DeleteKeyInvalid)?;
+    if value.len() != 43 {
+        return Err(ApiError::DeleteKeyInvalid);
+    }
+    let raw = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| ApiError::DeleteKeyInvalid)?;
+    let key = <[u8; 32]>::try_from(raw.as_slice()).map_err(|_| ApiError::DeleteKeyInvalid)?;
+    if !lakko_vault::proof::is_usable_public_key(&key) {
+        return Err(ApiError::DeleteKeyInvalid);
+    }
+    Ok(key)
 }
 
-/// Stream the request body through a SHA-256 hasher into the tempfile.
-/// Returns the lowercase-hex digest of what was actually written.
-async fn stream_body_into_tempfile(
+fn content_length(headers: &HeaderMap) -> Result<u64, ApiError> {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .ok_or(ApiError::LengthRequired)?
+        .to_str()
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or(ApiError::LengthRequired)
+}
+
+fn internal_io(ctx: &'static str, e: &std::io::Error) -> ApiError {
+    tracing::error!(error = %e, "{ctx}");
+    ApiError::Internal
+}
+
+/// Stream `body` through SHA-256 into `temp`, stopping at more than
+/// `declared` bytes. Returns the digest and the byte count.
+async fn stream_into(
     body: Body,
     temp: &tempfile::NamedTempFile,
-) -> Result<String, (StatusCode, String)> {
+    declared: u64,
+) -> Result<([u8; 32], u64), ApiError> {
     let mut hasher = Sha256::new();
     let mut writer = tokio::fs::File::from_std(
         temp.as_file()
             .try_clone()
             .map_err(|e| internal_io("clone temp fd", &e))?,
     );
-
+    let mut written: u64 = 0;
     let mut stream = body.into_data_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            tracing::warn!(error = %e, "client body stream error");
-            (StatusCode::BAD_REQUEST, format!("body stream error: {e}"))
-        })?;
+        let chunk = chunk.map_err(|_| ApiError::LengthMismatch)?;
+        written = written.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        if written > declared {
+            return Err(ApiError::LengthMismatch);
+        }
         hasher.update(&chunk);
         writer
             .write_all(&chunk)
@@ -152,463 +368,235 @@ async fn stream_body_into_tempfile(
         .sync_data()
         .await
         .map_err(|e| internal_io("fsync blob", &e))?;
-
-    Ok(hex::encode(hasher.finalize()))
+    Ok((hasher.finalize().into(), written))
 }
 
-/// Atomically publish the tempfile at `target`. Overwrites any existing
-/// file — safe because content addressing guarantees identical bytes.
-async fn persist_tempfile(
-    temp: tempfile::NamedTempFile,
-    target: PathBuf,
-) -> Result<(), (StatusCode, String)> {
-    let target_for_log = target.clone();
-    tokio::task::spawn_blocking(move || temp.persist(&target))
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "spawn_blocking for persist");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal error".to_string(),
-            )
-        })?
-        .map_err(|e| {
-            tracing::error!(
-                error = %e.error,
-                target = %target_for_log.display(),
-                "persist blob tempfile",
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal io error".to_string(),
-            )
-        })?;
-    Ok(())
-}
-
-/// `PUT /blob/{hex}` — upload a blob. The body is streamed through a
-/// SHA-256 hasher; if the resulting digest matches `hex` the blob is
-/// atomically committed. Otherwise the tempfile is discarded and the
-/// caller gets 400 Bad Request.
-///
-/// Idempotent: re-uploading the same hash overwrites with byte-identical
-/// content (which is a no-op by the meaning of content addressing).
-/// Returns:
-///
-/// - **201 Created** — first upload of this hash
-/// - **200 OK**      — re-upload (already existed)
-/// - **400 Bad Request** — hash mismatch or malformed hex
-/// - **413 Payload Too Large** — > `MAX_BLOB_BYTES` (handled by the
-///   `DefaultBodyLimit` layer)
-/// - **500 Internal** — IO error
+/// `PUT /blob/{hex}` - store a blob. Charged one file and `Content-Length`
+/// bytes against the upload pass before the body is read; the charge is not
+/// refunded when the upload then fails. The body must hash to the path and
+/// be exactly `Content-Length` bytes. A first upload writes the row with the
+/// delete key; a repeated upload is an access and keeps the first key.
 pub(crate) async fn put_blob(
     State(state): State<AppState>,
     AxumPath(hex): AxumPath<String>,
+    headers: HeaderMap,
     body: Body,
-) -> Result<Response, (StatusCode, String)> {
-    validate_hex(&hex)?;
-
-    let target = blob_path(&state.blob_root, &hex);
-    let parent = blob_parent(&state.blob_root, &hex);
-    let already_exists = tokio::fs::metadata(&target).await.is_ok();
-
-    tokio::fs::create_dir_all(&parent).await.map_err(|e| {
-        tracing::error!(error = %e, dir = %parent.display(), "create blob parent");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal io error".to_string(),
-        )
-    })?;
-
-    let temp = make_tempfile_in(parent).await?;
-    let computed_hex = stream_body_into_tempfile(body, &temp).await?;
-
-    if computed_hex != hex {
-        tracing::info!(
-            claimed = %hex,
-            computed = %computed_hex,
-            "PUT /blob: hash mismatch — discarding upload",
-        );
-        // `temp` drops here, removing the partial file.
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "blob content does not match URL hash".to_string(),
-        ));
+) -> Result<Response, ApiError> {
+    // Pass shape and expiry first, so nothing below is reachable without one;
+    // the charge follows the request checks, which cost the client nothing.
+    take_pass(&state, &headers, PassKind::Upload, 0, 0)?;
+    let id = parse_id(&hex)?;
+    let key = delete_key(&headers)?;
+    let declared = content_length(&headers)?;
+    if declared > crate::MAX_BLOB_BYTES as u64 {
+        return Err(ApiError::TooLarge);
     }
+    take_pass(&state, &headers, PassKind::Upload, 1, declared)?;
 
-    persist_tempfile(temp, target).await?;
+    let target = blob_path(&state.blob_root, &id);
+    let parent = target
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or(ApiError::Internal)?;
+    tokio::fs::create_dir_all(&parent)
+        .await
+        .map_err(|e| internal_io("create blob parent", &e))?;
+    let temp = tokio::task::spawn_blocking(move || {
+        tempfile::Builder::new()
+            .prefix(".lakko-blob-")
+            .tempfile_in(&parent)
+    })
+    .await
+    .map_err(|_| ApiError::Internal)?
+    .map_err(|e| internal_io("create tempfile", &e))?;
 
-    let status = if already_exists {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
+    let (digest, written) = stream_into(body, &temp, declared).await?;
+    if written != declared {
+        return Err(ApiError::LengthMismatch);
+    }
+    if digest != id {
+        // `temp` drops here, removing the partial file.
+        return Err(ApiError::HashMismatch);
+    }
+    tokio::task::spawn_blocking(move || temp.persist(&target))
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .map_err(|e| internal_io("persist blob", &e.error))?;
+
+    let day = today();
+    let outcome = state
+        .index
+        .record_upload(BlobRow {
+            id,
+            size: written,
+            node: state.node.to_string(),
+            created_day: day,
+            last_access_day: day,
+            delete_pk: Some(key),
+        })
+        .await?;
+    let status = match outcome {
+        UploadOutcome::Created => StatusCode::CREATED,
+        UploadOutcome::Existed => StatusCode::OK,
     };
-    Ok((status, "").into_response())
+    Ok(status.into_response())
 }
 
 // ============================================================================
-// GET /blob/{hex}
+// GET / HEAD /blob/{hex}
 // ============================================================================
 
-/// `GET /blob/{hex}` — fetch a blob. Streamed via tokio file IO + a
-/// `ReaderStream`, so memory stays flat regardless of size.
+/// The row of `id` on this node, or the refusal.
+async fn local_row(state: &AppState, id: &BlobId) -> Result<BlobRow, ApiError> {
+    let row = state.index.get(id).await?.ok_or(ApiError::NotFound)?;
+    if row.node != *state.node {
+        return Err(ApiError::NodeUnavailable);
+    }
+    Ok(row)
+}
+
+/// A row whose file is gone is removed, so the blob reads as not found from
+/// then on rather than failing every time.
+async fn file_missing(state: &AppState, id: &BlobId) -> ApiError {
+    tracing::warn!("blob row without a file; removing the row");
+    match state.index.remove(id).await {
+        Ok(_) => ApiError::NotFound,
+        Err(e) => ApiError::from(e),
+    }
+}
+
+/// `GET /blob/{hex}` - download a blob, streamed. One download against the
+/// read pass; an access.
 pub(crate) async fn get_blob(
     State(state): State<AppState>,
     AxumPath(hex): AxumPath<String>,
-) -> Result<Response, (StatusCode, String)> {
-    validate_hex(&hex)?;
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    take_pass(&state, &headers, PassKind::Read, 0, 0)?;
+    let id = parse_id(&hex)?;
+    take_pass(&state, &headers, PassKind::Read, 1, 0)?;
+    let row = local_row(&state, &id).await?;
 
-    let path = blob_path(&state.blob_root, &hex);
-
+    let path = blob_path(&state.blob_root, &id);
     let file = match tokio::fs::File::open(&path).await {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err((StatusCode::NOT_FOUND, "blob not found".to_string()));
+            return Err(file_missing(&state, &id).await);
         },
-        Err(e) => {
-            tracing::error!(error = %e, path = %path.display(), "open blob");
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal io error".to_string(),
-            ));
-        },
+        Err(e) => return Err(internal_io("open blob", &e)),
     };
-    let metadata = file
+    let len = file
         .metadata()
         .await
-        .map_err(|e| internal_io("stat blob", &e))?;
+        .map_err(|e| internal_io("stat blob", &e))?
+        .len();
+    let day = today();
+    if row.last_access_day < day {
+        state.index.touch(&[id], day).await?;
+    }
 
-    let stream = crate::stream::ReaderStream::new(file);
-    let body = Body::from_stream(stream);
-
-    let mut response = Response::new(body);
+    let mut response = Response::new(Body::from_stream(crate::stream::ReaderStream::new(file)));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         header::HeaderValue::from_static("application/octet-stream"),
     );
-    response.headers_mut().insert(
-        header::CONTENT_LENGTH,
-        header::HeaderValue::from(metadata.len()),
-    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, header::HeaderValue::from(len));
+    Ok(response)
+}
+
+/// `HEAD /blob/{hex}` - 200 with `Content-Length` when the blob exists. One
+/// download against the read pass; not an access.
+pub(crate) async fn head_blob(
+    State(state): State<AppState>,
+    AxumPath(hex): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    take_pass(&state, &headers, PassKind::Read, 0, 0)?;
+    let id = parse_id(&hex)?;
+    take_pass(&state, &headers, PassKind::Read, 1, 0)?;
+    let row = local_row(&state, &id).await?;
+    let mut response = Response::new(Body::empty());
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, header::HeaderValue::from(row.size));
     Ok(response)
 }
 
 // ============================================================================
-// HEAD /blob/{hex}
+// POST /blob/keep
 // ============================================================================
 
-/// `HEAD /blob/{hex}` — return 200 if the blob exists, 404 otherwise.
-/// `Content-Length` is set so callers can size their downloads.
-pub(crate) async fn head_blob(
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeepBody {
+    ids: Vec<String>,
+}
+
+/// `POST /blob/keep` with `{"ids": [hex, ...]}` (1..=256 ids) - mark each
+/// existing blob accessed today. One keep per id against the read pass.
+/// Answers 204 whether the ids exist or not.
+pub(crate) async fn keep_blobs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    take_pass(&state, &headers, PassKind::Read, 0, 0)?;
+    let parsed: KeepBody = serde_json::from_slice(&body).map_err(|_| ApiError::KeepMalformed)?;
+    if parsed.ids.is_empty() || parsed.ids.len() > MAX_KEEP_IDS {
+        return Err(ApiError::KeepMalformed);
+    }
+    let ids = parsed
+        .ids
+        .iter()
+        .map(|h| parse_id(h).map_err(|_| ApiError::KeepMalformed))
+        .collect::<Result<Vec<_>, _>>()?;
+    let count = u64::try_from(ids.len()).unwrap_or(u64::MAX);
+    take_pass(&state, &headers, PassKind::Read, 0, count)?;
+    state.index.touch(&ids, today()).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// ============================================================================
+// DELETE /blob/{hex}
+// ============================================================================
+
+/// `DELETE /blob/{hex}` - delete a blob, row then file. Requires an
+/// `x-lakko-storage-proof` over `("DELETE", "/blob/<hex>", empty body)`
+/// under the delete key the first upload carried; no pass. Every refusal is
+/// the same 403 `blob-delete-refused`: no row, a row with no key, a missing,
+/// malformed, stale or wrong proof.
+pub(crate) async fn delete_blob(
     State(state): State<AppState>,
     AxumPath(hex): AxumPath<String>,
-) -> Result<Response, (StatusCode, String)> {
-    validate_hex(&hex)?;
-
-    let path = blob_path(&state.blob_root, &hex);
-    match tokio::fs::metadata(&path).await {
-        Ok(meta) => {
-            let mut response = Response::new(Body::empty());
-            response.headers_mut().insert(
-                header::CONTENT_LENGTH,
-                header::HeaderValue::from(meta.len()),
-            );
-            Ok(response)
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Err((StatusCode::NOT_FOUND, String::new()))
-        },
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let id = parse_id(&hex).map_err(|_| ApiError::DeleteRefused)?;
+    let proof = headers
+        .get(lakko_vault::proof::PROOF_HEADER_NAME)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(ApiError::DeleteRefused)?;
+    let row = state.index.get(&id).await?.ok_or(ApiError::DeleteRefused)?;
+    let key = row.delete_pk.ok_or(ApiError::DeleteRefused)?;
+    let path = format!("/blob/{hex}");
+    lakko_vault::proof::verify(&key, "DELETE", &path, &[], proof, now_ms())
+        .map_err(|_| ApiError::DeleteRefused)?;
+    if row.node != *state.node {
+        return Err(ApiError::NodeUnavailable);
+    }
+    state.index.remove(&id).await?;
+    match tokio::fs::remove_file(blob_path(&state.blob_root, &id)).await {
+        Ok(()) => {},
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
         Err(e) => {
-            tracing::error!(error = %e, path = %path.display(), "head blob");
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal io error".to_string(),
-            ))
+            // The row is gone, so the blob is already unreachable; the file
+            // is an orphan on disk.
+            tracing::warn!(error = %e, "delete blob file after its row");
         },
     }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-fn internal_io(ctx: &str, e: &std::io::Error) -> (StatusCode, String) {
-    tracing::error!(error = %e, "{ctx}");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "internal io error".to_string(),
-    )
-}
-
-// `ReaderStream` shim lives in `crate::stream` — shared with the
-// per-account backup endpoint (`crate::backup`).
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::build_app;
-    use axum::body::Body;
-    use axum::http::Request;
-    use http_body_util::BodyExt as _;
-    use std::sync::Arc;
-    use tower::ServiceExt as _;
-
-    fn test_app() -> (axum::Router, tempfile::TempDir) {
-        let tmp = tempfile::tempdir().unwrap();
-        let secret = lakko_auth_token::TokenSecret::new(vec![0x42u8; 32])
-            .expect("32 bytes is over MIN_SECRET_LEN");
-        let state = AppState {
-            blob_root: Arc::new(tmp.path().to_path_buf()),
-            session_token_secret: Arc::new(secret),
-        };
-        (build_app(state), tmp)
-    }
-
-    fn sha256_hex(bytes: &[u8]) -> String {
-        let mut h = Sha256::new();
-        h.update(bytes);
-        hex::encode(h.finalize())
-    }
-
-    #[test]
-    fn validate_hex_accepts_canonical_lowercase() {
-        let s = "0".repeat(64);
-        assert!(validate_hex(&s).is_ok());
-        let s = "abcdef0123456789".repeat(4);
-        assert_eq!(s.len(), 64);
-        assert!(validate_hex(&s).is_ok());
-    }
-
-    #[test]
-    fn validate_hex_rejects_wrong_length_and_case() {
-        assert!(validate_hex("").is_err());
-        assert!(validate_hex(&"0".repeat(63)).is_err());
-        assert!(validate_hex(&"0".repeat(65)).is_err());
-        // Uppercase rejected — single canonical form.
-        assert!(validate_hex(&"A".repeat(64)).is_err());
-        // Path traversal-like bytes rejected.
-        assert!(
-            validate_hex("../etc/passwd0000000000000000000000000000000000000000000000000000",)
-                .is_err()
-        );
-        // Non-hex chars.
-        assert!(validate_hex(&"g".repeat(64)).is_err());
-    }
-
-    #[test]
-    fn blob_path_is_two_level_sharded() {
-        let root = std::path::Path::new("/var/lib/lakko/blobs");
-        let hex = "abcdef0123456789".repeat(4);
-        let p = blob_path(root, &hex);
-        assert_eq!(
-            p,
-            std::path::PathBuf::from(format!("/var/lib/lakko/blobs/ab/cd/{hex}"))
-        );
-    }
-
-    #[tokio::test]
-    async fn put_then_get_roundtrips() {
-        let (app, _tmp) = test_app();
-        let payload = b"hello lakko ciphertext";
-        let hex = sha256_hex(payload);
-
-        // PUT
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/blob/{hex}"))
-                    .body(Body::from(payload.to_vec()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::CREATED);
-
-        // GET
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/blob/{hex}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let got = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&got[..], payload);
-    }
-
-    #[tokio::test]
-    async fn put_with_wrong_hash_returns_400() {
-        let (app, _tmp) = test_app();
-        let payload = b"some bytes";
-        // Use a different hash on the URL than the body actually hashes to.
-        let bogus_hex = "0".repeat(64);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/blob/{bogus_hex}"))
-                    .body(Body::from(payload.to_vec()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn put_with_invalid_hex_returns_400() {
-        let (app, _tmp) = test_app();
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/blob/notvalidhex")
-                    .body(Body::from(&b"data"[..]))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn re_put_is_idempotent_and_returns_200() {
-        let (app, _tmp) = test_app();
-        let payload = b"reupload me";
-        let hex = sha256_hex(payload);
-
-        // First PUT — 201 Created.
-        let r1 = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/blob/{hex}"))
-                    .body(Body::from(payload.to_vec()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(r1.status(), StatusCode::CREATED);
-
-        // Second PUT — 200 OK (already existed).
-        let r2 = app
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/blob/{hex}"))
-                    .body(Body::from(payload.to_vec()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(r2.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn get_unknown_returns_404() {
-        let (app, _tmp) = test_app();
-        let unknown = "f".repeat(64);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/blob/{unknown}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn head_existing_returns_200_with_content_length() {
-        let (app, _tmp) = test_app();
-        let payload = b"sized blob";
-        let hex = sha256_hex(payload);
-
-        // PUT first.
-        let _ = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/blob/{hex}"))
-                    .body(Body::from(payload.to_vec()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        // HEAD.
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("HEAD")
-                    .uri(format!("/blob/{hex}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let cl = response
-            .headers()
-            .get(header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<usize>().ok());
-        assert_eq!(cl, Some(payload.len()));
-    }
-
-    #[tokio::test]
-    async fn head_missing_returns_404() {
-        let (app, _tmp) = test_app();
-        let unknown = "1".repeat(64);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("HEAD")
-                    .uri(format!("/blob/{unknown}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn put_creates_two_level_sharded_path_on_disk() {
-        let (app, tmp) = test_app();
-        let payload = b"layout test";
-        let hex = sha256_hex(payload);
-
-        let _ = app
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/blob/{hex}"))
-                    .body(Body::from(payload.to_vec()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let expected = tmp.path().join(&hex[0..2]).join(&hex[2..4]).join(&hex);
-        assert!(
-            expected.exists(),
-            "blob expected at sharded path {}",
-            expected.display(),
-        );
-    }
-}
+mod tests;

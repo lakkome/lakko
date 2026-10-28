@@ -10,6 +10,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -19,6 +24,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import me.lakko.app.launchBound
 import me.lakko.app.auth.IdentitySecrets
 import me.lakko.app.auth.OwnUsernameState
@@ -41,6 +48,8 @@ import uniffi.lakko_ffi_uniffi.DeviceGroupBody
 import uniffi.lakko_ffi_uniffi.FolderChangeSet
 import uniffi.lakko_ffi_uniffi.FolderView
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.LinkAnswerVerdict
+import uniffi.lakko_ffi_uniffi.LinkRecord
 import uniffi.lakko_ffi_uniffi.ParsedDeviceGroupPayload
 import uniffi.lakko_ffi_uniffi.ProcessedMessage
 import uniffi.lakko_ffi_uniffi.SyncedState
@@ -120,6 +129,13 @@ public class DeviceGroupSyncRepository(
      * reached the account's other devices yet. Drives the one quiet line in
      * Settings > Chat folders.
      */
+    private val mutableSaved: MutableStateFlow<List<uniffi.lakko_ffi_uniffi.SavedMessageView>> =
+        MutableStateFlow(emptyList())
+
+    /** ADR-0065 section 4 — the account's saved messages, as the fold holds
+     *  them (every device of the account shows the same list). */
+    public val saved: StateFlow<List<uniffi.lakko_ffi_uniffi.SavedMessageView>> = mutableSaved.asStateFlow()
+
     private val mutablePending: MutableStateFlow<Boolean> = MutableStateFlow(false)
     public val pendingSync: StateFlow<Boolean> = mutablePending.asStateFlow()
 
@@ -169,9 +185,21 @@ public class DeviceGroupSyncRepository(
      *  teardown removes only its own. */
     @Volatile private var reachPublisher: ((ByteArray) -> Unit)? = null
 
-    /** The account whose forked DeviceGroup this session already re-founded
-     *  ([repairFork]); the repair runs at most once per session per account. */
-    @Volatile private var forkRepairedFor: String? = null
+    /** ADR-0081 decision 3 — the snapshot generation the held handle was read
+     *  at (or last wrote). Every write of the handle names it, so a handle
+     *  still at N never puts N back over an N+1 another handle made current. */
+    @Volatile private var handleGeneration: Int? = null
+
+    /** ADR-0081 decision 4 — the founding decision or rejoin in progress. */
+    @Volatile private var rejoinJob: Job? = null
+
+    /** ADR-0081 decision 4 — the sibling's admission record. */
+    @Volatile private var admissions: AdmissionRecord? = null
+
+    /** When the knocks were last read, and the DS id of the last knock row
+     *  read this session. */
+    @Volatile private var lastKnockCheckAtMs: Long = 0L
+    @Volatile private var knockCursor: Long = 0L
 
     /** The folded state. Created lazily so constructing the repository never
      *  touches the native library. Every read-modify-republish runs under
@@ -273,15 +301,36 @@ public class DeviceGroupSyncRepository(
                 accountIdB64 = accountIdB64,
                 deviceIdentitySeed = seed,
             )
+        } catch (_: DeviceGroupLifecycle.NotJoined) {
+            // ADR-0081 decision 4 — no usable DeviceGroup state: found only
+            // when the directory lists no other own device, rejoin otherwise.
+            startFoundOrRejoin(accountIdBytes, accountIdB64, seed, seedState, accountIdentitySeed)
+            return
         } catch (cause: Throwable) {
             Log.w(LOG_TAG, "ensureDeviceGroup failed", cause)
             activeAccountIdB64.set(null)
+            seed.fill(0)
             return
         }
         seed.fill(0)
+        adopt(ensured, accountIdBytes, accountIdB64, seedState, accountIdentitySeed, startCursor, letIn)
+    }
 
+    /** Take [ensured] as this session's DeviceGroup handle and start following
+     *  it: the removed check, the synced state, the roster, the poll loop. */
+    private fun adopt(
+        ensured: DeviceGroupLifecycle.Ensured,
+        accountIdBytes: ByteArray,
+        accountIdB64: String,
+        seedState: Boolean,
+        accountIdentitySeed: ByteArray?,
+        startCursor: Long,
+        letIn: Boolean,
+    ) {
         identity.set(ensured.identity)
         group.set(ensured.group)
+        handleGeneration = ensured.generation
+        loadAdmissions(accountIdB64)
 
         // Removed while the app was closed (or by the batch a reopen follows):
         // the persisted snapshot already carries the commit that removed this
@@ -329,6 +378,11 @@ public class DeviceGroupSyncRepository(
         // acknowledges what is there: the device that let it in shows no
         // banner about it.
         me.lakko.app.devices.NewDeviceNotices.bind(applicationContext, accountIdB64)
+        // ADR-0080 - this account's device cards, sent through this
+        // runtime's DeviceGroup `ServiceEnvelope`.
+        me.lakko.app.devices.DeviceCardCenter.bind(applicationContext, accountIdB64) { envelope ->
+            sendServiceEnvelope(envelope)
+        }
         reportRoster(ensured.group, accountIdB64, localChange = letIn)
         if (seedState) startSyncStatePersistence(accountIdB64)
         mutableReady.value = true
@@ -353,70 +407,14 @@ public class DeviceGroupSyncRepository(
         val bound = sessionBinding.capture()
         pollJob = scope.launch {
             claimJournalBestEffort(groupId, refounded = true)
-            val forkedAt = runPollLoop(
+            runPollLoop(
                 bound = bound,
+                accountIdBytes = accountIdBytes,
                 accountIdB64 = accountIdB64,
                 groupId = groupId,
                 startCursor = startCursor,
             )
-            if (forkedAt != null && bound.isCurrent) {
-                repairFork(accountIdBytes, accountIdB64, forkedAt)
-            }
         }
-    }
-
-    /**
-     * The DeviceGroup this device holds forked from the chain on the DS
-     * ([DeviceGroupFork]): it read the whole journal and is still behind the
-     * newest registered epoch, which nothing that arrives will ever change.
-     * Re-found it. The poll loop has already stopped.
-     *
-     * Only this account's DeviceGroup MLS snapshot is deleted. It lives in
-     * its own store ([DeviceGroupSnapshotStore], its own folder and wrap key),
-     * apart from the conversation groups (`IdentitySnapshotStore`); the folded
-     * sync state in [DeviceGroupSnapshotStore.SYNC_STATE_DIR], the device
-     * identity seed and everything else stay. Android keeps no stored
-     * DeviceGroup cursor (every open polls from the cursor it is given).
-     *
-     * [openAndPoll] then finds no snapshot, so [DeviceGroupLifecycle] founds a
-     * fresh DeviceGroup under the same deterministic id with the SAME device
-     * identity (its conversation leaves in chats are unaffected) and marks the
-     * founding unconfirmed, and [claimJournalBestEffort] claims the journal
-     * with the account root and, on the `409` the old chain answers, RESETS
-     * it (ADR-0057 obligation 7). If the claim or reset does not land, the
-     * founding stays unconfirmed: no Welcome can leave for it
-     * ([DeviceGroupJournalAccess.claimFoundingIfUnconfirmed]) and the next
-     * open claims and resets again.
-     *
-     * Polling restarts at [headCursor], the head this device last saw: the
-     * old group's rows cannot be read by the new one.
-     *
-     * Consequence: every OTHER device of the account loses the DeviceGroup.
-     * The reset drops the chain their epoch keys were registered on, so their
-     * reads answer 401, and each must be added again. A 401 is not a drained
-     * poll, so none of them ever runs a repair of its own.
-     */
-    private fun repairFork(accountIdBytes: ByteArray, accountIdB64: String, headCursor: Long) {
-        if (activeAccountIdB64.get() != accountIdB64) return
-        // Never re-found the DeviceGroup of a removed device, nor of a handle
-        // whose state cannot be read (docs/ux/second-device.md section 3.1).
-        if (mutableDeviceRemoved.value) return
-        val held = group.get() ?: return
-        if (!RemovedDevice.forkRepairAllowed(RemovedDevice.readActive { held.isActive() })) return
-        // Nothing may go out on the forked handle while the new one is made.
-        group.set(null)
-        identity.set(null)
-        try {
-            DeviceGroupSnapshotStore.deleteSnapshot(
-                context = applicationContext,
-                accountIdB64 = accountIdB64,
-            )
-        } catch (cause: Throwable) {
-            // The old snapshot is then restored below and polling resumes on
-            // it; the repair is not tried again this session.
-            Log.w(LOG_TAG, "forked DeviceGroup snapshot not deleted (${cause.javaClass.simpleName})")
-        }
-        openAndPoll(accountIdBytes, accountIdB64, seedState = false, startCursor = headCursor)
     }
 
     /**
@@ -434,10 +432,10 @@ public class DeviceGroupSyncRepository(
      */
     public fun clear() {
         me.lakko.app.devices.NewDeviceNotices.unbind()
+        me.lakko.app.devices.DeviceCardCenter.unbind()
         cancelPollAndDropHandles()
         activeAccountIdB64.set(null)
         activeAccountId.set(null)
-        forkRepairedFor = null
         synchronized(stateLock) {
             syncedState = null
             mutableRecoveryEmail.value = RecoveryAddressState.NOT_READY
@@ -469,10 +467,38 @@ public class DeviceGroupSyncRepository(
             } else {
                 me.lakko.app.devices.NewDeviceNotices.onRoster(applicationContext, accountIdB64, roster, self)
             }
+            // ADR-0080 - a leaf that left takes its card with it.
+            me.lakko.app.devices.DeviceCardCenter.prune(rows.map { hexOf(it.signaturePublicKey) })
         } catch (cause: Throwable) {
             Log.w(LOG_TAG, "device roster not read for the new-device notice (${cause.javaClass.simpleName})")
         }
     }
+
+    /**
+     * ADR-0080 - take in [envelope] when it is a device card. `true` when it
+     * was one (kept or dropped), `false` for any other envelope. The sender
+     * is the MLS-authenticated leaf of the row, resolved against the roster
+     * at receipt; a row with no sender leaf, or a leaf the roster does not
+     * hold, is dropped.
+     */
+    private fun receiveDeviceCard(envelope: ByteArray, senderLeaf: UInt?, g: DeviceGroup): Boolean {
+        val card = try {
+            uniffi.lakko_ffi_uniffi.decodeDeviceCardEnvelope(envelope)
+        } catch (_: Throwable) {
+            return false
+        }
+        val leaf = senderLeaf ?: return true
+        val roster = runCatching { g.devices() }.getOrNull() ?: return true
+        val sender = roster.firstOrNull { it.leafIndex == leaf } ?: return true
+        me.lakko.app.devices.DeviceCardCenter.receive(
+            hexOf(sender.signaturePublicKey),
+            me.lakko.app.devices.DeviceCardCenter.fromFfi(card),
+            roster.map { hexOf(it.signaturePublicKey) },
+        )
+        return true
+    }
+
+    private fun hexOf(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
 
     /**
      * ADR-0074 section 2.3 — the leaf signature keys of the devices in the
@@ -546,6 +572,7 @@ public class DeviceGroupSyncRepository(
             try {
                 republishRecoveryEmail(state)
                 republishOwnUsername(state)
+                republishLinkRecords(state)
                 republishLineage(state)
                 // ADR-0073 R.5 - every person-facing store is keyed by
                 // conversation id; a screen holding ANY segment's id reads the
@@ -589,6 +616,7 @@ public class DeviceGroupSyncRepository(
                     OrderState(groupIds = o.groupIds, updatedAtHlc = o.hlc)
                 }
                 mutableFolders.value = state.folders()
+                mutableSaved.value = state.saved()
                 // A restored or received stamp may be ahead of this device's
                 // clock; the next local write must still out-rank it.
                 Hlc.advancePast(state.maxHlc())
@@ -825,6 +853,335 @@ public class DeviceGroupSyncRepository(
         if (changed) republish()
     }
 
+    // ------------------------------------------------------------
+    // ADR-0079 - the account's own invite links
+    // ------------------------------------------------------------
+
+    private val mutableLinkRecords: MutableStateFlow<List<LinkRecord>> = MutableStateFlow(emptyList())
+
+    /** The account's own invite links, every device's, revoked ones included
+     *  (ADR-0079 section 4). */
+    public val linkRecords: StateFlow<List<LinkRecord>> = mutableLinkRecords.asStateFlow()
+
+    /** Project the register. Under [stateLock]. */
+    private fun republishLinkRecords(state: SyncedState) {
+        val next = runCatching { state.allLinkRecords() }.getOrNull().orEmpty()
+        if (next != mutableLinkRecords.value) mutableLinkRecords.value = next
+    }
+
+    /** Fold one local link-record write, then send that record to the
+     *  account's other devices. A failed publish is kept by the pending
+     *  flag and re-sent with the catch-up. */
+    private suspend fun writeLinkRecord(
+        linkId: ByteArray,
+        mustPersist: Boolean = false,
+        sendInBackground: Boolean = false,
+        write: (SyncedState) -> Boolean,
+    ): Boolean {
+        val envelope = synchronized(stateLock) {
+            val state = syncedState ?: return false
+            val written = try {
+                write(state)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "link record refused (${cause.javaClass.simpleName})")
+                false
+            }
+            if (!written) return false
+            runCatching { state.linkRecordEnvelopeFor(linkId) }.getOrNull()
+        }
+        republish()
+        // On disk at once rather than after the debounce; a link whose record
+        // could not be written is not handed out (the caller revokes it).
+        if (!syncStatePersistence.writeNow() && mustPersist) return false
+        if (envelope != null) {
+            val send: suspend () -> Unit = {
+                try {
+                    sendServiceEnvelope(envelope)
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (cause: Throwable) {
+                    Log.w(LOG_TAG, "link record not published (${cause.javaClass.simpleName})")
+                    pendingFlag?.recordFailure()
+                }
+            }
+            // A copy mark goes out in the background, so Copy does not wait
+            // on the network (as iOS and web); a failed send is retried like
+            // any other unsent link record.
+            if (sendInBackground) scope.launchBound(sessionBinding) { send() } else send()
+        }
+        return true
+    }
+
+    /** Record a link just minted. `false` when the state is not open or the
+     *  record is refused. */
+    public suspend fun setLinkRecord(record: LinkRecord): Boolean =
+        writeLinkRecord(record.linkId, mustPersist = true) { it.setLinkRecord(Hlc.mint(), record) }
+
+    /** Mark a link revoked (final). `false` when nothing changed. */
+    public suspend fun revokeLinkRecord(linkId: ByteArray): Boolean =
+        writeLinkRecord(linkId) { it.revokeLinkRecord(Hlc.mint(), linkId) }
+
+    /** Mark a link copied (final, ADR-0079 amendment 2026-10-26): from then
+     *  on no device of the account offers to edit it. `false` when nothing
+     *  changed (already copied) or the state is not open. */
+    public suspend fun markLinkShared(linkId: ByteArray): Boolean =
+        writeLinkRecord(linkId, sendInBackground = true) { it.markLinkShared(Hlc.mint(), linkId) }
+
+    /** Count one request accepted through a link, remembering the requester. */
+    public suspend fun recordLinkUse(linkId: ByteArray, requesterKey: ByteArray): Boolean =
+        writeLinkRecord(linkId) { it.recordLinkUse(Hlc.mint(), linkId, requesterKey) }
+
+    /**
+     * The one rule for a request's link answer (ADR-0079 section 3 as
+     * amended 2026-10-19), asked of the fold: the link's expiry is judged at
+     * [pressedAtMs] (the time the DS stamped on the request row), its
+     * revocation and uses now. `null` while the fold is not loaded: the
+     * request stays undecided (no timer) and is decided once [ready] turns
+     * `true`.
+     */
+    public fun linkAnswerVerdictAt(
+        linkId: ByteArray,
+        linkSecret: ByteArray,
+        requesterKey: ByteArray,
+        pressedAtMs: ULong,
+    ): LinkAnswerVerdict? {
+        if (!ready.value) return null
+        return synchronized(stateLock) {
+            val state = syncedState ?: return null
+            runCatching {
+                state.linkAnswerVerdict(linkId, linkSecret, requesterKey, pressedAtMs)
+            }.getOrDefault(LinkAnswerVerdict.DEAD)
+        }
+    }
+
+    private val mutableLinkClaimsVersion: MutableStateFlow<Long> = MutableStateFlow(0L)
+
+    /** ADR-0079 (reworked 2026-10-17) - bumped whenever a claim of a link
+     *  request is recorded (another device's, or this device's own row
+     *  recognised by its bytes). */
+    public val linkClaimsVersion: StateFlow<Long> = mutableLinkClaimsVersion.asStateFlow()
+
+    /**
+     * ADR-0079 (reworked 2026-10-17) - seal and post this device's claim of
+     * a link request into the account's DeviceGroup, on its own
+     * `ServiceEnvelope` carrier. [beforePublish] gets the sealed bytes (hex)
+     * and must record them durably (`false` aborts the publish). The publish
+     * answer files nothing: the receive loop judges the row at its position
+     * ([judgeOwnLinkRow]; it counts only when sealed at the journal's epoch
+     * there). The snapshot is persisted before the publish, as for every
+     * service envelope. Returns the DS message id.
+     */
+    public suspend fun postLinkClaim(
+        linkId: ByteArray,
+        requesterKey: ByteArray,
+        beforePublish: (String) -> Boolean,
+    ): Long =
+        publishRecorded(uniffi.lakko_ffi_uniffi.composeLinkClaimEnvelope(linkId, requesterKey), beforePublish)
+
+    private suspend fun publishRecorded(envelope: ByteArray, beforePublish: (String) -> Boolean): Long {
+        check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
+        val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
+        val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
+        val accountIdB64 = activeAccountIdB64.get() ?: error("DeviceGroupSync not bootstrapped")
+        val wireBytes = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
+        check(beforePublish(me.lakko.app.contacts.LinkClaims.hex(wireBytes))) { "link row not recorded" }
+        persistHandleOrThrow(id, accountIdB64)
+        return DsClient().use { ds ->
+            ds.publishGroup(g.groupId(), DeviceGroupJournalEnvelope.encode(wireBytes, null)).id
+        }
+    }
+
+    /** ADR-0079 - this device's DeviceGroup leaf key and the current
+     *  roster's leaf keys, the inputs of the claim decision. `null` while no
+     *  handle is held or this device was removed. */
+    public fun linkClaimRoster(): Pair<ByteArray, List<ByteArray>>? {
+        if (mutableDeviceRemoved.value) return null
+        val g = group.get() ?: return null
+        val devices = runCatching { g.devices() }.getOrNull()?.takeIf { it.isNotEmpty() } ?: return null
+        val ownLeaf = runCatching { g.ownLeafIndex() }.getOrNull() ?: return null
+        val ownKey = devices.firstOrNull { it.leafIndex == ownLeaf }?.signaturePublicKey ?: return null
+        return ownKey to devices.map { it.signaturePublicKey }
+    }
+
+    /** ADR-0079 (order of 2026-10-17) - the journal's epochs for one batch:
+     *  the record kept next to the claim record, or one starting at the
+     *  group's epoch when none is held for this DeviceGroup. */
+    private fun loadJournalEpochs(g: DeviceGroup?): Pair<String, uniffi.lakko_ffi_uniffi.FfiJournalEpochs>? {
+        val group = g ?: return null
+        val accountIdB64 = activeAccountIdB64.get() ?: return null
+        val groupIdHex = runCatching { me.lakko.app.contacts.LinkClaims.hex(group.groupId()) }.getOrNull() ?: return null
+        val stored = me.lakko.app.contacts.LinkClaimRecord.onDevice(applicationContext, accountIdB64).journal(groupIdHex)
+        if (stored != null) {
+            return groupIdHex to uniffi.lakko_ffi_uniffi.FfiJournalEpochs(
+                stored.base.toULong(),
+                stored.commitRowIds.map { it.toULong() },
+                stored.commitEpochsAfter.map { it.toULong() },
+            )
+        }
+        val epoch = runCatching { group.epoch() }.getOrNull() ?: return null
+        val fresh = uniffi.lakko_ffi_uniffi.journalEpochsStartingAt(epoch)
+        // Kept at once: the start must not move with the group's epoch on
+        // later batches (an own commit merged early would then make an own
+        // claim sealed before it look straddled).
+        me.lakko.app.contacts.LinkClaimRecord.onDevice(applicationContext, accountIdB64).setJournal(
+            me.lakko.app.contacts.StoredJournal(groupIdHex, fresh.base.toLong(), emptyList(), emptyList()),
+        )
+        return groupIdHex to fresh
+    }
+
+    /** ADR-0079 - a journal row carrying one of this device's recorded
+     *  sealed claims or notes (its own application message cannot be
+     *  decrypted here) is judged at its position: it counts only when
+     *  sealed at the journal's epoch there. `true` when it was one. */
+    private fun judgeOwnLinkRow(
+        mlsMessage: ByteArray,
+        messageId: Long,
+        journal: uniffi.lakko_ffi_uniffi.FfiJournalEpochs,
+    ): Boolean {
+        val accountIdB64 = activeAccountIdB64.get() ?: return false
+        val record = me.lakko.app.contacts.LinkClaimRecord.onDevice(applicationContext, accountIdB64)
+        if (!record.hasUnmatchedWires()) return false
+        val counts = uniffi.lakko_ffi_uniffi.epochOfMessage(mlsMessage)?.let {
+            uniffi.lakko_ffi_uniffi.journalRowCounts(journal, messageId.coerceAtLeast(0).toULong(), it)
+        } ?: false
+        record.judgeOwnRow(me.lakko.app.contacts.LinkClaims.hex(mlsMessage), messageId, counts) ?: return false
+        mutableLinkClaimsVersion.value = mutableLinkClaimsVersion.value + 1
+        return true
+    }
+
+    /** ADR-0079 - after a row was processed (or failed): a commit that took
+     *  effect moves the journal's epoch, and the record is kept at once (it
+     *  only ever follows the journal's content). Returns the record. */
+    private fun observeJournalRow(
+        mlsMessage: ByteArray,
+        messageId: Long,
+        g: DeviceGroup,
+        journal: Pair<String, uniffi.lakko_ffi_uniffi.FfiJournalEpochs>?,
+    ): Pair<String, uniffi.lakko_ffi_uniffi.FfiJournalEpochs>? {
+        val (groupIdHex, epochs) = journal ?: return null
+        val sealed = uniffi.lakko_ffi_uniffi.epochOfMessage(mlsMessage) ?: return journal
+        val after = uniffi.lakko_ffi_uniffi.epochAfterMessage(mlsMessage) ?: return journal
+        if (after <= sealed) return journal
+        val groupEpoch = runCatching { g.epoch() }.getOrNull() ?: return journal
+        val next = uniffi.lakko_ffi_uniffi.journalEpochsObserve(
+            epochs,
+            messageId.coerceAtLeast(0).toULong(),
+            sealed,
+            after,
+            groupEpoch,
+        )
+        if (next == epochs) return journal
+        activeAccountIdB64.get()?.let { accountIdB64 ->
+            me.lakko.app.contacts.LinkClaimRecord.onDevice(applicationContext, accountIdB64).setJournal(
+                me.lakko.app.contacts.StoredJournal(
+                    groupIdHex = groupIdHex,
+                    base = next.base.toLong(),
+                    commitRowIds = next.commitRowIds.map { it.toLong() },
+                    commitEpochsAfter = next.commitEpochsAfter.map { it.toLong() },
+                ),
+            )
+        }
+        return groupIdHex to next
+    }
+
+    /** Wait until a poll that started after this call read the DeviceGroup
+     *  journal to its head, so every row up to a claim just published has
+     *  been applied. `false` when that did not happen in time. */
+    public suspend fun awaitJournalReadPastNow(timeoutMs: Long = CLAIM_HEAD_TIMEOUT_MS): Boolean =
+        awaitHead(timeoutMs)
+
+    /**
+     * ADR-0079 (reworked 2026-10-17) - another device's claim of a link
+     * request, taken in. Honoured only from a sender leaf the roster this
+     * row was sealed under resolves (C-68); its DS id is kept with that
+     * leaf's key. `true` when the envelope was a claim (kept or dropped).
+     */
+    /**
+     * ADR-0079 (order of 2026-10-17) - publish the link-founded note (the
+     * request, the one-to-one founded for it, its Welcome) into the
+     * account's DeviceGroup, BEFORE any Welcome is written. Returns the DS
+     * message id; throws when the publish failed. The snapshot is persisted
+     * before the publish, as for every service envelope.
+     */
+    public suspend fun postLinkFounded(
+        linkId: ByteArray,
+        requesterKey: ByteArray,
+        groupId: ByteArray,
+        welcome: ByteArray,
+        beforePublish: (String) -> Boolean,
+    ): Long =
+        publishRecorded(
+            uniffi.lakko_ffi_uniffi.composeLinkFoundedEnvelope(linkId, requesterKey, groupId, welcome),
+            beforePublish,
+        )
+
+    /**
+     * ADR-0079 - another device's link-founded note, taken in. Kept (the
+     * earliest per request) only from a sender leaf the roster this row was
+     * sealed under resolves (C-68). `true` when the envelope was a note (kept
+     * or dropped).
+     */
+    private fun receiveLinkFounded(envelope: ByteArray, senderLeaf: UInt?, g: DeviceGroup, messageId: Long): Boolean {
+        if (!uniffi.lakko_ffi_uniffi.isLinkFoundedEnvelope(envelope)) return false
+        val note = try {
+            uniffi.lakko_ffi_uniffi.decodeLinkFoundedEnvelope(envelope)
+        } catch (_: Throwable) {
+            return true
+        }
+        val leaf = senderLeaf ?: return true
+        val roster = runCatching { g.devices() }.getOrNull() ?: return true
+        if (roster.none { it.leafIndex == leaf }) return true
+        val accountIdB64 = activeAccountIdB64.get() ?: return true
+        val changed = me.lakko.app.contacts.LinkClaimRecord.onDevice(applicationContext, accountIdB64)
+            .recordNote(
+                me.lakko.app.contacts.LinkClaims.requestKeyHex(note.linkId, note.requesterAccountKey),
+                me.lakko.app.contacts.LinkClaims.HeldNote(
+                    id = messageId,
+                    groupIdHex = DsClient.pseudonymHex(note.groupId),
+                    welcomeB64 = java.util.Base64.getEncoder().encodeToString(note.welcome),
+                ),
+                System.currentTimeMillis(),
+            )
+        if (changed) mutableLinkClaimsVersion.value = mutableLinkClaimsVersion.value + 1
+        return true
+    }
+
+    private fun receiveLinkClaim(envelope: ByteArray, senderLeaf: UInt?, g: DeviceGroup, messageId: Long): Boolean {
+        if (!uniffi.lakko_ffi_uniffi.isLinkClaimEnvelope(envelope)) return false
+        val claim = try {
+            uniffi.lakko_ffi_uniffi.decodeLinkClaimEnvelope(envelope)
+        } catch (_: Throwable) {
+            return true
+        }
+        val leaf = senderLeaf ?: return true
+        val roster = runCatching { g.devices() }.getOrNull() ?: return true
+        val sender = roster.firstOrNull { it.leafIndex == leaf } ?: return true
+        val accountIdB64 = activeAccountIdB64.get() ?: return true
+        val changed = me.lakko.app.contacts.LinkClaimRecord.onDevice(applicationContext, accountIdB64)
+            .recordSeen(
+                me.lakko.app.contacts.LinkClaims.requestKeyHex(claim.linkId, claim.requesterAccountKey),
+                messageId,
+                me.lakko.app.contacts.LinkClaims.hex(sender.signaturePublicKey),
+                System.currentTimeMillis(),
+            )
+        if (changed) mutableLinkClaimsVersion.value = mutableLinkClaimsVersion.value + 1
+        return true
+    }
+
+    /** A received link-record envelope, folded by its original stamp. */
+    private fun applyLinkRecord(envelope: ByteArray) {
+        val changed = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                state.applyLinkRecordEnvelope(envelope)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "link record envelope refused (${cause.javaClass.simpleName})")
+                false
+            }
+        }
+        if (changed) republish()
+    }
+
     /** Fold this device's own write in, under its own leaf. */
     private fun foldLocal(body: DeviceGroupBody, hlc: ULong) {
         val ownLeaf = runCatching { group.get()?.ownLeafIndex() }.getOrNull() ?: 0u
@@ -860,6 +1217,8 @@ public class DeviceGroupSyncRepository(
         runCatching { restored.recoveryEmailEnvelope() }.getOrNull()?.let { applyRecoveryEmail(it) }
         // ADR-0076 - and the own-username register.
         runCatching { restored.ownUsernameEnvelope() }.getOrNull()?.let { applyOwnUsername(it) }
+        // ADR-0079 - and the link records.
+        for (envelope in runCatching { restored.linkRecordEnvelopes() }.getOrNull().orEmpty()) applyLinkRecord(envelope)
     }
 
     /** Permanently destroy the repository — cancels the
@@ -982,6 +1341,38 @@ public class DeviceGroupSyncRepository(
      * @throws Exception when the change set breaks a bound (the fold refuses
      *   it whole and nothing is sent).
      */
+    /** ADR-0065 section 3 — every blob id the saved list names, for the keep
+     *  tick; empty before the state is open. */
+    public fun savedBlobIds(): List<ByteArray> = synchronized(stateLock) {
+        try {
+            syncedState?.savedBlobIds().orEmpty()
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "saved blob ids not read", cause)
+            emptyList()
+        }
+    }
+
+    /**
+     * ADR-0065 section 4 — save or remove [registers], in change sets of at
+     * most `savedMaxPerChangeSet()` registers each (one DeviceGroup message
+     * stays small), applied here at once and sent to the other devices.
+     */
+    public suspend fun applySavedChanges(registers: List<uniffi.lakko_ffi_uniffi.SavedMessageRegister>) {
+        val per = uniffi.lakko_ffi_uniffi.savedMaxPerChangeSet().toInt().coerceAtLeast(1)
+        for (chunk in registers.chunked(per)) {
+            applyFolderChanges(
+                FolderChangeSet(
+                    metas = emptyList(),
+                    members = emptyList(),
+                    pins = emptyList(),
+                    removed = emptyList(),
+                    order = null,
+                    saved = chunk,
+                ),
+            )
+        }
+    }
+
     public suspend fun applyFolderChanges(changes: FolderChangeSet) {
         val changed = synchronized(stateLock) {
             val state = syncedState ?: error("DeviceGroupSync not bootstrapped")
@@ -1026,17 +1417,36 @@ public class DeviceGroupSyncRepository(
             ?: error("DeviceGroupSync not bootstrapped")
         val wireBytes = g.createDevicegroupMessage(id, body, hlc)
         val groupId = g.groupId()
+        // ADR-0081 decision 3 — the ratchet step this message took is on disk
+        // before the ciphertext is published, or nothing is published.
+        persistHandleOrThrow(id, accountIdB64)
         // G-13 (ADR-0015): wrap in the journal envelope (application messages
         // carry no attestation).
         val envelope = DeviceGroupJournalEnvelope.encode(wireBytes, null)
         DsClient().use { ds ->
             ds.publishGroup(groupId, envelope)
         }
-        DeviceGroupLifecycle.persistSnapshot(
-            context = applicationContext,
-            identity = id,
-            accountIdB64 = accountIdB64,
-        )
+    }
+
+    /**
+     * ADR-0081 decision 3 — persist the held handle, FAIL-CLOSED and
+     * conditional on the generation it read. A handle another one wrote past
+     * (a commit of this device made N+1 current) is reopened from disk and the
+     * write throws: nothing built on the stale handle is published.
+     */
+    private fun persistHandleOrThrow(id: Identity, accountIdB64: String) {
+        try {
+            handleGeneration = DeviceGroupLifecycle.persistSnapshotOrThrow(
+                context = applicationContext,
+                identity = id,
+                accountIdB64 = accountIdB64,
+                expectedGeneration = handleGeneration,
+            )
+        } catch (changed: DeviceGroupSnapshotStore.SnapshotChanged) {
+            Log.w(LOG_TAG, "the DeviceGroup snapshot moved under this handle; reopening")
+            scope.launch { reopenAfterLocalChange() }
+            throw changed
+        }
     }
 
     /**
@@ -1068,6 +1478,11 @@ public class DeviceGroupSyncRepository(
             runCatching { syncedState?.ownUsernameEnvelope() }.getOrNull()
         }
         ownUsernameEnvelope?.let { sendServiceEnvelope(it) }
+        // ADR-0079 - nor are the link records; each goes with its own stamp.
+        val linkRecordEnvelopes = synchronized(stateLock) {
+            runCatching { syncedState?.linkRecordEnvelopes() }.getOrNull().orEmpty()
+        }
+        for (envelope in linkRecordEnvelopes) sendServiceEnvelope(envelope)
     }
 
     /** Re-send everything this device holds if a write of ours is still
@@ -1126,6 +1541,7 @@ public class DeviceGroupSyncRepository(
      */
     public fun onLocalDeviceAdded(priorLeaves: List<UInt>) {
         if (!reopenAfterLocalChange(letIn = true)) return
+        me.lakko.app.devices.DeviceCardCenter.scheduleResend()
         onGrowth(priorLeaves)
     }
 
@@ -1155,27 +1571,22 @@ public class DeviceGroupSyncRepository(
     // ------------------------------------------------------------
 
     /**
-     * Returns the journal head it stopped at when the DeviceGroup forked
-     * ([DeviceGroupFork]) and this session may still re-found it, else
-     * `null` (cancelled, or the handle is gone).
+     * Read the DeviceGroup journal until cancelled, the handle is gone, this
+     * device is removed, or it is behind for good (ADR-0081 decision 4: it
+     * then rejoins through a sibling).
      */
     private suspend fun runPollLoop(
         bound: me.lakko.app.Binding,
+        accountIdBytes: ByteArray,
         accountIdB64: String,
         groupId: ByteArray,
         startCursor: Long = 0L,
-    ): Long? {
+    ) {
         var cursor = startCursor
-        var suspectSince: Long? = null
         DsClient().use { ds ->
             while (currentCoroutineContextActive()) {
                 val result = try {
-                    ds.fetchGroup(
-                        groupId = groupId,
-                        after = cursor,
-                        limit = null,
-                        waitSecs = 25,
-                    )
+                    fetchOrKicked(ds, groupId, cursor) ?: continue
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (http: DsHttpError) {
@@ -1195,7 +1606,30 @@ public class DeviceGroupSyncRepository(
                 // The fetch answered, so the network works: send whatever of
                 // ours is still waiting.
                 flushPendingIfAny()
-                val drainedBatch = DeviceGroupFork.isDrained(result.messages.size, result.hasMore)
+                val drainedBatch = result.messages.isEmpty() && !result.hasMore
+
+                // ADR-0081 decision 2, step 6 — a DeviceGroup commit of this
+                // device that did not finish (the DS could not be reached, a
+                // write failed, a crash) is finished before anything else;
+                // until it is, this device never reads itself as behind (the
+                // DS may hold its own next epoch). Not cancellable: a landed
+                // entry reopens this runtime (which cancels this loop), and
+                // its Welcome must still be delivered.
+                var commitPending = false
+                try {
+                    val owed = withContext(NonCancellable) {
+                        me.lakko.app.devices.DeviceGroupCommits.resendOwed(
+                            applicationContext, accountIdBytes, accountIdB64,
+                        )
+                    }
+                    if (owed != null) Log.i(LOG_TAG, "DeviceGroup commit outbox: ${owed.javaClass.simpleName}")
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (cause: Throwable) {
+                    commitPending = true
+                    Log.w(LOG_TAG, "DeviceGroup commit outbox: not finished yet (${cause.javaClass.simpleName})")
+                }
+                if (!currentCoroutineContextActive() || !bound.isCurrent) return
 
                 // G-13 (ADR-0015): the 32-byte verifying key peers feed to
                 // processIncomingVerifyingRemovals. Without it the batch is
@@ -1216,13 +1650,17 @@ public class DeviceGroupSyncRepository(
                 }
 
                 var mutated = false
+                // ADR-0079 (order of 2026-10-17) - the journal readability
+                // rule for this batch: own claims and notes judged at their
+                // rows, commits moving the journal's epoch.
+                var journal = loadJournalEpochs(group.get())
                 for (message in result.messages) {
                     // The account this loop polls for is gone: the handles
                     // read below are nobody's, or the next account's.
-                    if (!bound.isCurrent) return null
+                    if (!bound.isCurrent) return
                     cursor = message.id
-                    val g = group.get() ?: return null
-                    val id = identity.get() ?: return null
+                    val g = group.get() ?: return
+                    val id = identity.get() ?: return
                     // A commit earlier in this batch removed this device: the
                     // group is frozen, nothing after it decrypts. Stop reading
                     // the batch; the check after the persist below stops the loop.
@@ -1234,8 +1672,14 @@ public class DeviceGroupSyncRepository(
                         Log.w(LOG_TAG, "journal envelope decode failed at ${message.id}", cause)
                         continue
                     }
+                    // ADR-0079 - this device's own claim or note, recognised
+                    // by the sealed bytes it recorded before the publish and
+                    // judged at this row's position; recorded before the
+                    // cursor moves past it.
+                    if (journal != null && judgeOwnLinkRow(entry.first, message.id, journal.second)) continue
                     val attestations: List<ByteArray> =
                         entry.second?.let { listOf(it) } ?: emptyList()
+                    val devicesBeforeRow = runCatching { g.devices().map { it.signaturePublicKey } }.getOrNull()
                     val processed: ProcessedMessage = try {
                         g.processIncomingVerifyingRemovals(
                             id,
@@ -1246,8 +1690,12 @@ public class DeviceGroupSyncRepository(
                         )
                     } catch (cause: Throwable) {
                         Log.w(LOG_TAG, "processIncomingVerifyingRemovals failed at ${message.id}", cause)
+                        // A commit that took effect (its own, merged early)
+                        // still moves the journal's epoch.
+                        journal = observeJournalRow(entry.first, message.id, g, journal)
                         continue
                     }
+                    journal = observeJournalRow(entry.first, message.id, g, journal)
                     mutated = true
                     if (processed is ProcessedMessage.Application) {
                         try {
@@ -1256,6 +1704,12 @@ public class DeviceGroupSyncRepository(
                             )
                             val body = parsed.body
                             if (body is DeviceGroupBody.ServiceEnvelope &&
+                                uniffi.lakko_ffi_uniffi.isLinkRecordEnvelope(body.envelope)
+                            ) {
+                                // ADR-0079 - one of the account's invite links
+                                // from another of its devices.
+                                applyLinkRecord(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
                                 uniffi.lakko_ffi_uniffi.isOwnUsernameEnvelope(body.envelope)
                             ) {
                                 // ADR-0076 - the account's username from
@@ -1284,6 +1738,24 @@ public class DeviceGroupSyncRepository(
                                 // DeviceGroup; verified and stored as
                                 // pending by the auth side, never rendered.
                                 keyRotationSink?.invoke(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
+                                receiveDeviceCard(body.envelope, processed.senderLeaf, g)
+                            ) {
+                                // ADR-0080 - a device card, kept under the
+                                // sender's leaf key resolved here, against the
+                                // roster this row was sealed under (C-68).
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
+                                receiveLinkFounded(body.envelope, processed.senderLeaf, g, message.id)
+                            ) {
+                                // ADR-0079 (order of 2026-10-17) - another
+                                // device's link-founded note, resolved the
+                                // same way.
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
+                                receiveLinkClaim(body.envelope, processed.senderLeaf, g, message.id)
+                            ) {
+                                // ADR-0079 (reworked 2026-10-17) - another
+                                // device's claim of a link request, resolved
+                                // the same way.
                             } else if (body is DeviceGroupBody.ServiceEnvelope) {
                                 // ADR-0060 section 7 — the Visibility setting and
                                 // the ReachState counters from another of this
@@ -1304,9 +1776,18 @@ public class DeviceGroupSyncRepository(
                             Log.w(LOG_TAG, "parseDevicegroupPayload failed", cause)
                         }
                     } else if (processed is ProcessedMessage.Commit) {
+                        // ADR-0081 decision 4 — the sibling's record of which
+                        // keys it saw added, and when (the row's DS time), so a
+                        // knock another sibling answered is not answered twice.
+                        noteAdditions(devicesBeforeRow, g, message.createdAt)
                         val after = runCatching { g.devices().map { it.leafIndex }.toSet() }.getOrNull()
                         if (after != null) {
-                            SyncCatchUp.priorLeavesIfGrown(knownLeaves, after)?.let(::onGrowth)
+                            SyncCatchUp.priorLeavesIfGrown(knownLeaves, after)?.let { prior ->
+                                // ADR-0080 - every device that was there
+                                // re-sends its own card.
+                                me.lakko.app.devices.DeviceCardCenter.scheduleResend()
+                                onGrowth(prior)
+                            }
                             knownLeaves = after
                         }
                         // UX 17.5 - another device changed the account's
@@ -1318,15 +1799,23 @@ public class DeviceGroupSyncRepository(
                     // mutation.
                 }
 
-                if (!bound.isCurrent) return null
+                if (!bound.isCurrent) return
                 if (mutated) {
                     val id = identity.get()
                     if (id != null) {
-                        DeviceGroupLifecycle.persistSnapshot(
-                            context = applicationContext,
-                            identity = id,
-                            accountIdB64 = accountIdB64,
-                        )
+                        // ADR-0081 decision 3 — fail-closed and conditional on
+                        // the generation this handle read: a handle another one
+                        // wrote past reopens instead of putting its older state
+                        // back. Any other failure keeps the applied state in
+                        // memory; the next batch writes it again.
+                        try {
+                            persistHandleOrThrow(id, accountIdB64)
+                            saveAdmissions(accountIdB64)
+                        } catch (_: DeviceGroupSnapshotStore.SnapshotChanged) {
+                            return
+                        } catch (cause: Throwable) {
+                            Log.w(LOG_TAG, "DeviceGroup snapshot persist failed (${cause.javaClass.simpleName})")
+                        }
                     }
                 }
 
@@ -1339,59 +1828,49 @@ public class DeviceGroupSyncRepository(
                 // section 3.1). The batch that carried the removal was persisted
                 // above, so the next launch finds the inactive snapshot and shows
                 // the same screen; nothing after it is polled or persisted.
-                val held = group.get() ?: return null
+                val held = group.get() ?: return
                 val step = RemovedDevice.pollStepAfterBatch(RemovedDevice.readActive { held.isActive() })
                 if (step == PollStep.StopRemoved) {
                     markRemoved()
-                    return null
+                    return
                 }
 
-                // A drained journal whose chain is ahead of this device means
-                // its DeviceGroup forked. A handle that derives no signer (a
-                // removed device's inactive group) is never suspected.
+                // ADR-0081 decision 4 — behind for good? A drained read while
+                // the DS names a newer epoch than this handle's: since an
+                // epoch is registered only with its commit row, nothing left
+                // in the journal can bring this device forward. It drops its
+                // DeviceGroup state and rejoins through a sibling. A handle
+                // that derives no signer (an inactive group) is never behind.
                 val localEpoch = currentLocalEpoch()
-                val verdict = if (localEpoch == null) {
-                    ForkVerdict.InSync
-                } else {
-                    DeviceGroupFork.forkVerdict(
-                        localEpoch = localEpoch,
-                        drained = DeviceGroupFork.isDrained(result.messages.size, result.hasMore),
-                        latestEpoch = result.latestEpoch,
-                        suspectSince = suspectSince,
-                        nowMs = System.currentTimeMillis(),
+                if (localEpoch != null &&
+                    isBehind(localEpoch, drainedBatch, result.latestEpoch, commitPending) &&
+                    RemovedDevice.rejoinAllowed(RemovedDevice.readActive { held.isActive() })
+                ) {
+                    Log.w(
+                        LOG_TAG,
+                        "DeviceGroup behind the DS with nothing left to read: local epoch $localEpoch, " +
+                            "DS epoch ${result.latestEpoch}; rejoining",
                     )
+                    enterRejoin(accountIdBytes, accountIdB64)
+                    return
                 }
-                when (verdict) {
-                    ForkVerdict.InSync -> suspectSince = null
-                    is ForkVerdict.Suspect -> suspectSince = verdict.since
-                    ForkVerdict.Forked -> {
-                        Log.w(
-                            LOG_TAG,
-                            "DeviceGroup forked: local epoch $localEpoch, DS epoch ${result.latestEpoch}",
-                        )
-                        // The repair re-founds the account's DeviceGroup; it never
-                        // runs on a removed device. An inactive group cannot
-                        // reach this point anyway (it stopped above, and its
-                        // epoch comes from a DS signer an inactive group cannot
-                        // derive, so `localEpoch` is null and the verdict
-                        // in-sync); the guard keeps it so if either changes.
-                        val repairAllowed = RemovedDevice.forkRepairAllowed(
-                            group.get()?.let { h -> RemovedDevice.readActive { h.isActive() } },
-                        )
-                        if (repairAllowed && forkRepairedFor != accountIdB64 && rootSigner != null) {
-                            forkRepairedFor = accountIdB64
-                            return cursor
-                        }
-                        // Already re-founded this session, or no account root
-                        // on this device to claim a new founding with: keep
-                        // polling and do not repair again.
-                        Log.w(LOG_TAG, "DeviceGroup fork not repaired in this session")
-                        suspectSince = null
+                // At the head: a sibling reads the knocks (ADR-0081 decision 4).
+                val nowMs = System.currentTimeMillis()
+                if (drainedBatch && !commitPending && nowMs - lastKnockCheckAtMs >= KNOCK_CHECK_INTERVAL_MS) {
+                    lastKnockCheckAtMs = nowMs
+                    try {
+                        // Not cancellable: an admission's commits reopen this
+                        // runtime (which cancels this loop) and must finish.
+                        withContext(NonCancellable) { checkKnocks(accountIdBytes, accountIdB64, bound) }
+                    } catch (cancellation: CancellationException) {
+                        throw cancellation
+                    } catch (cause: Throwable) {
+                        Log.w(LOG_TAG, "DeviceGroup knock check failed (${cause.javaClass.simpleName})")
                     }
+                    if (!bound.isCurrent) return
                 }
             }
         }
-        return null
     }
 
     /** The epoch of the DeviceGroup handle held now, read from its journal
@@ -1400,6 +1879,442 @@ public class DeviceGroupSyncRepository(
         val g = group.get() ?: return null
         val id = identity.get() ?: return null
         return DeviceGroupJournalAccess.signerOf(g, id)?.epoch
+    }
+
+    // ------------------------------------------------------------
+    // ADR-0081 decision 4: founding, rejoining, admitting
+    // ------------------------------------------------------------
+
+    /**
+     * No usable DeviceGroup state at open. Ask the directory: with no other
+     * own device listed, found (nobody can be cut off); otherwise rejoin
+     * through a sibling. A directory that cannot be read founds nothing; the
+     * question is asked again.
+     */
+    private fun startFoundOrRejoin(
+        accountIdBytes: ByteArray,
+        accountIdB64: String,
+        deviceSeed: ByteArray,
+        seedState: Boolean,
+        accountIdentitySeed: ByteArray?,
+    ) {
+        if (rejoinJob?.isActive == true) {
+            deviceSeed.fill(0)
+            return
+        }
+        val seedCopy = deviceSeed.copyOf()
+        deviceSeed.fill(0)
+        val bound = sessionBinding.capture()
+        rejoinJob = scope.launch {
+            try {
+                var mayFound: Boolean? = null
+                while (mayFound == null && currentCoroutineContextActive() && bound.isCurrent) {
+                    mayFound = try {
+                        directoryListsNoOtherDevice(accountIdBytes, seedCopy)
+                    } catch (cancellation: CancellationException) {
+                        throw cancellation
+                    } catch (cause: Throwable) {
+                        Log.w(LOG_TAG, "the directory could not be read; founding nothing (${cause.javaClass.simpleName})")
+                        delay(5000)
+                        null
+                    }
+                }
+                if (mayFound == null || !bound.isCurrent || activeAccountIdB64.get() != accountIdB64) return@launch
+                if (mayFound) {
+                    val ensured = try {
+                        DeviceGroupLifecycle.ensureDeviceGroup(
+                            context = applicationContext,
+                            accountIdBytes = accountIdBytes,
+                            accountIdB64 = accountIdB64,
+                            deviceIdentitySeed = seedCopy,
+                            found = true,
+                        )
+                    } catch (cancellation: CancellationException) {
+                        throw cancellation
+                    } catch (cause: Throwable) {
+                        Log.w(LOG_TAG, "founding failed; retried next session (${cause.javaClass.simpleName})")
+                        return@launch
+                    }
+                    Log.i(LOG_TAG, "no other device listed; DeviceGroup founded")
+                    rejoinJob = null
+                    adopt(ensured, accountIdBytes, accountIdB64, seedState, accountIdentitySeed, 0L, false)
+                    return@launch
+                }
+                Log.i(LOG_TAG, "no DeviceGroup state while another device is listed; rejoining")
+                runRejoin(accountIdBytes, accountIdB64, bound, seedState, accountIdentitySeed)
+            } finally {
+                seedCopy.fill(0)
+            }
+        }
+    }
+
+    /** Stop following the DeviceGroup, drop its local state, and rejoin.
+     *  Called from inside the poll loop, which returns right after. */
+    private fun enterRejoin(accountIdBytes: ByteArray, accountIdB64: String) {
+        if (mutableDeviceRemoved.value || activeAccountIdB64.get() != accountIdB64) return
+        if (rejoinJob?.isActive == true) return
+        pollJob = null
+        identity.set(null)
+        group.set(null)
+        handleGeneration = null
+        admissions = null
+        mutableReady.value = false
+        val bound = sessionBinding.capture()
+        rejoinJob = scope.launch {
+            runRejoin(accountIdBytes, accountIdB64, bound, seedState = false, accountIdentitySeed = null)
+        }
+    }
+
+    /** The device's side ([rejoinOnce]) until joined or the session ends; then
+     *  the joined DeviceGroup is opened like any session start. */
+    private suspend fun runRejoin(
+        accountIdBytes: ByteArray,
+        accountIdB64: String,
+        bound: me.lakko.app.Binding,
+        seedState: Boolean,
+        accountIdentitySeed: ByteArray?,
+    ) {
+        val ports = rejoinPorts(accountIdBytes, accountIdB64)
+        var first = true
+        while (currentCoroutineContextActive() && bound.isCurrent) {
+            try {
+                val outcome = rejoinOnce(ports, first)
+                first = false
+                if (outcome == RejoinPass.JOINED) break
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "DeviceGroup rejoin attempt failed; trying again (${cause.javaClass.simpleName})")
+                delay(5000)
+            }
+        }
+        if (!bound.isCurrent || activeAccountIdB64.get() != accountIdB64) return
+        rejoinJob = null
+        Log.i(LOG_TAG, "rejoined the account's DeviceGroup")
+        openAndPoll(accountIdBytes, accountIdB64, seedState = seedState, accountIdentitySeed = accountIdentitySeed)
+    }
+
+    private fun rejoinPorts(accountIdBytes: ByteArray, accountIdB64: String): RejoinPorts = object : RejoinPorts {
+        private val b64e = java.util.Base64.getEncoder()
+        private val b64d = java.util.Base64.getDecoder()
+
+        override fun dropLocalState() {
+            DeviceGroupSnapshotStore.dropStateForRejoin(applicationContext, accountIdB64)
+        }
+
+        override suspend fun publishDirectoryKeyPackage() {
+            directoryKeyPackagePublisher?.invoke()
+        }
+
+        override fun loadState(): RejoinState? =
+            DeviceGroupSnapshotStore.getPending(
+                applicationContext, accountIdB64, DeviceGroupSnapshotStore.PendingKind.REJOIN,
+            )?.let { RejoinState.decode(it) }
+
+        override fun saveState(state: RejoinState) {
+            DeviceGroupSnapshotStore.putPending(
+                applicationContext, accountIdB64, DeviceGroupSnapshotStore.PendingKind.REJOIN, state.encoded(),
+            )
+        }
+
+        override suspend fun knock(nowMs: Long): RejoinState {
+            val loginHandle = loginHandleProvider?.invoke()
+                ?: throw IllegalStateException("no login handle for this account")
+            val groupId = DeviceGroupLifecycle.groupId(applicationContext, accountIdB64)
+                ?: throw DeviceGroupLifecycle.NoAccountSeed()
+            val seed = me.lakko.app.auth.DeviceIdentityStore.ensureDeviceIdentitySeed(
+                context = applicationContext, accountIdB64 = accountIdB64,
+            )
+            val joiner = try {
+                Identity.fromSeed(seed)
+            } finally {
+                seed.fill(0)
+            }
+            try {
+                val keyPackage = joiner.createKeyPackage()
+                val rendezvous = me.lakko.app.devices.PairingCodec.generateRendezvousPseudonym()
+                // ADR-0081 amendment — the device identity's key IS this
+                // device's old DeviceGroup leaf key: it signs that its leaf may
+                // be replaced by this KeyPackage in the commit leaving the
+                // journal's latest epoch (an empty knock is a probe that names
+                // it), which lets a sibling readmit it under the
+                // attested-removal policy without a passkey. An unclaimed
+                // journal names no epoch: no proof.
+                val probeEpoch = DsClient().use { ds -> ds.knock(groupId, emptyList()) }.epoch
+                val payload = if (probeEpoch == null) {
+                    me.lakko.app.devices.PairingCodec.buildPairingQrPayload(loginHandle, keyPackage, rendezvous)
+                } else {
+                    val proof = uniffi.lakko_ffi_uniffi.signDeviceGroupSelfRemoval(
+                        joiner, groupId, probeEpoch, keyPackage,
+                    )
+                    me.lakko.app.devices.PairingCodec.buildRejoinKnockPayload(
+                        loginHandle, keyPackage, rendezvous, proof,
+                    )
+                }
+                val snapshot = joiner.snapshotStorage()
+                val state = try {
+                    RejoinState(
+                        rendezvousB64 = b64e.encodeToString(rendezvous),
+                        joinerSnapshotB64 = b64e.encodeToString(snapshot),
+                        knockedAtMs = nowMs,
+                    )
+                } finally {
+                    snapshot.fill(0)
+                }
+                // Kept BEFORE the knock: the joiner's provider is the only
+                // thing that can open the Welcome a sibling sends.
+                saveState(state)
+                DsClient().use { ds -> ds.knock(groupId, listOf(payload)) }
+                return state
+            } finally {
+                joiner.close()
+            }
+        }
+
+        override suspend fun awaitWelcome(state: RejoinState, deadlineMs: Long): ByteArray? {
+            val rendezvous = b64d.decode(state.rendezvousB64)
+            val remaining = (deadlineMs - System.currentTimeMillis()).coerceIn(1L, REKNOCK_AFTER_MS)
+            val outcome = me.lakko.app.devices.WelcomeCourier.pollForWelcome(rendezvous, timeoutMillis = remaining)
+            return (outcome as? me.lakko.app.devices.WelcomeCourier.WelcomeOutcome.Received)?.welcomeBytes
+        }
+
+        override suspend fun join(state: RejoinState, welcome: ByteArray) {
+            val seed = me.lakko.app.auth.DeviceIdentityStore.ensureDeviceIdentitySeed(
+                context = applicationContext, accountIdB64 = accountIdB64,
+            )
+            val joiner = try {
+                Identity.fromSeed(seed)
+            } finally {
+                seed.fill(0)
+            }
+            try {
+                val snapshot = b64d.decode(state.joinerSnapshotB64)
+                try {
+                    joiner.restoreStorage(snapshot)
+                } finally {
+                    snapshot.fill(0)
+                }
+                DeviceGroup.joinFromWelcome(welcome, joiner, accountIdBytes).close()
+                DeviceGroupLifecycle.persistSnapshotOrThrow(applicationContext, joiner, accountIdB64)
+                // A fresh observer of the journal.
+                DeviceGroupSnapshotStore.putPending(
+                    applicationContext, accountIdB64, DeviceGroupSnapshotStore.PendingKind.ADMISSIONS,
+                    AdmissionRecord(watchingSinceMs = System.currentTimeMillis()).encoded(),
+                )
+            } finally {
+                joiner.close()
+            }
+        }
+
+        override fun clearState() {
+            DeviceGroupSnapshotStore.deletePending(applicationContext, accountIdB64, DeviceGroupSnapshotStore.PendingKind.REJOIN)
+        }
+
+        override fun now(): Long = System.currentTimeMillis()
+    }
+
+    /** The directory check of the founding policy: `true` when the account's
+     *  directory lists no own device other than this one. A failure throws
+     *  (nothing is founded on an unread directory). */
+    private suspend fun directoryListsNoOtherDevice(accountIdBytes: ByteArray, deviceSeed: ByteArray): Boolean {
+        val ownKey = Identity.fromSeed(deviceSeed).use { it.signaturePublicKey() }
+        val listed = me.lakko.app.discovery.DiscoveryClient().use { it.fetchKeyPackages(accountIdBytes) }.orEmpty()
+        return listed.all { it.deviceId.contentEquals(ownKey) }
+    }
+
+    /** The account's directory rows whose device binding verifies under the
+     *  account key the conversation leaves are bound to: leaf key hex to its
+     *  directory KeyPackage. A deleted device is tombstoned (ADR-0074) and
+     *  not listed. */
+    private suspend fun ownDirectory(accountIdBytes: ByteArray, accountIdB64: String): Map<String, ByteArray> {
+        val lineage = DeviceGroupLifecycle.lineageSeed(applicationContext, accountIdB64) ?: return emptyMap()
+        val accountKey = try {
+            Identity.fromSeed(lineage).use { it.signaturePublicKey() }
+        } finally {
+            lineage.fill(0)
+        }
+        val listed = me.lakko.app.discovery.DiscoveryClient().use { it.fetchKeyPackages(accountIdBytes) }.orEmpty()
+        val out = HashMap<String, ByteArray>()
+        for (row in listed) {
+            val bound = runCatching { uniffi.lakko_ffi_uniffi.keyPackageAccountKey(row.keyPackage) }.getOrNull()
+                ?: continue
+            // A Phase 1 unbound leaf resolves to itself: not a binding.
+            if (!bound.contentEquals(accountKey) || bound.contentEquals(row.deviceId)) continue
+            out[hexOf(row.deviceId)] = row.keyPackage
+        }
+        return out
+    }
+
+    private fun loadAdmissions(accountIdB64: String) {
+        admissions = DeviceGroupSnapshotStore.getPending(
+            applicationContext, accountIdB64, DeviceGroupSnapshotStore.PendingKind.ADMISSIONS,
+        )?.let { AdmissionRecord.decode(it) } ?: AdmissionRecord(watchingSinceMs = System.currentTimeMillis())
+    }
+
+    private fun saveAdmissions(accountIdB64: String) {
+        val record = admissions ?: return
+        if (activeAccountIdB64.get() != accountIdB64) return
+        try {
+            DeviceGroupSnapshotStore.putPending(
+                applicationContext, accountIdB64, DeviceGroupSnapshotStore.PendingKind.ADMISSIONS, record.encoded(),
+            )
+        } catch (cause: Throwable) {
+            // The record is a guard against admitting twice; an unsaved update
+            // is rebuilt from the journal by the next batch.
+            Log.w(LOG_TAG, "DeviceGroup admission record not saved (${cause.javaClass.simpleName})")
+        }
+    }
+
+    /** Record every key a commit added, at the row's DS time. */
+    private fun noteAdditions(before: List<ByteArray>?, g: DeviceGroup, createdAt: String) {
+        val record = admissions ?: return
+        before ?: return
+        val after = runCatching { g.devices().map { it.signaturePublicKey } }.getOrNull() ?: return
+        val beforeHex = before.map { hexOf(it) }.toSet()
+        val at = parseMs(createdAt) ?: System.currentTimeMillis()
+        admissions = after.map { hexOf(it) }.filter { it !in beforeHex }
+            .fold(record) { acc, keyHex -> acc.noteAdded(keyHex, at) }
+    }
+
+    private fun parseMs(iso: String): Long? =
+        try {
+            java.time.OffsetDateTime.parse(iso).toInstant().toEpochMilli()
+        } catch (_: Throwable) {
+            try {
+                java.time.Instant.parse(iso).toEpochMilli()
+            } catch (_: Throwable) {
+                null
+            }
+        }
+
+    /**
+     * A sibling's side: read the DeviceGroup's knocks and admit each one
+     * [admissionVerdict] allows — replace the device's previous leaf, if it
+     * is still in the roster, by its KeyPackage in one commit carrying its
+     * self-removal proof (ADR-0081 amendment), else add the KeyPackage; one
+     * commit through the outbox, the Welcome to the knock's rendezvous.
+     */
+    private suspend fun checkKnocks(accountIdBytes: ByteArray, accountIdB64: String, bound: me.lakko.app.Binding) {
+        val g = group.get() ?: return
+        val id = identity.get() ?: return
+        if (admissions == null) return
+        val loginHandle = loginHandleProvider?.invoke() ?: return
+        val knocks = DsClient().use { ds -> ds.fetchKnocks(g.groupId(), after = knockCursor) }
+        if (!bound.isCurrent || knocks.messages.isEmpty()) return
+        knockCursor = knocks.messages.last().id
+        val roster = runCatching { g.devices() }.getOrNull()?.map {
+            RosterMember(it.leafIndex, hexOf(it.signaturePublicKey))
+        } ?: return
+        val ownKeyHex = hexOf(id.signaturePublicKey())
+        val policy = runCatching { g.requireAttestedRemovals() }.getOrDefault(false)
+        val heldGroupId = g.groupId()
+        val heldEpoch = g.epoch()
+        var directory: Map<String, ByteArray>? = null
+        for (knock in knocks.messages) {
+            if (!bound.isCurrent) return
+            val decoded = try {
+                me.lakko.app.devices.PairingCodec.parsePairingQrPayload(knock.payload, loginHandle)
+            } catch (_: Throwable) {
+                continue // not a payload for this account (or not a pairing payload)
+            }
+            val keyBytes = runCatching { uniffi.lakko_ffi_uniffi.keyPackageSignatureKey(decoded.keyPackage) }
+                .getOrNull() ?: continue
+            val keyHex = hexOf(keyBytes)
+            // Checked BEFORE a commit is built: a commit the DS takes but every
+            // peer refuses would leave this device ahead of them.
+            val proof = decoded.selfRemovalProof
+            val proofCovers = proof != null && uniffi.lakko_ffi_uniffi.deviceGroupSelfRemovalCovers(
+                id, proof, heldGroupId, heldEpoch, keyBytes, decoded.keyPackage,
+            )
+            val dir = directory ?: ownDirectory(accountIdBytes, accountIdB64).also { directory = it }
+            if (!bound.isCurrent) return
+            val record = admissions ?: return
+            val nowMs = System.currentTimeMillis()
+            val verdict = admissionVerdict(
+                AdmissionInput(
+                    knockId = knock.id,
+                    knockAtMs = parseMs(knock.createdAt) ?: 0L,
+                    keyHex = keyHex,
+                    ownKeyHex = ownKeyHex,
+                    roster = roster,
+                    handled = record.handled.toSet(),
+                    watchingSinceMs = record.watchingSinceMs,
+                    lastAddedAtMs = record.lastAddedAtMs[keyHex],
+                    listed = dir.containsKey(keyHex),
+                    policyRequiresAttestation = policy,
+                    nowMs = nowMs,
+                    selfRemovalProofCovers = proofCovers,
+                    keyPackageAlreadyIn = runCatching {
+                        g.containsLeafOfKeyPackage(id, decoded.keyPackage)
+                    }.getOrDefault(false),
+                ),
+            )
+            if (verdict != AdmissionVerdict.ADMIT) continue
+            val added = me.lakko.app.devices.DeviceGroupCommits.commitChange(
+                context = applicationContext,
+                accountIdBytes = accountIdBytes,
+                accountIdB64 = accountIdB64,
+                build = { fresh ->
+                    val before = runCatching { fresh.group.devices() }.getOrNull().orEmpty()
+                    val previous = before.firstOrNull { hexOf(it.signaturePublicKey) == keyHex }
+                    val answered = runCatching {
+                        fresh.group.containsLeafOfKeyPackage(fresh.identity, decoded.keyPackage)
+                    }.getOrDefault(false)
+                    when {
+                        // Another sibling answered it meanwhile.
+                        answered -> null
+                        previous == null -> {
+                            val addition = fresh.group.addDeviceFromWire(fresh.identity, decoded.keyPackage)
+                            me.lakko.app.devices.DeviceGroupCommits.Built(
+                                kind = me.lakko.app.devices.DeviceGroupCommitEntry.Kind.REJOIN_ADD,
+                                row = DeviceGroupJournalEnvelope.encode(addition.commit, null),
+                                welcome = addition.welcome,
+                                welcomeRendezvous = decoded.rendezvousPseudonym,
+                                priorLeaves = before.map { it.leafIndex },
+                            )
+                        }
+                        else -> {
+                            // ADR-0081 amendment — the previous leaf out and the
+                            // new one in, in ONE commit; the proof rides in the
+                            // removal-authorisation slot. Re-checked at the
+                            // epoch this commit leaves: a proof names one
+                            // epoch, and peers refuse it at any other. Under
+                            // the policy a removal it does not cover would be
+                            // refused by every peer.
+                            val covers = proof != null && uniffi.lakko_ffi_uniffi.deviceGroupSelfRemovalCovers(
+                                fresh.identity, proof, fresh.group.groupId(), fresh.group.epoch(),
+                                keyBytes, decoded.keyPackage,
+                            )
+                            val policyNow = runCatching { fresh.group.requireAttestedRemovals() }.getOrDefault(true)
+                            if (!covers && policyNow) {
+                                null
+                            } else {
+                                val replaced = fresh.group.replaceDeviceAt(
+                                    fresh.identity, previous.leafIndex, decoded.keyPackage,
+                                )
+                                me.lakko.app.devices.DeviceGroupCommits.Built(
+                                    kind = me.lakko.app.devices.DeviceGroupCommitEntry.Kind.REJOIN_REPLACE,
+                                    row = DeviceGroupJournalEnvelope.encode(
+                                        replaced.commit, if (covers) proof else null,
+                                    ),
+                                    welcome = replaced.welcome,
+                                    welcomeRendezvous = decoded.rendezvousPseudonym,
+                                    priorLeaves = before.map { it.leafIndex },
+                                )
+                            }
+                        }
+                    }
+                },
+                after = { },
+            )
+            if (added?.outcome is me.lakko.app.devices.DeviceGroupCommitOutcome.Landed) {
+                admissions = admissions?.noteAdded(keyHex, nowMs)?.noteHandled(knock.id)
+                saveAdmissions(accountIdB64)
+                Log.i(LOG_TAG, "a device of this account was admitted again")
+            }
+            // The commits reopened this runtime; the next pass re-reads.
+            return
+        }
     }
 
     /**
@@ -1416,11 +2331,7 @@ public class DeviceGroupSyncRepository(
         val accountIdB64 = activeAccountIdB64.get()
             ?: error("DeviceGroupSync not bootstrapped")
         val wireBytes = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
-        DeviceGroupLifecycle.persistSnapshot(
-            context = applicationContext,
-            identity = id,
-            accountIdB64 = accountIdB64,
-        )
+        persistHandleOrThrow(id, accountIdB64)
         DsClient().use { ds ->
             ds.publishGroup(g.groupId(), DeviceGroupJournalEnvelope.encode(wireBytes, null))
         }
@@ -1432,6 +2343,35 @@ public class DeviceGroupSyncRepository(
 
     /** Bumped each time a poll read the journal to its head. */
     private val headReads: MutableStateFlow<Long> = MutableStateFlow(0L)
+
+    /** Callers waiting in [awaitHead]. While any wait, the poll does not hold
+     *  its read open: two head reads of a 25 s long poll each made every
+     *  step of an invite-link answer take about 50 s. */
+    private val headWaiters = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** Cuts short a long poll already out when a caller starts waiting. */
+    private val headKick = Channel<Unit>(Channel.CONFLATED)
+
+    /** One journal read: at once while a head waiter exists, else a long poll
+     *  that a new waiter cuts short (`null`: read again at once). */
+    private suspend fun fetchOrKicked(ds: DsClient, groupId: ByteArray, after: Long) =
+        if (headWaiters.get() > 0) {
+            ds.fetchGroup(groupId = groupId, after = after, limit = null, waitSecs = 0)
+        } else {
+            coroutineScope {
+                val fetch = async { ds.fetchGroup(groupId = groupId, after = after, limit = null, waitSecs = 25) }
+                val kicked = select {
+                    fetch.onAwait { false }
+                    headKick.onReceive { true }
+                }
+                if (kicked) {
+                    fetch.cancel()
+                    null
+                } else {
+                    fetch.await()
+                }
+            }
+        }
 
     private fun isKeyRotation(envelope: ByteArray): Boolean =
         try {
@@ -1445,12 +2385,18 @@ public class DeviceGroupSyncRepository(
      *  its head, or [timeoutMs] passed. */
     private suspend fun awaitHead(timeoutMs: Long): Boolean {
         val seen = headReads.value
-        return kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
-            // Two head reads: the first may belong to a fetch that was
-            // already waiting when this was asked.
-            headReads.first { it >= seen + 2 }
-            true
-        } ?: (headReads.value > seen)
+        headWaiters.incrementAndGet()
+        headKick.trySend(Unit)
+        try {
+            return kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+                // Two head reads: the first may belong to a fetch that was
+                // already out when this was asked.
+                headReads.first { it >= seen + 2 }
+                true
+            } ?: (headReads.value > seen)
+        } finally {
+            headWaiters.decrementAndGet()
+        }
     }
 
     /**
@@ -1511,7 +2457,7 @@ public class DeviceGroupSyncRepository(
         val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
         val accountIdB64 = activeAccountIdB64.get() ?: error("DeviceGroupSync not bootstrapped")
         val wire = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
-        DeviceGroupLifecycle.persistSnapshot(context = applicationContext, identity = id, accountIdB64 = accountIdB64)
+        persistHandleOrThrow(id, accountIdB64)
         val sealedAt = uniffi.lakko_ffi_uniffi.epochOfMessage(wire)
             ?: error("the sealed message carries no epoch")
         return wire to sealedAt
@@ -1610,17 +2556,6 @@ public class DeviceGroupSyncRepository(
                     statements = root,
                     refounded = unconfirmed,
                     put = { make -> ds.putStatement(make) },
-                    // ADR-0073 section 5 — after a reset of the account keys
-                    // the chain on the DS belongs to the old root; the
-                    // attestation is what lets this root reset it.
-                    keyResetEvidence = if (unconfirmed && accountIdB64 != null) {
-                        { rootKey ->
-                            me.lakko.app.devices.DeviceGroupJournalAccess
-                                .pendingResetEvidence(applicationContext, accountIdB64, groupId, rootKey)
-                        }
-                    } else {
-                        null
-                    },
                 )
                 Log.i(LOG_TAG, "DeviceGroup journal claim: $outcome")
                 val landed = outcome != me.lakko.app.ds.JournalClaimOutcome.ALREADY_CLAIMED
@@ -1656,8 +2591,14 @@ public class DeviceGroupSyncRepository(
         // some other call path still holds a reference would
         // crash. Letting them go out of scope is enough; the
         // JNA finalizer reclaims the Rust-side Arc.
+        rejoinJob?.cancel()
+        rejoinJob = null
         identity.set(null)
         group.set(null)
+        handleGeneration = null
+        admissions = null
+        lastKnockCheckAtMs = 0L
+        knockCursor = 0L
         rootSigner = null
         reachPublisher?.let { installed ->
             me.lakko.app.reach.ReachManager.peek()?.let { reach ->
@@ -1678,6 +2619,12 @@ public class DeviceGroupSyncRepository(
 
     public companion object {
         private const val LOG_TAG = "DeviceGroupSync"
+
+        /** How long a link-answer verdict waits for the fold (ADR-0079). Chosen,
+         *  not measured. */
+        /** How long a claim waits for the journal to be read past it: one
+         *  long poll (25 s) twice over and a margin. Chosen, not measured. */
+        internal const val CLAIM_HEAD_TIMEOUT_MS: Long = 60_000L
 
         /** Per-account "a write is waiting" flag. Not secret: a boolean. */
         internal const val PENDING_PREFS = "lakko-device-sync-pending"
@@ -1714,6 +2661,18 @@ public class DeviceGroupSyncRepository(
          *  stores it as pending). Set by the app root. */
         @Volatile
         public var keyRotationSink: ((ByteArray) -> Unit)? = null
+
+        /** ADR-0081 decision 4 — this account's login handle (the knock
+         *  payload names it; a sibling admits only a knock naming it). Set by
+         *  the app root; `null` for a guest, who has no other device. */
+        @Volatile
+        public var loginHandleProvider: (() -> ByteArray?)? = null
+
+        /** ADR-0081 decision 4 — publish this device's directory KeyPackage
+         *  (a rejoining device's first step: its signed device binding is
+         *  what a sibling checks). Set by the app root. */
+        @Volatile
+        public var directoryKeyPackagePublisher: (suspend () -> Unit)? = null
 
         /**
          * Wait until the live runtime read its journal to the head, once.

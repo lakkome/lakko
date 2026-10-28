@@ -7,7 +7,29 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 - **Status:** Accepted
 - **Date:** 2026-06-25
+- **Amended by [ADR-0078](0078-servers-cannot-link-accounts.md) phase 6 (2026-10-16):**
+  for OQ3, a PublisherGroup id is the owner's derivation over its account
+  seed and the channel id, so `channel_id_from_group_id` is removed; a
+  co-publisher `/g/` link carries the channel id (and optionally the channel
+  name) in its sealed preview (preview kind 2), and the joiner opens the
+  group under the id the capability conveyed.
 - **Context:** Phase 3/4 — the live consumer of ADR-0027 (external-join approval, G-3)
+
+> **AMENDED 2026-10-19 — the inline form is removed (maintainer).** Every
+> `/i/`, `/g/` and `/c/` link is the ledger pointer
+> `https://<host>/<k>/<8-char id>#<16-char secret>`. When the upload fails,
+> a network failure included, no link is minted: the person sees the
+> ordinary error and tries again. Nothing parses an inline link any more: a
+> slug that is not an 8-character ledger id is malformed, and every landing
+> page shows its dead-link state for it (contact links take the person to
+> Contacts, ADR-0079 amendment of the same day). No back-compat: an inline
+> link minted before this opens as dead. The **co-publisher** link of OQ3,
+> which was always the inline form and never touched the ledger, is now
+> uploaded to the group-invite ledger like any `/g/` link (no use limit,
+> never expires, the minting device keeps its revocation seed), and the
+> joiner fetches it from there. Every text below that describes the inline
+> form or its fallback is history. Built 2026-10-19 on web, iOS and Android;
+> host-tested only.
 
 > **AMENDED 2026-09-28 — sealed links (maintainer's decision on the security
 > pass below). Every invite link carries a secret after `#`, and the

@@ -3,7 +3,6 @@
 
 package me.lakko.app.push
 
-import me.lakko.app.ds.PushBindingOutcome
 
 import android.content.Context
 import java.security.SecureRandom
@@ -891,78 +890,36 @@ public object GroupPushRouting {
      * or push-gw error through — which is what makes this change introduce no
      * new state.
      */
-    /** ADR-0057 — [PushRoutingPorts.bindPushGid], bounded like every other
-     *  network call under the routing lock and never allowed to fail the
-     *  mint or rotation it belongs to: a throw or a timeout reads as
-     *  [PushBindingOutcome.FAILED]. */
-    private suspend fun bindBestEffort(pushGid: ByteArray, ports: PushRoutingPorts): PushBindingOutcome =
-        try {
-            boundedOrNull { ports.bindPushGid(pushGid) } ?: PushBindingOutcome.FAILED
-        } catch (cancellation: kotlinx.coroutines.CancellationException) {
-            throw cancellation
-        } catch (_: Throwable) {
-            PushBindingOutcome.FAILED
-        }
-
-    /** Groups whose last bind did not land (503 disabled, offline, timeout):
-     *  the next [ensure] binds again, whatever this device's rank (the port
-     *  sends nothing for a member). Session-scoped, keyed per row. */
-    private val bindRetry: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
-
-    private fun noteBindOutcome(accountIdB64: String, groupIdHex: String, outcome: PushBindingOutcome) {
-        val key = accountIdB64 + "|" + groupIdHex.lowercase()
-        if (outcome == PushBindingOutcome.DISABLED || outcome == PushBindingOutcome.FAILED) {
-            bindRetry.add(key)
-        } else {
-            bindRetry.remove(key)
-        }
-    }
-
     /** android.util.Log is absent on the host JVM: a log line never fails a
      *  routing decision. */
     private fun logWarn(message: String) {
         runCatching { android.util.Log.w("GroupPushRouting", message) }
     }
 
-    private fun bindRetryDue(accountIdB64: String, groupIdHex: String): Boolean =
-        (accountIdB64 + "|" + groupIdHex.lowercase()) in bindRetry
+    /** Mint a fresh secret and its routing id. (ADR-0078 retired the journal
+     *  binding that used to precede the broadcast: push-gw checks each wake's
+     *  signature by the group's wake key instead.) */
+    private fun mint(ports: PushRoutingPorts): Pair<ByteArray, ByteArray> {
+        val secret = ports.mintSecret()
+        return secret to ports.derivePushGid(secret)
+    }
 
     /**
-     * ADR-0057, the second security pass (finding 5) — mint a fresh secret and
-     * bind the journal to its routing id BEFORE the caller persists and
-     * broadcasts it, so nobody who learns the id from the broadcast can bind
-     * it to another journal first:
-     *
-     *   * 204: bound; broadcast.
-     *   * 503 (binding disabled) or a failure: logged; broadcast anyway (wakes
-     *     are dropped until bound) and the bind is retried on the next
-     *     provisioning pass.
-     *   * 409 (the id is bound to another journal): mint a fresh secret ONCE
-     *     and bind again; if that also fails, broadcast it all the same.
-     *
-     * Only the owner (mint) or an owner / admin (rotation) gets here; the port
-     * binds nothing for a member.
+     * ADR-0078 — send this device's sealed subscription for [groupIdHex]
+     * again (its tokens changed), under the same serializing routing lock
+     * every other entry point takes, so it never interleaves a rotation and
+     * re-arms a superseded id. Bounded and best-effort.
      */
-    private suspend fun mintAndBind(
-        accountIdB64: String,
-        groupIdHex: String,
-        ports: PushRoutingPorts,
-    ): Pair<ByteArray, ByteArray> {
-        var secret = ports.mintSecret()
-        var pushGid = ports.derivePushGid(secret)
-        var outcome = bindBestEffort(pushGid, ports)
-        if (outcome == PushBindingOutcome.CONFLICT) {
-            logWarn("push-routing: the minted routing id is bound elsewhere; minting another once")
-            secret.fill(0)
-            secret = ports.mintSecret()
-            pushGid = ports.derivePushGid(secret)
-            outcome = bindBestEffort(pushGid, ports)
-            if (outcome == PushBindingOutcome.CONFLICT) {
-                logWarn("push-routing: the second routing id is bound elsewhere too; broadcasting unbound")
+    public suspend fun resubscribe(accountIdB64: String, groupIdHex: String, subscribe: suspend () -> Unit) {
+        routingLock(accountIdB64, groupIdHex).withLock {
+            try {
+                bounded("subscribe") { subscribe() }
+            } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                logWarn("push-routing: re-subscribe failed")
             }
         }
-        noteBindOutcome(accountIdB64, groupIdHex, outcome)
-        return secret to pushGid
     }
 
     private suspend fun bounded(what: String, call: suspend () -> Unit) {
@@ -1112,9 +1069,9 @@ public object GroupPushRouting {
      * ADR-0043 — when an accepted secret CHANGES the one this device held,
      * the superseded `push_gid` is retired here too ([retireOldPushGid]):
      * every member tears down its OWN push-gw row, because
-     * `POST /push/group/unsubscribe` deletes exactly the `(device, group)`
-     * row named in the request and a client knows only its own device
-     * pseudonym — no one can delete anyone else's. Skipping it on the
+     * `POST /push/unsubscribe` deletes exactly the row named by its
+     * subscription id and a client knows only its own subscription ids
+     * (ADR-0078) — no one can delete anyone else's. Skipping it on the
      * non-rotating members is what would turn each rotation into a live
      * cluster PLUS a frozen snapshot of the previous one (ADR-0043
      * § Context calls that strictly worse than not rotating at all). The
@@ -1302,9 +1259,7 @@ public object GroupPushRouting {
                     // See [boundedOrNull].
                     val stamp = boundedOrNull { ports.freshMintStamp() }
                     if (stamp != null) {
-                        // ADR-0057 finding 5 — bind BEFORE the secret leaves
-                        // this device (one re-mint on a 409).
-                        val (secret, pushGid) = mintAndBind(accountIdB64, groupIdHex, ports)
+                        val (secret, pushGid) = mint(ports)
                         // Persist BEFORE broadcasting, flagged NOT distributed.
                         // The order is deliberate: minting twice would diverge
                         // the group's push_gid, so a crash between the two must
@@ -1337,20 +1292,6 @@ public object GroupPushRouting {
                 }
 
                 EnsureAction.NONE -> Unit
-            }
-
-            // ADR-0057 obligation 8 — an owner that already holds a secret it
-            // did not mint in this call re-binds it (idempotent on the DS). This
-            // is what binds a group whose secret predates the binding, and
-            // what repairs a bind that failed after an earlier mint or an
-            // admin's rotation (finding 5: 503 or a failure retries here).
-            if (hasSecret && action != EnsureAction.MINT_AND_BROADCAST &&
-                (isOwner || bindRetryDue(accountIdB64, groupIdHex))
-            ) {
-                runCatching { ports.getRecord(groupIdHex) }.getOrNull()?.let { held ->
-                    val outcome = bindBestEffort(ports.derivePushGid(held.secret), ports)
-                    if (outcome != PushBindingOutcome.NOT_PERMITTED) noteBindOutcome(accountIdB64, groupIdHex, outcome)
-                }
             }
 
             // Subscribe (or defer) under push_gid. Owner just minted ->
@@ -1506,10 +1447,10 @@ public object GroupPushRouting {
     // it was evicted from. The leak is not storage hygiene: an ex-member
     // learns "this group was active at time T" on every send, indefinitely.
     //
-    // It cannot be closed by unsubscribing, because
-    // `POST /push/group/unsubscribe` deletes exactly the `(device, group)`
-    // row named in the request and a client knows only its OWN device
-    // pseudonym — no remaining member can reach the ex-member's row, and
+    // It cannot be closed by unsubscribing, because `POST /push/unsubscribe`
+    // deletes exactly the row named by its subscription id and a client knows
+    // only its OWN subscription ids (ADR-0078) — no remaining member can
+    // reach the ex-member's row, and
     // the ex-member's client has no "you were removed" handling to do it
     // itself. Re-keying is the only mechanism the GROUP has: after a
     // rotation nobody ever notifies the old id again, so that row goes
@@ -1621,9 +1562,9 @@ public object GroupPushRouting {
      * Called on BOTH sides of a rotation with the OLD secret — by the
      * rotator after it re-arms under the new id ([rotate]), and by every
      * remaining member when [receiveGated] applies a CHANGED secret. Both
-     * must, and for the same reason: unsubscribe deletes exactly the
-     * `(device, group)` row named in the request and a client knows only
-     * its OWN device pseudonym, so nobody can tear down anyone else's row.
+     * must, and for the same reason: unsubscribe deletes exactly the row
+     * named by its subscription id and a client knows only its OWN
+     * subscription ids, so nobody can tear down anyone else's row.
      * If only the rotator unsubscribed, every OTHER member would leave a
      * live row under the old id — one dead subscription per member per
      * rotation, the "versioned cluster archive" ADR-0043 § Context calls
@@ -1670,8 +1611,8 @@ public object GroupPushRouting {
      *
      * ADR-0043 recorded the evicted member's push-gw row as never deleted,
      * because *"nobody else can delete it and no client has 'you were removed'
-     * handling"*: the endpoint deletes exactly the `(device, group)` row named
-     * in the request, and a client knows only its OWN device pseudonym, so the
+     * handling"*: the endpoint deletes exactly the row named by its
+     * subscription id, and a client knows only its OWN subscription ids, so the
      * ex-member is the only party that can end its own wake stream. This is
      * that handling, and it closes the other half of G-36 residual 2 — rotation
      * stops the group notifying the old id; this stops the ex-member being
@@ -1822,9 +1763,9 @@ public object GroupPushRouting {
      * wrong and the stamp is the PRE-removal epoch, which TIES with a
      * stale secret minted at that same epoch — the tie falls to the 32
      * secret bytes and the rotation may simply LOSE. The guarantee
-     * degrades from "always wins" to "coin flip", silently. Use
-     * [publishRemoveThenRotate] at the call site, which is where that
-     * ordering is pinned by a test.
+     * degrades from "always wins" to "coin flip", silently. Since the
+     * ADR-0081 amendment (2026-10-19) every removal is a sweep, and the
+     * rotation is started from the sweep's tail, after the merged commit.
      *
      * The steps, in the one order that works:
      *
@@ -1899,9 +1840,7 @@ public object GroupPushRouting {
                     // broadcasting for the same reason the mint path does: two
                     // divergent random secrets are worse than two identical
                     // envelopes.
-                    // ADR-0057 finding 5 — bind the new id BEFORE the secret
-                    // is broadcast (one re-mint on a 409).
-                    val (next, pushGid) = mintAndBind(accountIdB64, groupIdHex, ports)
+                    val (next, pushGid) = mint(ports)
                     ports.persist(groupIdHex, next, stamp.epoch, pushGid, distributed = false)
 
                     // (5) — redistribute at the POST-removal epoch. A failure
@@ -1920,75 +1859,6 @@ public object GroupPushRouting {
                 }
             }
         }
-    }
-
-    /**
-     * **C-61 — publish the Remove commit, THEN rotate.** The single call
-     * site for this device's own removal path, and the reason that
-     * ordering is testable at all rather than being two adjacent
-     * statements anyone can reorder.
-     *
-     * Both halves of what C-61 buys depend on [publishRemove] having
-     * RETURNED before [rotate] is even started:
-     *
-     *   - **Forward secrecy (ADR-0043).** The rotation envelope is an MLS
-     *     application message. Sealed before the Remove commit it is
-     *     sealed at the pre-removal epoch, where the evicted member is
-     *     still a member and can open it — learning the very secret the
-     *     rotation exists to deny it.
-     *   - **Recency (ADR-0044).** [rotate] stamps the new secret with
-     *     `Group.epoch()` read at mint time. After the commit that is the
-     *     POST-removal epoch, so the rotation strictly out-ranks the
-     *     secret it replaces and a stale re-broadcast of that older secret
-     *     is refused [ReceiveVerdict.REJECT_STALE] by every member. Before
-     *     the commit it is the PRE-removal epoch — the same epoch the
-     *     stale secret carries — so the two TIE, the tie falls to the 32
-     *     secret bytes, and the rotation wins or loses by a coin flip with
-     *     no signal either way.
-     *
-     * ADR-0043 required this ordering but enforced it only structurally,
-     * by call-site sequencing, with no test on any client. ADR-0044
-     * promotes it from a property that protects one guarantee to a
-     * precondition of two, so it is pinned here — where a test can drive
-     * both callbacks and observe which epoch the emitted envelope was
-     * STAMPED at.
-     *
-     * The rotation is deliberately fire-and-forget on [scope]: push is
-     * best-effort and a rotation failure must never unwind the membership
-     * change that triggered it. "Ordered" means the rotation is not
-     * STARTED until the removal has landed, not that the caller waits for
-     * it.
-     *
-     * @param scope the (long-lived, app-scoped) scope the rotation runs
-     *   on — never the caller's, which may complete first.
-     * @param publishRemove applies + publishes the Remove commit,
-     *   advancing the local MLS epoch. Its throw PROPAGATES — a removal
-     *   that failed must not rotate.
-     * @param rotate started ONLY after [publishRemove] returned. `null`
-     *   skips the rotation entirely (no session / no group record —
-     *   nothing to rotate for).
-     * @param onRotationError receives a rotation failure. The removal
-     *   itself is already durable.
-     * @return whatever [publishRemove] returned, so the caller keeps its
-     *   commit id (echo suppression, notices).
-     */
-    public suspend fun <T> publishRemoveThenRotate(
-        scope: CoroutineScope,
-        publishRemove: suspend () -> T,
-        rotate: (suspend () -> RotationOutcome)?,
-        onRotationError: ((Throwable) -> Unit)? = null,
-    ): T {
-        val result = publishRemove()
-        if (rotate != null) {
-            scope.launch {
-                try {
-                    rotate()
-                } catch (cause: Throwable) {
-                    onRotationError?.invoke(cause)
-                }
-            }
-        }
-        return result
     }
 
     /**
@@ -2161,15 +2031,17 @@ public interface PushRoutingPorts {
 
     /**
      * ADR-0043 — drop this device's push-gw subscription under a
-     * SUPERSEDED `pushGid` (`POST /push/group/unsubscribe`, idempotent).
+     * SUPERSEDED `pushGid` (`POST /push/unsubscribe` by its subscription id,
+     * idempotent; ADR-0078). Called BEFORE [deleteRoute], which removes the
+     * id with the route row.
      *
      * The counterpart [subscribeUnderPushGid] never had. It is the only
      * way an evicted member's wake stream can be ended: the endpoint
-     * deletes exactly the `(device, group)` row named in the request and a
-     * client knows only its OWN device pseudonym, so every member must
-     * retire its own row — which is why this is called both by the rotator
-     * and by every member whose [GroupPushRouting.receiveGated] applied a
-     * CHANGED secret.
+     * deletes exactly the row named by its subscription id and a client
+     * knows only its OWN subscription ids, so every member must retire its
+     * own row — which is why this is called both by the rotator and by
+     * every member whose [GroupPushRouting.receiveGated] applied a CHANGED
+     * secret.
      */
     public suspend fun unsubscribeFromPushGid(pushGid: ByteArray)
 
@@ -2194,17 +2066,6 @@ public interface PushRoutingPorts {
      *  [GroupPushRouting.redistribute]), which any HOLDER may run — the
      *  bytes are identical, so they need no rank. */
     public suspend fun broadcast(envelope: ByteArray)
-
-    /**
-     * ADR-0057 obligation 8 — bind the group's journal to [pushGid] on the
-     * Delivery Service, signed with this account's root (owner) or admin
-     * registrar key. Since the second security pass (finding 5) it is called
-     * BEFORE the minted or rotated secret is broadcast, and its outcome decides
-     * whether to mint once more ([PushBindingOutcome.CONFLICT]). Never throws
-     * by contract (a throw reads as [PushBindingOutcome.FAILED]); a member
-     * sends nothing ([PushBindingOutcome.NOT_PERMITTED]).
-     */
-    public suspend fun bindPushGid(pushGid: ByteArray): PushBindingOutcome = PushBindingOutcome.NOT_PERMITTED
 }
 
 /**
@@ -2222,7 +2083,6 @@ public class NativePushRoutingPorts(
     private val unsubscribeFn: suspend (ByteArray) -> Unit,
     private val broadcastFn: suspend (ByteArray) -> Unit,
     private val groupEpochFn: suspend () -> ULong?,
-    private val bindFn: suspend (ByteArray) -> PushBindingOutcome = { PushBindingOutcome.NOT_PERMITTED },
 ) : PushRoutingPorts {
 
     override fun mintSecret(): ByteArray =
@@ -2296,6 +2156,4 @@ public class NativePushRoutingPorts(
     override suspend fun broadcast(envelope: ByteArray) {
         broadcastFn(envelope)
     }
-
-    override suspend fun bindPushGid(pushGid: ByteArray): PushBindingOutcome = bindFn(pushGid)
 }

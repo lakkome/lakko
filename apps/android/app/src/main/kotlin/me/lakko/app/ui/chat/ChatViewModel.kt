@@ -1919,6 +1919,12 @@ public class ChatViewModel(
             fallbackLabel = { key -> nameOfKeyB64(me.lakko.app.chat.outboxB64(key)) },
         )
 
+    /** ADR-0084 — the key a pending joiner's photo is looked up by: the
+     *  account key the request is bound to, else the leaf key (the same keys
+     *  [pendingJoinLabel] names them by). */
+    public fun pendingJoinPersonKey(joinerSignatureKey: ByteArray): ByteArray =
+        repo.pendingExternalJoinAccountKey(groupIdHex, joinerSignatureKey) ?: joinerSignatureKey
+
     public fun nameOfKeyB64(keyB64: String?): String {
         val key = try {
             keyB64?.let { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }
@@ -2043,8 +2049,9 @@ public class ChatViewModel(
      * committing their own departure. A proposal is not a commit, so there is
      * nothing to commit and nothing to refuse.
      *
-     * Deliberately NOT routed through [onRemoveMember], whose own-leaf guard is
-     * still correct for the direct-commit path a table-less group takes.
+     * Deliberately NOT routed through [onRemoveMember], whose own-leaf guard
+     * dates from the direct-commit path a table-less group took (deleted by
+     * the ADR-0081 amendment of 2026-10-19).
      *
      * The caller is expected to have confirmed first: a published request cannot
      * be withdrawn — there is no wire withdraw, and evicting it locally would
@@ -2283,8 +2290,8 @@ public class ChatViewModel(
 
     /**
      * ADR-0028 revoke — revoke the currently-shown group invite link (issuer
-     * only). A pointer link carries a ledger blob the server deletes; an inline
-     * link has nothing to revoke (we just clear the field). Fail-closed.
+     * only): the server deletes its ledger row; without a kept revocation key
+     * the field is only cleared. Fail-closed.
      */
     public fun onRevokeInviteLink() {
         val link = mutableInviteLink.value ?: return
@@ -2478,9 +2485,130 @@ public class ChatViewModel(
      * Idempotent: a second call replaces the prior reference
      * but the in-flight collectors keep running.
      */
+    private val mutableSaved = MutableStateFlow<List<uniffi.lakko_ffi_uniffi.SavedMessageView>>(emptyList())
+
+    /** ADR-0065 section 4 — the account's saved messages (the mark, the
+     *  menu row's word). */
+    public val saved: StateFlow<List<uniffi.lakko_ffi_uniffi.SavedMessageView>> = mutableSaved.asStateFlow()
+
+    /** The ref a saved register names [key]'s segment with: this
+     *  conversation's kind, the segment group's id. */
+    private fun conversationRef(key: me.lakko.app.chat.SavedKey): uniffi.lakko_ffi_uniffi.FolderConversationRef? {
+        val id = hexToBytes(key.segmentHex) ?: return null
+        val kind = if (conversationKind() == me.lakko.app.chat.ConversationKind.Group) {
+            uniffi.lakko_ffi_uniffi.FolderConversationKind.GROUP
+        } else {
+            uniffi.lakko_ffi_uniffi.FolderConversationKind.ONE_TO_ONE
+        }
+        return uniffi.lakko_ffi_uniffi.FolderConversationRef(kind = kind, id = id)
+    }
+
+    /** Saved section 2 — whether [msg] is in the saved list. */
+    public fun isSaved(msg: me.lakko.app.chat.ChatMessage, list: List<uniffi.lakko_ffi_uniffi.SavedMessageView> = saved.value): Boolean {
+        val key = savedKeyOf(msg) ?: return false
+        return me.lakko.app.chat.isSavedIn(list, key)
+    }
+
+    /** The (segment group, DS id) [msg] is saved under. */
+    private fun savedKeyOf(msg: me.lakko.app.chat.ChatMessage): me.lakko.app.chat.SavedKey? =
+        me.lakko.app.chat.savedKeyOf(groupIdHex, msg)
+
+    private fun saveRegister(
+        ref: uniffi.lakko_ffi_uniffi.FolderConversationRef,
+        msg: me.lakko.app.chat.ChatMessage,
+        now: Long,
+        savedId: Long,
+    ): uniffi.lakko_ffi_uniffi.SavedMessageRegister {
+        // `savedId` is the DS id in the message's own segment.
+        val author = if (msg.direction == me.lakko.app.chat.Direction.Outgoing) {
+            Localization.strings.value["chat.author.you"]
+        } else {
+            msg.authorKey?.let(::nameOf).orEmpty()
+        }
+        return uniffi.lakko_ffi_uniffi.composeSavedMessage(
+            hlc = me.lakko.app.devices.sync.Hlc.mint(),
+            conversation = ref,
+            messageId = savedId.toULong(),
+            savedAtMs = now.toULong(),
+            // UX section 3 — the row shows the message's own date.
+            sentAtMs = (parseMessageTimeMs(msg.createdAt) ?: 0L).coerceAtLeast(0L).toULong(),
+            author = author,
+            excerpt = me.lakko.app.chat.savedExcerpt(msg),
+            attachmentKind = me.lakko.app.chat.savedAttachmentKind(msg),
+            blobIds = me.lakko.app.chat.messageBlobIds(msg),
+        )
+    }
+
+    /** Saved section 2 — Save, or Remove from saved, on one message. */
+    public fun onToggleSave(msg: me.lakko.app.chat.ChatMessage) {
+        val sync = deviceGroupSync
+        val key = savedKeyOf(msg)
+        val ref = key?.let(::conversationRef)
+        val savedId = key?.messageId
+        if (sync == null || ref == null || savedId == null) {
+            composer.update { it.copy(sendError = UiText("chat.error.save")) }
+            return
+        }
+        val removing = isSaved(msg)
+        viewModelScope.launch {
+            try {
+                val register = if (removing) {
+                    uniffi.lakko_ffi_uniffi.composeSavedRemoval(
+                        me.lakko.app.devices.sync.Hlc.mint(),
+                        ref,
+                        savedId.toULong(),
+                    )
+                } else {
+                    val max = uniffi.lakko_ffi_uniffi.savedMaxClient().toInt()
+                    if (!me.lakko.app.chat.saveAllowed(sync.saved.value.size, 1, max)) {
+                        throw IllegalStateException("saved list is full")
+                    }
+                    saveRegister(ref, msg, System.currentTimeMillis(), savedId)
+                }
+                sync.applySavedChanges(listOf(register))
+            } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
+                android.util.Log.w("ChatViewModel", "save failed: ${err.javaClass.simpleName}")
+                composer.update { it.copy(sendError = UiText("chat.error.save")) }
+            }
+        }
+    }
+
+    /** Saved section 2 — Select mode's Save: every selected message not yet
+     *  saved, in change sets of at most `savedMaxPerChangeSet()`. */
+    public fun onSaveSelected() {
+        val sync = deviceGroupSync
+        val chosen = selectedMessagesInOrder().mapNotNull { m ->
+            val key = savedKeyOf(m)?.takeIf { !m.deleted && !isSaved(m) } ?: return@mapNotNull null
+            val ref = conversationRef(key) ?: return@mapNotNull null
+            Triple(m, key.messageId, ref)
+        }
+        if (sync == null) {
+            composer.update { it.copy(sendError = UiText("chat.error.save")) }
+            return
+        }
+        onCancelSelection()
+        if (chosen.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                val max = uniffi.lakko_ffi_uniffi.savedMaxClient().toInt()
+                if (!me.lakko.app.chat.saveAllowed(sync.saved.value.size, chosen.size, max)) {
+                    throw IllegalStateException("saved list is full")
+                }
+                val now = System.currentTimeMillis()
+                sync.applySavedChanges(chosen.map { (m, id, ref) -> saveRegister(ref, m, now, id) })
+            } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
+                android.util.Log.w("ChatViewModel", "save selection failed: ${err.javaClass.simpleName}")
+                composer.update { it.copy(sendError = UiText("chat.error.save")) }
+            }
+        }
+    }
+
     public fun attachSync(sync: DeviceGroupSyncRepository) {
         if (deviceGroupSync === sync) return
         deviceGroupSync = sync
+        viewModelScope.launch { sync.saved.collect { mutableSaved.value = it } }
         val gid = hexToBytes(groupIdHex) ?: return
         groupIdBytes = gid
 
@@ -3140,6 +3268,14 @@ public class ChatViewModel(
      *  tray. Index matches the order in
      *  [ChatScreenUiState.pendingAttachments]. */
     public fun onRemovePendingAttachment(index: Int) {
+        // ADR-0065 section 6 — an upload removed from the composer was never
+        // sent: its file and thumbnail are deleted at once.
+        composer.value.pendingAttachments.getOrNull(index)?.let { ref ->
+            me.lakko.app.storage.BlobLifetime.delete(
+                repo.context,
+                listOfNotNull(ref.blobId, ref.thumb?.blobId),
+            )
+        }
         composer.update {
             if (index !in it.pendingAttachments.indices) it
             else it.copy(
@@ -3190,6 +3326,7 @@ public class ChatViewModel(
                 )
             },
             onLog = { line -> android.util.Log.w("ChatViewModel", line) },
+            deleteUnsent = { ids -> me.lakko.app.storage.BlobLifetime.delete(repo.context, ids) },
         )
 
     public val pendingMedia: StateFlow<List<me.lakko.app.media.PendingMediaRow>> = mediaQueue.rows
@@ -3390,6 +3527,10 @@ public class ChatViewModel(
     }
 
     override fun onCleared() {
+        // ADR-0065 section 6 — uploads still in the composer when the chat
+        // closes were never sent.
+        val abandoned = composer.value.pendingAttachments.flatMap { listOfNotNull(it.blobId, it.thumb?.blobId) }
+        if (abandoned.isNotEmpty()) me.lakko.app.storage.BlobLifetime.delete(repo.context, abandoned)
         visualPrepScope.cancel()
         super.onCleared()
         // Every call deliberately outlives the chat it started in (it lives in
@@ -3539,9 +3680,9 @@ public data class JoinableGroupCall(
 /**
  * What the group info says after Revoke on its invite link, the web rule
  * (`Chat.tsx` `onRevokeInviteLink`): a pointer link's ledger row was deleted,
- * so the link no longer works (`revoked`); an inline sealed link (the
- * censored-region fallback) has no server record, so the field was only
- * cleared (`cleared`). [revoked] is what `ChatRepository.revokeGroupInviteLink`
+ * so the link no longer works (`revoked`); a link this device keeps no
+ * revocation key for (or a malformed one) was only cleared from the field
+ * (`cleared`). [revoked] is what `ChatRepository.revokeGroupInviteLink`
  * returns.
  */
 internal fun inviteLinkRevokeNotice(revoked: Boolean): UiText =

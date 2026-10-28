@@ -84,7 +84,7 @@ class InviteLinkSecretStoreTest {
         label = "",
         createdAtMs = null,
         expiryMs = 0L,
-        usesLeft = null,
+        maxUses = 0L,
         fromSession = false,
     )
 

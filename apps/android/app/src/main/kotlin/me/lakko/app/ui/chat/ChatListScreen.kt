@@ -3,6 +3,7 @@
 
 package me.lakko.app.ui.chat
 
+import androidx.compose.material.icons.filled.Bookmark
 import android.text.format.DateFormat
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -96,19 +97,13 @@ import me.lakko.app.chat.ChatThread
 import me.lakko.app.chat.ConversationListRow
 import me.lakko.app.chat.ConversationRowKind
 import me.lakko.app.chat.Direction
-import me.lakko.app.chat.FoundByName
-import me.lakko.app.chat.NameLookups
 import me.lakko.app.chat.conversationRowMatchesQuery
-import me.lakko.app.chat.findByName
-import me.lakko.app.chat.findByNameMessage
-import me.lakko.app.chat.findByNameRowLabel
 import me.lakko.app.chat.orderConversationRows
 import me.lakko.app.chat.showsEmptyConversationState
 import me.lakko.app.chat.toRowKind
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import me.lakko.app.devices.sync.FlagsState
 import me.lakko.app.devices.sync.ReadCursorState
-import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.l10n.LocalStrings
 import me.lakko.app.l10n.Localization
 import me.lakko.app.l10n.Strings
@@ -155,8 +150,6 @@ public fun ChatListScreen(
     onCreateChannel: () -> Unit,
     /** A looked-up channel handle: its subscribe page. */
     onSubscribeToChannel: (channelId: String, handle: String) -> Unit,
-    /** A looked-up username: Contacts, which owns the request flow. */
-    onFoundPerson: (username: String) -> Unit,
     modifier: Modifier = Modifier,
     channels: ChannelsUiState? = null,
     deviceGroupSync: DeviceGroupSyncRepository? = null,
@@ -178,15 +171,23 @@ public fun ChatListScreen(
     onNewFolder: (firstRow: ConversationListRow?) -> Unit = {},
     /** UX spec 2.2 — Settings > Chat folders ("Edit folders", "Reorder folders"). */
     onOpenFolderSettings: () -> Unit = {},
+    /** docs/ux/saved-messages-and-file-lifetime.md section 3 — Saved, from
+     *  this screen's menu. `null` hides the entry (tests, previews). */
+    onOpenSaved: (() -> Unit)? = null,
     /**
      * `docs/ux/who-can-find-me.md` section 6.1 — people in the search field:
-     * the people this device knows as the person types, and the one **Search
-     * people** row (username, name, contacts of contacts, and the channel
-     * namespace). `null` keeps the plain lookup row (tests, previews).
+     * the people this device knows as the person types, and what the network
+     * finds on its own from 3 characters (username, name, contacts of
+     * contacts, and the channel namespace). `null` keeps the plain lookup row
+     * (tests, previews).
      */
     peopleSearch: me.lakko.app.search.PeopleSearchService? = null,
     /** A contact row of the people results: open their chat. */
     onOpenContact: (keyB64: String) -> Unit = {},
+    /** ADR-0079 section 4 — the people added through their invite link whose
+     *  app has not answered yet, listed in All chats at once. */
+    invited: List<me.lakko.app.contacts.PendingContact> = emptyList(),
+    onOpenPendingChat: (accountIdHex: String) -> Unit = {},
 ) {
     val state by repository.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -196,6 +197,10 @@ public fun ChatListScreen(
     var refreshing by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     var createMenuOpen by remember { mutableStateOf(false) }
+    // docs/ux/who-can-find-me.md section 6.1 — the field asks the network on
+    // its own (3 characters, 500 ms after the last keystroke).
+    val peopleSession = remember(peopleSearch, scope) { peopleSearch?.session(scope) }
+    LaunchedEffect(query, peopleSession) { peopleSession?.onQuery(query) }
 
     // docs/ux/calls.md section 2.1.1 — the muted conversation whose call is
     // ringing right now, or `null`. Read straight from the one call slot: this
@@ -270,16 +275,6 @@ public fun ChatListScreen(
         }
     }
 
-    // `docs/ux/navigation.md` section 4.3 — ONE network lookup row, offered
-    // when nothing local matched and the text could be a name. It asks both
-    // namespaces because the person typing does not know which one holds the
-    // name they were given.
-    var lookupBusy by remember { mutableStateOf(false) }
-    var lookupNote by remember { mutableStateOf<UiText?>(null) }
-    val lookupOffered = remember(visible, query) {
-        visible.isEmpty() && query.isNotBlank() && looksLikeANameSafely(query)
-    }
-
     var deletingFolder by remember { mutableStateOf<ChatFolder?>(null) }
 
     // One set of row handlers for every tab; [folder] is the tab the row sits
@@ -327,6 +322,7 @@ public fun ChatListScreen(
                             onNewChat = onNewChat,
                             onCreateGroup = onCreateGroup,
                             onCreateChannel = onCreateChannel,
+                            onOpenSaved = onOpenSaved,
                         )
                     }
                 },
@@ -354,10 +350,7 @@ public fun ChatListScreen(
             Column(modifier = Modifier.fillMaxSize()) {
                 SearchField(
                     query = query,
-                    onQueryChange = {
-                        query = it
-                        lookupNote = null
-                    },
+                    onQueryChange = { query = it },
                 )
                 // ADR-0050 / docs/ux/second-device.md section 2: one label while
                 // this device is still being admitted to the account's chats.
@@ -404,7 +397,7 @@ public fun ChatListScreen(
                         EmptyPanel(onStart = { createMenuOpen = true })
                     // UX who-can-find-me 6.1 — the people half of the search
                     // field replaces the plain lookup row when it is wired.
-                    searching && visible.isEmpty() && peopleSearch != null -> Column(
+                    searching && visible.isEmpty() && peopleSearch != null && peopleSession != null -> Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .verticalScroll(rememberScrollState()),
@@ -412,6 +405,7 @@ public fun ChatListScreen(
                         PeopleSearchSection(
                             query = query,
                             service = peopleSearch,
+                            session = peopleSession,
                             conversationMatches = 0,
                             onOpenChannel = { id, handle ->
                                 query = ""
@@ -423,49 +417,21 @@ public fun ChatListScreen(
                             },
                         )
                     }
-                    searching && visible.isEmpty() -> NoMatchPanel(
-                        offerLookup = lookupOffered,
-                        label = findByNameRowLabelSafely(query),
-                        busy = lookupBusy,
-                        note = lookupNote,
-                        onLookUp = {
-                            if (!lookupBusy) {
-                                lookupBusy = true
-                                lookupNote = null
-                                val typed = query
-                                scope.launch {
-                                    val found = lookUpName(typed)
-                                    lookupBusy = false
-                                    when (found) {
-                                        is FoundByName.Channel -> {
-                                            query = ""
-                                            onSubscribeToChannel(
-                                                found.channelIdHex,
-                                                found.handle,
-                                            )
-                                        }
-                                        is FoundByName.Person -> {
-                                            query = ""
-                                            onFoundPerson(found.username)
-                                        }
-                                        else -> lookupNote =
-                                            findByNameMessageSafely(found, typed)
-                                    }
-                                }
-                            }
-                        },
-                    )
+                    searching && visible.isEmpty() -> NoMatchPanel()
                     searching || !showBar -> ConversationList(
                         rows = visible,
                         folder = null,
                         handlers = rowHandlers,
+                        invited = invitedMatching(invited, query),
+                        onOpenPendingChat = onOpenPendingChat,
                         // UX who-can-find-me 6.1 — people under the matching
                         // conversations.
-                        footer = if (searching && peopleSearch != null) {
+                        footer = if (searching && peopleSearch != null && peopleSession != null) {
                             {
                                 PeopleSearchSection(
                                     query = query,
                                     service = peopleSearch,
+                                    session = peopleSession,
                                     conversationMatches = visible.size,
                                     onOpenChannel = { id, handle ->
                                         query = ""
@@ -489,10 +455,16 @@ public fun ChatListScreen(
                     ) { page ->
                         val folder = folders.getOrNull(page - 1)
                         if (folder == null) {
-                            if (rows.isEmpty()) {
+                            if (rows.isEmpty() && invited.isEmpty()) {
                                 EmptyPanel(onStart = { createMenuOpen = true })
                             } else {
-                                ConversationList(rows = rows, folder = null, handlers = rowHandlers)
+                                ConversationList(
+                                    rows = rows,
+                                    folder = null,
+                                    handlers = rowHandlers,
+                                    invited = invited,
+                                    onOpenPendingChat = onOpenPendingChat,
+                                )
                             }
                         } else {
                             val inFolder = remember(folder, allRows) { folderRows(folder, allRows) }
@@ -668,11 +640,17 @@ private fun ConversationList(
     handlers: RowHandlers,
     /** Drawn after the last row (the people search while searching). */
     footer: (@Composable () -> Unit)? = null,
+    /** ADR-0079 — the pending contacts, drawn first like any row. */
+    invited: List<me.lakko.app.contacts.PendingContact> = emptyList(),
+    onOpenPendingChat: (String) -> Unit = {},
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(vertical = 4.dp),
     ) {
+        items(items = invited, key = { "invited:${it.accountIdHex}" }) { contact ->
+            InvitedChatRow(contact = contact, onClick = { onOpenPendingChat(contact.accountIdHex) })
+        }
         items(items = rows, key = { "${it.kind}:${it.id}" }) { row ->
             val menu = RowMenuModel(row = row, folder = folder, handlers = handlers)
             if (row.kind == ConversationRowKind.CHANNEL) {
@@ -699,6 +677,57 @@ private fun ConversationList(
         }
         if (footer != null) {
             item(key = "people-search") { footer() }
+        }
+    }
+}
+
+/** The pending contacts whose stated name or username matches [query]. */
+@Composable
+private fun invitedMatching(
+    invited: List<me.lakko.app.contacts.PendingContact>,
+    query: String,
+): List<me.lakko.app.contacts.PendingContact> {
+    val q = query.trim()
+    if (q.isEmpty()) return invited
+    return invited.filter { c ->
+        me.lakko.app.contacts.PendingContacts.name(c)?.contains(q, ignoreCase = true) == true ||
+            c.username.contains(q.removePrefix("@"), ignoreCase = true)
+    }
+}
+
+/**
+ * ADR-0079 section 4 — the chat with a person added through their invite link
+ * before their app answered: drawn like any row (no "pending" badge).
+ */
+@Composable
+private fun InvitedChatRow(contact: me.lakko.app.contacts.PendingContact, onClick: () -> Unit) {
+    val title = me.lakko.app.contacts.PendingContacts.name(contact) ?: t("invite.contact.page.unnamed")
+    androidx.compose.foundation.layout.Row(
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        me.lakko.app.ui.components.LakkoAvatar(
+            name = title,
+            seed = contact.accountIdHex,
+            size = 48.dp,
+            personKey = me.lakko.app.ui.components.personKeyBytes(contact.signaturePubkeyB64),
+        )
+        androidx.compose.foundation.layout.Spacer(Modifier.width(12.dp))
+        androidx.compose.foundation.layout.Column {
+            androidx.compose.material3.Text(
+                text = title,
+                style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+            )
+            androidx.compose.material3.Text(
+                text = t("chat.pending.waiting", mapOf("name" to title)),
+                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
         }
     }
 }
@@ -735,6 +764,7 @@ private fun CreateMenu(
     onNewChat: () -> Unit,
     onCreateGroup: () -> Unit,
     onCreateChannel: () -> Unit,
+    onOpenSaved: (() -> Unit)? = null,
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
         DropdownMenuItem(
@@ -752,6 +782,13 @@ private fun CreateMenu(
             leadingIcon = { Icon(Icons.Filled.Campaign, contentDescription = null) },
             onClick = { onDismiss(); onCreateChannel() },
         )
+        if (onOpenSaved != null) {
+            DropdownMenuItem(
+                text = { Text(t("saved.title")) },
+                leadingIcon = { Icon(Icons.Filled.Bookmark, contentDescription = null) },
+                onClick = { onDismiss(); onOpenSaved() },
+            )
+        }
     }
 }
 
@@ -789,63 +826,6 @@ private fun toggleFlag(
             android.util.Log.w("ChatListScreen", "setFlags failed", cause)
         }
     }
-}
-
-/**
- * Ask both discovery namespaces for one typed name.
- *
- * The client is built and closed per lookup because a lookup is a rare,
- * user-initiated act, not a hot path. The decision itself is
- * [me.lakko.app.chat.findByName], which is pure and tested; this only supplies
- * the two network calls it takes as an argument.
- */
-private suspend fun lookUpName(typed: String): FoundByName = try {
-    DiscoveryClient().use { client ->
-        findByName(
-            typed = typed,
-            lookups = object : NameLookups {
-                override suspend fun channel(handle: String): String? =
-                    client.lookupChannel(handle)
-
-                override suspend fun person(username: String): String? {
-                    val found = client.lookup(username)
-                    return if (found.account == null) null else found.normalisedUsername
-                }
-            },
-        )
-    }
-} catch (cancelled: kotlinx.coroutines.CancellationException) {
-    throw cancelled
-} catch (cause: Throwable) {
-    android.util.Log.w("ChatListScreen", "the name lookup could not be started", cause)
-    FoundByName.Unreachable
-}
-
-/**
- * The shared name gate, degrading to "not a name" when the native library is
- * not there.
- *
- * Failing shut is the honest direction: the gate exists so a name the blinder
- * would refuse never costs a lookup token, and offering a lookup we cannot
- * even check the shape of would spend one to be told no.
- */
-private fun looksLikeANameSafely(typed: String): Boolean = try {
-    uniffi.lakko_ffi_uniffi.looksLikeAName(typed)
-} catch (cause: Throwable) {
-    android.util.Log.w("ChatListScreen", "the name rule could not be read", cause)
-    false
-}
-
-private fun findByNameRowLabelSafely(typed: String): UiText = try {
-    findByNameRowLabel(typed)
-} catch (_: Throwable) {
-    UiText("chats.lookup.action", texts = mapOf("name" to typed.trim()))
-}
-
-private fun findByNameMessageSafely(found: FoundByName, typed: String): UiText? = try {
-    findByNameMessage(found, typed)
-} catch (_: Throwable) {
-    UiText("chats.lookup.unreachable")
 }
 
 /**
@@ -915,6 +895,11 @@ internal fun threadConversationRows(
         archived = flags?.archived == true,
         unreadOverride = flags?.unreadOverride == true && !thread.membershipEnded,
         membershipEnded = thread.membershipEnded,
+        peerKeyB64 = if (kind == ConversationKind.Chat) {
+            repository.oneToOnePeerKey(thread.groupIdHex)?.let { java.util.Base64.getEncoder().encodeToString(it) }
+        } else {
+            null
+        },
     )
 }
 
@@ -1338,6 +1323,7 @@ internal fun ConversationRowBody(row: ConversationListRow, modifier: Modifier = 
             seed = row.id,
             size = 40.dp,
             group = row.kind != ConversationRowKind.CHAT,
+            personKey = me.lakko.app.ui.components.personKeyBytes(row.peerKeyB64.takeIf { row.kind == ConversationRowKind.CHAT }),
         )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
@@ -1448,49 +1434,19 @@ private fun EmptyPanel(onStart: () -> Unit) {
     }
 }
 
-/**
- * Nothing on this device matched, plus the ONE network lookup row when the text
- * could be a name.
- *
- * One row for the whole name, never a list of partial matches: discovery
- * evaluates a blinded name and answers only "does this exact name exist", so a
- * prefix search would be the server learning the prefix.
- */
+/** Nothing local matched and no people search is wired: say so. */
 @Composable
-private fun NoMatchPanel(
-    offerLookup: Boolean,
-    label: UiText,
-    busy: Boolean,
-    note: UiText?,
-    onLookUp: () -> Unit,
-) {
+private fun NoMatchPanel() {
     Box(
         modifier = Modifier
             .fillMaxSize()
             .padding(24.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text(
-                text = t("chats.search.no_results"),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (offerLookup) {
-                Button(onClick = onLookUp, enabled = !busy) {
-                    Text(if (busy) t("common.looking_up") else label.text())
-                }
-            }
-            if (note != null) {
-                Text(
-                    text = note.text(),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
+        Text(
+            text = t("chats.search.no_results"),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }

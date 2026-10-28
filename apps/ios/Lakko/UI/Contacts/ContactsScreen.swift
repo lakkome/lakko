@@ -6,9 +6,11 @@ import SwiftUI
 /// The Contacts tab (docs/ux/client-redesign.md section 5.3): a searchable
 /// list with the incoming requests on top (Accept / Decline on the row), the
 /// sent requests under a collapsed "Sent" header, then the contacts in
-/// alphabetical sections with an index on the right. The add menu holds
-/// "Add by username" and "Share invite link"; a row pushes
-/// ``ContactDetailScreen``.
+/// alphabetical sections with an index on the right. The search field is the
+/// one field of `docs/ux/who-can-find-me.md` section 6.1: it filters the
+/// contacts and, from three characters, finds people on the network under
+/// People, with Add contact on each row. The add menu holds "Share invite
+/// link"; a row pushes ``ContactDetailScreen``.
 ///
 /// Mirror of `apps/web/src/contacts/ContactsRoute.tsx` and
 /// `apps/android/.../ui/contacts/ContactsScreen.kt`.
@@ -20,6 +22,14 @@ import SwiftUI
 public struct ContactsScreen: View {
 
     @ObservedObject public var viewModel: ContactsViewModel
+    /// ADR-0060 — the people half of the search field (people only: no
+    /// channel row). `nil` filters the contact list only.
+    let peopleSearch: PeopleSearchModel?
+    /// **Open** on a found person who is already a contact.
+    let onOpenPerson: (FoundPerson) -> Void
+    /// A scanned Lakko link (`/i/`, `/g/`, `/c/`), handed to the same route
+    /// an opened Universal Link takes (``InviteIntake/handle(_:)``).
+    let onOpenLink: (URL) -> Void
 
     /// ADR-0048 — names resolve through the directory; observing it here
     /// regroups the list in place when a profile or a verdict arrives.
@@ -28,12 +38,21 @@ public struct ContactsScreen: View {
     @ObservedObject private var l10n = Localization.shared
 
     @State private var query = ""
-    @State private var addContactPresented = false
     @State private var inviteLinksPresented = false
+    @State private var scanPresented = false
+    @State private var addMenuOpen = false
     @State private var sentExpanded = false
 
-    public init(viewModel: ContactsViewModel) {
+    public init(
+        viewModel: ContactsViewModel,
+        peopleSearch: PeopleSearchModel? = nil,
+        onOpenPerson: @escaping (FoundPerson) -> Void = { _ in },
+        onOpenLink: @escaping (URL) -> Void = { _ in }
+    ) {
         self.viewModel = viewModel
+        self.peopleSearch = peopleSearch
+        self.onOpenPerson = onOpenPerson
+        self.onOpenLink = onOpenLink
     }
 
     // MARK: - Derived
@@ -48,22 +67,38 @@ public struct ContactsScreen: View {
             uniquingKeysWith: { first, _ in first })
     }
 
+    private var invitedById: [String: PendingContact] {
+        Dictionary(viewModel.shownInvited.map { ($0.accountIdHex, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
     /// The contacts as the grouping sees them, already filtered by the search.
-    private var items: [ContactListPresentation.Item<Int64>] {
+    /// ADR-0079 — a person added through their invite link is listed at once,
+    /// under the name the link states, mixed in alphabetically.
+    private var items: [ContactListPresentation.Item<ContactRowId>] {
         // Reading `revision` subscribes this body to every profile change.
         _ = profiles.revision
-        return viewModel.repositoryState.accepted.compactMap { contact in
+        let accepted = viewModel.repositoryState.accepted.compactMap { contact -> ContactListPresentation.Item<ContactRowId>? in
             let resolved = profiles.resolve(signatureKey: contact.request.fromPubkey)
             let item = ContactListPresentation.Item(
-                id: contact.request.messageId,
+                id: ContactRowId.contact(contact.request.messageId),
                 name: resolved.name,
                 username: resolved.verifiedUsername,
                 isPlaceholder: resolved.isPlaceholder)
             return ContactListPresentation.matches(item, query: query) ? item : nil
         }
+        let invited = viewModel.shownInvited.compactMap { contact -> ContactListPresentation.Item<ContactRowId>? in
+            let stated = PendingContacts.name(contact)
+            let item = ContactListPresentation.Item(
+                id: ContactRowId.invited(contact.accountIdHex),
+                name: stated ?? l10n.t("invite.contact.page.unnamed"),
+                username: contact.username.isEmpty ? nil : contact.username,
+                isPlaceholder: stated == nil)
+            return ContactListPresentation.matches(item, query: query) ? item : nil
+        }
+        return accepted + invited
     }
 
-    private var sections: [ContactListPresentation.LetterSection<Int64>] {
+    private var sections: [ContactListPresentation.LetterSection<ContactRowId>] {
         ContactListPresentation.sections(items)
     }
 
@@ -78,6 +113,7 @@ public struct ContactsScreen: View {
     private var showsEmptyState: Bool {
         !viewModel.repositoryState.requiresReauth && !isSearching
             && viewModel.repositoryState.accepted.isEmpty
+            && viewModel.shownInvited.isEmpty
             && viewModel.repositoryState.pending.isEmpty
             && viewModel.repositoryState.sent.isEmpty
     }
@@ -100,6 +136,14 @@ public struct ContactsScreen: View {
                         sentSection
                     }
                     contactSections
+                    if isSearching, let peopleSearch {
+                        Section {
+                            PeopleSearchSection(
+                                model: peopleSearch, includesChannels: false, showsLocalContacts: false,
+                                onOpenPerson: onOpenPerson)
+                        }
+                        .listRowSeparator(.hidden)
+                    }
                 }
             }
             .listStyle(.plain)
@@ -117,11 +161,15 @@ public struct ContactsScreen: View {
                     } description: {
                         Text(l10n.t("contacts.list.empty.body"))
                     } actions: {
-                        Button(l10n.t("contacts.list.empty.action")) { addContactPresented = true }
+                        Button(l10n.t("contacts.add.share_invite")) { inviteLinksPresented = true }
                             .buttonStyle(.borderedProminent)
                     }
                 } else if isSearching && items.isEmpty {
-                    ContentUnavailableView.search(text: query)
+                    if let peopleSearch {
+                        ContactsSearchEmpty(model: peopleSearch, query: query)
+                    } else {
+                        ContentUnavailableView.search(text: query)
+                    }
                 }
             }
         }
@@ -129,6 +177,7 @@ public struct ContactsScreen: View {
         // mirroring it was built with (see SettingsScreen).
         .id(l10n.layoutDirection)
         .searchable(text: $query, prompt: Text(l10n.t("contacts.list.search")))
+        .onChange(of: query) { _, text in peopleSearch?.update(query: text) }
         .refreshable { await viewModel.pullToRefresh() }
         .navigationTitle(l10n.t("nav.contacts"))
         .navigationBarTitleDisplayMode(.large)
@@ -137,20 +186,22 @@ public struct ContactsScreen: View {
                 addMenu
             }
         }
-        // `docs/ux/navigation.md` section 4.3 — the conversation list's one
-        // network lookup found a person and handed the name here, because the
-        // contact request asks for an introduction a search field has no room
-        // for.
-        .onChange(of: viewModel.addByUsernameRequests) { _, _ in
-            addContactPresented = true
-        }
-        .sheet(isPresented: $addContactPresented) {
-            AddContactSheet(
-                viewModel: viewModel,
-                onDismiss: { addContactPresented = false })
+        .lakkoActionSheet(isPresented: $addMenuOpen) {
+            [
+                .action(l10n.t("contacts.add.share_invite"), systemImage: "link") { inviteLinksPresented = true },
+                .action(l10n.t("contacts.scan_qr"), systemImage: "qrcode.viewfinder") { scanPresented = true },
+            ]
         }
         .sheet(isPresented: $inviteLinksPresented) {
             InviteLinksSheet(viewModel: viewModel, onDismiss: { inviteLinksPresented = false })
+        }
+        .sheet(isPresented: $scanPresented) {
+            ScanLinkSheet(
+                onLink: { url in
+                    scanPresented = false
+                    onOpenLink(url)
+                },
+                onDismiss: { scanPresented = false })
         }
         // The inbox long-poll runs for the whole session in `SessionRoot`,
         // so a chat or group created elsewhere lands whether or not this
@@ -166,9 +217,13 @@ public struct ContactsScreen: View {
 
     // MARK: - Toolbar
 
-    /// Show / scan a contact QR code are not offered: no contact-QR flow
-    /// exists in the repository (the QR renderer and scanner serve device
-    /// pairing only).
+    /// There is no "Add by username" form (`docs/ux/who-can-find-me.md`
+    /// section 6.1): a person is found through the search field, which sends
+    /// the request from its row.
+    ///
+    /// Scan QR code reads a Lakko link (`/i/`, `/g/`, `/c/`) someone shows
+    /// from their invite-links list and opens it like a tapped link; the
+    /// code itself is shown per link in the invite-links sheet.
     ///
     /// There is no call-link entry here (`docs/ux/navigation.md` section 3).
     /// It was put in this menu by the redesign only because Calls had been
@@ -176,14 +231,7 @@ public struct ContactsScreen: View {
     /// there — and the LINK belongs inside the call it leads into
     /// (`docs/ux/call-links.md` section 3), not in a menu about contacts.
     private var addMenu: some View {
-        Menu {
-            Button { addContactPresented = true } label: {
-                Label(l10n.t("contacts.add.by_username"), systemImage: "at")
-            }
-            Button { inviteLinksPresented = true } label: {
-                Label(l10n.t("contacts.add.share_invite"), systemImage: "link")
-            }
-        } label: {
+        Button { addMenuOpen = true } label: {
             Image(systemName: "person.badge.plus")
         }
         .accessibilityLabel(l10n.t("contacts.list.add"))
@@ -249,8 +297,15 @@ public struct ContactsScreen: View {
         ForEach(sections, id: \.letter) { section in
             Section {
                 ForEach(section.ids, id: \.self) { id in
-                    if let contact = contactsById[id] {
-                        ContactRow(contact: contact)
+                    switch id {
+                    case .contact(let messageId):
+                        if let contact = contactsById[messageId] {
+                            ContactRow(contact: contact)
+                        }
+                    case .invited(let accountIdHex):
+                        if let contact = invitedById[accountIdHex] {
+                            InvitedRow(contact: contact)
+                        }
                     }
                 }
             } header: {
@@ -265,7 +320,62 @@ public struct ContactsScreen: View {
     }
 }
 
+/// The search's empty overlay: "No results" only while the field has nothing
+/// of its own to show. A text that asks the network never gets it, because
+/// the People part answers (found, not found, or why it could not search).
+private struct ContactsSearchEmpty: View {
+    @ObservedObject var model: PeopleSearchModel
+    let query: String
+
+    var body: some View {
+        if !PeopleSearch.asksNetwork(query),
+           !model.showsAnything(includesChannels: false, showsLocalContacts: false) {
+            ContentUnavailableView.search(text: query)
+        }
+    }
+}
+
 // MARK: - Rows
+
+/// A row of the contact list: an accepted contact, or a person added through
+/// their invite link whose app has not answered yet (ADR-0079).
+enum ContactRowId: Hashable {
+    case contact(Int64)
+    case invited(String)
+}
+
+/// ADR-0079 — a person added through their invite link, before their app has
+/// answered: listed like any contact (no "pending" badge), opening the chat
+/// with them.
+private struct InvitedRow: View {
+    @ObservedObject private var l10n = Localization.shared
+    let contact: PendingContact
+
+    var body: some View {
+        let stated = PendingContacts.name(contact)
+        NavigationLink(value: TabRoute.pendingChat(accountIdHex: contact.accountIdHex)) {
+            HStack(spacing: 12) {
+                InitialsAvatar(
+                    name: stated ?? "",
+                    identity: base64Encode(contact.signaturePubkey),
+                    size: 40,
+                    placeholderSymbol: "person.fill",
+                    photo: .person(contact.signaturePubkey)
+                )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(stated ?? l10n.t("invite.contact.page.unnamed"))
+                        .foregroundStyle(Color.lakkoText)
+                    if !contact.username.isEmpty, stated != "@\(contact.username)" {
+                        Text("@\(contact.username)")
+                            .font(.subheadline)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+}
 
 /// One contact: 40 pt avatar, display name, `@username` under it. Pushes the
 /// detail through the tab's route table.
@@ -280,7 +390,8 @@ private struct ContactRow: View {
                         name: resolved.isPlaceholder ? "" : resolved.name,
                         identity: base64Encode(contact.request.fromPubkey),
                         size: 40,
-                        placeholderSymbol: "person.fill"
+                        placeholderSymbol: "person.fill",
+                        photo: .person(contact.request.fromPubkey)
                     )
                     VStack(alignment: .leading, spacing: 2) {
                         Text(resolved.name)
@@ -314,7 +425,8 @@ private struct IncomingRequestRow: View {
                     name: resolved.isPlaceholder ? "" : resolved.name,
                     identity: base64Encode(request.fromPubkey),
                     size: 40,
-                    placeholderSymbol: "person.fill"
+                    placeholderSymbol: "person.fill",
+                    photo: .person(request.fromPubkey)
                 )
                 VStack(alignment: .leading, spacing: 6) {
                     Text(resolved.isPlaceholder ? l10n.t("contacts.request.someone") : resolved.name)
@@ -399,5 +511,61 @@ private struct ReauthPanel: View {
                 .foregroundStyle(Color.lakkoTextMuted)
         }
         .padding(.vertical, 8)
+    }
+}
+
+/// Contacts > Scan QR code: the camera reads codes until one is a Lakko link,
+/// which is then opened through the app's link route; any other code shows
+/// a line and the camera keeps scanning.
+private struct ScanLinkSheet: View {
+    let onLink: (URL) -> Void
+    let onDismiss: () -> Void
+    @ObservedObject private var l10n = Localization.shared
+    @State private var notALink = false
+    /// A catalog key of a camera failure, when the camera could not start.
+    @State private var cameraErrorKey: String?
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                if let cameraErrorKey {
+                    Text(l10n.t(cameraErrorKey))
+                        .font(.callout)
+                        .foregroundStyle(Color.lakkoDanger)
+                        .multilineTextAlignment(.center)
+                        .padding()
+                } else {
+                    QrScannerView(
+                        onDetected: { text in
+                            if let url = InviteIntake.scannedLink(text) { onLink(url) }
+                        },
+                        onError: { key in cameraErrorKey = key },
+                        accept: { InviteIntake.scannedLink($0) != nil },
+                        onRejected: { _ in
+                            if !notALink { notALink = true }
+                        })
+                        .aspectRatio(1, contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .padding(.horizontal, 16)
+                    if notALink {
+                        Text(l10n.t("contacts.scan_qr.not_a_link"))
+                            .font(.callout)
+                            .foregroundStyle(Color.lakkoDanger)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 16)
+            .navigationTitle(l10n.t("contacts.scan_qr"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(l10n.t("common.cancel"), action: onDismiss)
+                }
+            }
+        }
+        .presentationDetents([.large])
     }
 }

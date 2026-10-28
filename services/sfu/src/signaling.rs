@@ -52,8 +52,8 @@ use crate::media::MediaTaskHandle;
 use crate::peer::{Peer, PeerId, PeerRegistry};
 use crate::prom::names;
 use crate::protocol::{
-    ClientFrame, ErrorCode, ServerFrame, MAX_INBOUND_FRAME_BYTES, SIGNALING_SUBPROTOCOL,
-    TOKEN_SUBPROTOCOL_PREFIX,
+    is_room_hex, ClientFrame, ErrorCode, ServerFrame, MAX_INBOUND_FRAME_BYTES,
+    SIGNALING_SUBPROTOCOL, TOKEN_SUBPROTOCOL_PREFIX,
 };
 use crate::router::Router;
 
@@ -178,24 +178,6 @@ fn token_from_subprotocols(headers: &HeaderMap) -> Option<&str> {
     found
 }
 
-/// The token of an `Authorization: Bearer <jwt>` header. The scheme is
-/// matched case-insensitively (RFC 9110 section 11.1); exactly one
-/// Authorization header is accepted.
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
-    let mut values = headers.get_all(header::AUTHORIZATION).iter();
-    let value = values.next()?;
-    if values.next().is_some() {
-        return None;
-    }
-    let value = value.to_str().ok()?;
-    let (scheme, token) = value.split_once(' ')?;
-    if !scheme.eq_ignore_ascii_case("bearer") {
-        return None;
-    }
-    let token = token.trim();
-    (!token.is_empty()).then_some(token)
-}
-
 /// Axum handler — verify token + upgrade to WebSocket.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -227,16 +209,17 @@ pub async fn ws_handler(
     };
 
     let (out_tx, out_rx) = mpsc::channel::<ServerFrame>(PEER_OUTBOUND_CAPACITY);
+    // ADR-0078 section 2: the token names a room and a random peer id and
+    // no account, so this peer record holds nothing that ties it to one.
+    // `verify` already checked both are lower-case hex of the right length.
     let peer = Peer {
-        id: PeerId::fresh(),
-        call_id: claims.call_id.clone(),
-        account_id: claims.sub.clone(),
+        id: PeerId::from_string(claims.peer_id),
+        room: claims.room,
         outbound: Some(out_tx),
     };
 
-    // Nothing derived from the account id is logged: the peer id is
-    // fresh per socket, so a log line cannot tie a call to an account.
-    info!(peer = %peer.id, call = %peer.call_id, "ws: admission ok");
+    // No identifier in the log line: not the peer id, not the room.
+    info!("ws: admission ok");
 
     // Only the signaling subprotocol is ever selected, so the token
     // entry the client offered is never echoed back.
@@ -244,35 +227,23 @@ pub async fn ws_handler(
         .on_upgrade(move |socket| handle_socket(socket, peer, out_rx, state))
 }
 
-/// `GET /v1/calls/{call_id}` with `Authorization: Bearer <jwt>` —
-/// whether the call the token
-/// names is still there (`call_lifetime.rs`). Gated by the same
-/// call-admission JWT as the socket, and the token must name the call
-/// asked about, so a member learns about a call it could join and
-/// nothing else. A member whose chat shows a call in progress asks this
-/// before offering Join, and closes the chat's record when the answer is
-/// `ended`.
-pub async fn call_state_handler(
-    Path(call_id): Path<String>,
-    headers: HeaderMap,
+/// `GET /v1/rooms/{room}` — whether the call in `room` is still there
+/// (`call_lifetime.rs`). No token (ADR-0078 section 2): the room id is
+/// `BLAKE3_derive_key("lakko/sfu/room/v1", call_id)` and only the call's
+/// members know the call id, so knowing the room is the capability, and
+/// no admission token is minted to ask. A member whose chat shows a call
+/// in progress asks this before offering Join, and closes the chat's
+/// record when the answer is `ended`. A path that is not a room id is a
+/// `400`; the answer for an unknown room and a room nobody ever used is
+/// the same `unknown`.
+pub async fn room_state_handler(
+    Path(room): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    let Some(token) = bearer_token(&headers) else {
-        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
-    };
-    let claims = match state.jwks.verify(token).await {
-        Ok(c) => c,
-        Err(JwksError::Verify(_) | JwksError::UnknownKid { .. }) => {
-            return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
-        },
-        Err(_) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, "auth unavailable").into_response();
-        },
-    };
-    if claims.call_id != call_id {
-        return (StatusCode::FORBIDDEN, "token names another call").into_response();
+    if !is_room_hex(&room) {
+        return (StatusCode::BAD_REQUEST, "not a room id").into_response();
     }
-    let status = state.calls.status(&call_id, Instant::now());
+    let status = state.calls.status(&room, Instant::now());
     let peers = match status {
         CallStatus::Live { peers } => peers,
         CallStatus::Unknown | CallStatus::Closing | CallStatus::Ended => 0,
@@ -297,21 +268,24 @@ async fn handle_socket(
     mut out_rx: mpsc::Receiver<ServerFrame>,
     state: Arc<AppState>,
 ) {
+    // The peer id is the token's: a second socket presenting the same token
+    // while the first is still registered is refused, so one token admits
+    // one live connection.
     if !state.peers.register(peer.clone()).await {
-        warn!(peer = %peer.id, "ws: peer registry collision; closing");
+        warn!("ws: peer id already connected; refusing the second socket");
         return;
     }
     // A call that stood empty past its grace is over (`call_lifetime.rs`):
     // say so in place of the Welcome and close, so the member closes the
     // chat's record instead of founding a second call under the old id.
-    if state.calls.admit(&peer.call_id, Instant::now()) == Admission::Ended {
-        info!(peer = %peer.id, call = %peer.call_id, "ws: join refused, call ended");
+    if state.calls.admit(&peer.room, Instant::now()) == Admission::Ended {
+        info!("ws: join refused, call ended");
         let refusal = ServerFrame::Error {
             code: ErrorCode::CallEnded,
             detail: "the call ended before you joined".to_owned(),
         };
         if let Err(e) = send_via_self(&peer, refusal) {
-            warn!(peer = %peer.id, error = %e, "ws: refusal enqueue failed");
+            warn!(error = %e, "ws: refusal enqueue failed");
         }
         state.peers.unregister(&peer.id).await;
         drain_and_close(socket, out_rx).await;
@@ -347,9 +321,9 @@ async fn handle_socket(
     // same channel. Push the welcome straight onto the rx
     // path so the writer half picks it up first.
     if let Err(e) = send_via_self(&peer, welcome) {
-        warn!(peer = %peer.id, error = %e, "ws: welcome enqueue failed; closing");
+        warn!(error = %e, "ws: welcome enqueue failed; closing");
         state.peers.unregister(&peer.id).await;
-        state.calls.depart(&peer.call_id, Instant::now());
+        state.calls.depart(&peer.room, Instant::now());
         metrics::gauge!(names::PEERS_ACTIVE).decrement(1.0);
         return;
     }
@@ -364,7 +338,6 @@ async fn handle_socket(
     // `liveness.ping_interval` so a live peer is never silent
     // for the reader's idle window (its stack answers with a
     // Pong without any app-layer help).
-    let writer_peer_id = peer.id.clone();
     let ping_interval = state.liveness.ping_interval;
     let writer = tokio::spawn(async move {
         let mut ws_tx = ws_tx;
@@ -379,7 +352,7 @@ async fn handle_socket(
                     Some(frame) => match serde_json::to_string(&frame) {
                         Ok(json) => Message::Text(json.into()),
                         Err(e) => {
-                            warn!(peer = %writer_peer_id, error = %e, "ws: outbound serialise failed");
+                            warn!(error = %e, "ws: outbound serialise failed");
                             continue;
                         },
                     },
@@ -388,7 +361,7 @@ async fn handle_socket(
                 _ = pings.tick() => Message::Ping(Vec::new().into()),
             };
             if let Err(e) = ws_tx.send(message).await {
-                debug!(peer = %writer_peer_id, error = %e, "ws: writer send failed");
+                debug!(error = %e, "ws: writer send failed");
                 break;
             }
         }
@@ -406,8 +379,6 @@ async fn handle_socket(
             Ok(None) => break,
             Err(_elapsed) => {
                 warn!(
-                    peer = %peer.id,
-                    call = %peer.call_id,
                     idle_secs = idle_timeout.as_secs(),
                     "ws: peer silent past the idle window; dropping it and announcing the leave"
                 );
@@ -480,14 +451,14 @@ async fn handle_socket(
                 // Reserved for a future RTP-over-WS fallback —
                 // log + drop until the routing-media sprint
                 // defines the shape.
-                debug!(peer = %peer.id, "ws: binary frame dropped (no schema yet)");
+                debug!("ws: binary frame dropped (no schema yet)");
             },
             Ok(Message::Ping(_)) => {
                 // WS-protocol ping — axum auto-replies on
                 // the WS layer; we hook in here only for the
                 // debug log so a future rate-limiter has a
                 // place to plug in.
-                ack_ws_ping(&peer);
+                ack_ws_ping();
             },
             Ok(Message::Pong(_)) => {},
             Ok(Message::Close(_)) | Err(_) => break,
@@ -498,18 +469,18 @@ async fn handle_socket(
     // outbound sender so the writer task exits.
     router.announce_leave(&peer).await;
     state.peers.unregister(&peer.id).await;
-    state.calls.depart(&peer.call_id, Instant::now());
+    state.calls.depart(&peer.room, Instant::now());
     // The media half keeps its own per-peer state and learns of the
     // departure only from here; left alone, a peer whose ICE never
     // connected would stay in the router for the life of the process.
     if let Some(media) = state.media.as_ref() {
         if let Err(e) = media.remove_peer(peer.id.clone()) {
-            warn!(peer = %peer.id, error = %e, "ws: could not ask the media task to drop the peer");
+            warn!(error = %e, "ws: could not ask the media task to drop the peer");
         }
     }
     metrics::gauge!(names::PEERS_ACTIVE).decrement(1.0);
     writer.abort();
-    info!(peer = %peer.id, "ws: peer disconnected");
+    info!("ws: peer disconnected");
 }
 
 /// Push a frame to the peer's own outbound channel. The
@@ -547,8 +518,8 @@ fn send_via_self(peer: &Peer, frame: ServerFrame) -> Result<(), &'static str> {
 /// Acknowledge a WS-protocol ping. axum auto-replies to
 /// pings on the WS layer; this is a debug hook so a future
 /// rate-limiter has a place to plug in.
-fn ack_ws_ping(peer: &Peer) {
-    debug!(peer = %peer.id, "ws: protocol ping acknowledged");
+fn ack_ws_ping() {
+    debug!("ws: protocol ping acknowledged");
 }
 
 #[cfg(test)]
@@ -587,37 +558,6 @@ mod tests {
         assert_eq!(token_from_subprotocols(&h), None);
         let h = with_protocols(&["lakko-sfu-token.a.b.c", "lakko-sfu-token.a.b.c"]);
         assert_eq!(token_from_subprotocols(&h), None);
-    }
-
-    fn with_authorization(values: &[&str]) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        for v in values {
-            headers.append(
-                header::AUTHORIZATION,
-                axum::http::HeaderValue::from_str(v).expect("header value"),
-            );
-        }
-        headers
-    }
-
-    #[test]
-    fn bearer_token_is_read_from_authorization() {
-        let h = with_authorization(&["Bearer a.b.c"]);
-        assert_eq!(bearer_token(&h), Some("a.b.c"));
-        let h = with_authorization(&["bearer a.b.c"]);
-        assert_eq!(bearer_token(&h), Some("a.b.c"));
-    }
-
-    #[test]
-    fn a_malformed_authorization_is_refused() {
-        assert_eq!(bearer_token(&HeaderMap::new()), None);
-        assert_eq!(bearer_token(&with_authorization(&["Basic a.b.c"])), None);
-        assert_eq!(bearer_token(&with_authorization(&["Bearer"])), None);
-        assert_eq!(bearer_token(&with_authorization(&["Bearer  "])), None);
-        assert_eq!(
-            bearer_token(&with_authorization(&["Bearer a.b.c", "Bearer d.e.f"])),
-            None
-        );
     }
 
     /// Compile-time sanity — the channel capacity must sit

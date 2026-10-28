@@ -6,13 +6,10 @@
  * device that minted them.
  *
  * Since the sealed-link amendment of ADR-0028 (2026-09-28) a link is
- * `/<k>/<id>#<secret>` and the ledger never sees the secret. The owner's list
- * of active links comes from the ledger (`listInvitesByOwner`), so without a
- * local record a listed link could only be shown without its fragment, which
- * opens nothing. This store maps `(account, ledger id)` to the secret at mint
- * time; a row whose secret this device does not hold (minted on another
- * device, or before the storage was cleared) is shown revocable but not
- * copyable.
+ * `/<k>/<id>#<secret>` and the ledger never sees the secret. Since ADR-0078
+ * section 10 the owner's list is built from this device's own records
+ * (`minted-links.ts`, which carry the secret too); this older map is only
+ * forgotten from now on, when a link is revoked.
  *
  * `localStorage`, wrapped: a read or write that throws (private mode, blocked
  * storage) degrades to "not known here", never to a broken list. The secret is

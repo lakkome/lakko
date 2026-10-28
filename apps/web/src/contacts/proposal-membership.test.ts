@@ -12,13 +12,11 @@
  *
  * ## Which of these actually discriminate (MEASURED — each probe was run)
  *
- * 1. **`a group with NO role table still direct-commits`** — with
- *    `usesProposalPath` forced to `true`:
- *
- *        ContactsError: group.proposeRemoveMember is not a function
- *
- *    i.e. a legacy group would be routed into a path whose peers' receipt gates
- *    drop every proposal it emits, so nothing it asks for would ever apply.
+ * 1. **`a group with NO role table is refused`** (ADR-0081 amendment of
+ *    2026-10-19; replaced `a group with NO role table still direct-commits`,
+ *    whose probe was measured against the deleted direct path). Not
+ *    re-measured: it asserts the core's typed `noRoleTable` refusal and that
+ *    nothing is staged or published.
  *
  * 2. **`a role-table group PROPOSES rather than committing`** — with
  *    `usesProposalPath` forced to `false`. FIVE tests went red; the first:
@@ -82,8 +80,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import {
   fakeAccessSigner,
   fakeRegistrarAuthority,
-  fakeRootAuthority,
-} from "../ds/access-test-doubles";
+  fakeRootAuthority, withStagedTwins } from "../ds/access-test-doubles";
 import { dsAccess } from "../ds/access";
 
 // No IndexedDB in the node test env; the store round-trip is covered by
@@ -124,6 +121,7 @@ vi.mock("../wasm", () => ({
   }),
 }));
 
+import { refusalReasonOf } from "../chat/membership-refusal";
 import { ContactsClient } from "./client";
 import type { ActingCommitter } from "../chat/committer-beacon";
 import type { IncomingChatEvent } from "../chat/client";
@@ -279,7 +277,7 @@ function fakeGroup(opts: {
     });
   }
   return {
-    group: base as unknown as WasmGroup,
+    group: withStagedTwins(base) as unknown as WasmGroup,
     order,
     epoch: () => epoch,
     pending: () => pending,
@@ -310,10 +308,12 @@ function client(
 function ds(order: string[], journal: unknown[] = []): Partial<DsClient> {
   let id = 100;
   return {
-    // ADR-0053 — the epoch registration a commit and a sweep run before they
-    // publish. Accepted, and deliberately not logged into `order`: the
-    // ordering is pinned in `contacts/ds-access-commit.test.ts`.
-    registerGroupEpoch: vi.fn(async () => {}),
+    // ADR-0081 — a commit (direct or swept) reaches the journal with its
+    // epoch's registration in one call; logged as the publish it contains.
+    commitGroupEpoch: vi.fn(async () => {
+      order.push("publish");
+      return { id: (id += 1), createdAt: "t", resent: false };
+    }),
     publishGroup: vi.fn(async () => {
       order.push("publish");
       return { id: (id += 1), createdAt: "t" };
@@ -363,19 +363,22 @@ const DEFER_TO = (toRank: number) => async (): Promise<ActingCommitter> => ({
 });
 
 describe("ADR-0045 obligation 5 — which path a group takes", () => {
-  it("a group with NO role table still direct-commits", async () => {
+  it("a group with NO role table is refused: nothing is staged, recorded or published", async () => {
     const g = fakeGroup({ gid: freshGid(), roleTable: false });
     const c = client(g.order, ds(g.order));
 
-    const out = await c.removeMemberFromGroup(null, g.group, 4);
+    // ADR-0081 amendment (2026-10-19): a group with no role table has no
+    // owner, hence no committer, and every peer's receipt gate drops a
+    // proposal in it. The direct-commit path that used to serve it is deleted,
+    // so the call fails closed with the core's own typed refusal.
+    const err = await c.removeMemberFromGroup(null, g.group, 4).then(
+      () => null,
+      (e: unknown) => e,
+    );
 
-    expect(out).toMatchObject({ kind: "committed" });
-    // create -> record -> publish, the ADR-0040 sequence, byte-for-byte as it
-    // was. A legacy group has no owner, hence no committer, and every peer's
-    // receipt gate would drop a proposal it emitted — so routing it into the
-    // proposal path would mean nothing it asks for ever applies.
-    expect(g.order).toEqual(["removeMember", "record", "publish"]);
-    expect(g.epoch()).toBe(7n);
+    expect(refusalReasonOf(err)).toBe("noRoleTable");
+    expect(g.order).toEqual([]);
+    expect(g.epoch()).toBe(6n);
   });
 
   it("a role-table group PROPOSES rather than committing", async () => {
@@ -562,7 +565,7 @@ describe("ADR-0045 — the restart sweep resolves an owed verdict FIRST", () => 
     expect(order).not.toContain("publish-mailbox");
   });
 
-  it("re-publishes an ordinary direct-commit entry as before", async () => {
+  it("an ordinary direct-commit entry is acked without sending its commit again (ADR-0081)", async () => {
     const g = fakeGroup({ gid: freshGid(), roleTable: false });
     const order: string[] = [];
     loadUnacked.mockResolvedValueOnce([
@@ -579,7 +582,9 @@ describe("ADR-0045 — the restart sweep resolves an owed verdict FIRST", () => 
 
     await c.sweepPendingCommits(g.group, NOOP);
 
-    expect(order).toContain("publish");
+    // The entry was written after the commit route took the commit.
+    expect(order).not.toContain("publish");
+    expect(markAcked).toHaveBeenCalledWith("direct-1", undefined, undefined);
   });
 });
 
@@ -605,7 +610,10 @@ describe("ADR-0045 — the verdict apply surfaces the rows it consumes", () => {
     let id = 100;
     let fetches = 0;
     return {
-      registerGroupEpoch: vi.fn(async () => {}),
+      commitGroupEpoch: vi.fn(async () => {
+        order.push("publish");
+        return { id: (id += 1), createdAt: "t", resent: false };
+      }),
       publishGroup: vi.fn(async () => {
         order.push("publish");
         return { id: (id += 1), createdAt: "t" };
@@ -909,12 +917,12 @@ describe("ADR-0050 2.5a point 4 — every own proposal records its intent", () =
     ]);
   });
 
-  it("a direct commit (no role table) records nothing — it landed or threw", async () => {
+  it("a refused removal (no role table) records nothing", async () => {
     const f = fakeGroup({ gid: freshGid(), roleTable: false });
     Object.assign(f.group as unknown as Record<string, unknown>, {
       members: () => [{ leafIndex: 4, signaturePublicKey: BOB_LEAF, accountKey: BOB_ACCOUNT }],
     });
-    await ownClient(f.order).removeMemberFromGroup(SECRETS, f.group, 4);
+    await expect(ownClient(f.order).removeMemberFromGroup(SECRETS, f.group, 4)).rejects.toThrow();
     expect(await intents(f)).toEqual([]);
   });
 });

@@ -53,6 +53,7 @@
  * the canonical home-broadband case. TURN relay arrives in
  * 3a2.
  */
+import { InboundCounterLog } from "./media-counters";
 import {
   inboundHasGoneSilent,
   noteInboundMedia,
@@ -67,7 +68,14 @@ import {
   attachSenderSFrame,
   coverEncodedStreams,
   isSFrameTransformSupported,
+  SFRAME_STREAM_SCREEN_AUDIO,
+  SFRAME_STREAM_SCREEN_SHARE,
 } from "./sframe-transform";
+import {
+  ScreenShareNotSealedError,
+  screenStreamPeerOf,
+  withScreenStreamId,
+} from "./screen-share-tracks";
 import {
   sframePeerConnectionConfig,
   sframeTransport,
@@ -85,7 +93,14 @@ export interface SFrameAttachers {
   readonly supported: () => boolean;
   readonly attachSender: (
     sender: RTCRtpSender,
-    opts: { readonly seed: Uint8Array; readonly localLeaf: number },
+    opts: {
+      readonly seed: Uint8Array;
+      readonly localLeaf: number;
+      readonly kind?: "audio" | "video";
+      /** Stated for a sender that is not the microphone or the camera (a
+       *  screen share, ADR-0083); otherwise the kind decides. */
+      readonly streamIndex?: number;
+    },
   ) => void;
   readonly attachReceiver: (
     receiver: RTCRtpReceiver,
@@ -103,6 +118,13 @@ export const DEFAULT_SFRAME_ATTACHERS: SFrameAttachers = {
     attachReceiverSFrame(receiver, opts);
   },
 };
+import {
+  preferVp8,
+  videoReceiveCapabilities,
+  type CodecPreferenceTransceiver,
+} from "./video-codec-preference";
+import { CallPathLog } from "./call-path";
+import { iceServersFor, iceServersLine } from "./ice-servers";
 import { loadWasm } from "../wasm";
 import type { ParsedCallSignaling } from "../../wasm/lakko_ffi_wasm";
 
@@ -224,6 +246,10 @@ export interface CallSessionCallbacks {
    *  it. Fires on every transition (`off` → `starting` → `live` /
    *  `failed`, and back to `off` at teardown). */
   onVideoPublishState?(state: VideoPublishState): void;
+  /** The other person's screen share arrived (ADR-0083): a stream whose id
+   *  ends in `~screen`, never the camera stream `onRemoteStream` names.
+   *  Optional: a caller that shows no share omits it. */
+  onRemoteScreenStream?(stream: MediaStream, track: MediaStreamTrack): void;
 }
 
 /** Audio / video request flags. Phase 3a8 MVP is audio-only
@@ -345,12 +371,6 @@ export const DEFAULT_CALL_SESSION_TIMING: Omit<CallSessionTiming, "ringTimeoutMs
 export type CallSessionTimingInput = Partial<Omit<CallSessionTiming, "ringTimeoutMs">> &
   Pick<CallSessionTiming, "ringTimeoutMs">;
 
-/** STUN-only base list. A TURN row from the auth service is appended to it
- *  per call when one can be minted; see `setTurnProvider`. */
-const PUBLIC_ICE_SERVERS: RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-];
 
 /** Generate a fresh 16-byte call_id. */
 export function mintCallId(): Uint8Array {
@@ -427,6 +447,178 @@ export class CallSession {
 
   /** Logged once per session; see {@link armFrameDescriptor}. */
   private frameDescriptorWarned = false;
+  /** Logged once per session; see {@link armFrameDescriptor}. */
+  private vp8Warned = false;
+
+  /** Receivers that already carry this session's decrypt transform. */
+  private readonly sealedReceivers = new WeakSet<RTCRtpReceiver>();
+
+  /** Senders that already carry this session's encrypt transform. */
+  private readonly sealedSenders = new WeakSet<RTCRtpSender>();
+
+  /** Attach the encrypt transform to `sender` unless it has one. A second
+   *  attach would build a new transform on the script-transform path, which
+   *  Chromium may not run (see {@link sealSendersOfTransceivers}). */
+  private sealSender(
+    sender: RTCRtpSender,
+    key: { readonly seed: Uint8Array; readonly localLeaf: number },
+    kind?: "audio" | "video",
+    streamIndex?: number,
+  ): void {
+    if (this.sealedSenders.has(sender)) return;
+    this.sframe.attachSender(sender, {
+      seed: key.seed,
+      localLeaf: key.localLeaf,
+      ...(kind !== undefined ? { kind } : {}),
+      ...(streamIndex !== undefined ? { streamIndex } : {}),
+    });
+    this.sealedSenders.add(sender);
+  }
+
+  /** This device's screen share, while it sends one (ADR-0083). */
+  private screen: { readonly streamId: string; readonly transceivers: RTCRtpTransceiver[] } | null =
+    null;
+
+  /**
+   * Add a screen capture to the call (ADR-0083 section 4): its picture and,
+   * when there is any, its sound, each on a transceiver of its own, sealed
+   * as the camera is on this path but under stream index 2 (picture) and 5
+   * (sound), so it never shares the camera's key. The renegotiation the
+   * camera uses describes them; the SDP sent names their stream with the
+   * `~screen` suffix, which is how the other device knows it is a share.
+   *
+   * Rejects with {@link ScreenShareNotSealedError} when a sender could not be
+   * sealed (nothing of the share is left in the call), with a plain error
+   * when there is no connection yet or a share is already there.
+   */
+  async attachScreenShare(capture: MediaStream): Promise<void> {
+    const pc = this.pc;
+    const key = this.callKey;
+    if (pc === null || key === null || this.callIsOver()) {
+      throw new Error("no media connection to share the screen on");
+    }
+    if (this.screen !== null) throw new Error("a screen share is already in the call");
+    const tracks = [...capture.getVideoTracks().slice(0, 1), ...capture.getAudioTracks().slice(0, 1)];
+    const transceivers: RTCRtpTransceiver[] = [];
+    try {
+      for (const track of tracks) {
+        // A new transceiver, never one the other side's offer created (whose
+        // sender may already carry the camera's seal).
+        transceivers.push(pc.addTransceiver(track, { direction: "sendonly", streams: [capture] }));
+      }
+    } catch (err) {
+      this.removeTransceivers(pc, transceivers);
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+    try {
+      for (const transceiver of transceivers) {
+        const video = transceiver.sender.track?.kind === "video";
+        this.sealSender(
+          transceiver.sender,
+          key,
+          video ? "video" : "audio",
+          video ? SFRAME_STREAM_SCREEN_SHARE : SFRAME_STREAM_SCREEN_AUDIO,
+        );
+      }
+    } catch (err) {
+      this.removeTransceivers(pc, transceivers);
+      throw new ScreenShareNotSealedError(err);
+    }
+    this.screen = { streamId: capture.id, transceivers };
+  }
+
+  /** Take this device's screen share out of the call. Idempotent. */
+  detachScreenShare(): void {
+    const slot = this.screen;
+    if (slot === null) return;
+    this.screen = null;
+    const pc = this.pc;
+    if (pc !== null) this.removeTransceivers(pc, slot.transceivers);
+  }
+
+  private removeTransceivers(pc: RTCPeerConnection, transceivers: readonly RTCRtpTransceiver[]): void {
+    for (const transceiver of transceivers) {
+      try {
+        if (typeof transceiver.stop === "function") transceiver.stop();
+        else pc.removeTrack(transceiver.sender);
+      } catch {
+        try {
+          pc.removeTrack(transceiver.sender);
+        } catch {
+          // A closed connection has nothing left to remove.
+        }
+      }
+    }
+  }
+
+  /** An SDP this device sends, with its share's stream named as a share. */
+  private outgoingSdp(sdp: string): string {
+    return withScreenStreamId(sdp, this.screen?.streamId ?? null);
+  }
+
+  /**
+   * Attach the encrypt transform to the sender of every transceiver that has
+   * none yet, right after a remote offer was applied and before the answer.
+   *
+   * Chromium does not run a send transform set on the sender that `addTrack`
+   * hands back when it REUSES a transceiver a remote offer created: the
+   * answerer of a video call turning its camera on (it captures audio only and
+   * adds the camera to the video transceiver the caller's offer made) sent its
+   * video unsealed, and the caller dropped every frame of it ("media frame
+   * version ... is not supported"; seen on test.lakko.me 2026-10-24, both
+   * peers Chrome). Measured in Chromium 1243 (Playwright 1.63) with a marking
+   * worker: that transform received 0 of 58 frames, with the transform set
+   * after `addTrack`, after the renegotiation, or one task later; set on the
+   * transceiver's sender as soon as the transceiver existed, before any track,
+   * it received all 58, and it kept them when `addTrack` later reused the
+   * sender. A transceiver `addTrack` creates is not affected. Nothing leaves
+   * unsealed when this is skipped on another browser: the peer drops it.
+   */
+  private sealSendersOfTransceivers(pc: RTCPeerConnection): void {
+    const key = this.callKey;
+    if (key === null) return;
+    for (const t of pc.getTransceivers()) {
+      const kind = t.receiver.track.kind === "video" ? "video" : "audio";
+      this.sealSender(t.sender, key, kind);
+    }
+  }
+
+  /** Attach the decrypt transform to `receiver` unless it has one. Returns
+   *  whether it attached. */
+  private sealReceiver(receiver: RTCRtpReceiver, seed: Uint8Array): boolean {
+    if (this.sealedReceivers.has(receiver)) return false;
+    this.sframe.attachReceiver(receiver, { seed });
+    this.sealedReceivers.add(receiver);
+    return true;
+  }
+
+  /**
+   * Attach the decrypt transform to the receiver of every transceiver that
+   * has none yet, and let one task pass before the caller applies a
+   * description.
+   *
+   * Chromium bypasses a receive transform set from `ontrack` on a
+   * transceiver this side created with `addTrack` (a two-way audio
+   * transceiver, which is every 1x1 call): the frames go to the decoder
+   * still sealed and the transform never sees one. Measured 2026-10-22 in
+   * Chromium 1243 (Playwright 1.63) with a counting worker: two-way audio
+   * with the receive transforms set in `ontrack` delivered 0 frames to them
+   * while 300 were sent each way and the peer played the sealed bytes as
+   * noise (about 60% of samples concealed); the same transforms set before
+   * the description, with one task in between, delivered every frame. WebKit
+   * delivered every frame either way. A transceiver a remote offer creates
+   * is not affected, which is why the group call (receive-only transceivers
+   * from the SFU's offers) never showed it; `ontrack` still covers those.
+   */
+  private async sealReceiversBeforeDescription(pc: RTCPeerConnection): Promise<void> {
+    const key = this.callKey;
+    if (key === null) return;
+    let attached = false;
+    for (const t of pc.getTransceivers()) {
+      if (this.sealReceiver(t.receiver, key.seed)) attached = true;
+    }
+    if (attached) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
 
   /** In-flight guard for {@link addLocalVideo} (no double-acquire). */
   private addingVideo = false;
@@ -436,6 +628,9 @@ export class CallSession {
   /** G3-3-conn-quality — `getStats()` poll loop handle, armed on
    *  the first `connected` transition, cleared in `dispose()`. */
   private statsTimer: ReturnType<typeof setInterval> | null = null;
+  /** What the receivers report, logged with every stats sample and as a
+   *  total in `dispose()` (ADR-0067 step 1, as the group call does). */
+  private readonly inboundCounters = new InboundCounterLog();
   /** Previous candidate-pair byte counters + monotonic timestamp
    *  (ms) used to derive the down/up bitrate. */
   private prevStatsBytes: {
@@ -445,6 +640,9 @@ export class CallSession {
   } | null = null;
   /** How long inbound media has been silent (`media-watchdog.ts`). */
   private inboundActivity: InboundActivity | null = null;
+  /** Which network path the media takes, logged when it is first known and
+   *  when it changes (`call-path.ts`). */
+  private callPathLog = new CallPathLog();
 
   /** The inbound offer this callee is ringing for. Held, not applied: the
    *  answerer captures media and builds its `RTCPeerConnection` only when the
@@ -485,15 +683,22 @@ export class CallSession {
   }
 
   /** Resolve the ICE servers for this call: STUN always, TURN when minted. */
+  /** Lakko's own servers only (`./ice-servers.ts`): the minted TURN entry
+   *  and STUN on its host, or none. */
   private async resolveIceServers(): Promise<RTCIceServer[]> {
     const provider = this.turnProvider;
-    if (provider === null) return PUBLIC_ICE_SERVERS;
-    try {
-      const turn = await provider();
-      return turn === null ? PUBLIC_ICE_SERVERS : [...PUBLIC_ICE_SERVERS, turn];
-    } catch {
-      return PUBLIC_ICE_SERVERS;
+    let turn: RTCIceServer | null = null;
+    if (provider !== null) {
+      try {
+        turn = await provider();
+      } catch {
+        turn = null;
+      }
     }
+    const servers = iceServersFor(turn);
+    // eslint-disable-next-line no-console
+    console.info(`call ice servers: ${iceServersLine(servers)}`);
+    return servers;
   }
 
   /**
@@ -565,6 +770,8 @@ export class CallSession {
     const pc = this.pc;
     if (pc === null) throw new Error("peer connection not initialised");
     this.armFrameDescriptor(pc);
+    await this.sealReceiversBeforeDescription(pc);
+    if (this.offerIsStale(pc)) return;
     let offer: RTCSessionDescriptionInit;
     try {
       offer = await pc.createOffer();
@@ -760,7 +967,10 @@ export class CallSession {
       if (this.state !== "ringing") return;
       const pc = this.pc;
       if (pc === null) return;
+      await this.sealReceiversBeforeDescription(pc);
+      if (this.state !== "ringing" || this.pc !== pc) return;
       await pc.setRemoteDescription({ type: "offer", sdp: offer.sdp });
+      this.sealSendersOfTransceivers(pc);
       this.coverSFrame();
       this.pendingOffer = null;
       await this.applyQueuedCandidates();
@@ -909,13 +1119,11 @@ export class CallSession {
       // The camera arriving mid-call is a new sender and needs its own seal;
       // without this the video would leave unsealed while the audio beside it
       // is sealed, and the peer would drop every frame of it.
+      // A sender `addTrack` reused already carries the seal it was given when
+      // its transceiver appeared (`sealSendersOfTransceivers`); it is not
+      // replaced.
       const midCallKey = this.callKey;
-      if (midCallKey !== null) {
-        this.sframe.attachSender(sender, {
-          seed: midCallKey.seed,
-          localLeaf: midCallKey.localLeaf,
-        });
-      }
+      if (midCallKey !== null) this.sealSender(sender, midCallKey, "video");
       // Refresh the self-preview stream (it now carries a video track).
       this.callbacks.onLocalStream?.(localStream);
       // The local self-preview is live now (the track is captured + attached);
@@ -1034,6 +1242,11 @@ export class CallSession {
     }
     this.prevStatsBytes = null;
     this.inboundActivity = null;
+    this.callPathLog = new CallPathLog();
+    for (const line of this.inboundCounters.total()) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
     if (this.pc !== null) {
       try {
         this.pc.close();
@@ -1054,6 +1267,9 @@ export class CallSession {
     this.makingOffer = false;
     this.isSettingRemoteAnswerPending = false;
     this.addingVideo = false;
+    // The share's tracks went with the peer connection; the capture is its
+    // owner's to stop.
+    this.screen = null;
     // Back to `off` so a reused instance (or the UI after teardown) starts
     // clean — the camera button drops any spinner.
     this.setVideoPublishState("off");
@@ -1154,7 +1370,7 @@ export class CallSession {
       // Attached between `addTrack` and the SDP build, the ordering the native
       // shims keep (C-48): the sender's track decides the stream index the
       // KID carries, so it must already be set.
-      this.sframe.attachSender(sender, { seed: key.seed, localLeaf: key.localLeaf });
+      this.sealSender(sender, key);
     }
 
     pc.onicecandidate = (ev): void => {
@@ -1185,9 +1401,14 @@ export class CallSession {
       // sender leaf and stream, so audio and camera need no separate arming.
       // A frame that fails to open is dropped in the worker, never forwarded
       // as plaintext.
-      this.sframe.attachReceiver(ev.receiver, { seed: key.seed });
+      this.sealReceiver(ev.receiver, key.seed);
       const remote = ev.streams[0];
       if (remote !== undefined) {
+        // The other person's screen share (ADR-0083) is not their camera.
+        if (screenStreamPeerOf(remote.id) !== null) {
+          this.callbacks.onRemoteScreenStream?.(remote, ev.track);
+          return;
+        }
         this.callbacks.onRemoteStream(remote);
       }
     };
@@ -1270,6 +1491,19 @@ export class CallSession {
    * the descriptor puts on the wire in the clear.
    */
   private armFrameDescriptor(pc: RTCPeerConnection): void {
+    // The codec first: a sealed frame travels only as VP8
+    // (`./video-codec-preference.ts`), and this runs before every description.
+    const codecs = preferVp8(
+      pc.getTransceivers() as unknown as readonly CodecPreferenceTransceiver[],
+      videoReceiveCapabilities(),
+    );
+    if (codecs.unsupported > 0 && !this.vp8Warned) {
+      this.vp8Warned = true;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `CallSession: ${codecs.unsupported} video transceiver(s) could not be set to VP8; this browser's video may not reach the other person`,
+      );
+    }
     const outcome = armGenericFrameDescriptor(
       pc.getTransceivers() as unknown as readonly HeaderExtensionTransceiver[],
     );
@@ -1293,13 +1527,17 @@ export class CallSession {
       // transceiver, and it starts with the descriptor stopped like every
       // other: arm it before the offer that first describes it.
       this.armFrameDescriptor(pc);
+      // The camera's transceiver is new; its receiver gets the decrypt
+      // transform now, before the offer that describes it.
+      await this.sealReceiversBeforeDescription(pc);
+      if (this.pc !== pc || pc.signalingState !== "stable") return;
       await pc.setLocalDescription(); // implicit createOffer
       const sdp = pc.localDescription?.sdp;
       if (sdp === undefined) return;
       const wasm = await loadWasm();
       const bytes = wasm.composeCallOfferSignaling(
         this.callId,
-        sdp,
+        this.outgoingSdp(sdp),
         BigInt(Date.now()),
         true,
         true,
@@ -1323,6 +1561,9 @@ export class CallSession {
   private async applyRenegotiationOffer(sdp: string): Promise<void> {
     const pc = this.pc;
     if (pc === null) return;
+    // A transceiver this side added that the peer now starts sending on.
+    await this.sealReceiversBeforeDescription(pc);
+    if (this.pc !== pc) return;
     const polite = !this.isOfferer;
     const readyForOffer =
       !this.makingOffer &&
@@ -1331,6 +1572,7 @@ export class CallSession {
     if (ignoreOffer) return;
     try {
       await pc.setRemoteDescription({ type: "offer", sdp });
+      this.sealSendersOfTransceivers(pc);
       // The peer turning its camera on mid-call is a NEW video transceiver,
       // created by the line above, and a fresh transceiver starts with the
       // descriptor stopped. Arm it here, between the remote offer and the
@@ -1346,7 +1588,7 @@ export class CallSession {
       const answerSdp = pc.localDescription?.sdp;
       if (answerSdp === undefined) return;
       const wasm = await loadWasm();
-      const bytes = wasm.composeCallAnswerSignaling(this.callId, answerSdp);
+      const bytes = wasm.composeCallAnswerSignaling(this.callId, this.outgoingSdp(answerSdp));
       this.callbacks.onOutboundSignaling(bytes);
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -1630,8 +1872,10 @@ export class CallSession {
     // call left: metering the pair would have watched the 45-minute call climb
     // and called it healthy.
     let mediaPackets = 0;
+    const entries: Record<string, unknown>[] = [];
     report.forEach((value: unknown, id: string) => {
       byId.set(id, value);
+      if (typeof value === "object" && value !== null) entries.push(value as Record<string, unknown>);
       const type = statString(value, "type");
       if (type === "candidate-pair") pairs.push(value);
       if (type === "inbound-rtp") mediaPackets += statNumber(value, "packetsReceived") ?? 0;
@@ -1641,6 +1885,15 @@ export class CallSession {
       mediaPackets,
       performance.now(),
     );
+    for (const line of this.inboundCounters.interval(entries)) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    const pathLine = this.callPathLog.note(entries);
+    if (pathLine !== null) {
+      // eslint-disable-next-line no-console
+      console.info(pathLine);
+    }
     const succeeded = (s: unknown): boolean =>
       statString(s, "state") === "succeeded";
     const isNominated = (s: unknown): boolean => {

@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import uniffi.lakko_ffi_uniffi.FfiCallEndReason
 import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
+import uniffi.lakko_ffi_uniffi.VerifiedCallScreenShare
 
 /**
  * The app-level owner of the 1x1 call: one slot for the whole signed-in
@@ -88,6 +89,10 @@ public interface OneToOneCallSession {
 
     public fun applyIncomingSignaling(body: FfiCallSignalingBody)
 
+    /** A share state from the other person, verified against the
+     *  conversation's MLS sender (ADR-0083 section 4). */
+    public fun applyScreenShare(share: VerifiedCallScreenShare) {}
+
     public fun dial(audio: Boolean = true, video: Boolean = false)
 
     public fun acceptCall(withVideo: Boolean = false)
@@ -123,6 +128,10 @@ public interface OneToOneCallPort<S : OneToOneCallSession> {
      */
     public fun peerName(groupIdHex: String): String? = null
 
+    /** ADR-0084 — the other person's signature key in [groupIdHex]
+     *  (standard base64), for the ring's photo, or `null`. */
+    public fun peerKeyB64(groupIdHex: String): String? = null
+
     /**
      * Is the conversation in [groupIdHex] muted (`docs/ux/calls.md` section
      * 2.1)?
@@ -144,9 +153,11 @@ public interface OneToOneCallPort<S : OneToOneCallSession> {
      * Local to this device — nothing is composed and nothing is published, so
      * this is a side effect on the transcript store and never on the wire.
      * Defaulted to a no-op for the same reason as [peerName]: a host driven by
-     * fake sessions has no conversation to write into.
+     * fake sessions has no conversation to write into. [startedAtMs] is when
+     * the call began ringing or was dialled (`docs/ux/navigation.md` section
+     * 6.2 lists calls by it); `null` when this host never saw it start.
      */
-    public fun recordCall(groupIdHex: String, entry: CallTranscriptEntry) {
+    public fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?) {
         // No conversation store attached.
     }
 }
@@ -246,6 +257,9 @@ internal fun routeOneToOneSignaling(
         is FfiCallSignalingBody.Answer -> callIdHexOf(body.callId)
         is FfiCallSignalingBody.IceCandidate -> callIdHexOf(body.callId)
         is FfiCallSignalingBody.End -> callIdHexOf(body.callId)
+        // ADR-0083 — a share state reaches a call only verified, through
+        // [OneToOneCallHost.deliverScreenShare]; the raw body applies nothing.
+        is FfiCallSignalingBody.ScreenShare -> return OneToOneRoute.DROP
         // C-11 — group-control bodies never advance a 1x1 call.
         is FfiCallSignalingBody.GroupStart,
         is FfiCallSignalingBody.GroupJoin,
@@ -446,6 +460,26 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         }
     }
 
+    /**
+     * A screen-share state of the call [callIdHex] in [groupIdHex], already
+     * verified against the conversation's MLS sender (ADR-0083 section 4).
+     * Called from inside a poll's critical section, like [deliver]: checks
+     * the same per-group high-water mark and enqueues.
+     */
+    public fun deliverScreenShare(
+        groupIdHex: String,
+        messageId: Long,
+        callIdHex: String,
+        share: VerifiedCallScreenShare,
+    ) {
+        synchronized(highWater) {
+            val last = highWater[groupIdHex]
+            if (last != null && messageId <= last) return
+            highWater[groupIdHex] = messageId
+            send(Event.ScreenShare(groupIdHex, callIdHex, share))
+        }
+    }
+
     // ---- UI commands --------------------------------------------------------
 
     /**
@@ -620,6 +654,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         data class ConversationMoved(val groupIdHex: String) : Event
         class SessionState(val session: OneToOneCallSession, val state: CallSession.WebCallState) : Event
         class Timeout(val session: OneToOneCallSession, val generation: Long) : Event
+        class ScreenShare(val groupIdHex: String, val callIdHex: String, val share: VerifiedCallScreenShare) : Event
     }
 
     private class Outbound(val groupIdHex: String, val bytes: ByteArray)
@@ -645,6 +680,11 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         /** The outgoing call was dialed. An undialed prepared session (the
          *  pre-join, cancelled) is not a call and writes no row. */
         var dialed: Boolean = false
+
+        /** When the call started: an incoming call when its offer arrived (the
+         *  ring), an outgoing one when it was dialled. `null` for an outgoing
+         *  call still at the pre-join. */
+        var startedAtMs: Long? = null
 
         /** Wall clock at the first `Connected`, or `null` if media never flowed.
          *  The only source of a duration; its absence is what keeps an
@@ -747,6 +787,9 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
             is Event.ConversationMoved -> onConversationMoved(event.groupIdHex)
             is Event.SessionState -> onSessionState(event)
             is Event.Timeout -> onTimeout(event)
+            is Event.ScreenShare -> liveSlot()
+                ?.takeIf { it.callIdHex == event.callIdHex && it.call.groupIdHex.lowercase() == event.groupIdHex.lowercase() }
+                ?.call?.session?.applyScreenShare(event.share)
         }
     }
 
@@ -830,6 +873,12 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
                     null
                 },
                 video = offer.media.video,
+                callerKeyB64 = try {
+                    port?.peerKeyB64(row.groupIdHex)
+                } catch (error: Throwable) {
+                    warn("call host: resolving the caller's key failed", error)
+                    null
+                },
                 // The offer's own stamp, not this device's clock: a wake that
                 // took twenty seconds to arrive has twenty-five seconds of
                 // ringing left, not forty-five.
@@ -987,7 +1036,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
                 ),
                 callIdHex = callIdHexOf(offer.callId),
                 keyArmed = key != null,
-            ),
+            ).also { it.startedAtMs = clock() },
         )
         // An answer already taken on the ring screen, for exactly this call.
         val pending = pendingAccept
@@ -1029,6 +1078,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         if (s.call.incoming || s.call.session.state.value != CallSession.WebCallState.Idle) return
         armKeyIfMissing(s)
         s.dialed = true
+        if (s.startedAtMs == null) s.startedAtMs = clock()
         s.call.session.dial(audio = event.audio, video = event.video)
     }
 
@@ -1221,13 +1271,14 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
                 },
                 durationSecs = callDurationSecs(s.connectedAtMs, clock()),
             ),
+            startedAtMs = s.startedAtMs,
         )
     }
 
     /** Write one row, never letting a transcript failure break a call teardown. */
-    private fun recordCall(groupIdHex: String, entry: CallTranscriptEntry) {
+    private fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?) {
         try {
-            port?.recordCall(groupIdHex, entry)
+            port?.recordCall(groupIdHex, entry, startedAtMs)
         } catch (error: Throwable) {
             warn("call host: recording the call row failed", error)
         }
@@ -1243,6 +1294,8 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         recordCall(
             groupIdHex = row.groupIdHex,
             entry = CallTranscriptEntry(outcome = outcome, video = offer.media.video),
+            // When the offer was held is not kept; the row's time stands in.
+            startedAtMs = null,
         )
     }
 
@@ -1308,6 +1361,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         is FfiCallSignalingBody.Answer -> body.callId
         is FfiCallSignalingBody.IceCandidate -> body.callId
         is FfiCallSignalingBody.End -> body.callId
+        is FfiCallSignalingBody.ScreenShare -> body.callId
         is FfiCallSignalingBody.GroupStart -> body.callId
         is FfiCallSignalingBody.GroupJoin -> body.callId
         is FfiCallSignalingBody.GroupLeave -> body.callId

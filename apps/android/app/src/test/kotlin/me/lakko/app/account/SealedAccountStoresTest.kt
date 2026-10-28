@@ -125,12 +125,12 @@ class SealedAccountStoresTest {
         val persisted = prepare.indexOf("persistRatchet()")
         val handedOut = prepare.indexOf("return PreparedSend(")
         assertTrue(sealed in 0 until persisted && persisted < handedOut)
-        // The commit paths: outbox entry, then snapshot, and a failure of
-        // either is rethrown after the abort handler.
+        // The commit path (the ADR-0045 sweep): outbox entry, then snapshot,
+        // and a failure of either propagates (nothing catches it).
         val outbox = java.io.File("src/main/kotlin/me/lakko/app/chat/CommitOutbox.kt").readText()
         val crashSafe = outbox.substringAfter("internal fun prepareCrashSafeCommit(").substringBefore("\n}\n")
         assertTrue(crashSafe.indexOf("persistEntryOrThrow()") < crashSafe.indexOf("persistSnapshotOrThrow()"))
-        assertTrue("throw persistFailure" in crashSafe)
+        assertTrue("catch" !in crashSafe)
     }
 
     @Test

@@ -3,7 +3,7 @@
 
 import Foundation
 
-/// What the SFU knows about a call id (`services/sfu` call lifetime).
+/// What the SFU knows about a room (`services/sfu` call lifetime).
 enum SfuCallState: String, Equatable {
     case unknown, live, closing, ended
 }
@@ -16,22 +16,22 @@ enum SfuCallState: String, Equatable {
 /// "in progress" on every other phone for the freshness window, and whoever
 /// taps Join lands in an empty room. The one party that knows a room is empty
 /// is the SFU: the call ends there five seconds after the last socket goes,
-/// and `GET /v1/calls/{call_id}` (`Authorization: Bearer <call jwt>`) says
-/// so. A phone showing the
-/// call as joinable asks every ``intervalMs`` and, on `ended`, closes the
-/// chat's record itself by publishing the End signal — so the banner goes on
-/// every device, not only its own. Shared word-for-word with web and Android.
+/// and `GET /v1/rooms/{room}` says so. The request carries no token
+/// (ADR-0078 section 2): the room is `sfuRoomForCall(callId)`, a one-way
+/// function of the call id that only the call's members can compute, so no
+/// admission token is minted just to ask. A phone showing the call as
+/// joinable asks every ``intervalMs`` and, on `ended`, closes the chat's
+/// record itself by publishing the End signal, so the banner goes on every
+/// device, not only its own. Shared word-for-word with web and Android.
 enum SfuCallStateProbe {
     /// How often a device offering Join asks the SFU. Chosen: a stale banner
     /// lives at most this long past the SFU's own five-second grace.
     static let intervalMs: Int64 = 10_000
 
-    /// The state route for `callIdHex`, on the HTTP origin behind the SFU's
-    /// WebSocket base (`wss://host/sfu` -> `https://host/sfu`). The token
-    /// never rides the URL (invariant #5: a request line in a log must not
-    /// name who asked about which call); ``request(sfuBaseUrl:callIdHex:jwt:)``
-    /// carries it in a header.
-    static func url(sfuBaseUrl: String, callIdHex: String) -> URL? {
+    /// The state route for `roomHex` (64 lowercase hex characters), on the
+    /// HTTP origin behind the SFU's WebSocket base (`wss://host/sfu` ->
+    /// `https://host/sfu`).
+    static func url(sfuBaseUrl: String, roomHex: String) -> URL? {
         var base = sfuBaseUrl
         if base.lowercased().hasPrefix("wss:") {
             base = "https:" + base.dropFirst(4)
@@ -39,15 +39,13 @@ enum SfuCallStateProbe {
             base = "http:" + base.dropFirst(3)
         }
         while base.hasSuffix("/") { base.removeLast() }
-        return URL(string: "\(base)/v1/calls/\(callIdHex)")
+        return URL(string: "\(base)/v1/rooms/\(roomHex)")
     }
 
-    /// The probe request: the same call-admission JWT the socket uses, bound
-    /// to this call id, as a bearer token.
-    static func request(sfuBaseUrl: String, callIdHex: String, jwt: String) -> URLRequest? {
-        guard let url = url(sfuBaseUrl: sfuBaseUrl, callIdHex: callIdHex) else { return nil }
+    /// The probe request: no token, no credentials.
+    static func request(sfuBaseUrl: String, roomHex: String) -> URLRequest? {
+        guard let url = url(sfuBaseUrl: sfuBaseUrl, roomHex: roomHex) else { return nil }
         var request = URLRequest(url: url)
-        request.setValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 5
         return request
     }
@@ -63,10 +61,8 @@ enum SfuCallStateProbe {
     }
 
     /// One probe over `URLSession`. Never throws; `nil` on any failure.
-    static func fetch(sfuBaseUrl: String, callIdHex: String, jwt: String) async -> SfuCallState? {
-        guard let request = request(sfuBaseUrl: sfuBaseUrl, callIdHex: callIdHex, jwt: jwt) else {
-            return nil
-        }
+    static func fetch(sfuBaseUrl: String, roomHex: String) async -> SfuCallState? {
+        guard let request = request(sfuBaseUrl: sfuBaseUrl, roomHex: roomHex) else { return nil }
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let http = response as? HTTPURLResponse, http.statusCode == 200
         else { return nil }

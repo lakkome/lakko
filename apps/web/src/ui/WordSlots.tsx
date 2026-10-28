@@ -6,7 +6,7 @@
  * and the local three-word sign-in.
  *
  * Each field is labelled with the position asked for, in the order given
- * (say 7, 3 and 12; the positions are drawn on the device), autocompletes from the BIP39 English list, refuses a word that is
+ * (say 7, 3 and 12; the positions are drawn on the device), suggests words from the BIP39 English list (`WordSuggest`, the app's own list), refuses a word that is
  * not in it (red outline, and the caller's Continue stays disabled), and a
  * paste of the whole 12-word phrase into any field fills the three positions
  * from it, unless `allowPhrasePaste` is false (the signup check, where the
@@ -14,9 +14,10 @@
  * field order.
  */
 import { Index, type JSX } from "solid-js";
-import { BIP39_ENGLISH, isBip39Word } from "../recovery/bip39-words";
+import { isBip39Word } from "../recovery/bip39-words";
 import { RECOVERY_PHRASE_WORDS } from "../recovery/phrase-shape";
 import { t } from "../l10n";
+import { createWordSuggest } from "./WordSuggest";
 
 export function WordSlots(props: {
   positions: () => readonly number[];
@@ -52,7 +53,15 @@ export function WordSlots(props: {
     e.preventDefault();
     props.setValue(props.positions().map((p) => parts[p - 1] ?? ""));
   };
+  const suggest = createWordSuggest({
+    word: (i) => words()[i] ?? "",
+    accept: (i, word) => {
+      setWord(i, word);
+      if (i < inputs.length - 1) focusSlot(i + 1);
+    },
+  });
   const onKeyDown = (i: number, e: KeyboardEvent & { currentTarget: HTMLInputElement }): void => {
+    if (suggest.onKeyDown(i, e)) return;
     if ((e.key === " " || e.key === "Enter") && i < inputs.length - 1 && e.currentTarget.value.length > 0) {
       e.preventDefault();
       focusSlot(i + 1);
@@ -75,7 +84,11 @@ export function WordSlots(props: {
                 inputs[i] = el;
               }}
               type="text"
-              list="lk-bip39-words-3"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={suggest.expanded(i)}
+              aria-controls={suggest.controls(i)}
+              aria-activedescendant={suggest.activeDescendant(i)}
               value={words()[i] ?? ""}
               classList={{
                 invalid: (words()[i] ?? "").length > 0 && !isBip39Word(words()[i] ?? ""),
@@ -87,16 +100,19 @@ export function WordSlots(props: {
               disabled={props.disabled?.() === true}
               aria-label={t("recovery_phrase.word_label", { position: String(pos()) })}
               placeholder={t("recovery_phrase.word_placeholder", { position: String(pos()) })}
-              onInput={(e) => setWord(i, e.currentTarget.value)}
+              onInput={(e) => {
+                setWord(i, e.currentTarget.value);
+                suggest.onInput();
+              }}
+              onFocus={() => suggest.onFocus(i)}
+              onBlur={() => suggest.onBlur(i)}
               onPaste={onPaste}
               onKeyDown={(e) => onKeyDown(i, e)}
             />
+            <suggest.List slot={i} />
           </label>
         )}
       </Index>
-      <datalist id="lk-bip39-words-3">
-        <Index each={BIP39_ENGLISH}>{(w) => <option value={w()} />}</Index>
-      </datalist>
     </div>
   );
 }

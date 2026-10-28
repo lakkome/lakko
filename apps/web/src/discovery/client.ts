@@ -64,8 +64,6 @@ import type {
   InviteConsumeRequest,
   InviteConsumeResponse,
   InviteFetchResponse,
-  InviteOwnerListRequest,
-  InviteOwnerListResponse,
   InviteRevokeRequest,
   InviteUploadRequest,
   InviteUploadResponse,
@@ -183,49 +181,6 @@ export type ConsumeInviteResult =
  *  — they indicate a buggy client, not a probing attacker. */
 export type RevokeInviteResult =
   | { readonly kind: "revoked" }
-  | { readonly kind: "not-found-or-not-owner" };
-
-/** One row in the [`DiscoveryClient.listInvitesByOwner`]
- *  response — normalised TS view of the wire shape. Field names
- *  are camelCased compared to the snake_case wire; the
- *  `blobIdSlug` is the URL-safe base64 the owner uses to
- *  reconstruct the share URL or feed into
- *  [`DiscoveryClient.revokeInvite`]. */
-export interface ActiveInvite {
-  /** URL-safe base64 (no padding) of the 6-byte ledger id —
-   *  same `/i/<slug>` segment that appears in the share URL.
-   *  Pass through `base64UrlDecodeNoPad` to recover the raw
-   *  bytes when calling `revokeInvite`. */
-  readonly blobIdSlug: string;
-  /** UNIX millis the capability expires at. `0` means never
-   *  expires (the `NEVER_EXPIRES` sentinel). */
-  readonly expiryMs: number;
-  /** Wire-format `max_uses` sentinel: `0` = SINGLE_USE,
-   *  `0xFFFFFFFF` = unlimited, any other N = N consumes
-   *  allowed. */
-  readonly maxUses: number;
-  /** Server-counted consumes. */
-  readonly usedCount: number;
-  /** Owner-supplied free-text label; empty string when not
-   *  set. */
-  readonly label: string;
-  /** `true` if the capability flags the link as a referral
-   *  signup-deep-link (Phase 1.9b4). */
-  readonly bootstrapReferral: boolean;
-  /** RFC 3339 timestamp the server recorded on first upload. */
-  readonly createdAt: string;
-}
-
-/** Result of `DiscoveryClient.listInvitesByOwner`
- *  (Phase 1.18d2b-list). Discriminated so the owner UI can
- *  branch on the well-known 404 — "no identity bundle for this
- *  account_id OR the signature didn't verify" — distinctly
- *  from a clean empty list.
- *
- *  Body-shape failures (bad base64, signed_at_ms outside the
- *  replay window) still throw `DiscoveryHttpError(400, …)`. */
-export type ListInvitesResult =
-  | { readonly kind: "list"; readonly invites: ActiveInvite[] }
   | { readonly kind: "not-found-or-not-owner" };
 
 /** Programmer error — empty / invalid inputs caught before any
@@ -369,25 +324,25 @@ async function decodeServerLedgerId(slug: string, endpoint: string): Promise<Uin
 export interface SealedInviteUpload {
   /** `InviteLinkMint.sealed`. */
   readonly sealed: Uint8Array;
-  /** `InviteLinkMint.issuerPubkey` (32 bytes). */
-  readonly issuerPubkey: Uint8Array;
+  /** The link's own revocation public key (32 bytes, ADR-0078 section 10):
+   *  `wasm.linkRevocationPublicKey(seed)` over a seed drawn for this link
+   *  alone, which the minting device keeps beside the link secret
+   *  (`contacts/minted-links.ts`) and signs a revocation with. */
+  readonly revocationPubkey: Uint8Array;
   /** The capability's `expiry_ms` (`0n` = never expires). */
   readonly expiryMs: bigint;
   /** The `max_uses` sentinel (`0` = single-use, `0xFFFFFFFF` = unlimited). */
   readonly maxUses: number;
-  /** `/i/` only: the label, for the owner's own list. */
-  readonly label?: string;
-  /** `/i/` only: the referral flag, for the owner's own list. */
-  readonly bootstrapReferral?: boolean;
 }
 
 /** Largest sealed blob each ledger stores (the server's column widths, derived
  *  from each codec's `MAX_SEALED_LEN`, ADR-0028 amendment). Checked here so a
  *  misbehaving caller fails before a round trip. `/i/` and `/c/` carry a
  *  `link` reach grant with the owner's mailbox binding (ADR-0060, ADR-0078),
- *  discovery migration 0030; `max-sealed-invite.test.ts` pins `/i/` against
+ *  discovery migration 0030; `/i/` also carries the inviter preview
+ *  (ADR-0079), migration 0031; `max-sealed-invite.test.ts` pins `/i/` against
  *  the longest capability the core composes. */
-export const MAX_SEALED_INVITE_BYTES = 404;
+export const MAX_SEALED_INVITE_BYTES = 693;
 export const MAX_SEALED_CALL_INVITE_BYTES = 4488;
 export const MAX_SEALED_GROUP_INVITE_BYTES = 938;
 
@@ -400,8 +355,8 @@ function requireSealedUpload(upload: SealedInviteUpload, max: number): void {
       `sealed exceeds the ${max}-byte ceiling (got ${upload.sealed.length} bytes)`,
     );
   }
-  if (upload.issuerPubkey.length !== 32) {
-    throw new DiscoveryClientArgError("issuerPubkey must be 32 bytes");
+  if (upload.revocationPubkey.length !== 32) {
+    throw new DiscoveryClientArgError("revocationPubkey must be 32 bytes");
   }
   if (upload.expiryMs < 0n || upload.expiryMs > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new DiscoveryClientArgError("expiryMs out of range");
@@ -413,13 +368,13 @@ function requireSealedUpload(upload: SealedInviteUpload, max: number): void {
 
 function sealedUploadBody(upload: SealedInviteUpload): {
   sealed: string;
-  issuer_pubkey: string;
+  revocation_pubkey: string;
   expiry_ms: number;
   max_uses: number;
 } {
   return {
     sealed: base64Encode(upload.sealed),
-    issuer_pubkey: base64Encode(upload.issuerPubkey),
+    revocation_pubkey: base64Encode(upload.revocationPubkey),
     expiry_ms: Number(upload.expiryMs),
     max_uses: upload.maxUses,
   };
@@ -503,8 +458,8 @@ export class DiscoveryClient {
    * Change this account's `@username` at discovery (ADR-0076): OPRF blind,
    * evaluate, finalize, then `username/replace`. Returns the canonical name
    * and the new certificate. Throws `DiscoveryHttpError`: `409
-   * username-taken`, `409 no-username`, `429 rename-too-soon` (with
-   * `retry_after_secs` in the body).
+   * username-taken`, `409 no-username`. There is no minimum interval between
+   * renames (ADR-0076, amended 2026-10-26).
    *
    * A rename takes the account out of Everyone at the server; the caller's
    * publishers put it back.
@@ -605,7 +560,7 @@ export class DiscoveryClient {
     const url = `${this.baseUrl}${endpoint}`;
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await sessionFetch(url, {
         method: "DELETE",
         headers: {
           "content-type": "application/json",
@@ -635,7 +590,7 @@ export class DiscoveryClient {
     const url = `${this.baseUrl}${endpoint}`;
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await sessionFetch(url, {
         method: "DELETE",
         headers: {
           "content-type": "application/json",
@@ -652,8 +607,10 @@ export class DiscoveryClient {
   }
 
   /** A3 (GDPR erasure) — `DELETE /discovery/account`. Purges this account's
-   *  discovery footprint (username binding, identity bundle, KeyPackage, owned
-   *  invites). Bearer-auth; the server keys the purge on the verified session
+   *  discovery footprint (username binding, identity bundle, KeyPackage).
+   *  Invite rows name no owner (ADR-0078 section 10): the deleting client
+   *  revokes its live links first (`contacts/minted-links.ts`
+   *  `revokeAllMintedLinks`). Bearer-auth; the server keys the purge on the verified session
    *  token's account_id, so the caller can only erase their own. Idempotent
    *  (204). */
   async deleteAccount(): Promise<void> {
@@ -661,7 +618,7 @@ export class DiscoveryClient {
     const url = `${this.baseUrl}${endpoint}`;
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await sessionFetch(url, {
         method: "DELETE",
         headers: { ...this.authHeaders() },
       });
@@ -671,39 +628,6 @@ export class DiscoveryClient {
     if (response.status === 204) return;
     const text = await safeReadBody(response);
     throw new DiscoveryHttpError(response.status, `${endpoint} (DELETE)`, text);
-  }
-
-  /** Wire-level `POST /discovery/invite/by-owner` (Phase
-   *  1.18d2b-list). Returns the raw wire response on 200,
-   *  `null` on 404, throws `DiscoveryHttpError` on any other
-   *  non-2xx. The session-token middleware is the DoS gate;
-   *  the body signature is the actual ownership proof — see
-   *  the high-level [`listInvitesByOwner`] wrapper for the
-   *  ergonomic API. */
-  async inviteOwnerList(
-    req: InviteOwnerListRequest,
-  ): Promise<InviteOwnerListResponse | null> {
-    const endpoint = "/discovery/invite/by-owner";
-    const url = `${this.baseUrl}${endpoint}`;
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...this.authHeaders(),
-        },
-        body: JSON.stringify(req),
-      });
-    } catch (err) {
-      throw new DiscoveryNetworkError(`${endpoint} (POST)`, err);
-    }
-    if (response.status === 404) return null;
-    if (!response.ok) {
-      const text = await safeReadBody(response);
-      throw new DiscoveryHttpError(response.status, `${endpoint} (POST)`, text);
-    }
-    return (await response.json()) as InviteOwnerListResponse;
   }
 
   /**
@@ -928,7 +852,7 @@ export class DiscoveryClient {
    *        binding. Supplied by the signup + fresh-start-mint callers
    *        (where a new key is published). Omit on a routine same-key
    *        re-upload — the log append is idempotent there.
-   * @param keyResetAttest  ADR-0073: the raw 177-byte key-reset attestation
+   * @param keyResetAttest  ADR-0073: the raw 145-byte key-reset attestation
    *        (from `AuthClient.resetAccountKeys`) or a pre-base64'd string
    *        (standard alphabet). Supplied ONLY by the key-reset publish; it is
    *        what lets discovery accept a changed key without a supersession
@@ -1147,11 +1071,7 @@ export class DiscoveryClient {
    */
   async uploadInvite(upload: SealedInviteUpload): Promise<Uint8Array> {
     requireSealedUpload(upload, MAX_SEALED_INVITE_BYTES);
-    const resp = await this.inviteUpload({
-      ...sealedUploadBody(upload),
-      label: upload.label ?? "",
-      bootstrap_referral: upload.bootstrapReferral ?? false,
-    });
+    const resp = await this.inviteUpload(sealedUploadBody(upload));
     return decodeServerLedgerId(resp.blob_id, "/discovery/invite");
   }
 
@@ -1457,9 +1377,8 @@ export class DiscoveryClient {
   }
 
   /**
-   * Owner-signed revocation of an invite blob (Phase 1.18d2b-web).
-   *
-   * Driven by the same Ed25519 key that signed the capability:
+   * Revocation of an invite blob (Phase 1.18d2b-web), signed by the link's
+   * own revocation key (ADR-0078 section 10):
    * `wasm.signInviteRevocation(seed, blobId, signedAtMs)`
    * builds the canonical bytes (`REVOKE_DOMAIN_V1 || blob_id ||
    * signed_at_ms_be`) and signs. We POST `signed_at_ms +
@@ -1483,8 +1402,8 @@ export class DiscoveryClient {
    *
    * @param blobId      Raw 6-byte ledger id (the
    *                    same value `uploadInvite` returned).
-   * @param signingSeed The owner's 32-byte Ed25519 seed —
-   *                    typically `chats.identity().ed25519Seed`.
+   * @param signingSeed The link's 32-byte revocation seed, kept by the
+   *                    device that minted it (`contacts/minted-links.ts`).
    */
   async revokeInvite(
     blobId: Uint8Array,
@@ -1546,8 +1465,8 @@ export class DiscoveryClient {
    *
    * @param blobId      Raw 6-byte ledger id (the
    *                    same value `uploadCallInvite` returned).
-   * @param signingSeed The owner's 32-byte Ed25519 seed —
-   *                    typically `chats.identity().ed25519Seed`.
+   * @param signingSeed The link's 32-byte revocation seed, kept by the
+   *                    device that minted it (`contacts/minted-links.ts`).
    */
   async revokeCallInvite(
     blobId: Uint8Array,
@@ -1588,7 +1507,7 @@ export class DiscoveryClient {
     const url = `${this.baseUrl}${endpoint}`;
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await sessionFetch(url, {
         method: "DELETE",
         headers: {
           "content-type": "application/json",
@@ -1604,11 +1523,11 @@ export class DiscoveryClient {
     throw new DiscoveryHttpError(response.status, `${endpoint} (DELETE)`, text);
   }
 
-  /** ADR-0028 revoke — issuer-signed delete of a group-invite blob. Signs the
-   *  group-invite revoke canonical bytes with `signingSeed` (the issuer's
-   *  ed25519 seed) and DELETEs the ledger row; the server verifies against the
-   *  stored capability's issuer pubkey. 404 folds into `not-found-or-not-owner`
-   *  (a wrong signer / already-deleted row). */
+  /** ADR-0028 revoke — delete of a group-invite blob. Signs the group-invite
+   *  revoke canonical bytes with `signingSeed` (the link's own revocation
+   *  seed, ADR-0078 section 10) and DELETEs the ledger row; the server
+   *  verifies against the stored revocation public key. 404 folds into
+   *  `not-found-or-not-owner` (a wrong signer / already-deleted row). */
   async revokeGroupInvite(
     blobId: Uint8Array,
     signingSeed: Uint8Array,
@@ -1637,83 +1556,6 @@ export class DiscoveryClient {
       }
       throw err;
     }
-  }
-
-  /**
-   * Owner-signed list of every live invite this account owns
-   * (Phase 1.18d2b-list).
-   *
-   * Driven by the same Ed25519 key that signed every
-   * `InviteCapability` the owner has uploaded. The canonical
-   * bytes (`OWNER_LIST_DOMAIN_V1 || owner_account_id ||
-   * signed_at_ms_be`) are signed via
-   * `wasm.signOwnerListQuery`; server resolves the verifying
-   * key from `identity_bundles.signature_pubkey` for the
-   * supplied `account_id` and verifies before returning rows.
-   *
-   * Distinct domain separator from
-   * [`signInviteRevocation`] ensures a captured revoke
-   * signature can't be replayed against this endpoint.
-   *
-   * Replay window: server enforces `±10 min` against its own
-   * clock — same constant as the revoke flow.
-   *
-   * Returns a discriminated [`ListInvitesResult`]:
-   *   * `"list"` with the parsed rows on 200 (empty array
-   *     when the owner has no live invites — distinct from a
-   *     malformed-request failure)
-   *   * `"not-found-or-not-owner"` on 404 (server folds "no
-   *     identity bundle for `account_id`" / "signature
-   *     mismatch" / "stored pubkey malformed" into one
-   *     status to deny status-code probing)
-   *
-   * Other non-2xx still throw `DiscoveryHttpError`.
-   *
-   * @param accountId    The owner's 16-byte UUIDv7 account_id
-   *                     (matches `IdentitySecrets.accountId`).
-   * @param signingSeed  The owner's 32-byte Ed25519 seed —
-   *                     typically `chats.identity().ed25519Seed`.
-   */
-  async listInvitesByOwner(
-    accountId: Uint8Array,
-    signingSeed: Uint8Array,
-  ): Promise<ListInvitesResult> {
-    if (accountId.length !== 16) {
-      throw new DiscoveryClientArgError("accountId must be 16 bytes");
-    }
-    if (signingSeed.length !== 32) {
-      throw new DiscoveryClientArgError("signingSeed must be 32 bytes");
-    }
-
-    const wasm = await loadWasm();
-    // Bind the timestamp once so the wire body's `signed_at_ms`
-    // matches the canonical bytes we just signed — same
-    // single-source pattern as `revokeInvite`.
-    const signedAtMs = Date.now();
-    const signature = wasm.signOwnerListQuery(
-      signingSeed,
-      accountId,
-      BigInt(signedAtMs),
-    );
-
-    const raw = await this.inviteOwnerList({
-      owner_account_id: base64Encode(accountId),
-      signed_at_ms: signedAtMs,
-      signature: base64Encode(signature),
-    });
-    if (raw === null) {
-      return { kind: "not-found-or-not-owner" };
-    }
-    const invites = raw.invites.map((row) => ({
-      blobIdSlug: row.blob_id_slug,
-      expiryMs: row.expiry_ms,
-      maxUses: row.max_uses,
-      usedCount: row.used_count,
-      label: row.label,
-      bootstrapReferral: row.bootstrap_referral,
-      createdAt: row.created_at,
-    }));
-    return { kind: "list", invites };
   }
 
   /**

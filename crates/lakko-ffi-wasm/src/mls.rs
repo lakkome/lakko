@@ -1027,6 +1027,14 @@ pub struct Group {
     inner: Mutex<MlsGroup>,
 }
 
+impl Group {
+    /// The core group, for sibling modules that verify against its roster
+    /// (ADR-0078 call peer announcements). Crate-private on purpose.
+    pub(crate) const fn mls_group(&self) -> &Mutex<MlsGroup> {
+        &self.inner
+    }
+}
+
 #[wasm_bindgen]
 impl Group {
     /// Create a fresh group with `identity` as the founding member and the
@@ -1230,6 +1238,75 @@ impl Group {
         group::encode_message(&commit).map_err(mls_err)
     }
 
+    /// ADR-0081 staged twin of [`Self::add_member`]: the same commit and
+    /// Welcome, but the group stays at epoch N holding the commit as pending,
+    /// exactly as [`Self::stage_pending_proposals`] leaves a sweep. Record it
+    /// durably, send it with `dsStagedAccessSigner`, then `mergeStagedSweep`
+    /// on the Delivery Service's acceptance or `abandonStagedSweep` on its
+    /// `409`. While it is staged every membership operation throws the
+    /// `sweepAlreadyStaged` refusal. The staged commit is persisted with the
+    /// group, so it survives `snapshotStorage` and a reload.
+    ///
+    /// No client calls the staged twins today: the ADR-0081 amendment of
+    /// 2026-10-19 deleted the direct-commit paths for ordinary groups.
+    #[wasm_bindgen(js_name = stageAddMember)]
+    pub fn stage_add_member(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<AddMember, JsValue> {
+        self.stage_add_members_inner(identity, &[key_package])
+    }
+
+    /// The several-leaf form of [`Self::stage_add_member`] (one commit, one
+    /// Welcome; see [`Self::add_members`]). `keyPackages` is a `Uint8Array[]`.
+    #[wasm_bindgen(js_name = stageAddMembers)]
+    pub fn stage_add_members(
+        &self,
+        identity: &Identity,
+        key_packages: Vec<js_sys::Uint8Array>,
+    ) -> Result<AddMember, JsValue> {
+        let owned: Vec<Vec<u8>> = key_packages.into_iter().map(|a| a.to_vec()).collect();
+        let borrowed: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+        self.stage_add_members_inner(identity, &borrowed)
+    }
+
+    fn stage_add_members_inner(
+        &self,
+        identity: &Identity,
+        key_packages: &[&[u8]],
+    ) -> Result<AddMember, JsValue> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        let MemberAddition { commit, welcome } = g
+            .stage_add_members_from_wire(&identity.inner, key_packages)
+            .map_err(mls_err)?;
+        Ok(AddMember {
+            commit_bytes: group::encode_message(&commit).map_err(mls_err)?,
+            welcome_bytes: group::encode_message(&welcome).map_err(mls_err)?,
+        })
+    }
+
+    /// [`Self::remove_member`], staged (ADR-0081; see
+    /// [`Self::stage_add_member`]). Returns the commit to send.
+    #[wasm_bindgen(js_name = stageRemoveMember)]
+    pub fn stage_remove_member(
+        &self,
+        identity: &Identity,
+        leaf_index: u32,
+    ) -> Result<Vec<u8>, JsValue> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        let commit = g
+            .stage_remove_member(&identity.inner, lakko_mls::LeafNodeIndex::new(leaf_index))
+            .map_err(mls_err)?;
+        group::encode_message(&commit).map_err(mls_err)
+    }
+
     /// Encrypt an application payload for the current epoch.
     #[wasm_bindgen(js_name = createApplicationMessage)]
     pub fn create_application_message(
@@ -1327,6 +1404,24 @@ impl Group {
     ) -> Result<Vec<u8>, JsValue> {
         self.set_group_roles_core(identity, owner, admins_flat)
             .map_err(MlsFailure::into_js)
+    }
+
+    /// [`Self::set_group_roles`], staged (ADR-0081; see
+    /// [`Self::stage_add_member`]). Returns the commit to send.
+    #[wasm_bindgen(js_name = stageSetGroupRoles)]
+    pub fn stage_set_group_roles(
+        &self,
+        identity: &Identity,
+        owner: &[u8],
+        admins_flat: &[u8],
+    ) -> Result<Vec<u8>, JsValue> {
+        let table = role_table_from_flat(owner, admins_flat)
+            .map_err(MlsFailure::from)
+            .map_err(MlsFailure::into_js)?;
+        self.locked()
+            .map_err(MlsFailure::into_js)?
+            .stage_set_group_roles(&identity.inner, &table)
+            .map_err(mls_err)
     }
 
     /// **Propose** adding a member from their published KeyPackage — the
@@ -2189,6 +2284,48 @@ impl PublisherGroup {
         }
     }
 
+    /// ADR-0028 OQ3 / ADR-0081 amendment (2026-10-19) — join a PublisherGroup
+    /// as a co-publisher from the owner's Welcome. A PublisherGroup carries no
+    /// role table, so `Group.joinFromWelcome` refuses its Welcome
+    /// (`noRoleTable`); this is its entry point. A Welcome for another group
+    /// than `groupId`, or a conversation's Welcome, is refused before anything
+    /// is written. The joined state persists in `identity`'s provider
+    /// (`loadJoined` reopens it).
+    #[wasm_bindgen(js_name = joinFromWelcome)]
+    pub fn join_from_welcome(
+        identity: &Identity,
+        welcome: &[u8],
+        group_id: &[u8],
+        channel_id: &[u8],
+    ) -> Result<PublisherGroup, JsValue> {
+        let cid = MlsChannelId::try_from_slice(channel_id).map_err(mls_err)?;
+        let inner = MlsPublisherGroup::join_from_welcome(&identity.inner, welcome, group_id, &cid)
+            .map_err(mls_err)?;
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+
+    /// ADR-0028 OQ3 / ADR-0078 section 6 — open a PublisherGroup this identity
+    /// JOINED as a co-publisher, under the `group_id` its `/g/` capability
+    /// conveyed and the `channel_id` that link's sealed preview carried (a
+    /// co-publisher cannot derive the owner's id). `undefined` when nothing is
+    /// stored there; never creates.
+    #[wasm_bindgen(js_name = loadJoined)]
+    pub fn load_joined(
+        identity: &Identity,
+        group_id: &[u8],
+        channel_id: &[u8],
+    ) -> Result<Option<PublisherGroup>, JsValue> {
+        let cid = MlsChannelId::try_from_slice(channel_id).map_err(mls_err)?;
+        match MlsPublisherGroup::load_joined(&identity.inner, group_id, &cid).map_err(mls_err)? {
+            Some(inner) => Ok(Some(Self {
+                inner: Mutex::new(inner),
+            })),
+            None => Ok(None),
+        }
+    }
+
     /// Load-or-create convenience. Returns the persisted
     /// PublisherGroup for `(identity, channel_id)` if one
     /// exists; otherwise mints a fresh one and persists it
@@ -2276,6 +2413,20 @@ impl PublisherGroup {
         crate::ds_proof::group_signer(g.inner(), &identity.inner)
     }
 
+    /// ADR-0081 - the 32-byte access seed of the current epoch, to record
+    /// with a commit before it merges (a rotation, an approve) so a re-send
+    /// after a reload can prove the epoch the commit left
+    /// (`DsProofSigner.forGroup`). Keep it only in the device-key-encrypted
+    /// record of that commit.
+    #[wasm_bindgen(js_name = dsAccessSeed)]
+    pub fn ds_access_seed(&self, identity: &Identity) -> Result<Vec<u8>, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        crate::ds_proof::group_access_seed(g.inner(), &identity.inner)
+    }
+
     /// ADR-0028 OQ3 — the underlying MLS `group_id`. A co-publisher invite-link
     /// is minted over this; the joiner targets it when crafting its
     /// external-join proposal.
@@ -2286,6 +2437,18 @@ impl PublisherGroup {
             .lock()
             .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.group_id())
+    }
+
+    /// The current MLS epoch (`bigint`). G-50: a PublisherGroup commit's
+    /// durable record names the epoch it moved the group to, and a restart
+    /// compares it with this.
+    #[wasm_bindgen(js_name = epoch)]
+    pub fn epoch(&self) -> Result<u64, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        Ok(g.epoch())
     }
 
     /// Process one row read from this journal's **knock** queue (ADR-0053).
@@ -2411,14 +2574,19 @@ impl PublisherGroup {
     }
 }
 
-/// ADR-0028 OQ3 — recover the 16-byte channel id from a PublisherGroup
-/// `group_id` (the inverse of the deterministic derivation). Returns
-/// `undefined` for bytes that do not carry the publisher-group prefix. A
-/// co-publisher uses this after joining via a `/g/` ticket — which conveys only
-/// the `group_id` — to reconstruct the channel + derive its content-key seed.
-#[wasm_bindgen(js_name = channelIdFromPublisherGroupId)]
-pub fn channel_id_from_publisher_group_id(group_id: &[u8]) -> Option<Vec<u8>> {
-    lakko_mls::channel_id_from_group_id(group_id).map(|c| c.as_bytes().to_vec())
+/// ADR-0078 section 6 — the PublisherGroup id the account whose identity is
+/// `ownerIdentity` derives for `channelId`
+/// (`BLAKE3-derive-key("lakko/pubgrp/id/v3", owner_seed || channel_id)`).
+#[wasm_bindgen(js_name = publisherGroupIdFor)]
+pub fn publisher_group_id_for(
+    owner_identity: &Identity,
+    channel_id: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    let cid = MlsChannelId::try_from_slice(channel_id).map_err(mls_err)?;
+    Ok(
+        lakko_mls::publisher_group_id_for(&owner_identity.inner.ed25519_seed_bytes(), &cid)
+            .to_vec(),
+    )
 }
 
 // ============================================================================
@@ -2436,7 +2604,8 @@ pub fn channel_id_from_publisher_group_id(group_id: &[u8]) -> Option<Vec<u8>> {
 ///   * `addDeviceFromWire` — add a fresh device by its
 ///     KeyPackage; returns the (commit, welcome) pair.
 ///   * `groupId` — the deterministic
-///     `BLAKE3("lakko-device-group/v1" || account_id)`.
+///     `BLAKE3-derive-key("lakko/device-group/id/v2", account_seed)`
+///     (ADR-0078 section 6).
 ///
 /// 2a3c widens this with `devices` + `removeDevice` once the
 /// per-platform UI lands.
@@ -2445,43 +2614,115 @@ pub struct DeviceGroup {
     inner: Mutex<MlsDeviceGroup>,
 }
 
+/// ADR-0081 amendment — the DeviceGroup self-removal proof: a device that
+/// lost its DeviceGroup state signs, with its OLD leaf key (`oldIdentity`,
+/// the device identity it still holds), that in the DeviceGroup `groupId` its
+/// leaf may be replaced by the KeyPackage `replacementKeyPackage` in the
+/// commit that leaves `epoch` (the journal's latest epoch, from a knock
+/// probe). A fixed 137-byte blob carried with the knock; the admitting
+/// sibling puts it in the removal-authorisation slot of the replacement
+/// commit's envelope.
+#[wasm_bindgen(js_name = signDeviceGroupSelfRemoval)]
+pub fn sign_device_group_self_removal(
+    old_identity: &Identity,
+    group_id: &[u8],
+    epoch: u64,
+    replacement_key_package: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    lakko_mls::sign_self_removal(
+        &old_identity.inner,
+        group_id,
+        epoch,
+        replacement_key_package,
+    )
+    .map_err(mls_err)
+}
+
+/// ADR-0081 amendment — would `proof` cover replacing the leaf
+/// `removedSignaturePubkey` by `keyPackage` in the DeviceGroup `groupId`, in a
+/// commit leaving `epoch` (the sibling's current epoch)? The admitting
+/// sibling's check BEFORE it builds the replacement commit.
+/// `identity` supplies the crypto provider. Malformed input answers `false`.
+#[wasm_bindgen(js_name = deviceGroupSelfRemovalCovers)]
+#[must_use]
+pub fn device_group_self_removal_covers(
+    identity: &Identity,
+    proof: &[u8],
+    group_id: &[u8],
+    epoch: u64,
+    removed_signature_pubkey: &[u8],
+    key_package: &[u8],
+) -> bool {
+    lakko_mls::self_removal::covers_key_package(
+        &identity.inner,
+        proof,
+        group_id,
+        epoch,
+        removed_signature_pubkey,
+        key_package,
+    )
+}
+
+/// The wire length of a DeviceGroup self-removal proof (137).
+#[wasm_bindgen(js_name = deviceGroupSelfRemovalProofLen)]
+#[must_use]
+pub fn device_group_self_removal_proof_len() -> u32 {
+    u32::try_from(lakko_mls::SELF_REMOVAL_PROOF_LEN).unwrap_or(u32::MAX)
+}
+
 #[wasm_bindgen]
 impl DeviceGroup {
     /// Bootstrap a fresh DeviceGroup with `identity` as the
     /// founding leaf. `account_id` MUST be the raw 16-byte
-    /// UUIDv7.
+    /// UUIDv7 (removal attestations bind to it); the group id is derived
+    /// from `accountIdentity`'s seed (`deviceGroupIdFor`).
     #[wasm_bindgen(js_name = createFounder)]
-    pub fn create_founder(identity: &Identity, account_id: &[u8]) -> Result<DeviceGroup, JsValue> {
-        if account_id.len() != 16 {
-            return Err(js_error("account_id must be 16 bytes"));
-        }
-        let mut acct = [0u8; 16];
-        acct.copy_from_slice(account_id);
-        let inner = MlsDeviceGroup::create_founder(&identity.inner, &acct).map_err(mls_err)?;
+    pub fn create_founder(
+        identity: &Identity,
+        account_id: &[u8],
+        account_identity: &Identity,
+    ) -> Result<DeviceGroup, JsValue> {
+        let acct = account_id_16(account_id)?;
+        let inner = MlsDeviceGroup::create_founder(
+            &identity.inner,
+            &acct,
+            &account_identity.inner.ed25519_seed_bytes(),
+        )
+        .map_err(mls_err)?;
         Ok(Self {
             inner: Mutex::new(inner),
         })
     }
 
     /// Join a DeviceGroup from a Welcome the scanner device
-    /// produced via [`DeviceGroup::addDeviceFromWire`]. The
-    /// deterministic `group_id` check inside
-    /// `lakko_mls::DeviceGroup::join_from_welcome` rejects a
-    /// misrouted Welcome before any state advance.
+    /// produced via [`DeviceGroup::addDeviceFromWire`]. Binds nothing about
+    /// the group id (ADR-0078 section 6): the joiner holds no account seed
+    /// yet; the recovery row opened under this group's exporter binds it.
     #[wasm_bindgen(js_name = joinFromWelcome)]
     pub fn join_from_welcome(
         welcome: &[u8],
         identity: &Identity,
         account_id: &[u8],
     ) -> Result<DeviceGroup, JsValue> {
-        if account_id.len() != 16 {
-            return Err(js_error("account_id must be 16 bytes"));
-        }
-        let mut acct = [0u8; 16];
-        acct.copy_from_slice(account_id);
+        let acct = account_id_16(account_id)?;
         let inner =
             MlsDeviceGroup::join_from_welcome(welcome, &identity.inner, &acct).map_err(mls_err)?;
         Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+
+    /// ADR-0056 join by name / ADR-0081 amendment (2026-10-19) - join a
+    /// DeviceGroup Welcome before the account is known. `Group.joinFromWelcome`
+    /// refuses a DeviceGroup Welcome (it carries no role table), so the by-name
+    /// flow joins here: the group is persisted and handed back as a plain
+    /// `Group` (its exporter opens the recovery row) for `loadDeviceGroupById` to
+    /// adopt. A conversation's Welcome is refused.
+    #[wasm_bindgen(js_name = joinWelcomeByName)]
+    pub fn join_welcome_by_name(welcome: &[u8], identity: &Identity) -> Result<Group, JsValue> {
+        let inner = MlsDeviceGroup::join_welcome_before_account(welcome, &identity.inner)
+            .map_err(mls_err)?;
+        Ok(Group {
             inner: Mutex::new(inner),
         })
     }
@@ -2525,8 +2766,8 @@ impl DeviceGroup {
         crate::ds_proof::group_signer(g.as_group(), &identity.inner)
     }
 
-    /// The deterministic `group_id` this DeviceGroup is bound
-    /// to. Same value `deviceGroupIdFor(account_id)` returns.
+    /// The `group_id` of this DeviceGroup (its DS journal id): for a founded
+    /// group, what `deviceGroupIdFor(accountIdentity)` returns.
     #[wasm_bindgen(js_name = groupId)]
     pub fn group_id(&self) -> Result<Vec<u8>, JsValue> {
         let g = self
@@ -2534,6 +2775,18 @@ impl DeviceGroup {
             .lock()
             .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.group_id())
+    }
+
+    /// The DeviceGroup's current MLS epoch (`bigint`). ADR-0079: the
+    /// journal readability rule asks whether the group moved past a commit
+    /// row's epoch after the row.
+    #[wasm_bindgen(js_name = epoch)]
+    pub fn epoch(&self) -> Result<u64, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        Ok(g.as_group().epoch())
     }
 
     /// Snapshot of every device leaf currently in the
@@ -2613,6 +2866,59 @@ impl DeviceGroup {
             .map_err(|_| js_error("internal lock poisoned"))?;
         g.remove_device_at(&identity.inner, leaf_index)
             .map_err(mls_err)
+    }
+
+    /// ADR-0081 amendment — replace the device at `leafIndex` by the device
+    /// whose KeyPackage is `keyPackage`, in ONE commit (a remove and an add):
+    /// the commit a sibling builds to readmit a device that lost its
+    /// DeviceGroup state. Under the attested-removal policy peers accept the
+    /// removal when the rejoining device's self-removal proof for this
+    /// KeyPackage (`signDeviceGroupSelfRemoval`) travels in the envelope's
+    /// removal-authorisation slot. Merges eagerly, like the other DeviceGroup
+    /// commits.
+    #[wasm_bindgen(js_name = replaceDeviceAt)]
+    pub fn replace_device_at(
+        &self,
+        identity: &Identity,
+        leaf_index: u32,
+        key_package: &[u8],
+    ) -> Result<AddMember, JsValue> {
+        self.replace_device_at_inner(identity, leaf_index, key_package)
+    }
+
+    /// ADR-0081 amendment — `true` when a device leaf carries the leaf node
+    /// of `keyPackage`: a rejoin knock with it was already admitted (the
+    /// roster's keys cannot tell, the replaced leaf has the same key).
+    #[wasm_bindgen(js_name = containsLeafOfKeyPackage)]
+    pub fn contains_leaf_of_key_package(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<bool, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        Ok(g.contains_leaf_of_key_package(&identity.inner, key_package))
+    }
+
+    fn replace_device_at_inner(
+        &self,
+        identity: &Identity,
+        leaf_index: u32,
+        key_package: &[u8],
+    ) -> Result<AddMember, JsValue> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        let MemberAddition { commit, welcome } = g
+            .replace_device_at(&identity.inner, leaf_index, key_package)
+            .map_err(mls_err)?;
+        Ok(AddMember {
+            commit_bytes: group::encode_message(&commit).map_err(mls_err)?,
+            welcome_bytes: group::encode_message(&welcome).map_err(mls_err)?,
+        })
     }
 
     /// Derive the per-pairing history-bundle exporter secret
@@ -3983,23 +4289,44 @@ pub fn remove_device_action_hash(removed_signature_pubkey: &[u8]) -> Vec<u8> {
     lakko_mls::device_group::remove_device_action_hash(removed_signature_pubkey).to_vec()
 }
 
-/// Compute the deterministic DeviceGroup `group_id` from an
-/// account_id, without constructing a `DeviceGroup` handle.
-/// Useful on the joining-device side when polling the DS
-/// journal for catch-up Commits before any Welcome has been
-/// processed.
-#[wasm_bindgen(js_name = deviceGroupIdFor)]
-pub fn device_group_id_for(account_id: &[u8]) -> Result<Vec<u8>, JsValue> {
-    if account_id.len() != 16 {
-        return Err(js_error("account_id must be 16 bytes"));
-    }
-    let mut acct = [0u8; 16];
-    acct.copy_from_slice(account_id);
-    Ok(MlsDeviceGroup::group_id_for(&acct))
+fn account_id_16(account_id: &[u8]) -> Result<[u8; 16], JsValue> {
+    account_id
+        .try_into()
+        .map_err(|_| js_error("account_id must be 16 bytes"))
 }
 
-/// Load an existing DeviceGroup for `account_id` from
-/// `identity`'s MLS provider storage. Pair with
+/// The deterministic DeviceGroup `group_id` of the account whose identity is
+/// `accountIdentity` (ADR-0078 section 6):
+/// `BLAKE3-derive-key("lakko/device-group/id/v2", account_seed)`. Pass the
+/// account identity the conversation leaves are bound to (the oldest own
+/// predecessor after a rotation, else the current one). Not computable from
+/// the account id.
+#[wasm_bindgen(js_name = deviceGroupIdFor)]
+#[must_use]
+pub fn device_group_id_for(account_identity: &Identity) -> Vec<u8> {
+    MlsDeviceGroup::group_id_for(&account_identity.inner.ed25519_seed_bytes())
+}
+
+/// Load the DeviceGroup stored under `groupId`: one this device joined from a
+/// Welcome before it held the account seed. `undefined` when nothing is
+/// stored there.
+#[wasm_bindgen(js_name = loadDeviceGroupById)]
+pub fn load_device_group_by_id(
+    identity: &Identity,
+    account_id: &[u8],
+    group_id: &[u8],
+) -> Result<Option<DeviceGroup>, JsValue> {
+    let acct = account_id_16(account_id)?;
+    match MlsDeviceGroup::load_by_group_id(&identity.inner, &acct, group_id).map_err(mls_err)? {
+        Some(inner) => Ok(Some(DeviceGroup {
+            inner: Mutex::new(inner),
+        })),
+        None => Ok(None),
+    }
+}
+
+/// Load the DeviceGroup of the account whose identity is `accountIdentity`
+/// from `identity`'s MLS provider storage. Pair with
 /// `Identity.restoreStorage` on app startup: restore the
 /// snapshot first, then call this to get the live handle.
 ///
@@ -4015,13 +4342,16 @@ pub fn device_group_id_for(account_id: &[u8]) -> Result<Vec<u8>, JsValue> {
 pub fn load_device_group(
     identity: &Identity,
     account_id: &[u8],
+    account_identity: &Identity,
 ) -> Result<Option<DeviceGroup>, JsValue> {
-    if account_id.len() != 16 {
-        return Err(js_error("account_id must be 16 bytes"));
-    }
-    let mut acct = [0u8; 16];
-    acct.copy_from_slice(account_id);
-    match MlsDeviceGroup::load(&identity.inner, &acct).map_err(mls_err)? {
+    let acct = account_id_16(account_id)?;
+    match MlsDeviceGroup::load(
+        &identity.inner,
+        &acct,
+        &account_identity.inner.ed25519_seed_bytes(),
+    )
+    .map_err(mls_err)?
+    {
         Some(inner) => Ok(Some(DeviceGroup {
             inner: Mutex::new(inner),
         })),
@@ -4061,6 +4391,8 @@ pub struct ParsedCallSignaling {
     leaf_index_val: u32,
     initiator_leaf_val: u32,
     joined_at_ms_val: u64,
+    // ADR-0083 — the one-to-one screen-share state.
+    screen_share_state_val: Vec<u8>,
 }
 
 const CALL_KIND_OFFER: &str = "offer";
@@ -4070,6 +4402,7 @@ const CALL_KIND_END: &str = "end";
 const CALL_KIND_GROUP_START: &str = "groupStart";
 const CALL_KIND_GROUP_JOIN: &str = "groupJoin";
 const CALL_KIND_GROUP_LEAVE: &str = "groupLeave";
+const CALL_KIND_SCREEN_SHARE: &str = "screenShare";
 
 #[wasm_bindgen]
 impl ParsedCallSignaling {
@@ -4159,6 +4492,13 @@ impl ParsedCallSignaling {
     #[wasm_bindgen(getter, js_name = joinedAtMs)]
     pub fn joined_at_ms(&self) -> u64 {
         self.joined_at_ms_val
+    }
+
+    /// `screenShare` only: the signed share state (ADR-0083); verify it
+    /// with `verifyCallScreenShare` against the MLS sender's leaf.
+    #[wasm_bindgen(getter, js_name = screenShareState)]
+    pub fn screen_share_state(&self) -> Vec<u8> {
+        self.screen_share_state_val.clone()
     }
 }
 
@@ -4288,6 +4628,20 @@ pub fn compose_group_call_leave_signaling(
     lakko_calls::compose_signaling_payload(&body).map_err(calls_err)
 }
 
+/// Compose a one-to-one `ScreenShare` call signal (ADR-0083) carrying
+/// `state`, the output of `composeCallScreenShare`.
+#[wasm_bindgen(js_name = composeCallScreenShareSignaling)]
+pub fn compose_call_screen_share_signaling(
+    call_id: &[u8],
+    state: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    let body = lakko_calls::SignalingBody::ScreenShare {
+        call_id: take_call_id(call_id)?,
+        state: state.to_vec(),
+    };
+    lakko_calls::compose_signaling_payload(&body).map_err(calls_err)
+}
+
 /// Parse plaintext bytes (the `Application` payload from
 /// `processIncoming`) into a typed
 /// [`ParsedCallSignaling`] (Phase 3a3).
@@ -4308,6 +4662,7 @@ pub fn parse_call_signaling(plaintext: &[u8]) -> Result<ParsedCallSignaling, JsV
         leaf_index_val: 0,
         initiator_leaf_val: 0,
         joined_at_ms_val: 0,
+        screen_share_state_val: Vec::new(),
     };
     match body {
         lakko_calls::SignalingBody::Offer {
@@ -4377,6 +4732,11 @@ pub fn parse_call_signaling(plaintext: &[u8]) -> Result<ParsedCallSignaling, JsV
             out.call_id_val = call_id.to_vec();
             out.leaf_index_val = leaf_index;
             out.end_reason_val = end_reason_str(reason);
+        },
+        lakko_calls::SignalingBody::ScreenShare { call_id, state } => {
+            out.kind_val = CALL_KIND_SCREEN_SHARE;
+            out.call_id_val = call_id.to_vec();
+            out.screen_share_state_val = state;
         },
     }
     Ok(out)
@@ -4566,8 +4926,8 @@ pub fn sframe_open_with_overlap(
 pub struct ParsedCallJwt {
     iss_val: String,
     aud_val: String,
-    sub_val: String,
-    call_id_val: String,
+    room_val: String,
+    peer_id_val: String,
     role_val: &'static str,
     iat_val: u64,
     exp_val: u64,
@@ -4586,8 +4946,8 @@ fn claims_to_parsed(claims: lakko_call_jwt::CallJwtClaims, kid: String) -> Parse
     ParsedCallJwt {
         iss_val: claims.iss,
         aud_val: claims.aud,
-        sub_val: claims.sub,
-        call_id_val: claims.call_id,
+        room_val: claims.room,
+        peer_id_val: claims.peer_id,
         role_val: role_str(claims.role),
         iat_val: claims.iat,
         exp_val: claims.exp,
@@ -4611,16 +4971,19 @@ impl ParsedCallJwt {
     pub fn aud(&self) -> String {
         self.aud_val.clone()
     }
-    /// account_id, 32-char lower-case hex.
+    /// The room the token admits to: 64-char lower-case hex (ADR-0078
+    /// section 2; never the call id, never an account).
     #[wasm_bindgen(getter)]
-    pub fn sub(&self) -> String {
-        self.sub_val.clone()
+    pub fn room(&self) -> String {
+        self.room_val.clone()
     }
-    /// call_id, 32-char lower-case hex.
-    #[wasm_bindgen(getter, js_name = callId)]
-    pub fn call_id(&self) -> String {
-        self.call_id_val.clone()
+
+    /// The SFU peer id the token admits as: 32-char lower-case hex.
+    #[wasm_bindgen(getter, js_name = peerId)]
+    pub fn peer_id(&self) -> String {
+        self.peer_id_val.clone()
     }
+
     /// One of `"participant"` / `"publisher"` / `"subscriber"`.
     #[wasm_bindgen(getter)]
     pub fn role(&self) -> String {

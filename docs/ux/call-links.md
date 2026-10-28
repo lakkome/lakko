@@ -182,6 +182,7 @@ written out three times - the reason [`navigation.md`](navigation.md) section
 | `Invite`, link ready | The platform's share mechanism, or a copy with confirmation. |
 | Mint failed | One sentence on what happened and that it can be tried again. The call is unaffected and does not end. |
 | Opening a damaged link (the arriving side) | `This invite link is damaged. Ask for a new link.` and nothing else. Shown when the fragment is missing or malformed, or the link does not open under it (see below). |
+| The link could not be fetched (the arriving side; added 2026-10-23) | `Could not reach Lakko. Check your connection and try again.` and `Try again`. Shown when the network failed or the server answered with an error other than "no such link" or 429; never `This call link is invalid or has expired.` |
 | Signed out mid-flow | One sentence: sign in again. |
 | A call joined from a link ends (the arriving side, signed in) | Back in the app where the person was, never the link page with `The call has ended.` (added 2026-10-03). A guest stays on the link page, where section 9 asks about an account. |
 

@@ -83,8 +83,9 @@ pub use synced::{should_send_snapshot, SyncedState};
 #[doc(hidden)]
 pub mod fuzz_api {
     use crate::synced::{
-        compose_lineage_envelope, compose_own_username_envelope, compose_recovery_email_envelope,
-        decode_lineage_envelope, decode_own_username_envelope, decode_recovery_email_envelope,
+        compose_lineage_envelope, compose_link_record_envelope, compose_own_username_envelope,
+        compose_recovery_email_envelope, decode_lineage_envelope, decode_link_record_envelope,
+        decode_own_username_envelope, decode_recovery_email_envelope,
     };
     use crate::{EditChain, EditOp, Hlc, HybridLogicalClock, SyncedState};
 
@@ -102,6 +103,10 @@ pub mod fuzz_api {
     ///   removal), fold to exactly that register, and not apply twice.
     /// * [`decode_own_username_envelope`] — the account's own username
     ///   register, reached the same way, held to the same properties.
+    /// * [`decode_link_record_envelope`] — the account's invite links
+    ///   (ADR-0079), reached the same way. Whatever decodes must re-encode to
+    ///   the identical bytes, hold records within their bounds, and fold so
+    ///   that every revoked record it carries is held revoked.
     /// * [`SyncedState::from_bytes`] — reached from local persistence and
     ///   from the backup payload a storage tier serves. Whatever decodes
     ///   must persist to bytes that read back as the same state, and its
@@ -114,7 +119,27 @@ pub mod fuzz_api {
         lineage_envelope_holds(bytes)
             && recovery_email_envelope_holds(bytes)
             && own_username_envelope_holds(bytes)
+            && link_record_envelope_holds(bytes)
             && persisted_state_holds(bytes)
+    }
+
+    /// The link-record envelope (ADR-0079): canonical, within bounds, and a
+    /// revoked record it carries is held revoked after the fold.
+    fn link_record_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(entries) = decode_link_record_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        compose_link_record_envelope(&entries).as_deref() == Ok(bytes)
+            && entries.iter().all(|e| e.value.validate().is_ok())
+            && state.apply_link_record_envelope(bytes).is_ok()
+            && state.all_link_records() == entries
+            && entries.iter().all(|e| {
+                !e.value.revoked
+                    || state
+                        .link_record(&e.value.link_id)
+                        .is_some_and(|r| r.value.revoked)
+            })
     }
 
     /// The lineage envelope: canonical, and it folds to exactly its own
@@ -186,7 +211,13 @@ pub mod fuzz_api {
                 return false;
             }
         }
+        for envelope in state.link_record_envelopes() {
+            if rebuilt.apply_link_record_envelope(&envelope).is_err() {
+                return false;
+            }
+        }
         rebuilt.all_lineage() == state.all_lineage()
+            && rebuilt.all_link_records() == state.all_link_records()
             && rebuilt.recovery_email_register() == state.recovery_email_register()
             && rebuilt.own_username_register() == state.own_username_register()
             && !state
@@ -352,6 +383,28 @@ mod fuzz_api_tests {
         removed.set_own_username(8, None).unwrap();
         let unnamed = removed.own_username_envelope().unwrap();
         let persisted_unnamed = removed.to_bytes();
+        removed
+            .set_link_record(
+                9,
+                crate::synced::LinkRecordEntry {
+                    link_id: [4; 16],
+                    link_secret: [5; 12],
+                    kind: crate::synced::LinkRecordKind::Contact,
+                    ledger_id: vec![6; 6],
+                    revocation_seed: vec![8; 32],
+                    expiry_ms: 0,
+                    max_uses: 0,
+                    uses: 0,
+                    revoked: false,
+                    shared: false,
+                    minted_at_ms: 1,
+                    label: "home".into(),
+                    answered: vec![[7; 32]],
+                },
+            )
+            .unwrap();
+        let links = removed.link_record_envelopes().remove(0);
+        let persisted_links = removed.to_bytes();
         for wire in [
             &envelope,
             &persisted,
@@ -361,6 +414,8 @@ mod fuzz_api_tests {
             &named,
             &unnamed,
             &persisted_unnamed,
+            &links,
+            &persisted_links,
         ] {
             assert!(decode_synced_and_check(wire));
             for i in 0..wire.len() {

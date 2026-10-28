@@ -87,9 +87,13 @@ public final class JoinCallLandingViewModel: ObservableObject {
     /// ADR-0028 amendment 2026-09-28 — the link's fragment secret is missing or
     /// malformed, or the blob does not open under it.
     @Published public private(set) var damaged = false
+    /// The ledger could not be asked for the link (the network, a server
+    /// error): the link may be fine, the screen offers it again.
+    @Published public private(set) var openFailed = false
     /// ADR-0048 / UX spec §4 — a guest (no session) is asked for a name here,
-    /// prefilled `Guest`. It becomes the new account's own profile.
-    @Published public var guestName: String = Localization.text("call.guest.default_name")
+    /// prefilled with "<adjective> <animal>" from the shared rule
+    /// (`lakko_ui_rules::guest_name`). It becomes the new account's own profile.
+    @Published public var guestName: String = LakkoCore.guestName(random: UInt64.random(in: .min ... .max))
     /// ADR-0054 S4 — the guest account is being created (the one heavy proof
     /// of work): `Getting you into the call...` with the signup line below.
     @Published public private(set) var creatingGuest = false
@@ -341,10 +345,11 @@ public final class JoinCallLandingViewModel: ObservableObject {
 
     // MARK: - Decode
 
-    /// Decode again after a rate-limit refusal.
+    /// Decode again after a rate-limit refusal or a failed fetch.
     public func retryDecode() async {
-        guard rateLimited else { return }
+        guard rateLimited || openFailed else { return }
         rateLimited = false
+        openFailed = false
         loading = true
         await decode()
     }
@@ -364,14 +369,33 @@ public final class JoinCallLandingViewModel: ObservableObject {
             let capabilityBytes: Data
             switch parsed {
             case .pointer(let blobId):
-                guard let fetched = try await DiscoveryClient().fetchCallInvite(blobId: blobId) else {
+                let fetched: Data?
+                do {
+                    fetched = try await DiscoveryClient().fetchCallInvite(blobId: blobId)
+                } catch {
+                    if Cancellation.endedByCancellation(error) {
+                        didDecode = false
+                        return
+                    }
+                    // A failure to ask the ledger says nothing about the link:
+                    // a 429 is "try again later", anything else is offered
+                    // again too, never called invalid.
+                    NSLog("join-call: the call link could not be fetched: %@", String(describing: error))
+                    decoded = nil
+                    if DiscoveryClientError.isRateLimited(error) {
+                        rateLimited = true
+                    } else {
+                        openFailed = true
+                    }
+                    loading = false
+                    return
+                }
+                guard let fetched else {
                     decoded = nil
                     loading = false
                     return
                 }
                 capabilityBytes = fetched
-            case .inline(let bytes):
-                capabilityBytes = bytes
             }
             let cap: CallInviteCapability
             do {
@@ -529,6 +553,15 @@ public struct JoinCallLandingScreen: View {
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                 closeButton
+            } else if viewModel.openFailed {
+                Text(inviteLinkOpenFailedMessage)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                Button(l10n.t("common.try_again")) {
+                    Task { await viewModel.retryDecode() }
+                }
+                .buttonStyle(.bordered)
+                closeButton
             } else if viewModel.decoded == nil || viewModel.decoded?.valid == false {
                 Text(l10n.t("call.link.invalid"))
                     .multilineTextAlignment(.center)
@@ -542,6 +575,10 @@ public struct JoinCallLandingScreen: View {
                         .multilineTextAlignment(.center)
                 }
                 if let host = hostName(decoded) {
+                    // ADR-0084 — the host's photo beside their name.
+                    InitialsAvatar(
+                        name: host, identity: base64Encode(decoded.ownerSignatureKey), size: 56,
+                        placeholderSymbol: "person.fill", photo: .person(decoded.ownerSignatureKey))
                     Text(l10n.t("call.link.host", texts: ["name": host]))
                         .font(.footnote)
                         .foregroundStyle(.secondary)

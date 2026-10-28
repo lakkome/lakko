@@ -5,11 +5,11 @@
  * ADR-0042, "A wake is shown only for the signed-in account" — the
  * foreground half of the wake binding (`push/wake-binding.ts`).
  *
- * Pins: the binding is written only for the pseudonym still on disk after
- * registration; a different account signing in rotates the pseudonym; Log
- * out / Forget device clear the binding FIRST and then close this app's
- * delivered notifications. The worker-side gate is pinned in
- * `src/sw/push-decrypt.test.ts`.
+ * Pins: the binding names the signed-in account (ADR-0078: no device
+ * pseudonym); a different account signing in is reported so its push-gw
+ * subscriptions are removed; Log out / Forget device clear the binding FIRST
+ * and then close this app's delivered notifications. The worker-side gate is
+ * pinned in `src/sw/push-decrypt.test.ts`.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -17,66 +17,39 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   closeDeliveredNotifications,
-  pseudonymMustRotate,
+  previousBoundAccount,
   recordWakeBinding,
   releaseWakeBinding,
 } from "./wake-binding";
 
 const ACCT = "YWNjb3VudC1h";
 const OTHER = "YWNjb3VudC1i";
-const PSEUDONYM = new Uint8Array(32).fill(0xab);
 
-describe("pseudonymMustRotate", () => {
-  it("no binding: keep the pseudonym", () => {
-    expect(pseudonymMustRotate(null, ACCT)).toBe(false);
+describe("previousBoundAccount", () => {
+  it("no binding: nothing to remove", () => {
+    expect(previousBoundAccount(null, ACCT)).toBeNull();
   });
-  it("a binding for the same account: keep it", () => {
-    expect(
-      pseudonymMustRotate({ devicePseudonymHex: "ab".repeat(32), accountId: ACCT }, ACCT),
-    ).toBe(false);
+  it("a binding for the same account: nothing to remove", () => {
+    expect(previousBoundAccount({ accountId: ACCT }, ACCT)).toBeNull();
   });
-  it("a binding for another account: mint a fresh one", () => {
-    expect(
-      pseudonymMustRotate({ devicePseudonymHex: "ab".repeat(32), accountId: OTHER }, ACCT),
-    ).toBe(true);
+  it("a binding for another account: that account's subscriptions go", () => {
+    expect(previousBoundAccount({ accountId: OTHER }, ACCT)).toBe(OTHER);
   });
 });
 
 describe("recordWakeBinding", () => {
-  it("writes (lowercase hex pseudonym, account) for the pseudonym on disk", async () => {
+  it("writes the account", async () => {
     const putBinding = vi.fn(async () => {});
-    const wrote = await recordWakeBinding(ACCT, PSEUDONYM, {
-      putBinding,
-      currentPseudonym: () => new Uint8Array(PSEUDONYM),
-    });
-    expect(wrote).toBe(true);
-    expect(putBinding).toHaveBeenCalledWith({
-      devicePseudonymHex: "ab".repeat(32),
-      accountId: ACCT,
-    });
-  });
-
-  it("skips when Log out dropped the pseudonym meanwhile", async () => {
-    const putBinding = vi.fn(async () => {});
-    expect(
-      await recordWakeBinding(ACCT, PSEUDONYM, { putBinding, currentPseudonym: () => null }),
-    ).toBe(false);
-    expect(
-      await recordWakeBinding(ACCT, PSEUDONYM, {
-        putBinding,
-        currentPseudonym: () => new Uint8Array(32).fill(0xcd),
-      }),
-    ).toBe(false);
-    expect(putBinding).not.toHaveBeenCalled();
+    expect(await recordWakeBinding(ACCT, { putBinding })).toBe(true);
+    expect(putBinding).toHaveBeenCalledWith({ accountId: ACCT });
   });
 
   it("a failed write is swallowed (the worker then shows nothing)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const wrote = await recordWakeBinding(ACCT, PSEUDONYM, {
+    const wrote = await recordWakeBinding(ACCT, {
       putBinding: async () => {
         throw new Error("quota");
       },
-      currentPseudonym: () => PSEUDONYM,
     });
     expect(wrote).toBe(false);
     warn.mockRestore();
@@ -184,16 +157,17 @@ describe("the callers (source)", () => {
     );
   });
 
-  it("subscribeToPush records the binding only after push-gw accepted the pseudonym", () => {
+  it("subscribeToPush removes another account's subscriptions, then records and re-subscribes", () => {
     const src = read("./subscribe.ts");
-    const register = src.indexOf("await pushClient.register(");
-    const record = src.indexOf("await recordWakeBinding(");
-    expect(register).toBeGreaterThan(-1);
-    expect(record).toBeGreaterThan(register);
-    // The rotation check runs before the pseudonym is read.
-    const rotate = src.indexOf("pseudonymMustRotate(existing, accountIdB64)");
-    const mint = src.indexOf("const devicePseudonym = getOrCreateDevicePushId();");
-    expect(rotate).toBeGreaterThan(-1);
-    expect(mint).toBeGreaterThan(rotate);
+    const previous = src.indexOf("previousBoundAccount(existing, accountIdB64)");
+    const unsubscribeOld = src.indexOf("await unsubscribeAllForAccount(previous)");
+    const token = src.indexOf("setDevicePushToken(tokenBytes)");
+    const record = src.indexOf("await recordWakeBinding(accountIdB64)");
+    const resubscribe = src.indexOf("await resubscribeAllForAccount(accountIdB64)");
+    expect(previous).toBeGreaterThan(-1);
+    expect(unsubscribeOld).toBeGreaterThan(previous);
+    expect(token).toBeGreaterThan(unsubscribeOld);
+    expect(record).toBeGreaterThan(token);
+    expect(resubscribe).toBeGreaterThan(record);
   });
 });

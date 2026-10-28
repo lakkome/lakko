@@ -388,6 +388,7 @@ private data class StoredPendingRequest(
     val validAfterMs: Long,
     val intro: String?,
     val createdAt: String,
+    /** ADR-0079 - the dead-link note, kept with the request. */
 )
 
 /** JSON for [pending]; `java.util.Base64` for the byte fields so the codec

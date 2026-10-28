@@ -126,6 +126,128 @@ public enum PeopleSearchOutcome: Equatable {
     case allowanceUsed
 }
 
+/// The people half of a network search before the fold: who was found, and
+/// whether any question was refused for a used-up allowance or got no answer.
+public struct PeopleNetworkLegs: Equatable {
+    public var people: [FoundPerson]
+    public var allowanceUsed: Bool
+    public var failed: Bool
+
+    public init(people: [FoundPerson], allowanceUsed: Bool, failed: Bool) {
+        self.people = people
+        self.allowanceUsed = allowanceUsed
+        self.failed = failed
+    }
+}
+
+/// A channel the search found by its `@handle`; its row opens the subscribe
+/// page (UX section 6.1).
+public struct FoundChannel: Equatable {
+    public let idHex: String
+    public let handle: String
+
+    public init(idHex: String, handle: String) {
+        self.idHex = idHex
+        self.handle = handle
+    }
+}
+
+/// UX section 6.1 — what the People part of the search field says.
+public enum PeopleNetworkState: Equatable {
+    case found
+    /// The same whether nobody exists or nobody lets you find them.
+    case notFound
+    /// The network failed: never "not found". Typing again retries.
+    case failed
+    /// The search allowance (anonymous lookup tokens) is used up for now.
+    case outOfSearches
+
+    /// The line under the heading, `nil` for `found` (the rows say it).
+    public var message: String? {
+        switch self {
+        case .found: return nil
+        case .notFound: return Localization.text("search.people.not_found")
+        case .failed: return Localization.text("search.people.failed")
+        case .outOfSearches: return Localization.text("search.people.out_of_searches")
+        }
+    }
+}
+
+/// One network search of the field: the people, the channel the typed handle
+/// names, and whether any question went unanswered.
+public struct PeopleSearchAnswer: Equatable {
+    public var people: [FoundPerson]
+    public var channel: FoundChannel?
+    public var allowanceUsed: Bool
+    public var failed: Bool
+
+    public init(people: [FoundPerson], channel: FoundChannel? = nil, allowanceUsed: Bool = false, failed: Bool = false) {
+        self.people = people
+        self.channel = channel
+        self.allowanceUsed = allowanceUsed
+        self.failed = failed
+    }
+
+    /// The people legs and the channel leg, as one answer.
+    public init(legs: PeopleNetworkLegs, channel: FoundChannel?, channelAllowanceUsed: Bool, channelFailed: Bool) {
+        self.init(
+            people: legs.people, channel: channel,
+            allowanceUsed: legs.allowanceUsed || channelAllowanceUsed,
+            failed: legs.failed || channelFailed)
+    }
+
+    /// Only an answer to every question is remembered for the session: a
+    /// failed or refused question is asked again when the text is typed again.
+    public var remembered: Bool { !allowanceUsed && !failed }
+
+    /// Anything found is shown, whatever else failed; nothing found is "not
+    /// found" only when every question was answered. `includesChannels` is
+    /// `false` in Contacts, which matches only people.
+    public func state(includesChannels: Bool) -> PeopleNetworkState {
+        if !people.isEmpty || (includesChannels && channel != nil) { return .found }
+        if allowanceUsed { return .outOfSearches }
+        if failed { return .failed }
+        return .notFound
+    }
+}
+
+/// UX section 6.1 — a found person's row after **Add contact**.
+public enum PersonRequestState: Equatable {
+    case idle
+    case sending
+    /// "Request sent"; the button is gone.
+    case sent
+    /// Their mailbox refused the request: they changed who can find them.
+    case refused
+    /// Any other failure; the button is back.
+    case failed
+
+    /// The state a failed send leaves the row in.
+    public static func after(error: Error) -> PersonRequestState {
+        isRefusal(error) ? .refused : .failed
+    }
+
+    private static func isRefusal(_ error: Error) -> Bool {
+        switch error as? ContactsError {
+        case .requestRefused?: return true
+        case .wrapped(let cause)?: return isRefusal(cause)
+        default: return false
+        }
+    }
+
+    /// The line on the row, `nil` when the row says nothing in words.
+    public var message: String? {
+        switch self {
+        case .refused: return Localization.text("search.people.request_refused")
+        case .failed: return Localization.text("search.people.request_failed")
+        case .idle, .sending, .sent: return nil
+        }
+    }
+
+    /// Whether the row offers **Add contact**.
+    public var offersAdd: Bool { self == .idle || self == .failed }
+}
+
 /// The network lookups a search makes, injected so the rules run in a test.
 ///
 /// ADR-0060 section 5: every OPRF round yields an `OprfResult`. Its
@@ -188,9 +310,34 @@ public struct PeopleSearchPorts {
 /// a result is shown.
 public enum PeopleSearch {
 
-    /// UX section 6.1 — the network row is offered from 2 characters.
-    public static func offersNetworkSearch(_ query: String) -> Bool {
-        query.trimmingCharacters(in: .whitespacesAndNewlines).count >= Int(nameSearchMinChars())
+    /// UX section 6.1 — the field asks the network only from this many
+    /// characters (a leading `@` not counted). Chosen, not measured.
+    public static let networkMinChars = 3
+
+    /// UX section 6.1 — how long the person must stop typing before the field
+    /// asks the network. Chosen, not measured.
+    public static let networkDebounceMs: UInt64 = 500
+
+    /// UX section 6.1 — whether the typed text asks the network at all: from
+    /// three characters (a leading `@` ignored), and only when the text could
+    /// be a username (the shared `looks_like_a_name` rule) or its longest word
+    /// (the shared name-term rule) has at least three letters. Anything else
+    /// asks nothing.
+    public static func asksNetwork(_ query: String) -> Bool {
+        let bare = NameLookup.bareName(query.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard bare.count >= networkMinChars else { return false }
+        if NameLookup.looksLikeAName(bare) { return true }
+        return (nameQueryTerm(query: bare)?.count ?? 0) >= networkMinChars
+    }
+
+    /// The key a network search is remembered under for the session: the
+    /// typed text without its `@`, with case, accents and repeated spaces
+    /// folded (none of them changes what the network answers). `nil` for a
+    /// text that asks nothing.
+    public static func searchKey(_ query: String) -> String? {
+        guard asksNetwork(query) else { return nil }
+        let bare = NameLookup.bareName(query.trimmingCharacters(in: .whitespacesAndNewlines))
+        return normalizeForMatch(bare)
     }
 
     /// At most this many usernames of introduction results are verified per
@@ -346,6 +493,23 @@ public enum PeopleSearch {
         ownAccountKey: Data? = nil,
         ports: PeopleSearchPorts
     ) async -> PeopleSearchOutcome {
+        let legs = await networkLegs(
+            query: query, records: records, known: known, ownAccountKey: ownAccountKey, ports: ports)
+        return outcome(found: legs.people, allowanceUsed: legs.allowanceUsed, failed: legs.failed)
+    }
+
+    /// ``network(query:records:known:ownAccountKey:ports:)`` before the fold:
+    /// the people found and whether any question was refused for a used-up
+    /// allowance or got no answer. The search field needs the unfolded form,
+    /// because an answer with a failed question is not remembered (typing
+    /// again retries it).
+    public static func networkLegs(
+        query: String,
+        records: [Data],
+        known: (Data) -> KnownPerson = { _ in .unknown },
+        ownAccountKey: Data? = nil,
+        ports: PeopleSearchPorts
+    ) async -> PeopleNetworkLegs {
         let bare = NameLookup.bareName(query)
         var failed = false
         var allowance = false
@@ -488,7 +652,43 @@ public enum PeopleSearch {
                 failed = true
             }
         }
-        return outcome(found: found, allowanceUsed: allowance, failed: failed)
+        return PeopleNetworkLegs(people: found, allowanceUsed: allowance, failed: failed)
+    }
+
+    /// The channel namespace for the typed handle (UX section 6.1), asked
+    /// only when the text could be a name: the channel, or `nil` when the
+    /// handle names none, and whether the question was refused for a used-up
+    /// allowance or got no answer.
+    public static func channelLeg(
+        query: String, lookup: (String) async throws -> String?
+    ) async -> (channel: FoundChannel?, allowanceUsed: Bool, failed: Bool) {
+        let bare = NameLookup.bareName(query.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard NameLookup.looksLikeAName(bare) else { return (nil, false, false) }
+        do {
+            guard let idHex = try await lookup(bare) else { return (nil, false, false) }
+            return (FoundChannel(idHex: idHex, handle: bare), false, false)
+        } catch {
+            let quota = AnonTokenUnavailable.isQuotaExhausted(error)
+            return (nil, quota, !quota)
+        }
+    }
+
+    /// One network search of the field: the people (username, name term,
+    /// introductions) and the channel handle, asked at the same time.
+    public static func answer(
+        query: String,
+        records: [Data],
+        known: (Data) -> KnownPerson = { _ in .unknown },
+        ownAccountKey: Data? = nil,
+        ports: PeopleSearchPorts,
+        lookupChannel: @escaping (String) async throws -> String?
+    ) async -> PeopleSearchAnswer {
+        async let channel = channelLeg(query: query, lookup: lookupChannel)
+        let legs = await networkLegs(
+            query: query, records: records, known: known, ownAccountKey: ownAccountKey, ports: ports)
+        let c = await channel
+        return PeopleSearchAnswer(
+            legs: legs, channel: c.channel, channelAllowanceUsed: c.allowanceUsed, channelFailed: c.failed)
     }
 
     /// A public record served beside `accountId`, opened with the OPRF
@@ -550,7 +750,7 @@ public enum PeopleSearch {
         case .found: return nil
         case .notFound: return Localization.text("search.people.not_found")
         case .failed: return Localization.text("search.people.failed")
-        case .allowanceUsed: return AnonTokenCopy.searchAllowanceUsed
+        case .allowanceUsed: return Localization.text("search.people.out_of_searches")
         }
     }
 }
@@ -618,5 +818,195 @@ enum PeopleSearchWiring {
                 accountKey: key, accountId: accountId,
                 known: known(keyB64: keyB64, contactKeys: contactKeys))
         }
+    }
+}
+
+/// The search field's session (UX section 6.1), shared by the field at the top
+/// of Chats and the one at the top of Contacts: the answers already asked, the
+/// searches in flight, and each found person's request state. A text asked
+/// once is not asked again while the app runs.
+@MainActor
+public final class PeopleSearchSession: ObservableObject {
+
+    /// What the field needs from the app, injected so the rules run in a test.
+    public struct Ports {
+        /// The people this device already knows matching the text (contacts,
+        /// members of its groups and channels).
+        public var local: @MainActor (String) -> [FoundPerson]
+        /// One network search: username, name, introductions, channel handle.
+        public var network: @MainActor (String) async -> PeopleSearchAnswer
+        /// Send the contact request to a result, at once, with no
+        /// introduction text.
+        public var sendRequest: @MainActor (FoundPerson) async throws -> Void
+        /// Whether a request to this person is already on its way (the sent
+        /// log): the row then reads "Request sent".
+        public var alreadyRequested: @MainActor (FoundPerson) -> Bool
+
+        public init(
+            local: @escaping @MainActor (String) -> [FoundPerson],
+            network: @escaping @MainActor (String) async -> PeopleSearchAnswer,
+            sendRequest: @escaping @MainActor (FoundPerson) async throws -> Void,
+            alreadyRequested: @escaping @MainActor (FoundPerson) -> Bool = { _ in false }
+        ) {
+            self.local = local
+            self.network = network
+            self.sendRequest = sendRequest
+            self.alreadyRequested = alreadyRequested
+        }
+    }
+
+    /// Request states by account key; a person with none is idle unless the
+    /// sent log already holds a request to them.
+    @Published public private(set) var requests: [Data: PersonRequestState] = [:]
+
+    let ports: Ports
+    private var answers: [String: PeopleSearchAnswer] = [:]
+    private var inFlight: [String: Task<PeopleSearchAnswer, Never>] = [:]
+
+    public init(ports: Ports) {
+        self.ports = ports
+    }
+
+    /// The answer remembered for `key`, if any.
+    public func remembered(_ key: String) -> PeopleSearchAnswer? {
+        answers[key]
+    }
+
+    /// The answer for `key`: the remembered one, the one already being asked,
+    /// or a new network search. A search is never cancelled once asked (its
+    /// tokens are spent), so a text typed away from and back to joins it.
+    func answer(key: String, query: String) async -> PeopleSearchAnswer {
+        if let held = answers[key] { return held }
+        if let running = inFlight[key] { return await running.value }
+        let network = ports.network
+        let task = Task { @MainActor in await network(query) }
+        inFlight[key] = task
+        let result = await task.value
+        inFlight[key] = nil
+        if result.remembered { answers[key] = result }
+        return result
+    }
+
+    /// The row state of `person`.
+    public func requestState(for person: FoundPerson) -> PersonRequestState {
+        if let held = requests[person.accountKey] { return held }
+        return ports.alreadyRequested(person) ? .sent : .idle
+    }
+
+    /// **Add contact**: send the request at once; the row reads "Request
+    /// sent" on success, the refusal or the failure otherwise.
+    public func addContact(_ person: FoundPerson) async {
+        guard person.canAddContact, requestState(for: person).offersAdd else { return }
+        requests[person.accountKey] = .sending
+        do {
+            try await ports.sendRequest(person)
+            requests[person.accountKey] = .sent
+        } catch {
+            requests[person.accountKey] = PersonRequestState.after(error: error)
+        }
+    }
+}
+
+/// One search field (UX section 6.1): local results from the first letter;
+/// from three characters, after ``PeopleSearch/networkDebounceMs`` without
+/// typing, the network under the heading People. The answer last shown stays
+/// while the person keeps typing, until the new one arrives.
+@MainActor
+public final class PeopleSearchModel: ObservableObject {
+
+    /// The people this device knows matching the text.
+    @Published public private(set) var local: [FoundPerson] = []
+    /// The network answer shown under People; `nil` hides the heading.
+    @Published public private(set) var answer: PeopleSearchAnswer?
+    /// A network search for the current text is under way.
+    @Published public private(set) var searching = false
+    /// Whether the current text asks the network at all (People then always
+    /// answers, so no "No results" line is needed beside it).
+    @Published public private(set) var asksNetwork = false
+
+    public let session: PeopleSearchSession
+    private let sleep: @Sendable (UInt64) async throws -> Void
+    private var query = ""
+    private var generation = 0
+    private var pending: Task<Void, Never>?
+
+    /// `sleep` waits the given milliseconds (injected for tests).
+    public init(
+        session: PeopleSearchSession,
+        sleep: @escaping @Sendable (UInt64) async throws -> Void = { ms in
+            try await Task.sleep(nanoseconds: ms * 1_000_000)
+        }
+    ) {
+        self.session = session
+        self.sleep = sleep
+    }
+
+    /// The field's text changed.
+    public func update(query raw: String) {
+        let typed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard typed != query else { return }
+        query = typed
+        generation += 1
+        let current = generation
+        pending?.cancel()
+        pending = nil
+        local = typed.isEmpty ? [] : session.ports.local(typed)
+        let key = PeopleSearch.searchKey(typed)
+        asksNetwork = key != nil
+        guard let key else {
+            answer = nil
+            searching = false
+            return
+        }
+        if let held = session.remembered(key) {
+            answer = held
+            searching = false
+            return
+        }
+        searching = false
+        let sleep = self.sleep
+        let session = self.session
+        pending = Task { @MainActor [weak self] in
+            do { try await sleep(PeopleSearch.networkDebounceMs) } catch { return }
+            guard let self, !Task.isCancelled, self.generation == current else { return }
+            self.searching = true
+            let result = await session.answer(key: key, query: typed)
+            guard self.generation == current else { return }
+            self.answer = result
+            self.searching = false
+        }
+    }
+
+    /// Wait for the field's pending search, if any (tests).
+    func settle() async {
+        await pending?.value
+    }
+
+    /// The rows the field shows: the local people first (with what the
+    /// network learned about them merged in), then the people only the
+    /// network found. `showsLocalContacts` is `false` in Contacts, whose list
+    /// already shows the matching contacts.
+    public func rows(showsLocalContacts: Bool) -> (local: [FoundPerson], network: [FoundPerson]) {
+        let merged = PeopleSearch.merge([local, answer?.people ?? []], ownAccountKey: nil)
+        let localKeys = Set(local.map(\.accountKey))
+        return (
+            merged.filter { localKeys.contains($0.accountKey) && (showsLocalContacts || $0.reach != .contact) },
+            merged.filter { !localKeys.contains($0.accountKey) })
+    }
+
+    /// The network part's state, `nil` while nothing was answered.
+    public func networkState(includesChannels: Bool) -> PeopleNetworkState? {
+        answer?.state(includesChannels: includesChannels)
+    }
+
+    /// Whether the field shows anything of its own (a row, the spinner or a
+    /// line under People).
+    public func showsAnything(includesChannels: Bool, showsLocalContacts: Bool) -> Bool {
+        if searching { return true }
+        let rows = rows(showsLocalContacts: showsLocalContacts)
+        if !rows.local.isEmpty || !rows.network.isEmpty { return true }
+        if includesChannels, answer?.channel != nil { return true }
+        if let state = networkState(includesChannels: includesChannels), state != .found { return true }
+        return false
     }
 }

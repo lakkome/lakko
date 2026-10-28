@@ -428,33 +428,13 @@ final class KeyResetPublishTests: XCTestCase {
         XCTAssertNil(defaults.data(forKey: RecoveryMarkers.publishOwedKey(accountIdB64: "c")))
     }
 
-    func testTheAttestedResetBodyAddsTheOneFieldBesideTheStatement() throws {
-        let plain = DsStatementRequest(
-            path: "/ds/group/ab/reset", bodyJson: #"{"statement_b64":"c3RtdA=="}"#)
-        // ADR-0074 section 4.6 — the DS refuses the attestation without the
-        // root endorsement, so the two fields are only ever attached together.
-        let attested = try AttestedResetBody.attach(
-            attestation: Data([1, 2, 3]), endorsement: Data([9, 8, 7]), to: plain)
-        XCTAssertEqual(attested.path, plain.path)
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(attested.bodyJson.utf8)) as? [String: Any])
-        XCTAssertEqual(json["statement_b64"] as? String, "c3RtdA==")
-        XCTAssertEqual(json["key_reset_attest_b64"] as? String, Data([1, 2, 3]).base64EncodedString())
-        XCTAssertEqual(json["root_endorsement_b64"] as? String, Data([9, 8, 7]).base64EncodedString())
-        XCTAssertEqual(json.count, 3)
-        XCTAssertThrowsError(
-            try AttestedResetBody.attach(
-                attestation: Data(), endorsement: Data([1]), to: DsStatementRequest(path: "/x", bodyJson: "[]")))
-        // An empty endorsement is refused here rather than sent: the DS would
-        // answer 400.
-        XCTAssertThrowsError(
-            try AttestedResetBody.attach(attestation: Data([1]), endorsement: Data(), to: plain))
-    }
-
     func testTheDsRefusalsName503KeyResetDisabled() {
         XCTAssertEqual(
             DsStatementError.from(status: 503, body: #"{"error":"key-reset-disabled"}"#), .keyResetDisabled)
+        // ADR-0078 retired the push binding: its old refusal is a plain 503.
         XCTAssertEqual(
-            DsStatementError.from(status: 503, body: #"{"error":"push-binding-disabled"}"#), .pushBindingDisabled)
+            DsStatementError.from(status: 503, body: #"{"error":"push-binding-disabled"}"#),
+            .http(status: 503, body: #"{"error":"push-binding-disabled"}"#))
     }
 
     func testTheConfirmationWordIsTheSameLatinLettersTrimmed() {

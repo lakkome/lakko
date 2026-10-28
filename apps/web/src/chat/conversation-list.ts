@@ -49,6 +49,9 @@ export interface ConversationRow {
   readonly pinned: boolean;
   readonly muted: boolean;
   readonly archived: boolean;
+  /** ADR-0084 - the person a one-to-one is with (their profile key), whose
+   *  photo the row's circle shows. Absent for groups and channels. */
+  readonly personKey?: string | undefined;
 }
 
 /**

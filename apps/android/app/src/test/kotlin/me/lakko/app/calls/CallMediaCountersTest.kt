@@ -430,4 +430,39 @@ class CallMediaCountersTest {
             ),
         )
     }
+
+    @Test
+    fun `the one-to-one log writes each interval's change and the whole call once`() {
+        val log = InboundCounterLog()
+        assertEquals(
+            listOf(
+                "call media interval audio#1 pkts=50 lost=0 nack=0 jb_ms=- concealed=1.0%",
+                "call media interval video#2 pkts=100 lost=0 nack=0 jb_ms=- pli=0 freezes=0" +
+                    " freeze_s=0.00 decoded=30 dropped=0 layer=main",
+            ),
+            log.interval(
+                listOf(inboundAudio("A1", 50, 96_000, 960), inboundVideo("V1", "remote-cam", 100, 30)),
+            ),
+        )
+        val second = log.interval(
+            listOf(inboundAudio("A1", 150, 192_000, 5_760), inboundVideo("V1", "remote-cam", 160, 48)),
+        )
+        assertEquals("call media interval audio#1 pkts=100 lost=0 nack=0 jb_ms=- concealed=5.0%", second[0])
+        assertTrue(second[1].startsWith("call media interval video#2 pkts=60 "))
+        val total = log.total()
+        assertEquals("call media total audio#1 pkts=150 lost=0 nack=0 jb_ms=- concealed=3.0%", total[0])
+        assertEquals(2, total.size)
+        assertEquals(emptyList<String>(), log.total())
+    }
+
+    @Test
+    fun `the one-to-one log says nothing for a call that was never read`() {
+        assertEquals(emptyList<String>(), InboundCounterLog().total())
+        assertEquals(
+            emptyList<String>(),
+            InboundCounterLog().interval(
+                listOf(RtcStat(type = "candidate-pair", id = "CP1", members = mapOf("bytesReceived" to 9))),
+            ),
+        )
+    }
 }

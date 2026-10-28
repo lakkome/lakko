@@ -340,7 +340,7 @@ public struct AccountProtectionStore {
     /// Every key of `accountIdB64`, for the wipe.
     static func keys(accountIdB64: String) -> [String] {
         ["phrase-saved", "status", "banner-dismissed", "notice-cursor", "own-actions",
-         "rename-owed", "rename-at", "username-register-owed"]
+         "rename-owed", "username-register-owed"]
             .map { key($0, accountIdB64: accountIdB64) }
     }
 
@@ -376,17 +376,6 @@ public struct AccountProtectionStore {
         } else {
             defaults.removeObject(forKey: key)
         }
-    }
-
-    /// When this device last changed the username (unix ms).
-    public func lastRenameAtMs(accountIdB64: String) -> Int64? {
-        defaults.object(forKey: Self.key("rename-at", accountIdB64: accountIdB64)) as? Int64
-    }
-
-    public func setLastRenameAtMs(_ ms: Int64, accountIdB64: String) {
-        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
-        defer { gate.leave() }
-        defaults.set(ms, forKey: Self.key("rename-at", accountIdB64: accountIdB64))
     }
 
     /// A name this device wrote locally and still owes the own-username

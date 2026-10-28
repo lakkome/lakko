@@ -26,8 +26,9 @@
  * Left on purpose, and why:
  *
  * - `lakko.transparency.last-seen-root.v1`: the device's KT-log root floor.
- * - `lakko.push.device.v1`: the device push pseudonym; `unsubscribeFromPush`
- *   in `forgetDevice` handles it.
+ * - `lakko.push.token.v1`: the browser's Web Push token (device-wide, ADR-0078);
+ *   `unsubscribeFromPush` in `forgetDevice` handles it, after it removed the
+ *   account's sealed push subscriptions.
  * - `lakko-push-routing` / `wake_binding`: device-wide, released by
  *   `releaseWakeBinding` before this runs.
  * - theme, language and media preferences, the GIF privacy note: device
@@ -72,6 +73,7 @@ import { deleteSentIntrosForAccount } from "../contacts/sent-request-intros";
 import { clearSpendOwed } from "../contacts/rotation-spent";
 import { clearInviteLinkSecrets } from "../contacts/invite-link-secrets";
 import { deleteMintedLinksForAccount } from "../contacts/minted-links";
+import { deletePendingContactsForAccount } from "../contacts/pending-contacts";
 import { deleteMlsSnapshot } from "../chat/mls-store";
 import { deleteOutboxForAccount } from "../chat/commit-outbox";
 import { deleteMessageLog } from "../chat/message-log-store";
@@ -96,6 +98,7 @@ import { clearOwnerMoved } from "../channels/owner-moved";
 import { clearRotationStatesForAccount } from "../channels/rotation-state-store";
 import { clearUnconfirmedFoundingsForAccount } from "../channels/composer";
 import { deleteProfileRow } from "../profile/profile-idb";
+import { deleteAvatarCache } from "../profile/avatar-cache-idb";
 import { clearOwnProfile } from "../profile/own-profile";
 import { clearMemberBaselinesForAccount } from "../profile/membership-baseline";
 import { clearProfileRequestsForAccount } from "../profile/profile-request";
@@ -127,6 +130,7 @@ import { clearGroupRoutingForAccount } from "../push/group-routing-store";
 import { clearSupersededMirrorForAccount } from "../push/superseded-mirror";
 import { deleteAnonTokensForAccount } from "../tokens/anon-token-store";
 import { clearEmojiPrefsForAccount } from "../media/emoji/emoji-index";
+import { cardsStorageKey, cityStorageKey, showCityStorageKey } from "../devices/device-cards";
 
 /**
  * Retired device-wide `localStorage` rows that may still hold the wiped
@@ -210,6 +214,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // rotated identity.
     { name: "channels-owner-moved", run: () => clearOwnerMoved(accountIdB64) },
     { name: "profiles", run: () => deleteProfileRow(accountIdB64) },
+    { name: "avatars", run: () => deleteAvatarCache(accountIdB64) },
     { name: "group-names", run: () => deleteGroupNameRow(accountIdB64) },
     { name: "group-closed", run: () => deleteGroupClosedRow(accountIdB64) },
     { name: "registrar-seeds", run: () => deleteRegistrarSeedRow(accountIdB64) },
@@ -232,6 +237,9 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // The intro text of the unanswered contact requests this device sent,
     // kept under the device key for a re-send after a key rotation.
     { name: "sent-request-intros", run: () => deleteSentIntrosForAccount(accountIdB64) },
+    // ADR-0079: the inviters added through a link, and what was written to
+    // them before their app answered.
+    { name: "pending-contacts", run: () => deletePendingContactsForAccount(accountIdB64) },
     { name: "push-routing", run: () => clearGroupRoutingForAccount(accountIdB64) },
     // ADR-0073 R.8: the service worker's copy of the keys a reset retired.
     { name: "superseded-mirror", run: () => clearSupersededMirrorForAccount(accountIdB64) },
@@ -314,6 +322,11 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "leave-requested", run: () => clearLeaveRequestedForAccount(accountIdB64) },
     // ADR-0073 R.5: the "a lineage register is not confirmed sent" marker.
     { name: "lineage-unsent", run: () => removeLocal(`lakko.lineage.unsent.v1.${accountIdB64}`) },
+    // ADR-0080: the cards of the account's devices, this device's own card,
+    // its city answer and its "Show my city" switch.
+    { name: "device-cards", run: () => removeLocal(cardsStorageKey(accountIdB64)) },
+    { name: "device-city", run: () => removeLocal(cityStorageKey(accountIdB64)) },
+    { name: "device-city-shown", run: () => removeLocal(showCityStorageKey(accountIdB64)) },
     // ADR-0075: the "recovery-email register is not confirmed sent" marker
     // (the address itself is in the synced state, deleted with it), and the
     // "first password owed" marker of a guest that chose a username.
@@ -329,6 +342,23 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
       run: () => removeLocal(`lakko.own-username.unsent.v1.${accountIdB64}`),
     },
     { name: "username-change", run: () => clearRenameStores(storage, accountIdB64) },
+    // ADR-0079: the "link-record register is not confirmed sent" marker,
+    // the claims of link requests (seen from the account's other devices and
+    // this device's own, reworked 2026-10-17), and the ledger-row deletions
+    // this device still owes.
+    {
+      name: "link-records-unsent",
+      run: () => removeLocal(`lakko.link-records.unsent.v1.${accountIdB64}`),
+    },
+    { name: "link-claims", run: () => removeLocal(`lakko.link-claims.v1.${accountIdB64}`) },
+    // ADR-0065 - blob deletes still owed, and when each conversation's
+    // files were last kept.
+    { name: "blob-deletes-owed", run: () => removeLocal(`lakko.blob-deletes-owed.v1.${accountIdB64}`) },
+    { name: "blob-keeps", run: () => removeLocal(`lakko.blob-keeps.v1.${accountIdB64}`) },
+    {
+      name: "link-row-deletions-owed",
+      run: () => removeLocal(`lakko.link-row-deletions-owed.v1.${accountIdB64}`),
+    },
     // ADR-0073 R.5 / R.7: when a conversation moved, and that a re-send ran.
     { name: "reset-continuity-state", run: () => clearContinuityStateForAccount(accountIdB64) },
     // The per-account conversation-kind map of builds before ADR-0062 (the

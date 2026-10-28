@@ -5,12 +5,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import { base64Encode } from "../auth/account-id";
 import { toHex, type PersonResult } from "./people";
-import { sendFoundRequest, type SendDeps } from "./send-request";
+import { NO_INTRO, sendFoundRequest, type SendDeps } from "./send-request";
 
 const KEY = new Uint8Array(32).fill(0xa1);
 const X25519 = new Uint8Array(32).fill(0xa3);
 const ACC = new Uint8Array(16).fill(0xa2);
-const INTRO = new TextEncoder().encode("hi");
 
 const found = (over: Partial<PersonResult> = {}): PersonResult => ({
   keyB64: base64Encode(KEY),
@@ -41,31 +40,31 @@ function deps(over: Partial<SendDeps> = {}): SendDeps & {
 describe("sendFoundRequest", () => {
   it("checks the grant again, then sends through the bundle with that grant", async () => {
     const d = deps();
-    expect(await sendFoundRequest(found(), INTRO, d)).toEqual({ kind: "sent" });
+    expect(await sendFoundRequest(found(), d)).toEqual({ kind: "sent" });
     expect(d.reachCheck).toHaveBeenCalledWith(KEY, "GRANT");
     // A grant-reach send carries no open-mailbox binding (ADR-0078).
-    expect(d.sendToBundle).toHaveBeenCalledWith(ACC, KEY, X25519, INTRO, "GRANT", null);
+    expect(d.sendToBundle).toHaveBeenCalledWith(ACC, KEY, X25519, NO_INTRO, "GRANT", null);
   });
 
   it("ADR-0078: an open (Everyone) person with no username is sent the binding their public record carries", async () => {
     const d = deps();
     const person = found({ reach: "open", grantWireB64: null, openBindingB64: "BINDING" });
-    expect(await sendFoundRequest(person, INTRO, d)).toEqual({ kind: "sent" });
+    expect(await sendFoundRequest(person, d)).toEqual({ kind: "sent" });
     // No reach check (nothing is signed), and the binding rides to the sender.
     expect(d.reachCheck).not.toHaveBeenCalled();
-    expect(d.sendToBundle).toHaveBeenCalledWith(ACC, KEY, X25519, INTRO, null, "BINDING");
+    expect(d.sendToBundle).toHaveBeenCalledWith(ACC, KEY, X25519, NO_INTRO, null, "BINDING");
   });
 
   it("is Request refused, and sends nothing, when the person changed who can find them", async () => {
     const d = deps({ reachCheck: vi.fn(async () => false) });
-    expect(await sendFoundRequest(found(), INTRO, d)).toEqual({ kind: "refused" });
+    expect(await sendFoundRequest(found(), d)).toEqual({ kind: "refused" });
     expect(d.sendToBundle).not.toHaveBeenCalled();
     expect(d.sendByUsername).not.toHaveBeenCalled();
   });
 
   it("sends nothing when the identity bundle publishes another key for the account", async () => {
     const d = deps({ identityFetch: vi.fn(async () => ({ signaturePub: new Uint8Array(32), x25519Pub: X25519 })) });
-    expect(await sendFoundRequest(found(), INTRO, d)).toEqual({ kind: "refused" });
+    expect(await sendFoundRequest(found(), d)).toEqual({ kind: "refused" });
     expect(d.sendToBundle).not.toHaveBeenCalled();
   });
 
@@ -76,10 +75,10 @@ describe("sendFoundRequest", () => {
       identityFetch: vi.fn(async () => ({ signaturePub: CURRENT, x25519Pub: X25519 })),
       provenPredecessor,
     });
-    expect(await sendFoundRequest(found(), INTRO, d)).toEqual({ kind: "sent" });
+    expect(await sendFoundRequest(found(), d)).toEqual({ kind: "sent" });
     expect(provenPredecessor).toHaveBeenCalledWith(KEY, ACC);
     // Sealed to the published key, never to the key the hit was found under.
-    expect(d.sendToBundle).toHaveBeenCalledWith(ACC, CURRENT, X25519, INTRO, "GRANT", null);
+    expect(d.sendToBundle).toHaveBeenCalledWith(ACC, CURRENT, X25519, NO_INTRO, "GRANT", null);
   });
 
   it("an UNPROVEN mismatch is still refused", async () => {
@@ -87,16 +86,16 @@ describe("sendFoundRequest", () => {
       identityFetch: vi.fn(async () => ({ signaturePub: new Uint8Array(32).fill(0xb7), x25519Pub: X25519 })),
       provenPredecessor: vi.fn(async () => false),
     });
-    expect(await sendFoundRequest(found(), INTRO, d)).toEqual({ kind: "refused" });
+    expect(await sendFoundRequest(found(), d)).toEqual({ kind: "refused" });
     expect(d.sendToBundle).not.toHaveBeenCalled();
   });
 
   it("sends to a person in Everyone by their verified username, with no check", async () => {
     const d = deps();
     const person = found({ reach: "open", username: "anna", grantWireB64: null });
-    expect(await sendFoundRequest(person, INTRO, d)).toEqual({ kind: "sent" });
+    expect(await sendFoundRequest(person, d)).toEqual({ kind: "sent" });
     expect(d.reachCheck).not.toHaveBeenCalled();
-    expect(d.sendByUsername).toHaveBeenCalledWith("anna", INTRO, null);
+    expect(d.sendByUsername).toHaveBeenCalledWith("anna", NO_INTRO, null);
   });
 
   it("is refused when the username no longer resolves (they left Everyone)", async () => {
@@ -107,7 +106,7 @@ describe("sendFoundRequest", () => {
       isRefusal: () => true,
     });
     const person = found({ reach: "open", username: "anna", grantWireB64: null });
-    expect(await sendFoundRequest(person, INTRO, d)).toEqual({ kind: "refused" });
+    expect(await sendFoundRequest(person, d)).toEqual({ kind: "refused" });
   });
 
   it("reports any other failure as a failure", async () => {
@@ -116,15 +115,25 @@ describe("sendFoundRequest", () => {
         throw new Error("offline");
       }),
     });
-    const out = await sendFoundRequest(found(), INTRO, d);
+    const out = await sendFoundRequest(found(), d);
     expect(out.kind).toBe("failed");
     expect(out.kind === "failed" ? out.message() : null).toBe("could not send");
   });
 
+  it("sends no introduction text on either path (UX 6.1: no form, no second field)", async () => {
+    const d = deps();
+    await sendFoundRequest(found(), d);
+    await sendFoundRequest(found({ reach: "open", username: "anna", grantWireB64: null }), d);
+    const bundleIntro = d.sendToBundle.mock.calls[0]?.[3] as Uint8Array;
+    const usernameIntro = d.sendByUsername.mock.calls[0]?.[1] as Uint8Array;
+    expect(bundleIntro.length).toBe(0);
+    expect(usernameIntro.length).toBe(0);
+  });
+
   it("offers nothing for a contact or a hidden person", async () => {
     const d = deps();
-    expect(await sendFoundRequest(found({ reach: "contact", grantWireB64: null }), INTRO, d)).toEqual({ kind: "refused" });
-    expect(await sendFoundRequest(found({ reach: "none", grantWireB64: null }), INTRO, d)).toEqual({ kind: "refused" });
+    expect(await sendFoundRequest(found({ reach: "contact", grantWireB64: null }), d)).toEqual({ kind: "refused" });
+    expect(await sendFoundRequest(found({ reach: "none", grantWireB64: null }), d)).toEqual({ kind: "refused" });
     expect(d.sendToBundle).not.toHaveBeenCalled();
   });
 });

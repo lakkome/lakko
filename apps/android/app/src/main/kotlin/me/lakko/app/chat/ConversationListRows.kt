@@ -74,6 +74,9 @@ public data class ConversationListRow(
      *  [id] is the conversation id every person-facing store is keyed on.
      *  The same value for a conversation that never moved. */
     val headId: String = id,
+    /** ADR-0084 — for a one-to-one, the other person's signature key
+     *  (standard base64), so the row shows their profile photo. */
+    val peerKeyB64: String? = null,
 )
 
 /** The shared kind a chat-or-group row opens under. */
@@ -121,8 +124,8 @@ public fun orderConversationRows(
  *
  * Local and loose, over titles and previews this device already holds — which
  * is the half of `docs/ux/navigation.md` section 4 that may be fuzzy at all.
- * The network lookup next to it can only ever be exact, and lives in
- * [findByName].
+ * The network half is the people search (`docs/ux/who-can-find-me.md`
+ * section 6.1).
  */
 public fun conversationRowMatchesQuery(
     query: String,

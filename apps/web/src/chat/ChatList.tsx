@@ -41,7 +41,7 @@ import {
 import { useCallHost } from "../calls/CallHostContext";
 import { quietCallKindLabel, quietCallOfferFor } from "../calls/quiet-call-offer";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
-import { personKeysOf } from "./person-key";
+import { ownPersonKeyB64, personKeysOf } from "./person-key";
 import { PeopleSearch } from "../search/PeopleSearch";
 import { rowHasUnread, type ConversationRow } from "./conversation-list";
 import { createConversationRows } from "./conversation-rows";
@@ -84,6 +84,15 @@ import {
   rowIsInFolder,
 } from "./folders/folder-view";
 import { ALL_CHATS, loadSelectedTab, resolveTab, selectTab, selectedTab } from "./folders/selected-tab";
+import { conversationKindOf } from "./conversation-kind";
+import {
+  loadPendingContacts,
+  pendingContacts,
+  lastPendingMessageText,
+  pendingNameOf,
+  shownPendingContacts,
+  type PendingContact,
+} from "../contacts/pending-contacts";
 
 type Flag = "pinned" | "muted" | "archived";
 
@@ -140,6 +149,12 @@ function CreateMenu(props: { onClose: () => void }): JSX.Element {
           <Icon name="channels" size={16} />
           {t("chats.create.channel")}
         </button>
+        {/* ADR-0065 section 3 — Saved, from the menu that holds New group. */}
+        <div class="lk-menu-sep" />
+        <button type="button" role="menuitem" onClick={() => go(paths.saved)}>
+          <Icon name="bookmark" size={16} />
+          {t("saved.title")}
+        </button>
       </div>
     </>
   );
@@ -181,7 +196,7 @@ function ChannelRow(props: {
       onPointerLeave={press.onPointerLeave}
       onClick={(e) => press.swallowClick(e)}
     >
-      <Avatar label={props.row.title} id={props.row.id} />
+      <Avatar label={props.row.title} id={props.row.id} personKey={props.row.personKey} />
       <div class="lk-row-body">
         <div class="lk-row-line">
           <span class="lk-row-title" classList={{ unread: props.row.unread > 0 }}>
@@ -242,6 +257,28 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   // The search field in the pane head filters by name and preview.
   const [query, setQuery] = createSignal("");
   const searching = (): boolean => query().trim().length > 0;
+
+  // ADR-0079 — a person added through their invite link is in the list at
+  // once, under the name the link states (UX section 4), until their app
+  // answers and the one-to-one takes over the row. Shown in All chats only:
+  // a folder is a view of conversations, and this one does not exist yet.
+  createEffect(() => {
+    const account = accountId();
+    if (account !== null) void loadPendingContacts(account);
+  });
+  const invitedName = (p: PendingContact): string =>
+    pendingNameOf(p) ?? t("invite.contact.page.unnamed");
+  const invitedRows = createMemo((): PendingContact[] => {
+    const own = ownPersonKeyB64(chats.identity());
+    const peers = new Set<string>();
+    for (const g of chats.groups()) {
+      if (conversationKindOf(g.group) !== "chat") continue;
+      for (const k of personKeysOf(g.group)) if (k !== own) peers.add(k);
+    }
+    const shown = shownPendingContacts(pendingContacts(), peers);
+    const q = query();
+    return searching() ? shown.filter((p) => rowMatchesQuery(q, invitedName(p), "")) : shown;
+  });
 
   /** The rows of the open tab: All chats, or the folder's own view. */
   const tabRows = createMemo((): readonly ConversationRow[] => {
@@ -513,7 +550,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           is, it gives way to what the search finds, the people half
           included (`docs/ux/who-can-find-me.md` section 6.1). */}
       <Show
-        when={!showsEmptyState(orderedRows().length, query())}
+        when={!showsEmptyState(orderedRows().length + invitedRows().length, query())}
         fallback={
           <div class="lk-empty">
             <Icon name="chat" size={40} strokeWidth={1.4} />
@@ -548,6 +585,25 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                 {t("folders.edit")}
               </button>
             </div>
+          </Show>
+          <Show when={currentFolder() === null || searching()}>
+            <For each={invitedRows()}>
+              {(p) => (
+                <A href={paths.pendingChat(p.accountIdHex)} class="lk-row" activeClass="" inactiveClass="">
+                  <Avatar label={invitedName(p)} id={p.signaturePubkeyB64} personKey={p.signaturePubkeyB64} />
+                  <div class="lk-row-body">
+                    <div class="lk-row-line">
+                      <span class="lk-row-title">
+                        <span class="lk-ellipsis">{invitedName(p)}</span>
+                      </span>
+                    </div>
+                    <div class="lk-row-line">
+                      <span class="lk-row-sub">{lastPendingMessageText(p)}</span>
+                    </div>
+                  </div>
+                </A>
+              )}
+            </For>
           </Show>
           <For each={visibleRows()}>
             {(row) => {
@@ -617,7 +673,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                     press.swallowClick(e);
                   }}
                 >
-                  <Avatar label={label()} id={conversationIdB64Of(g)} />
+                  <Avatar label={label()} id={conversationIdB64Of(g)} personKey={row.personKey} />
                   <div class="lk-row-body">
                     <div class="lk-row-line">
                       <span class="lk-row-title" classList={{ unread: unread() > 0 }}>
@@ -761,11 +817,12 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           </For>
           {/* `docs/ux/who-can-find-me.md` section 6.1 - the people half of
               the field: the people this device knows, matched as the person
-              types, and one Search people row that asks the network for the
-              username, the name and the channel handle, and adds what it
-              finds to the same list. `docs/ux/navigation.md` section 4. */}
+              types, and, from three characters with nothing to press, what
+              the network finds by username, name and channel handle, in the
+              same list under People. */}
           <Show when={query().trim().length > 0}>
             <PeopleSearch
+              scope="chats"
               query={query}
               conversationMatches={() => visibleRows().length}
               groupPeopleKeys={groupPeopleKeys}

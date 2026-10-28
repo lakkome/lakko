@@ -24,6 +24,8 @@
  * bytes are copied into this file.
  */
 
+import { avatarFromWasm, type AvatarData, type WasmProfileAvatarLike } from "./avatar-model";
+
 /** A decoded profile, detached from the wasm handle. */
 export interface ReceivedProfile {
   readonly displayName: string | null;
@@ -44,6 +46,9 @@ export interface ReceivedProfile {
    *  SECRET (each lets its holder write to the sender's mailbox): kept only
    *  under the rules of `reach/grant-rules.ts`, never logged. */
   readonly grants?: readonly ReceivedGrantWire[];
+  /** ADR-0084 — the profile photo references, or `null` for none. Copied out
+   *  of the wasm handle (blob keys inside: SECRET). */
+  readonly avatar?: AvatarData | null;
 }
 
 /** One grant from a profile, detached from the wasm handle. */
@@ -69,6 +74,7 @@ export interface ProfileDecoder {
     readonly accountId?: Uint8Array | undefined;
     readonly usernameCertificate?: Uint8Array | undefined;
     readonly grants?: readonly { readonly class: number; readonly version: number; free?(): void }[];
+    readonly avatar?: WasmProfileAvatarLike | undefined;
     free?(): void;
   };
   /** Encodes a grant to its 134-byte wire (`encodeReachGrant`); absent in a
@@ -123,6 +129,10 @@ export function sniffProfile(decoder: ProfileDecoder, bytes: Uint8Array): Profil
     usernameCertificate:
       decoded.usernameCertificate === undefined ? null : decoded.usernameCertificate.slice(),
     grants,
+    ...((): { avatar?: AvatarData } => {
+      const avatar = avatarFromWasm(decoded.avatar);
+      return avatar === null ? {} : { avatar };
+    })(),
   };
   try {
     decoded.free?.();

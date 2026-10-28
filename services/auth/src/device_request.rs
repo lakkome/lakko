@@ -511,10 +511,7 @@ pub(crate) async fn answer(
     .map_err(ApiError::Db)?
     .rows_affected();
     if written == 1 {
-        tracing::info!(
-            account_id = %URL_SAFE_NO_PAD.encode(auth.0),
-            "device-request: answered"
-        );
+        tracing::info!("device-request: answered");
         return Ok(Json(serde_json::json!({})).into_response());
     }
     let exists = live_row_for(&state, &auth.0, &request_id).await?;
@@ -575,13 +572,11 @@ pub(crate) async fn result(
         };
         tx.commit().await.map_err(ApiError::Db)?;
         tracing::info!(
-            account_id = %URL_SAFE_NO_PAD.encode(auth.0),
             outcome = outcome_name(outcome).unwrap_or("?"),
             "device-request: decided"
         );
         if let Some(secs) = suspended_secs {
             tracing::info!(
-                account_id = %URL_SAFE_NO_PAD.encode(auth.0),
                 suspend_secs = secs,
                 "device-request: guess budget spent, requests suspended"
             );
@@ -621,11 +616,7 @@ pub(crate) async fn delete(
             .await
             .map_err(ApiError::Db)?
             .rows_affected();
-    tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(auth.0),
-        removed,
-        "device-request: closed"
-    );
+    tracing::info!(removed, "device-request: closed");
     Ok(Json(serde_json::json!({ "removed": removed == 1 })))
 }
 
@@ -813,7 +804,7 @@ mod device_request_e2e_tests {
             turn: None,
             totp_enc_key: None,
             vault_enc_key: None,
-            throttle: crate::throttle::ThrottleConfig::disabled(),
+            room_cap: std::sync::Arc::new(crate::room_cap::RoomAdmissionCap::disabled()),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),

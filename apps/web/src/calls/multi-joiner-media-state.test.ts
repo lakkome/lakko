@@ -35,8 +35,6 @@ const hooks = vi.hoisted(() => ({
       selfPeerId: string,
       roster: ReadonlyArray<{
         peer_id: string;
-        account_pseudonym: string;
-        peer_tag?: string;
       }>,
     ) => void;
     onPeerLeft?: (peerId: string) => void;
@@ -75,7 +73,6 @@ vi.mock("./sfu-call-session", () => ({
 // KeyPackage wrap). The camera-state callbacks under test touch no wasm.
 vi.mock("../wasm", () => ({
   loadWasm: async () => ({
-    sfuPeerTag: (): string => "ownertag",
     wrapCallKeyPackage: (): Uint8Array => new Uint8Array([1, 2, 3]),
   }),
 }));
@@ -83,9 +80,8 @@ vi.mock("../wasm", () => ({
 // JWT mint without HTTP.
 vi.mock("./call-jwt-client", () => ({
   CallJwtClient: class {
-    setSessionToken(): void {}
-    async mint(): Promise<{ jwt: string }> {
-      return { jwt: "test-jwt" };
+    async mintForCall(): Promise<{ jwt: string; turn: null }> {
+      return { jwt: "test-jwt", turn: null };
     }
   },
 }));
@@ -114,7 +110,6 @@ function makeOpts(): MultiJoinerCallOptions {
     ownerAccountId: new Uint8Array(16).fill(2),
     ownerSignatureKey: new Uint8Array(32).fill(3),
     sfuBaseUrl: "wss://sfu.test",
-    sessionToken: "sess",
     media: { audio: true, video: false },
   } as unknown as MultiJoinerCallOptions;
 }
@@ -159,7 +154,7 @@ function camOn(peerId: string): boolean | undefined {
 /** Build a one-remote roster (peerX) so the tiles exist to be flipped. */
 function seedRosterWithPeerX(): void {
   hooks.captured?.onWelcome?.("self", [
-    { peer_id: "peerX", account_pseudonym: "abcdef0123" },
+    { peer_id: "peerX" },
   ]);
 }
 

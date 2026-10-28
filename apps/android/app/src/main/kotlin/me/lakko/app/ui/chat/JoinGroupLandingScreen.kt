@@ -21,6 +21,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -109,6 +110,10 @@ public class JoinGroupLandingViewModel(
         public data object Damaged : State
         /** The ledger answered `429`; the link may be fine. */
         public data object RateLimited : State
+
+        /** The ledger could not be asked (the network, a server error): the
+         *  link may be fine, the page offers it again. */
+        public data object OpenFailed : State
         /** The card is on screen; nothing has been sent yet. */
         public data object Ready : State
         public data object Requesting : State
@@ -132,7 +137,7 @@ public class JoinGroupLandingViewModel(
 
     /** The OPENED capability's plaintext wire + the ledger blob id (pointer
      *  form only), kept so `Request again` does not re-resolve the slug. */
-    private var resolved: Pair<ByteArray, ByteArray?>? = null
+    private var resolved: Pair<ByteArray, ByteArray>? = null
 
     private val mutableRequesting: MutableStateFlow<Boolean> = MutableStateFlow(false)
 
@@ -166,10 +171,9 @@ public class JoinGroupLandingViewModel(
             repository.state.first { it.bootstrapped }
             val nowMs = System.currentTimeMillis().toULong()
             try {
-                // ADR-0028 OQ1 — resolve the slug (a 6-byte ledger-id
-                // pointer => fetch the sealed link from the ledger; an inline
-                // sealed link => pass through), then open it under the
-                // fragment's secret.
+                // ADR-0028 OQ1 — resolve the slug (a 6-byte ledger id: fetch
+                // the sealed link from the ledger; an inline slug, the removed
+                // form, is invalid), then open it under the fragment's secret.
                 val sealedAndBlob = repository.resolveGroupInviteSlug(slug)
                 val card = repository.inspectGroupInvite(sealedAndBlob.first, fragment, nowMs)
                 if (!card.valid) {
@@ -191,14 +195,16 @@ public class JoinGroupLandingViewModel(
                     me.lakko.app.chat.GroupInviteOpenFailure.Invalid -> State.Invalid
                     me.lakko.app.chat.GroupInviteOpenFailure.Damaged -> State.Damaged
                     me.lakko.app.chat.GroupInviteOpenFailure.RateLimited -> State.RateLimited
+                    me.lakko.app.chat.GroupInviteOpenFailure.OpenFailed -> State.OpenFailed
                 }
             }
         }
     }
 
-    /** `Try again` after a rate-limited open: resolve the link once more. */
+    /** `Try again` after a rate-limited or failed open: resolve the link
+     *  once more. */
     public fun retryOpen() {
-        if (mutableState.value != State.RateLimited) return
+        if (mutableState.value != State.RateLimited && mutableState.value != State.OpenFailed) return
         mutableState.value = State.Loading
         started = false
         start()
@@ -227,8 +233,7 @@ public class JoinGroupLandingViewModel(
             val groupId: ByteArray
             val joinerKey: ByteArray
             try {
-                // Request to join, registering a consume against the ledger
-                // when the link was a pointer.
+                // Request to join, registering a consume against the ledger.
                 val result = repository.requestToJoinFromLink(
                     ticket.first,
                     nowMs,
@@ -335,6 +340,13 @@ public fun JoinGroupLandingScreen(
                 Text(me.lakko.app.discovery.INVITE_RATE_LIMITED_TEXT.text(), textAlign = TextAlign.Center)
                 Spacer(Modifier.height(12.dp))
                 Button(onClick = { viewModel.retryOpen() }) { Text(me.lakko.app.chat.JOIN_TRY_AGAIN_TEXT.text()) }
+            }
+            is JoinGroupLandingViewModel.State.OpenFailed -> {
+                Text(me.lakko.app.chat.INVITE_LINK_OPEN_FAILED_TEXT.text(), textAlign = TextAlign.Center)
+                Spacer(Modifier.height(12.dp))
+                Button(onClick = { viewModel.retryOpen() }) { Text(me.lakko.app.chat.JOIN_TRY_AGAIN_TEXT.text()) }
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = onDone) { Text(t("common.open_lakko")) }
             }
             is JoinGroupLandingViewModel.State.Ready -> {
                 InviteHeadline(card)

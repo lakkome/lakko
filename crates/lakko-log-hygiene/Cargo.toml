@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-log-hygiene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "ADR-0078 section 11 - service logs carry no identifiers: the request span every service mounts, the source lint over tracing macros, and the capture layer service tests assert with"
+
+[lints]
+workspace = true
+
+[features]
+# The capture layer service integration tests install. Off in production
+# builds; a service enables it from its `[dev-dependencies]`.
+capture = ["dep:tracing-subscriber"]
+
+[dependencies]
+tracing.workspace = true
+axum = { version = "0.8", default-features = false, features = ["matched-path"] }
+tracing-subscriber = { workspace = true, optional = true, features = ["fmt", "registry"] }
+
+[dev-dependencies]
+tokio.workspace = true

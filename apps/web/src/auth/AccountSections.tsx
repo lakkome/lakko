@@ -6,6 +6,8 @@
  * portability), and the session / device / account controls, with the
  * destructive ones last and behind the in-page confirmation (ADR-0045 UX §14).
  */
+import { revokeAllMintedLinks } from "../contacts/own-links";
+import { base64Encode } from "./account-id";
 import { createSignal, Show, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 
@@ -260,6 +262,17 @@ function DeleteAccountDialog(props: { readonly onClose: () => void }): JSX.Eleme
         grant = auth.freshProof();
       }
       if (steps.actionGesture) await assertDeletion(secrets.accountId);
+      // ADR-0078 section 10: the invite ledgers name no owner, so the
+      // directory cannot delete this account's links. Revoke every live link
+      // this device keeps a record of first, while the session still works;
+      // one it has no record of lives until it expires or is used up.
+      try {
+        const links = new DiscoveryClient();
+        links.setSessionToken(secrets.sessionToken);
+        await revokeAllMintedLinks(links, base64Encode(secrets.accountId));
+      } catch {
+        /* best-effort: the deletion does not wait on a link */
+      }
       try {
         await c.deleteAccount(grant);
       } catch (err) {

@@ -28,7 +28,7 @@ import Security
 /// What stays: other accounts' data, and genuine device settings (theme,
 /// media preferences, the anti-censorship switch, update-check
 /// bookkeeping, the KT-log root floor, the per-installation wrap keys and the
-/// push device pseudonym, which the push unsubscribe handles).
+/// device's push tokens, which the push unsubscribe forgets).
 ///
 /// Order: the push binding and the delivered notifications first, then the
 /// rest. Best effort per store: one failing store never stops the others, and
@@ -116,9 +116,17 @@ enum AccountLocalDataWipe {
                 NSLog("[account-wipe] ERR step %@ failed: %@", name, String(describing: error))
             }
         }
-        let accountId = base64Decode(accountIdB64)
         let standard = UserDefaults.standard
         let shared = SharedStorage.sharedDefaults()
+        // ADR-0078 section 6 — the DeviceGroup and PublisherGroup ids are
+        // derived from the account seed (the conversation seed), not from any
+        // id, so they are read here, before the steps below delete the seeds,
+        // for the founding marks of steps 3 and 6.
+        let lineageAccount = DeviceGroupLifecycle.lineageSeed(accountIdB64: accountIdB64)
+            .flatMap { try? Identity.fromSeed(seed: $0) }
+        let deviceGroupJournalHex = lineageAccount.map {
+            DsClient.pseudonymHex(deviceGroupIdFor(accountIdentity: $0))
+        }
 
         // 1. Push first: no background wake is handled for this account from
         //    here on, and nothing it received stays on the lock screen.
@@ -127,7 +135,14 @@ enum AccountLocalDataWipe {
             if binding.current()?.accountIdB64 == accountIdB64 { binding.clear() }
         }
         step("delivered-notifications") { removeDeliveredNotifications() }
-        step("push-routing") { PushRoutingStore().clear(accountIdB64: accountIdB64) }
+        step("push-routing") {
+            // ADR-0078 — the subscription ids name this account's push-gw
+            // rows; hand them to the unsubscribe that runs after the wipe
+            // before the route rows (where they live) go.
+            let store = PushRoutingStore()
+            PendingPushUnsubscribes.stash(store.subscriptionIds(accountIdB64: accountIdB64))
+            store.clear(accountIdB64: accountIdB64)
+        }
         step("push-routing-legacy-v1") {
             for defaults in [standard, shared].compactMap({ $0 }) {
                 for (key, value) in defaults.dictionaryRepresentation()
@@ -202,6 +217,16 @@ enum AccountLocalDataWipe {
         step("invite-link-secrets") {
             InviteLinkSecretStore.shared.clear(accountIdB64: accountIdB64)
         }
+        step("own-links") {
+            // ADR-0078 section 10: this device's records of the links it
+            // minted, with their revocation seeds.
+            OwnLinkStore.shared.clear(accountIdB64: accountIdB64)
+        }
+        step("owed-link-row-deletions") {
+            // ADR-0079 section 4: the ledger rows this device revoked and
+            // still owes a deletion of.
+            OwedLinkRowDeletionStore.clear(accountIdB64: accountIdB64)
+        }
         step("anon-tokens") {
             // This account's stored tokens; any other account's stay. The
             // pool stops writing for this account too, so the token the
@@ -212,7 +237,7 @@ enum AccountLocalDataWipe {
 
         // 3. The DeviceGroup and the cross-device synced state. The founding
         //    mark of the account's DeviceGroup journal goes too; the id is
-        //    derived from the account id.
+        //    derived from the account seed (read at the start).
         step("device-group-snapshot") {
             DeviceGroupSnapshotStore().deleteSnapshot(accountIdB64: accountIdB64)
         }
@@ -221,9 +246,8 @@ enum AccountLocalDataWipe {
             PendingSyncTracker(accountIdB64: accountIdB64).clear()
         }
         step("device-group-founding-mark") {
-            guard let accountId else { return }
-            let groupId = try deviceGroupIdFor(accountId: accountId)
-            JournalFoundingMarks.shared.clear(journalIdHex: DsClient.pseudonymHex(groupId))
+            guard let deviceGroupJournalHex else { return }
+            JournalFoundingMarks.shared.clear(journalIdHex: deviceGroupJournalHex)
         }
 
         // 4. Chats.
@@ -282,7 +306,30 @@ enum AccountLocalDataWipe {
             standard.removeObject(
                 forKey: DeviceGroupSyncRepository.recoveryEmailUnsentKey(accountIdB64: accountIdB64))
         }
+        // ADR-0079 — the unsent link-record marker and the people added
+        // through their invite link (their queued messages are in the
+        // held-send queue, cleared above).
+        step("link-records-unsent") {
+            standard.removeObject(
+                forKey: DeviceGroupSyncRepository.linkRecordsUnsentKey(accountIdB64: accountIdB64))
+        }
+        step("pending-contacts") { PendingContactStore.clear(accountIdB64: accountIdB64) }
+        // ADR-0079 (reworked 2026-10-17) — the link requests not decided yet
+        // (sealed, they carry link secrets) and the claims of link requests.
+        step("link-requests") { LinkRequestInbox.clear(accountIdB64: accountIdB64) }
+        step("link-claims") { LinkClaims.Record.clear(accountIdB64: accountIdB64) }
         step("profiles") { ProfileDirectory.shared.forget(accountIdB64: accountIdB64) }
+        // ADR-0084 — the decrypted avatars this device cached (and the
+        // prepared ones waiting for Save).
+        // ADR-0065 — the owed blob deletes and the keep schedule; the passes.
+        step("blob-lifecycle") {
+            BlobLifecycleStore().clear(accountIdB64: accountIdB64)
+            Task { await BlobAccess.shared.clear() }
+        }
+        step("avatars") {
+            AvatarImages.shared.purge()
+            try? FileManager.default.removeItem(at: AvatarMediaFiles.directory)
+        }
         step("contacts-inbox") { ContactsInboxStore().clear(accountIdB64: accountIdB64) }
         // ADR-0073 R.3 — the requests kept waiting for an identity verdict.
         step("contacts-inbox-waiting") { KnownRequestWaitingStore().clear(accountIdB64: accountIdB64) }
@@ -300,13 +347,18 @@ enum AccountLocalDataWipe {
             let channelIds = Set(
                 (ChannelLogStore().get(accountIdB64: accountIdB64)?.channels ?? [])
                     .map { $0.id.lowercased() })
-            guard !channelIds.isEmpty else { return }
+            guard !channelIds.isEmpty, let lineageAccount else { return }
+            // ADR-0078 section 6: an owned channel's PublisherGroup id is the
+            // owner's derivation over the channel id; nothing inverts it.
+            let owned = Set(channelIds.compactMap { hex -> String? in
+                guard let channelId = CoPublisher.hexToData(hex),
+                      let groupId = try? publisherGroupIdFor(
+                        ownerIdentity: lineageAccount, channelId: channelId)
+                else { return nil }
+                return DsClient.pseudonymHex(groupId)
+            })
             let marks = JournalFoundingMarks.shared
-            for journalIdHex in marks.all() {
-                guard let groupId = CoPublisher.hexToData(journalIdHex),
-                      let channelId = channelIdFromPublisherGroupId(groupId: groupId),
-                      channelIds.contains(ChannelsComposer.bytesToHex(channelId).lowercased())
-                else { continue }
+            for journalIdHex in marks.all() where owned.contains(journalIdHex) {
                 marks.clear(journalIdHex: journalIdHex)
             }
         }
@@ -314,10 +366,16 @@ enum AccountLocalDataWipe {
         step("co-published-journals") {
             CoPublishedJournals.shared.clear(accountIdB64: accountIdB64)
         }
-        // ADR-0077 decision 5 — the keys of an unanswered co-publisher request.
-        step("co-publish-request-keys") {
-            CoPublishRequestKeys.Ports.live.delete(accountIdB64)
+        // G-50 — the channel provider (the PublisherGroups, the keys of an
+        // unanswered co-publisher request) and the recorded PublisherGroup
+        // commits.
+        step("channel-provider") {
+            if ChannelPublisherIdentity.shared.boundAccountId == accountIdB64 {
+                ChannelPublisherIdentity.shared.unbind()
+            }
+            ChannelPublisherIdentity.deleteOnDeviceSnapshot(accountIdB64: accountIdB64)
         }
+        step("publisher-commits") { PublisherCommitStore.deleteAll(accountIdB64: accountIdB64) }
         // ADR-0063 — the decrypted channel posts the feed reads.
         step("channel-post-log") { ChannelPostLogStore().delete(accountIdB64: accountIdB64) }
         // ADR-0059 — G-43 publisher roles learned this session (in memory,
@@ -354,6 +412,13 @@ enum AccountLocalDataWipe {
         }
         step("new-device-notice") {
             NewDeviceNoticeStore(defaults: standard).clear(accountIdB64: accountIdB64)
+        }
+        // ADR-0080 — the cards of the account's devices, this device's own
+        // card, its city answer and its "Show my city" switch.
+        step("device-cards") {
+            standard.removeObject(forKey: DeviceCards.cardsKey(accountIdB64: accountIdB64))
+            standard.removeObject(forKey: DeviceCards.cityKey(accountIdB64: accountIdB64))
+            standard.removeObject(forKey: DeviceCards.showCityKey(accountIdB64: accountIdB64))
         }
         step("decrypted-media") {
             MediaSessionCache.shared.purge()

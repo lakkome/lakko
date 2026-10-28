@@ -24,30 +24,23 @@ import uniffi.lakko_ffi_uniffi.electCommitter
  * signature key + the present-key set, and (b) computes that present-key set
  * from what the client can observe on the SFU roster.
  *
- * ## Presence — what the reference can and cannot bind
+ * ## Presence — how a peer is bound to a member
  *
  * The election needs "is member X present?" but the SFU roster is keyed on
- * an opaque per-connection `peer_id`, not on an MLS leaf. Two bindings are
- * available WITHOUT any new wire (invariant #2):
+ * an opaque random `peer_id`, not on an MLS leaf.
  *
  *   * **Self** — this client is connected, so its own signature key is
  *     always present.
- *   * **Owner** — the owner's per-call `peer_tag`
- *     (`sfuPeerTag(call_id, owner_account_id)`, ADR-0021) is re-derivable
- *     from the capability's `owner_account_id`, so the owner is present iff
- *     that tag appears in the current roster. This makes the common case
- *     (owner-present -> owner commits) and the reclaim case (owner returns
- *     -> roster tag reappears -> committer reverts to the owner) correct.
- *
- * A NON-owner member's leaf<->peer binding is the documented residual: a
- * stranger joiner only knows its own + the owner's account id, so it cannot
- * in general map another joiner's peer to that joiner's leaf. The reference
- * binds a non-owner member opportunistically when it observes a relay FROM
- * that peer ([CallPresence.bindPeerToMember]); members it has never heard
- * from are treated as absent for the successor election. Per ADR-0032 this
- * is a low-severity residual (a redirected joiner lands in an isolated
- * group, never a plaintext or cross-group E2EE break); a strong-auth
- * successor delegation is deferred.
+ *   * **Every other member, the owner included** — each participant
+ *     announces its own SFU peer id, signed with its MLS leaf key and sealed
+ *     under the call seed (ADR-0078 section 2, `CallRelay.kt`); a verified
+ *     announcement binds that peer to that leaf
+ *     ([CallPresence.bindPeerToMember]). The owner is present iff a peer in
+ *     the roster announced the capability's owner key. This replaces the
+ *     ADR-0021 peer tag the SFU used to send; a member that has not announced
+ *     yet is treated as absent until it does. A joiner holds no group before
+ *     its Welcome, so before it it sees no owner and only re-broadcasts its
+ *     KeyPackage, which is harmless.
  */
 
 /** One member of the call MLS group, projected for the election. */
@@ -99,29 +92,27 @@ fun electActingCommitterLeaf(
  *
  * @param selfKeyHex   This client's own signature-key hex — always present.
  * @param ownerKeyHex  The capability owner's signature-key hex.
- * @param ownerPeerTag The owner's per-call `peer_tag` (`sfuPeerTag(call_id,
- *                     owner_account_id)`), or `null` when this client IS the
- *                     owner (then owner-presence rides [selfKeyHex]).
  */
 class CallPresence(
     private val selfKeyHex: String,
     private val ownerKeyHex: String,
-    private val ownerPeerTag: String?,
 ) {
-    /** peer_id -> peer_tag (empty string when the SFU emits no tag). */
-    private val roster = LinkedHashMap<String, String>()
-    /** peer_id -> member signature-key hex, learned from a relay's `from`. */
+    /** The peer ids currently in the SFU room. */
+    private val roster = LinkedHashSet<String>()
+    /** peer_id -> member signature-key hex, from a verified announcement
+     *  (ADR-0078 section 2) or the committer's own admission of a KeyPackage
+     *  relayed by that peer. */
     private val peerToMember = HashMap<String, String>()
 
     /** Replace the roster from an SFU `Welcome` snapshot. */
-    fun setRoster(entries: List<Pair<String, String>>) {
+    fun setRoster(peerIds: List<String>) {
         roster.clear()
-        for ((peerId, peerTag) in entries) roster[peerId] = peerTag
+        roster.addAll(peerIds)
     }
 
     /** A peer joined the SFU room. */
-    fun addPeer(peerId: String, peerTag: String) {
-        roster[peerId] = peerTag
+    fun addPeer(peerId: String) {
+        roster.add(peerId)
     }
 
     /** The member signature-key hex bound to a peer, or `null` when this
@@ -137,20 +128,19 @@ class CallPresence(
         peerToMember.remove(peerId)
     }
 
-    /** Opportunistically bind a peer to a member signature key — learned
-     *  when a relay arrives FROM that peer carrying a KeyPackage (committer
-     *  side) or a Welcome (joiner side, binds the committer/owner peer). */
+    /** Bind a peer to a member signature key: from that peer's verified
+     *  announcement, or (committer side) from the KeyPackage it relayed and
+     *  this client admitted. A later announcement replaces it. */
     fun bindPeerToMember(peerId: String, memberKeyHex: String) {
         peerToMember[peerId] = memberKeyHex
     }
 
-    /** `true` iff the owner is currently present (this client is the owner,
-     *  or the owner's peer_tag is in the roster). Load-bearing for the common
-     *  case + reclaim. */
+    /** `true` iff the owner is currently present: this client is the owner,
+     *  or a peer in the roster announced the owner's key. Load-bearing for the
+     *  common case + reclaim. */
     fun ownerPresent(): Boolean {
         if (ownerKeyHex == selfKeyHex) return true
-        val tag = ownerPeerTag ?: return false
-        return roster.values.any { it == tag }
+        return peerToMember.any { (peerId, memberKeyHex) -> memberKeyHex == ownerKeyHex && peerId in roster }
     }
 
     /** The present member signature-key set for the election: self, the
@@ -161,7 +151,7 @@ class CallPresence(
         present.add(selfKeyHex)
         if (ownerPresent()) present.add(ownerKeyHex)
         for ((peerId, memberKeyHex) in peerToMember) {
-            if (roster.containsKey(peerId)) present.add(memberKeyHex)
+            if (peerId in roster) present.add(memberKeyHex)
         }
         return present
     }

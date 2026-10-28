@@ -46,14 +46,39 @@ public class PeopleSearchService(
     /** This account's key hex, `null` without a reach session. */
     public fun ownKeyHex(): String? = reach().ownAccountKey()?.let(::searchHex)
 
-    /** UX section 6.1 — the network row is offered from the core's minimum. */
-    public fun offersNetworkSearch(query: String): Boolean = try {
-        val normalised = uniffi.lakko_ffi_uniffi.normalizeNameForSearch(query)
+    /** What the field remembers for this session (the texts answered, the
+     *  requests sent from rows), shared by the Chats and the Contacts field. */
+    public val memory: PeopleSearchMemory = PeopleSearchMemory()
+
+    /**
+     * UX section 6.1 — whether the field asks the network for [bare] (the
+     * text with a leading `@` dropped): from the core's minimum length, and
+     * only when the text could be a username or carries a name term.
+     */
+    public fun asksNetwork(bare: String): Boolean = try {
+        val normalised = uniffi.lakko_ffi_uniffi.normalizeNameForSearch(bare)
         normalised != null &&
-            normalised.codePointCount(0, normalised.length) >= uniffi.lakko_ffi_uniffi.nameSearchMinChars().toInt()
+            normalised.codePointCount(0, normalised.length) >= uniffi.lakko_ffi_uniffi.nameSearchMinChars().toInt() &&
+            (canonicalUsernameOf(bare) != null || uniffi.lakko_ffi_uniffi.nameQueryTerm(bare) != null)
     } catch (_: Throwable) {
         false
     }
+
+    private fun canonicalUsernameOf(typed: String): String? = try {
+        val bare = uniffi.lakko_ffi_uniffi.bareName(typed)
+        if (!uniffi.lakko_ffi_uniffi.looksLikeAName(bare)) null else uniffi.lakko_ffi_uniffi.validateUsername(bare)
+    } catch (_: Throwable) {
+        null
+    }
+
+    /** A search field's network half, on [scope] (the screen's). */
+    public fun session(scope: kotlinx.coroutines.CoroutineScope): PeopleSearchSession = PeopleSearchSession(
+        scope = scope,
+        memory = memory,
+        asks = ::asksNetwork,
+        search = ::search,
+        send = ::send,
+    )
 
     /** The address book: account key base64 -> account id hex (or `null`). */
     private fun contactKeys(): Map<String, String?> =
@@ -141,12 +166,7 @@ public class PeopleSearchService(
         DiscoveryClient().use { discovery -> searchPeople(query, deps(discovery)) }
 
     private fun deps(discovery: DiscoveryClient): PeopleSearchDeps = object : PeopleSearchDeps {
-        override fun canonicalUsername(typed: String): String? = try {
-            val bare = uniffi.lakko_ffi_uniffi.bareName(typed)
-            if (!uniffi.lakko_ffi_uniffi.looksLikeAName(bare)) null else uniffi.lakko_ffi_uniffi.validateUsername(bare)
-        } catch (_: Throwable) {
-            null
-        }
+        override fun canonicalUsername(typed: String): String? = canonicalUsernameOf(typed)
 
         override fun queryTerm(query: String): String? = try {
             uniffi.lakko_ffi_uniffi.nameQueryTerm(query)
@@ -290,10 +310,11 @@ public class PeopleSearchService(
         return key
     }
 
-    /** Send the contact request to a found person. Never throws (a
-     *  cancellation is let through). */
-    public suspend fun send(person: PersonResult, intro: String): SendOutcome =
-        sendFoundRequest(person, intro.toByteArray(Charsets.UTF_8), sendDeps(person.username))
+    /** Send the contact request to a found person, at once and with no
+     *  introduction (UX section 6.1). Never throws (a cancellation is let
+     *  through). */
+    public suspend fun send(person: PersonResult): SendOutcome =
+        sendFoundRequest(person, ByteArray(0), sendDeps(person.username))
 
     private fun sendDeps(shownUsername: String?): SendDeps = object : SendDeps {
         override suspend fun reachCheck(identityPk: ByteArray, grantWireB64: String): Boolean =

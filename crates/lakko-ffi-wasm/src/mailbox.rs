@@ -74,6 +74,8 @@ pub enum MailboxKind {
     ContactAck = 3,
     /// A Welcome rendezvous (the channel co-publisher join).
     WelcomeRendezvous = 4,
+    /// A signed link refusal (ADR-0079, 2026-10-19).
+    LinkRefusal = 5,
 }
 
 impl From<MailboxKind> for core::MailboxKind {
@@ -83,6 +85,7 @@ impl From<MailboxKind> for core::MailboxKind {
             MailboxKind::Welcome => Self::Welcome,
             MailboxKind::ContactAck => Self::ContactAck,
             MailboxKind::WelcomeRendezvous => Self::WelcomeRendezvous,
+            MailboxKind::LinkRefusal => Self::LinkRefusal,
         }
     }
 }
@@ -94,6 +97,7 @@ impl From<core::MailboxKind> for MailboxKind {
             core::MailboxKind::Welcome => Self::Welcome,
             core::MailboxKind::ContactAck => Self::ContactAck,
             core::MailboxKind::WelcomeRendezvous => Self::WelcomeRendezvous,
+            core::MailboxKind::LinkRefusal => Self::LinkRefusal,
         }
     }
 }

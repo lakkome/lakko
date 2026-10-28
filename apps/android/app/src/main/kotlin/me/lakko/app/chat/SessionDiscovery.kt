@@ -35,28 +35,27 @@ internal suspend fun <T> withSessionDiscovery(
 
 /**
  * ADR-0028 OQ1 — upload a group-invite capability to the discovery ledger
- * under the signed-in session and answer its 6-byte `blob_id`, or `null`
- * when the ledger could not be REACHED (a censored or offline network), in
- * which case the caller shares the inline link instead.
+ * under the signed-in session and answer its 6-byte `blob_id`.
  *
- * Only a transport failure takes the inline fallback. A server refusal (a
- * `401` for a missing or expired session, a `400`, a `429`) is thrown as a
- * [ChatError]: falling back there hid a broken session behind a very long
- * link. [log] receives the status or the failure class, never the capability.
+ * Every failure is thrown as a [ChatError] and mints no link: a server
+ * refusal (a `401` for a missing or expired session, a `400`, a `429`) and an
+ * unreachable ledger alike (the inline form that used to be shared then was
+ * removed on 2026-10-19). [log] receives the status or the failure class,
+ * never the capability.
  */
-internal suspend fun uploadGroupInviteOrNull(
+internal suspend fun uploadGroupInvite(
     sessionToken: String?,
     clientFactory: () -> DiscoveryClient,
     upload: suspend (DiscoveryClient) -> ByteArray,
     log: (String) -> Unit,
-): ByteArray? =
+): ByteArray =
     withSessionDiscovery(sessionToken, "group invite upload", clientFactory) { client ->
         try {
             upload(client)
         } catch (e: DiscoveryNetworkError) {
             if (e.cause is CancellationException) throw e.cause as CancellationException
-            log("group invite upload unreachable (${e.cause?.javaClass?.simpleName}); sharing the inline link")
-            null
+            log("group invite upload unreachable (${e.cause?.javaClass?.simpleName})")
+            throw ChatError("group invite upload unreachable", e)
         } catch (e: DiscoveryHttpError) {
             log("group invite upload refused: HTTP ${e.status}")
             throw ChatError("group invite upload refused (HTTP ${e.status})", e)

@@ -8,22 +8,22 @@ import XCTest
 /// there. The same URL and the same reading of the answer as web and Android.
 final class SfuCallStateTests: XCTestCase {
     func testTheStateRouteIsOnTheHttpOriginBehindTheSocketBase() {
-        let id = String(repeating: "ab", count: 16)
+        let room = String(repeating: "ab", count: 32)
         XCTAssertEqual(
-            SfuCallStateProbe.url(sfuBaseUrl: "wss://test.lakko.me/sfu", callIdHex: id)?.absoluteString,
-            "https://test.lakko.me/sfu/v1/calls/\(id)")
+            SfuCallStateProbe.url(sfuBaseUrl: "wss://test.lakko.me/sfu", roomHex: room)?.absoluteString,
+            "https://test.lakko.me/sfu/v1/rooms/\(room)")
         XCTAssertEqual(
-            SfuCallStateProbe.url(sfuBaseUrl: "ws://127.0.0.1:9640/", callIdHex: id)?.absoluteString,
-            "http://127.0.0.1:9640/v1/calls/\(id)")
+            SfuCallStateProbe.url(sfuBaseUrl: "ws://127.0.0.1:9640/", roomHex: room)?.absoluteString,
+            "http://127.0.0.1:9640/v1/rooms/\(room)")
     }
 
-    /// The token rides `Authorization`, never the URL (invariant #5).
-    func testTheTokenIsABearerHeaderNotAQuery() {
-        let id = String(repeating: "00", count: 16)
-        let request = SfuCallStateProbe.request(sfuBaseUrl: "wss://h/sfu", callIdHex: id, jwt: "a.b.c")
-        XCTAssertEqual(request?.url?.absoluteString, "https://h/sfu/v1/calls/\(id)")
+    /// ADR-0078 section 2: the probe carries no token at all.
+    func testTheProbeCarriesNoToken() {
+        let room = String(repeating: "00", count: 32)
+        let request = SfuCallStateProbe.request(sfuBaseUrl: "wss://h/sfu", roomHex: room)
+        XCTAssertEqual(request?.url?.absoluteString, "https://h/sfu/v1/rooms/\(room)")
         XCTAssertNil(request?.url?.query)
-        XCTAssertEqual(request?.value(forHTTPHeaderField: "Authorization"), "Bearer a.b.c")
+        XCTAssertNil(request?.value(forHTTPHeaderField: "Authorization"))
     }
 
     func testTheFourWordsAreRead() {

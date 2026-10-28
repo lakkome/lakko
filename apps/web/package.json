@@ -16,6 +16,7 @@
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "typecheck": "tsc --noEmit",
+    "typecheck:e2e": "tsc --noEmit -p tsconfig.playwright.json",
     "report": "npm run build && node scripts/bundle-report.mjs",
     "report:no-build": "node scripts/bundle-report.mjs",
     "clean": "rm -rf wasm dist node_modules/.vite"

@@ -265,6 +265,18 @@ where
     }
 }
 
+/// Deserialize the optional screen ceiling of a
+/// [`ServerFrame::PublishBudget`] (ADR-0083) under the same bounds.
+#[allow(clippy::unnecessary_wraps)]
+fn deserialize_optional_publish_budget_kbps<'de, D>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_publish_budget_kbps(deserializer).map(Some)
+}
+
 /// A sequence read with its entry count checked as it is read, so an
 /// over-long list is refused without being collected, and then checked as
 /// a whole by `problem`.
@@ -297,6 +309,38 @@ impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Bounded<T> {
             None => Ok(entries),
         }
     }
+}
+
+/// Why a `screen_mids` list is out of bounds, or `None` when it is within
+/// them (ADR-0083). The bounds are those of `light_mids`
+/// ([`MAX_LIGHT_MIDS`] entries, each non-empty and at most
+/// [`MAX_LIGHT_MID_BYTES`] bytes); a share is one video and at most one
+/// audio line.
+#[must_use]
+pub fn screen_mids_problem(mids: &[String]) -> Option<&'static str> {
+    if mids.len() > MAX_LIGHT_MIDS {
+        return Some("screen_mids has more entries than the protocol allows");
+    }
+    if mids.iter().any(String::is_empty) {
+        return Some("screen_mids has an empty entry");
+    }
+    if mids.iter().any(|mid| mid.len() > MAX_LIGHT_MID_BYTES) {
+        return Some("screen_mids has an entry longer than the protocol allows");
+    }
+    None
+}
+
+/// Deserialize `screen_mids`, refusing a list outside its bounds
+/// ([`screen_mids_problem`]).
+fn deserialize_screen_mids<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserializer.deserialize_seq(Bounded {
+        max: MAX_LIGHT_MIDS,
+        too_many: "screen_mids has more entries than the protocol allows",
+        problem: |mids: &[String]| screen_mids_problem(mids),
+    })
 }
 
 /// Deserialize `light_mids`, refusing a list outside its bounds
@@ -366,44 +410,47 @@ pub enum SfuProtoError {
     FrameTooLarge(usize),
 }
 
-/// Domain-separation context for the per-call peer tag (ADR-0021).
-const PEER_TAG_CONTEXT: &str = "lakko/sfu/peer-tag/v1";
+/// Domain-separation context for the room id (ADR-0078 section 2).
+pub const ROOM_CONTEXT: &str = "lakko/sfu/room/v1";
 
-/// Length of the per-call peer tag in bytes (rendered as `2×` lower-case
-/// hex chars). 8 bytes = 64 bits — birthday-safe for the few-hundred
-/// participants a call holds, and short on the wire / as a fallback
-/// display label.
-pub const PEER_TAG_LEN: usize = 8;
+/// Length of a call id in bytes (16 random bytes, chosen by the caller).
+pub const CALL_ID_LEN: usize = 16;
 
-/// Derive the per-call **peer tag** (ADR-0021).
+/// Length of a room id in bytes (rendered as 64 lower-case hex chars).
+pub const ROOM_ID_LEN: usize = 32;
+
+/// The SFU room a call lives in (ADR-0078 section 2):
+/// `BLAKE3_derive_key("lakko/sfu/room/v1", call_id)`.
 ///
-/// A privacy-preserving, collision-resistant, per-call identifier the SFU
-/// emits for each peer (over the JWT-verified `account_id`) and the
-/// clients re-derive over their contacts' account ids to resolve a roster
-/// entry to a display name.
-///
-/// `peer_tag = BLAKE3_derive_key(PEER_TAG_CONTEXT, len(call_id) ‖ call_id
-/// ‖ len(account_id) ‖ account_id)` truncated to [`PEER_TAG_LEN`] bytes,
-/// lower-case hex. The big-endian length framing prevents a
-/// `(call_id, account_id)` concatenation ambiguity; keying on `call_id`
-/// makes the tag fresh per call (unlinkable across calls); the one-way
-/// hash never reveals the `account_id`. Deterministic + canonical, so the
-/// SFU and every client compute byte-identical strings.
+/// The call id is 16 random bytes that travel only inside the E2EE call
+/// signalling, so only the call's members can compute the room; the SFU
+/// and the issuer of the admission token see the room and never the call
+/// id. One-way, so the room does not reveal the call id. Every client and
+/// the SFU-side tests use this one definition (golden-pinned).
 #[must_use]
-pub fn peer_tag(call_id: &str, account_id: &str) -> String {
+pub fn room_id(call_id: &[u8; CALL_ID_LEN]) -> [u8; ROOM_ID_LEN] {
+    blake3::derive_key(ROOM_CONTEXT, call_id)
+}
+
+/// [`room_id`] as 64 lower-case hex characters, the form the admission
+/// token's `room` claim and the `/v1/rooms/{room}` route carry.
+#[must_use]
+pub fn room_hex(call_id: &[u8; CALL_ID_LEN]) -> String {
     use core::fmt::Write as _;
-    let mut hasher = blake3::Hasher::new_derive_key(PEER_TAG_CONTEXT);
-    hasher.update(&(call_id.len() as u64).to_be_bytes());
-    hasher.update(call_id.as_bytes());
-    hasher.update(&(account_id.len() as u64).to_be_bytes());
-    hasher.update(account_id.as_bytes());
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(PEER_TAG_LEN * 2);
-    for b in &digest.as_bytes()[..PEER_TAG_LEN] {
+    let room = room_id(call_id);
+    let mut out = String::with_capacity(ROOM_ID_LEN * 2);
+    for b in &room {
         // Writing a `u8` as hex into a `String` is infallible.
         let _ = write!(out, "{b:02x}");
     }
     out
+}
+
+/// Whether `s` is a room id as the route and the token carry it: exactly
+/// 64 lower-case hex characters.
+#[must_use]
+pub fn is_room_hex(s: &str) -> bool {
+    s.len() == ROOM_ID_LEN * 2 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Server-to-client frame.
@@ -413,10 +460,12 @@ pub enum ServerFrame {
     /// First frame after the WS upgrade. Confirms admission and seeds
     /// the client's view of the call.
     Welcome {
-        /// Server-assigned id for this connection.
+        /// This connection's peer id: the random `peer_id` of the
+        /// admission token (ADR-0078 section 2). The client announces it,
+        /// signed with its MLS leaf key, to the other members.
         peer_id: String,
-        /// Call this peer was admitted to (from the JWT).
-        call_id: String,
+        /// The room this peer was admitted to (the token's `room`).
+        room: String,
         /// Every other peer currently in the call. Empty list means
         /// the joiner is alone (typical at call creation).
         roster: Vec<PeerSnapshot>,
@@ -425,19 +474,12 @@ pub enum ServerFrame {
         server_ts: u64,
     },
 
-    /// A new peer joined the same call.
+    /// A new peer joined the same call. The SFU knows nothing about who
+    /// the peer is (ADR-0078 section 2); members learn that from the
+    /// peer's own sealed announcement over `signal-relay`.
     PeerJoined {
         /// New peer's id.
         peer_id: String,
-        /// Pseudonymised account id (first 8 hex chars). The SFU
-        /// never broadcasts the raw `sub`. Legacy display tag — kept
-        /// during the ADR-0021 rollout; superseded by `peer_tag`.
-        account_pseudonym: String,
-        /// Per-call peer tag (ADR-0021) — [`peer_tag`] over the
-        /// JWT-verified `account_id` + the `call_id`. `#[serde(default)]`
-        /// for forward/backward compatibility during rollout.
-        #[serde(default)]
-        peer_tag: String,
     },
 
     /// A peer disconnected.
@@ -552,6 +594,16 @@ pub enum ServerFrame {
         /// has nothing to apply it to.
         #[serde(deserialize_with = "deserialize_publish_budget_kbps")]
         middle_kbps: u32,
+        /// The ceiling of the publisher's screen-share sender, kbit/s
+        /// (ADR-0083): present only while the publisher sends a screen
+        /// (`screen_mids`), whose room the SFU reserves before the camera
+        /// ceilings above are computed. Same bounds as the other two.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_optional_publish_budget_kbps"
+        )]
+        screen_kbps: Option<u32>,
     },
 }
 
@@ -652,6 +704,22 @@ pub enum ClientFrame {
             deserialize_with = "deserialize_middle_mids"
         )]
         middle_mids: Vec<String>,
+        /// The `mid`s of this offer's lines that carry the sender's
+        /// **screen share** (ADR-0083): its picture (SFrame stream index
+        /// 2) and its sound when it has any (stream index 5). The SFU
+        /// forwards them under the MSID stream id = the sender's peer id
+        /// followed by `~screen`, to every subscriber, never paused by
+        /// [`Self::VideoWants`].
+        ///
+        /// Absent on the wire when empty, and an absent field decodes
+        /// to empty. The bounds are those of `light_mids`
+        /// ([`screen_mids_problem`]).
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "deserialize_screen_mids"
+        )]
+        screen_mids: Vec<String>,
     },
 
     /// Client → SFU: a trickle-ICE candidate the client gathered
@@ -738,23 +806,13 @@ pub enum RelayTarget {
     Call,
 }
 
-/// Snapshot of a peer in the welcome roster.
+/// Snapshot of a peer in the welcome roster: the peer id and nothing
+/// else (ADR-0078 section 2; the ADR-0021 account pseudonym and peer tag
+/// are gone).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PeerSnapshot {
-    /// Server-assigned peer id.
+    /// The peer's id (its admission token's random `peer_id`).
     pub peer_id: String,
-    /// First 8 hex chars of the account id. The SFU never publishes
-    /// the full `sub`. Legacy display tag — kept during the ADR-0021
-    /// rollout; superseded by [`PeerSnapshot::peer_tag`].
-    pub account_pseudonym: String,
-    /// Per-call peer tag (ADR-0021) — [`peer_tag`] over the JWT-verified
-    /// `account_id` + the `call_id`. The client re-derives it over its
-    /// contacts' account ids to resolve this entry to a display name.
-    /// `#[serde(default)]` so a frame from a pre-ADR-0021 SFU (or a
-    /// fixture) still decodes (empty tag → no resolution, falls back to
-    /// the pseudonym).
-    #[serde(default)]
-    pub peer_tag: String,
 }
 
 /// Machine-readable error codes the SFU may emit.
@@ -812,15 +870,18 @@ pub fn decode_client_frame(json: &str) -> Result<ClientFrame, SfuProtoError> {
 /// an SDP offer's `light_mids` or `middle_mids`, or the `wants` of a
 /// [`ClientFrame::VideoWants`], is outside its bounds
 /// ([`light_mids_problem`], [`middle_mids_problem`],
-/// [`video_wants_problem`]): the server would refuse that frame, so it is
+/// [`screen_mids_problem`], [`video_wants_problem`]): the server would refuse that frame, so it is
 /// not composed.
 pub fn encode_client_frame(frame: &ClientFrame) -> Result<String, SfuProtoError> {
     let problem = match frame {
         ClientFrame::SdpOffer {
             light_mids,
             middle_mids,
+            screen_mids,
             ..
-        } => light_mids_problem(light_mids).or_else(|| middle_mids_problem(middle_mids)),
+        } => light_mids_problem(light_mids)
+            .or_else(|| middle_mids_problem(middle_mids))
+            .or_else(|| screen_mids_problem(screen_mids)),
         ClientFrame::VideoWants { wants } => video_wants_problem(wants),
         _ => None,
     };
@@ -855,7 +916,9 @@ pub fn encode_server_frame(frame: &ServerFrame) -> Result<String, SfuProtoError>
         ServerFrame::PublishBudget {
             main_kbps,
             middle_kbps,
-        } => publish_budget_problem(*main_kbps, *middle_kbps),
+            screen_kbps,
+        } => publish_budget_problem(*main_kbps, *middle_kbps)
+            .or_else(|| screen_kbps.and_then(|screen| publish_budget_problem(screen, screen))),
         _ => None,
     };
     if let Some(problem) = problem {
@@ -885,11 +948,9 @@ mod tests {
     fn welcome_round_trip_via_json() {
         let frame = ServerFrame::Welcome {
             peer_id: "p123".into(),
-            call_id: "0123456789abcdef0123456789abcdef".into(),
+            room: room_hex(&[0x01; CALL_ID_LEN]),
             roster: vec![PeerSnapshot {
                 peer_id: "p100".into(),
-                account_pseudonym: "deadbeef".into(),
-                peer_tag: peer_tag("0123456789abcdef0123456789abcdef", "p100acct"),
             }],
             server_ts: 1_700_000_000,
         };
@@ -949,6 +1010,7 @@ mod tests {
             sdp: "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\n".into(),
             light_mids: Vec::new(),
             middle_mids: Vec::new(),
+            screen_mids: Vec::new(),
         };
         let json = encode_client_frame(&frame).expect("encode");
         assert!(json.contains("\"kind\":\"sdp-offer\""), "got {json}");
@@ -970,6 +1032,7 @@ mod tests {
             sdp: "v=0\r\n".into(),
             light_mids: vec!["2".into()],
             middle_mids: Vec::new(),
+            screen_mids: Vec::new(),
         };
         let json = encode_client_frame(&frame).expect("encode");
         assert!(json.contains("\"light_mids\":[\"2\"]"), "got {json}");
@@ -984,10 +1047,12 @@ mod tests {
                 sdp,
                 light_mids,
                 middle_mids,
+                screen_mids,
             } => {
                 assert_eq!(sdp, "v=0");
                 assert!(light_mids.is_empty());
                 assert!(middle_mids.is_empty());
+                assert!(screen_mids.is_empty());
             },
             other => panic!("expected SdpOffer, got {other:?}"),
         }
@@ -1035,6 +1100,7 @@ mod tests {
             sdp: "v=0".into(),
             light_mids,
             middle_mids: Vec::new(),
+            screen_mids: Vec::new(),
         };
         assert!(encode_client_frame(&offer(vec!["1".into(); MAX_LIGHT_MIDS])).is_ok());
         assert!(encode_client_frame(&offer(vec!["1".into(); MAX_LIGHT_MIDS + 1])).is_err());
@@ -1048,6 +1114,7 @@ mod tests {
             sdp: "v=0\r\n".into(),
             light_mids: vec!["2".into()],
             middle_mids: vec!["3".into()],
+            screen_mids: Vec::new(),
         };
         let json = encode_client_frame(&frame).expect("encode");
         assert!(json.contains("\"middle_mids\":[\"3\"]"), "got {json}");
@@ -1087,11 +1154,65 @@ mod tests {
             sdp: "v=0".into(),
             light_mids: Vec::new(),
             middle_mids,
+            screen_mids: Vec::new(),
         };
         assert!(encode_client_frame(&offer(vec!["1".into(); MAX_LIGHT_MIDS])).is_ok());
         assert!(encode_client_frame(&offer(vec!["1".into(); MAX_LIGHT_MIDS + 1])).is_err());
         assert!(encode_client_frame(&offer(vec![String::new()])).is_err());
         assert!(encode_client_frame(&offer(vec!["m".repeat(MAX_LIGHT_MID_BYTES + 1)])).is_err());
+    }
+
+    #[test]
+    fn sdp_offer_screen_mids_round_trip_and_bounds() {
+        let frame = ClientFrame::SdpOffer {
+            sdp: "v=0\r\n".into(),
+            light_mids: Vec::new(),
+            middle_mids: Vec::new(),
+            screen_mids: vec!["4".into(), "5".into()],
+        };
+        let json = encode_client_frame(&frame).expect("encode");
+        assert!(json.contains("\"screen_mids\":[\"4\",\"5\"]"), "got {json}");
+        assert_eq!(decode_client_frame(&json).expect("decode"), frame);
+        let raw =
+            |mids: &str| format!(r#"{{"kind":"sdp-offer","sdp":"v=0","screen_mids":{mids}}}"#);
+        for bad in [r#"["a","b","c","d","e"]"#, r#"[""]"#, "[1]"] {
+            assert!(decode_client_frame(&raw(bad)).is_err(), "refused: {bad}");
+        }
+        let too_many = ClientFrame::SdpOffer {
+            sdp: "v=0".into(),
+            light_mids: Vec::new(),
+            middle_mids: Vec::new(),
+            screen_mids: vec!["1".into(); MAX_LIGHT_MIDS + 1],
+        };
+        assert!(encode_client_frame(&too_many).is_err());
+    }
+
+    #[test]
+    fn publish_budget_screen_kbps_is_optional_and_bounded() {
+        let without = ServerFrame::PublishBudget {
+            main_kbps: 900,
+            middle_kbps: 300,
+            screen_kbps: None,
+        };
+        let json = encode_server_frame(&without).expect("encode");
+        assert!(!json.contains("screen_kbps"), "got {json}");
+        assert_eq!(decode_server_frame(&json).expect("decode"), without);
+        let with = ServerFrame::PublishBudget {
+            main_kbps: 900,
+            middle_kbps: 300,
+            screen_kbps: Some(1200),
+        };
+        let json = encode_server_frame(&with).expect("encode");
+        assert!(json.contains("\"screen_kbps\":1200"), "got {json}");
+        assert_eq!(decode_server_frame(&json).expect("decode"), with);
+        let zero = ServerFrame::PublishBudget {
+            main_kbps: 900,
+            middle_kbps: 300,
+            screen_kbps: Some(0),
+        };
+        assert!(encode_server_frame(&zero).is_err());
+        let raw = r#"{"kind":"publish-budget","main_kbps":900,"middle_kbps":300,"screen_kbps":0}"#;
+        assert!(decode_server_frame(raw).is_err());
     }
 
     #[test]
@@ -1258,61 +1379,53 @@ mod tests {
         assert!(decode_payload_b64("not valid base64!!").is_err());
     }
 
-    // -- ADR-0021 per-call peer tag ----------------------------------
-
-    const ACCT_A: &str = "deadbeefdeadbeefdeadbeefdeadbeef";
+    // -- ADR-0078 section 2 room id ------------------------------------
 
     #[test]
-    fn peer_tag_is_deterministic() {
-        assert_eq!(peer_tag("call-1", ACCT_A), peer_tag("call-1", ACCT_A));
+    fn room_is_deterministic_and_per_call() {
+        assert_eq!(room_id(&[0x07; CALL_ID_LEN]), room_id(&[0x07; CALL_ID_LEN]));
+        assert_ne!(room_id(&[0x07; CALL_ID_LEN]), room_id(&[0x08; CALL_ID_LEN]));
     }
 
     #[test]
-    fn peer_tag_shape_is_lowercase_hex() {
-        let t = peer_tag("call-1", ACCT_A);
-        assert_eq!(t.len(), PEER_TAG_LEN * 2);
-        assert!(t
-            .chars()
-            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+    fn room_hex_is_64_lower_case_hex_and_never_the_call_id() {
+        let call_id = [0xab; CALL_ID_LEN];
+        let room = room_hex(&call_id);
+        assert!(is_room_hex(&room));
+        assert!(!room.contains("abababababababababababababababab"));
     }
 
     #[test]
-    fn peer_tag_is_per_call_unlinkable() {
-        // Same account, different call → different tag.
-        assert_ne!(peer_tag("call-1", ACCT_A), peer_tag("call-2", ACCT_A));
+    fn is_room_hex_refuses_anything_else() {
+        assert!(!is_room_hex(""));
+        assert!(!is_room_hex(&"a".repeat(63)));
+        assert!(!is_room_hex(&"A".repeat(64)));
+        assert!(!is_room_hex(&"g".repeat(64)));
+        assert!(is_room_hex(&"0".repeat(64)));
     }
 
+    /// Pins the canonical derivation so the SFU, auth and every client
+    /// agree on the room of a call.
     #[test]
-    fn peer_tag_distinguishes_accounts() {
-        assert_ne!(
-            peer_tag("call-1", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-            peer_tag("call-1", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
-        );
+    fn room_golden_vector() {
+        let call_id: [u8; CALL_ID_LEN] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
+        ];
+        assert_eq!(room_hex(&call_id), ROOM_GOLDEN);
     }
 
-    #[test]
-    fn peer_tag_length_framing_avoids_concatenation_ambiguity() {
-        // ("ab","c") vs ("a","bc") must not collide.
-        assert_ne!(peer_tag("ab", "c"), peer_tag("a", "bc"));
-    }
+    const ROOM_GOLDEN: &str = "084b368ae5f3030d27355b44dc67aaea5a00f394e8ed7c5338b29698dbc25f15";
 
+    /// A roster entry carries the peer id only.
     #[test]
-    fn peer_tag_golden_vector() {
-        // Pins the canonical derivation so the SFU + every client agree.
-        assert_eq!(
-            peer_tag("call-golden", "00000000000000000000000000000000"),
-            PEER_TAG_GOLDEN,
-        );
-    }
-
-    const PEER_TAG_GOLDEN: &str = "2151ad585010e90b";
-
-    #[test]
-    fn peer_snapshot_decodes_without_peer_tag() {
-        // serde(default) — a pre-ADR-0021 frame (no peer_tag) still parses.
-        let json = r#"{"peer_id":"p1","account_pseudonym":"deadbeef…"}"#;
-        let snap: PeerSnapshot = serde_json::from_str(json).expect("decode");
-        assert_eq!(snap.peer_tag, "");
+    fn peer_snapshot_carries_only_the_peer_id() {
+        let json = encode_server_frame(&ServerFrame::PeerJoined {
+            peer_id: "p1".into(),
+        })
+        .expect("encode");
+        assert_eq!(json, r#"{"kind":"peer-joined","peer_id":"p1"}"#);
+        let snap: PeerSnapshot = serde_json::from_str(r#"{"peer_id":"p1"}"#).expect("decode");
         assert_eq!(snap.peer_id, "p1");
     }
 
@@ -1462,6 +1575,7 @@ mod tests {
             let frame = ServerFrame::PublishBudget {
                 main_kbps,
                 middle_kbps,
+                screen_kbps: None,
             };
             assert_eq!(encode_server_frame(&frame).expect("encode"), wire);
             assert_eq!(decode_server_frame(wire).expect("decode"), frame);
@@ -1499,6 +1613,7 @@ mod tests {
         let frame = |main_kbps, middle_kbps| ServerFrame::PublishBudget {
             main_kbps,
             middle_kbps,
+            screen_kbps: None,
         };
         assert!(encode_server_frame(&frame(0, 500)).is_err());
         assert!(encode_server_frame(&frame(2500, 0)).is_err());
@@ -1517,14 +1632,12 @@ mod tests {
         let frames = [
             ServerFrame::Welcome {
                 peer_id: "p".into(),
-                call_id: "c".into(),
+                room: "r".into(),
                 roster: vec![],
                 server_ts: 0,
             },
             ServerFrame::PeerJoined {
                 peer_id: "p".into(),
-                account_pseudonym: "a".into(),
-                peer_tag: "t".into(),
             },
             ServerFrame::PeerLeft {
                 peer_id: "p".into(),
@@ -1553,6 +1666,7 @@ mod tests {
             ServerFrame::PublishBudget {
                 main_kbps: 1200,
                 middle_kbps: 500,
+                screen_kbps: None,
             },
         ];
         for frame in &frames {
@@ -1583,6 +1697,7 @@ mod tests {
                 sdp: "v=0".into(),
                 light_mids: vec!["1".into()],
                 middle_mids: vec!["2".into()],
+                screen_mids: Vec::new(),
             },
             ClientFrame::IceCandidate {
                 candidate_sdp: "candidate:1".into(),

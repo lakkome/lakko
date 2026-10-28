@@ -8,9 +8,6 @@ import me.lakko.app.ds.DsJournalSigner
 import me.lakko.app.ds.FfiDsJournalSigner
 import me.lakko.app.ds.DsStatementSigning
 import me.lakko.app.ds.FfiDsStatementSigning
-import me.lakko.app.ds.registerEpochBeforePublish
-import me.lakko.app.ds.KeyResetRootEvidence
-import me.lakko.app.ds.withKeyResetEvidence
 import uniffi.lakko_ffi_uniffi.DeviceGroup
 import uniffi.lakko_ffi_uniffi.Identity
 
@@ -22,10 +19,10 @@ import uniffi.lakko_ffi_uniffi.Identity
  * derives the same journal ROOT from the account identity seed and registers
  * every epoch with it; there are no registrars (and nothing to revoke).
  *
- * The DeviceGroup's commit paths ([PairingOrchestrator], [DeviceRemoval]) each
- * open their own short-lived handle, so they take the signers from that handle
- * explicitly: [signerOf] before the commit (epoch N) and after it (N+1), then
- * [registerNext] before anything is persisted or published.
+ * The DeviceGroup's commit paths ([PairingOrchestrator], [DeviceRemoval]) go
+ * through the commit outbox ([DeviceGroupCommits], ADR-0081): the N+1
+ * registration and the commit row reach the DS in one request, proven under
+ * N. Nothing here registers an epoch on its own.
  */
 internal object DeviceGroupJournalAccess {
     /** The [me.lakko.app.ds.DsSignerRegistry] owner tag of the sync
@@ -115,7 +112,6 @@ internal object DeviceGroupJournalAccess {
                     statements = root,
                     refounded = true,
                     put = { make -> ds.putStatement(make) },
-                    keyResetEvidence = { rootKey -> pendingResetEvidence(context, accountIdB64, groupId, rootKey) },
                 )
                 if (outcome != me.lakko.app.ds.JournalClaimOutcome.ALREADY_CLAIMED) {
                     onJournalRootLanded(context, accountIdB64)
@@ -126,94 +122,33 @@ internal object DeviceGroupJournalAccess {
         )
     }
 
-    /**
-     * ADR-0073 section 5 / ADR-0074 T5 item 21 - what a founding of this
-     * account's DeviceGroup must carry on its `Reset`, because the journal's
-     * chain on the DS belongs to the OLD root: the key-reset attestation and
-     * the NEW account key's endorsement of [rootKey] (the reset's signer).
-     * Present while a reset's DS step is still owed and the attestation is
-     * within its 30-day bound. `null` otherwise (an ordinary same-root
-     * re-founding), and `null` when the new seed is not on this device (the
-     * DS then answers the uniform 401 and the step stays owed).
-     */
-    fun pendingResetEvidence(
-        context: android.content.Context,
-        accountIdB64: String,
-        journalId: ByteArray,
-        rootKey: ByteArray,
-    ): KeyResetRootEvidence? {
-        val owed = me.lakko.app.auth.KeyResetOwedStore.onDevice(context).load(accountIdB64) ?: return null
-        if (owed.deviceGroupReset) return null
-        val age = me.lakko.app.auth.attestationAgeAt(
-            signedAtMs = owed.signedAtMs,
-            nowMs = System.currentTimeMillis(),
-            signedInAgainMs = null,
-        )
-        if (age != me.lakko.app.auth.AttestationAge.Fresh) return null
-        val seed = me.lakko.app.auth.AccountIdentitySeedStore.getAccountIdentitySeed(context, accountIdB64)
-            ?: return null
-        return try {
-            rootEvidence(seed, owed.attestationB64, owed.keyGeneration, journalId, rootKey)
-        } finally {
-            seed.fill(0)
-        }
-    }
-
-    /**
-     * The attestation with the endorsement of [rootKey] by the account
-     * identity [accountIdentitySeed] derives (the key the attestation
-     * names). `null` when the endorsement cannot be signed.
-     */
-    fun rootEvidence(
-        accountIdentitySeed: ByteArray,
-        attestationB64: String,
-        keyGeneration: Long,
-        journalId: ByteArray,
-        rootKey: ByteArray,
-    ): KeyResetRootEvidence? =
-        try {
-            val endorsement = Identity.fromSeed(accountIdentitySeed).use { identity ->
-                val ed = identity.ed25519Seed()
-                try {
-                    uniffi.lakko_ffi_uniffi.signDsRootEndorsement(ed, journalId, keyGeneration.toULong(), rootKey)
-                } finally {
-                    ed.fill(0)
-                }
-            }
-            KeyResetRootEvidence(attestationB64, me.lakko.app.auth.base64Encode(endorsement))
-        } catch (_: Throwable) {
-            null
-        }
-
-    /** A claim or an attested reset of this account's DeviceGroup journal
-     *  answered 204: the reset's DS step, when one was owed, is done. */
+    /** A claim of this account's DeviceGroup journal answered 204: the
+     *  reset's DS step, when one was owed, is done. */
     fun onJournalRootLanded(context: android.content.Context, accountIdB64: String) {
         me.lakko.app.auth.KeyResetOwedStore.onDevice(context)
             .markStep(accountIdB64, me.lakko.app.auth.KeyResetStep.DeviceGroupReset)
     }
 
     /**
-     * ADR-0073 section 2.3 step 4 / section 5 — the DeviceGroup after a reset
-     * of the account keys, on the device that reset them. The journal id is
-     * unchanged (derived from the account id) but the chain on the DS belongs
-     * to the OLD root, and the DeviceGroup this device holds was founded
-     * under the old seed. So: drop that DeviceGroup, found a new one under the
-     * same id with the SAME device identity (the conversation leaves are
-     * unaffected), and re-root the journal with a `Reset` signed by the NEW
-     * root carrying the attestation. The founding stays unconfirmed until the
-     * reset answers 204 (no Welcome may leave before that); a later open claims
-     * again with the stored attestation ([pendingResetEvidence]).
+     * ADR-0073 section 2.3 step 4 — the DeviceGroup after a reset of the
+     * account keys, on the device that reset them. ADR-0078 section 6: the
+     * DeviceGroup id is derived from the account seed, so the NEW seed names
+     * a NEW journal (the reset cleared the own predecessors). The caller
+     * dropped the old DeviceGroup ([DeviceGroupLifecycle.discardForKeyReset]);
+     * this founds the new one with the SAME device identity (the
+     * conversation leaves are unaffected) and claims its journal with the
+     * NEW root, a plain claim (a `409` from an earlier attempt of this device
+     * resets the chain the same root left). The founding stays unconfirmed
+     * until the claim answers 204 (no Welcome may leave before that).
      *
-     * Returns what the DS said; nothing is minted again on any outcome.
-     * [accountIdentitySeed] is the NEW phrase seed (read, never kept).
+     * Returns what the DS said. [accountIdentitySeed] is the NEW phrase seed
+     * (read, never kept).
      */
-    suspend fun reRootAfterKeyReset(
+    suspend fun refoundAfterKeyReset(
         context: android.content.Context,
         accountIdBytes: ByteArray,
         accountIdB64: String,
         accountIdentitySeed: ByteArray,
-        attestationB64: String,
-        keyGeneration: Long,
         ds: DsClient,
     ): me.lakko.app.auth.KeyResetStepOutcome {
         val deviceSeed = me.lakko.app.auth.DeviceIdentityStore.ensureDeviceIdentitySeed(context, accountIdB64)
@@ -223,6 +158,10 @@ internal object DeviceGroupJournalAccess {
                 accountIdBytes = accountIdBytes,
                 accountIdB64 = accountIdB64,
                 deviceIdentitySeed = deviceSeed,
+                accountSeed = accountIdentitySeed,
+                // ADR-0081 decision 4 — a key reset is one of the two cases
+                // that found (the new seed names a new journal nobody holds).
+                found = true,
             )
         } finally {
             deviceSeed.fill(0)
@@ -233,14 +172,16 @@ internal object DeviceGroupJournalAccess {
                 ?: throw me.lakko.app.ds.DsRegistrationUnavailable("the DeviceGroup access key could not be derived")
             val root = rootOfSeed(accountIdentitySeed, groupId)
                 ?: throw me.lakko.app.ds.DsRegistrationUnavailable("the DeviceGroup root could not be derived")
-            // ADR-0074 T5 item 21 - the DS refuses the attestation without
-            // the new account key's endorsement of the resetting root.
-            val evidence = rootEvidence(accountIdentitySeed, attestationB64, keyGeneration, groupId, root.publicKey)
-                ?: throw me.lakko.app.ds.DsRegistrationUnavailable("the root endorsement could not be signed")
             val error: Throwable? = try {
-                ds.putStatement {
-                    root.reset(groupId, signer.epoch, signer.verifyingKey)
-                        .withKeyResetEvidence(evidence)
+                me.lakko.app.ds.requireClaim {
+                    me.lakko.app.ds.claimOrReset(
+                        journalId = groupId,
+                        epoch = signer.epoch,
+                        epochKey = signer.verifyingKey,
+                        statements = root,
+                        refounded = true,
+                        put = { make -> ds.putStatement(make) },
+                    )
                 }
                 null
             } catch (cancel: kotlinx.coroutines.CancellationException) {
@@ -248,15 +189,7 @@ internal object DeviceGroupJournalAccess {
             } catch (cause: Throwable) {
                 cause
             }
-            val probeConfirmed = error is me.lakko.app.ds.DsHttpError && error.status == HTTP_CONFLICT &&
-                try {
-                    me.lakko.app.ds.probeRoot(groupId, root) { make -> ds.putStatement(make) }
-                } catch (cancel: kotlinx.coroutines.CancellationException) {
-                    throw cancel
-                } catch (_: Throwable) {
-                    false
-                }
-            val outcome = me.lakko.app.auth.deviceGroupResetOutcome(error, probeConfirmed)
+            val outcome = me.lakko.app.auth.deviceGroupResetOutcome(error, rootProbeConfirmed = false)
             if (me.lakko.app.auth.keyResetStepLanded(outcome)) {
                 clearFoundingUnconfirmed(context, accountIdB64)
                 onJournalRootLanded(context, accountIdB64)
@@ -268,8 +201,6 @@ internal object DeviceGroupJournalAccess {
         }
     }
 
-    private const val HTTP_CONFLICT: Int = 409
-
     /** [rootOf] over an account identity seed already in hand. */
     fun rootOfSeed(accountIdentitySeed: ByteArray, groupId: ByteArray): DsStatementSigning? =
         try {
@@ -278,26 +209,4 @@ internal object DeviceGroupJournalAccess {
             null
         }
 
-    /**
-     * ADR-0057 obligation 5 — register epoch N+1's key ([after]) with the
-     * account's journal [root] and return [before], the signer the commit POST
-     * is signed with. Throws when the registration cannot be made or is
-     * refused (no root on this device included); the caller must then publish
-     * nothing.
-     */
-    suspend fun registerNext(
-        ds: DsClient,
-        groupId: ByteArray,
-        before: DsJournalSigner?,
-        after: DsJournalSigner?,
-        root: DsStatementSigning?,
-    ): DsJournalSigner =
-        registerEpochBeforePublish(
-            journalId = groupId,
-            before = before,
-            after = after,
-            statements = root,
-            revoke = emptyList(),
-            put = { make -> ds.putStatement(make) },
-        )
 }

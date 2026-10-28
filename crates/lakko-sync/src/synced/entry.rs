@@ -209,6 +209,21 @@ pub enum BoundsError {
     /// blob ids. A tombstone has none.
     #[error("removed saved message carries a value")]
     SavedRemovedCarriesValue,
+    /// A link record named a kind this build does not know (ADR-0079).
+    #[error("unknown link record kind")]
+    LinkRecordKind,
+    /// A link record's ledger id was not 6 bytes.
+    #[error("link record ledger id length is out of bounds")]
+    LinkRecordLedgerIdLength,
+    /// A link record's label was longer than 64 bytes.
+    #[error("link record label is too long")]
+    LinkRecordLabel,
+    /// A link record named more than 16 requesters, or one twice.
+    #[error("link record requester list is out of bounds")]
+    LinkRecordAnswered,
+    /// A link record's revocation seed was not 32 bytes.
+    #[error("link record revocation seed length is out of bounds")]
+    LinkRecordRevocationSeedLength,
 }
 
 /// Which kind of conversation a [`ConversationRef`] names.
@@ -510,6 +525,11 @@ pub struct SavedSnapshot {
     /// client maps to its own label. Empty when the message has no
     /// attachment. At most 32 bytes.
     pub attachment_kind: String,
+    /// The message's own time in UNIX milliseconds, as the saving device
+    /// showed it, so a row can show the message date before the device
+    /// holds the message. `0` means unknown. Display only: it never orders
+    /// the saved list and never decides which write wins.
+    pub sent_at_ms: u64,
 }
 
 /// The longest prefix of `s` that is at most `max` bytes and ends on a
@@ -530,13 +550,14 @@ impl SavedSnapshot {
     /// `excerpt` to their byte bounds on a character boundary. An excerpt is
     /// a prefix by definition, so a long message is cut, not refused.
     /// `attachment_kind` is a token and is never cut: an over-long one is
-    /// refused by [`Self::validate`].
+    /// refused by [`Self::validate`]. `sent_at_ms` is kept as given.
     #[must_use]
-    pub fn fitted(author: &str, excerpt: &str, attachment_kind: &str) -> Self {
+    pub fn fitted(author: &str, excerpt: &str, attachment_kind: &str, sent_at_ms: u64) -> Self {
         Self {
             author: fit(author, SAVED_AUTHOR_MAX_BYTES).to_owned(),
             excerpt: fit(excerpt, SAVED_EXCERPT_MAX_BYTES).to_owned(),
             attachment_kind: attachment_kind.to_owned(),
+            sent_at_ms,
         }
     }
 
@@ -770,6 +791,7 @@ impl SavedMessage {
                     &snapshot.author,
                     &snapshot.excerpt,
                     &snapshot.attachment_kind,
+                    snapshot.sent_at_ms,
                 ),
                 blob_ids: distinct,
             },
@@ -850,6 +872,8 @@ pub enum SyncEntry {
     OwnUsername(OwnUsernameEntry),
     /// A saved message, or its removal (ADR-0065 section 4).
     Saved(SavedMessage),
+    /// One of the account's invite links (ADR-0079 section 4).
+    LinkRecord(super::link_record::LinkRecordEntry),
 }
 
 /// Which register an entry writes.
@@ -884,6 +908,8 @@ pub enum RegisterKey {
     OwnUsername,
     /// The saved register of this message in this conversation.
     Saved(ConversationRef, u64),
+    /// The link-record register of this link id (ADR-0079). Appended last.
+    LinkRecord([u8; super::link_record::LINK_RECORD_ID_LEN]),
 }
 
 impl RegisterKey {
@@ -913,6 +939,7 @@ const TAG_SAVED: u8 = 10;
 const TAG_LINEAGE: u8 = 11;
 const TAG_RECOVERY_EMAIL: u8 = 12;
 const TAG_OWN_USERNAME: u8 = 13;
+const TAG_LINK_RECORD: u8 = 14;
 
 impl SyncEntry {
     /// The register this entry writes.
@@ -932,6 +959,7 @@ impl SyncEntry {
             Self::RecoveryEmail(_) => RegisterKey::RecoveryEmail,
             Self::OwnUsername(_) => RegisterKey::OwnUsername,
             Self::Saved(m) => RegisterKey::Saved(m.conversation.clone(), m.message_id),
+            Self::LinkRecord(r) => RegisterKey::LinkRecord(r.link_id),
         }
     }
 
@@ -955,6 +983,7 @@ impl SyncEntry {
             Self::RecoveryEmail(r) => r.validate(),
             Self::OwnUsername(u) => u.validate(),
             Self::Saved(m) => m.validate(),
+            Self::LinkRecord(r) => r.validate(),
             Self::FolderRemoved(_)
             | Self::Flags(_)
             | Self::ReadCursor(_)
@@ -969,7 +998,10 @@ impl SyncEntry {
     ///
     /// Deterministic and injective per register, so on an exact stamp tie
     /// "larger bytes win" picks the same value on every device.
+    // One arm per register tag; splitting the match would hide that every tag
+    // is written here.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         match self {
@@ -1045,6 +1077,10 @@ impl SyncEntry {
                 out.push(TAG_OWN_USERNAME);
                 put_bytes32(&mut out, u.username.as_bytes());
             },
+            Self::LinkRecord(r) => {
+                out.push(TAG_LINK_RECORD);
+                r.encode_body(&mut out);
+            },
             // The key (reference, message id) comes first and the state
             // byte directly after it, so on an exact stamp tie the two
             // writes of one register differ first at the state byte and a
@@ -1064,6 +1100,7 @@ impl SyncEntry {
                     put_bytes32(&mut out, snapshot.author.as_bytes());
                     put_bytes32(&mut out, snapshot.excerpt.as_bytes());
                     put_bytes32(&mut out, snapshot.attachment_kind.as_bytes());
+                    out.extend_from_slice(&snapshot.sent_at_ms.to_be_bytes());
                     put_len(&mut out, blob_ids.len());
                     for b in blob_ids {
                         out.extend_from_slice(b);
@@ -1181,6 +1218,9 @@ impl SyncEntry {
             TAG_RECOVERY_EMAIL => Self::RecoveryEmail(take_recovery_email(&mut cur)?),
             TAG_OWN_USERNAME => Self::OwnUsername(take_own_username(&mut cur)?),
             TAG_SAVED => Self::Saved(take_saved(&mut cur)?),
+            TAG_LINK_RECORD => {
+                Self::LinkRecord(super::link_record::LinkRecordEntry::take_body(&mut cur)?)
+            },
             _ => return Err(CodecError::UnknownTag),
         };
         if !cur.is_empty() {
@@ -1540,6 +1580,7 @@ fn take_saved(cur: &mut &[u8]) -> Result<SavedMessage, CodecError> {
                 SAVED_ATTACHMENT_KIND_MAX_BYTES,
                 BoundsError::SavedAttachmentKindTooLong,
             )?;
+            let sent_at_ms = take_u64(cur)?;
             let n = take_u32(cur)? as usize;
             if n > SAVED_BLOB_IDS_MAX {
                 return Err(BoundsError::TooManyBlobIds.into());
@@ -1554,6 +1595,7 @@ fn take_saved(cur: &mut &[u8]) -> Result<SavedMessage, CodecError> {
                     author,
                     excerpt,
                     attachment_kind,
+                    sent_at_ms,
                 },
                 blob_ids,
             }
@@ -1623,6 +1665,7 @@ mod tests {
                     author: "Ada".into(),
                     excerpt: "see you at nine".into(),
                     attachment_kind: "photo".into(),
+                    sent_at_ms: 1_699_999_000_000,
                 },
                 blob_ids: blob_ids.to_vec(),
             },
@@ -1780,6 +1823,7 @@ mod tests {
         blobs.extend_from_slice(&len(0));
         blobs.extend_from_slice(&len(0));
         blobs.extend_from_slice(&len(0));
+        blobs.extend_from_slice(&0u64.to_be_bytes()); // sent_at_ms
         blobs.extend_from_slice(&u32::MAX.to_be_bytes());
         assert_eq!(
             SyncEntry::from_canonical_bytes(&blobs),
@@ -1812,6 +1856,7 @@ mod tests {
         short_blob.extend_from_slice(&len(0));
         short_blob.extend_from_slice(&len(0));
         short_blob.extend_from_slice(&len(0));
+        short_blob.extend_from_slice(&0u64.to_be_bytes()); // sent_at_ms
         short_blob.extend_from_slice(&len(1));
         short_blob.extend_from_slice(&[1; 31]);
         assert_eq!(
@@ -1824,6 +1869,28 @@ mod tests {
         assert_eq!(
             SyncEntry::from_canonical_bytes(&tombstone),
             Err(CodecError::Trailing)
+        );
+    }
+
+    #[test]
+    fn the_message_time_survives_the_canonical_encoding() {
+        for sent_at_ms in [0u64, 1, 1_699_999_000_000, u64::MAX] {
+            let e = SyncEntry::Saved(saved_with(|_, s, _| s.sent_at_ms = sent_at_ms));
+            let Ok(SyncEntry::Saved(back)) = SyncEntry::from_canonical_bytes(&e.canonical_bytes())
+            else {
+                panic!("a saved register did not round-trip");
+            };
+            assert!(matches!(
+                back.value,
+                SavedValue::Present { snapshot, .. } if snapshot.sent_at_ms == sent_at_ms
+            ));
+        }
+        // A register cut inside the message time is truncated, not read short.
+        let bytes = SyncEntry::Saved(saved(9, &[])).canonical_bytes();
+        let cut = bytes.len() - 4 /* blob count */ - 3;
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&bytes[..cut]),
+            Err(CodecError::Truncated)
         );
     }
 
@@ -1850,14 +1917,15 @@ mod tests {
         // 4-byte scalars: 512 bytes is exactly 128 of them, 255 is not a
         // multiple of 4 and must round down to 252.
         let long = "😀".repeat(200);
-        let snap = SavedSnapshot::fitted(&long, &long, "voice");
+        let snap = SavedSnapshot::fitted(&long, &long, "voice", 42);
+        assert_eq!(snap.sent_at_ms, 42);
         assert_eq!(snap.excerpt.len(), SAVED_EXCERPT_MAX_BYTES);
         assert_eq!(snap.author.len(), 252);
         assert_eq!(snap.attachment_kind, "voice");
         assert!(long.starts_with(&snap.excerpt));
         assert_eq!(snap.validate(), Ok(()));
         // Short text is untouched.
-        assert_eq!(SavedSnapshot::fitted("Ada", "hi", "").excerpt, "hi");
+        assert_eq!(SavedSnapshot::fitted("Ada", "hi", "", 0).excerpt, "hi");
 
         let m = SavedMessage::present(
             sref(),
@@ -1867,6 +1935,7 @@ mod tests {
                 author: long.clone(),
                 excerpt: long,
                 attachment_kind: "voice".into(),
+                sent_at_ms: 7,
             },
             &[vec![1u8; 32], vec![2; 32], vec![1; 32]],
         );
@@ -2094,23 +2163,23 @@ mod tests {
         );
 
         let bytes = SyncEntry::Lineage(l(vec![0xAA, 0xBB], vec![0xCC])).canonical_bytes();
-        assert_eq!(bytes, [10, 0, 0, 0, 2, 0xAA, 0xBB, 0, 0, 0, 1, 0xCC]);
+        assert_eq!(bytes, [11, 0, 0, 0, 2, 0xAA, 0xBB, 0, 0, 0, 1, 0xCC]);
 
         // Decode refuses what validate refuses, and a hostile length.
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[10, 0, 0, 0, 1, 5, 0, 0, 0, 1, 5]),
+            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 1, 5, 0, 0, 0, 1, 5]),
             Err(CodecError::Bounds(BoundsError::LineageSelfReference))
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[10, 0, 0, 0, 0, 0, 0, 0, 1, 5]),
+            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 0, 0, 0, 0, 1, 5]),
             Err(CodecError::Bounds(BoundsError::LineageIdLength))
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[10, 0xFF, 0xFF, 0xFF, 0xFF, 1]),
+            SyncEntry::from_canonical_bytes(&[11, 0xFF, 0xFF, 0xFF, 0xFF, 1]),
             Err(CodecError::Bounds(BoundsError::LineageIdLength))
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[10, 0, 0, 0, 4, 1]),
+            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 4, 1]),
             Err(CodecError::Truncated)
         );
     }
@@ -2165,9 +2234,9 @@ mod tests {
         };
         assert_eq!(
             e("a@b").canonical_bytes(),
-            [11, 0, 0, 0, 3, b'a', b'@', b'b']
+            [12, 0, 0, 0, 3, b'a', b'@', b'b']
         );
-        assert_eq!(e("").canonical_bytes(), [11, 0, 0, 0, 0]);
+        assert_eq!(e("").canonical_bytes(), [12, 0, 0, 0, 0]);
         assert_eq!(e("a@b").key(), RegisterKey::RecoveryEmail);
         assert_eq!(e("").key(), RegisterKey::RecoveryEmail);
         // The register sorts after every older kind.
@@ -2176,31 +2245,31 @@ mod tests {
         // Decode refuses what validate refuses, a hostile length, bytes that
         // are not UTF-8, and trailing bytes.
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 2, b'a', b'@']),
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 2, b'a', b'@']),
             Err(CodecError::Bounds(BoundsError::RecoveryEmailLength))
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 3, b'a', b'b', b'c']),
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 3, b'a', b'b', b'c']),
             Err(CodecError::Bounds(BoundsError::RecoveryEmailShape))
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 0xFF, b'a']),
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 0xFF, b'a']),
             Err(CodecError::Bounds(BoundsError::RecoveryEmailLength))
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[11, 0xFF, 0xFF, 0xFF, 0xFF, 1]),
+            SyncEntry::from_canonical_bytes(&[12, 0xFF, 0xFF, 0xFF, 0xFF, 1]),
             Err(CodecError::Bounds(BoundsError::RecoveryEmailLength))
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 3, b'a', 0xFF, b'b']),
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 3, b'a', 0xFF, b'b']),
             Err(CodecError::NotUtf8)
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 3, b'a', b'@']),
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 3, b'a', b'@']),
             Err(CodecError::Truncated)
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 0, 0]),
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 0, 0]),
             Err(CodecError::Trailing)
         );
     }
@@ -2238,9 +2307,9 @@ mod tests {
         };
         assert_eq!(
             e("bob").canonical_bytes(),
-            [12, 0, 0, 0, 3, b'b', b'o', b'b']
+            [13, 0, 0, 0, 3, b'b', b'o', b'b']
         );
-        assert_eq!(e("").canonical_bytes(), [12, 0, 0, 0, 0]);
+        assert_eq!(e("").canonical_bytes(), [13, 0, 0, 0, 0]);
         assert_eq!(e("bob").key(), RegisterKey::OwnUsername);
         assert_eq!(e("").key(), RegisterKey::OwnUsername);
         // The register sorts after every older kind.
@@ -2248,31 +2317,31 @@ mod tests {
 
         let bounds = Err(CodecError::Bounds(BoundsError::OwnUsername));
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 2, b'a', b'b']),
+            SyncEntry::from_canonical_bytes(&[13, 0, 0, 0, 2, b'a', b'b']),
             bounds
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 3, b'B', b'o', b'b']),
+            SyncEntry::from_canonical_bytes(&[13, 0, 0, 0, 3, b'B', b'o', b'b']),
             bounds
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 33, b'a']),
+            SyncEntry::from_canonical_bytes(&[13, 0, 0, 0, 33, b'a']),
             bounds
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[12, 0xFF, 0xFF, 0xFF, 0xFF, 1]),
+            SyncEntry::from_canonical_bytes(&[13, 0xFF, 0xFF, 0xFF, 0xFF, 1]),
             bounds
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 3, b'a', 0xFF, b'b']),
+            SyncEntry::from_canonical_bytes(&[13, 0, 0, 0, 3, b'a', 0xFF, b'b']),
             Err(CodecError::NotUtf8)
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 3, b'a', b'b']),
+            SyncEntry::from_canonical_bytes(&[13, 0, 0, 0, 3, b'a', b'b']),
             Err(CodecError::Truncated)
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 0, 0]),
+            SyncEntry::from_canonical_bytes(&[13, 0, 0, 0, 0, 0]),
             Err(CodecError::Trailing)
         );
     }

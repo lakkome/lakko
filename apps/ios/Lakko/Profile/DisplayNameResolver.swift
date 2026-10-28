@@ -135,9 +135,14 @@ public enum UsernameVerificationStateView: Equatable, Sendable {
 }
 
 extension UsernameVerificationStateView {
+    /// `nil` for no verdict yet and for a check that could not complete: both
+    /// read as a check still running.
     init?(_ state: UsernameVerificationState?) {
-        guard let state else { return nil }
-        self = state.isVerified ? .verified : .refused
+        switch state {
+        case .verified?: self = .verified
+        case .mismatch?: self = .refused
+        case .failed?, nil: return nil
+        }
     }
 }
 

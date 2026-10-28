@@ -18,6 +18,7 @@
  * Every sender is the account key resolved from the MLS sender leaf at
  * receipt (C-68); an unresolvable sender is dropped.
  */
+import { createSignal } from "solid-js";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { registerAccountMemory } from "../auth/account-memory";
 import { journalHex } from "../ds/access";
@@ -77,6 +78,15 @@ export function decodeIntroductionsRow(json: string | null): IntroductionsRow {
 
 let introductionsCache: { account: string; row: IntroductionsRow } | null = null;
 
+const [offersTick, setOffersTick] = createSignal(0);
+
+/**
+ * Bumped when a contact's offered record is new or changed. The publication
+ * runtime re-runs on it, so the record is relayed to this account's other
+ * contacts at once rather than at the next periodic check.
+ */
+export const introductionOffersTick = offersTick;
+
 // The cache is what the next save starts from: a row cached before Forget
 // device would be saved back over the wiped store at the account's next
 // sign-in on this page. A sign-out drops it too (re-read on the next load).
@@ -101,6 +111,29 @@ export async function loadIntroductions(accountIdB64: string): Promise<Introduct
 async function saveIntroductions(accountIdB64: string, row: IntroductionsRow): Promise<void> {
   introductionsCache = { account: accountIdB64, row };
   await saveReachRow(accountIdB64, "introductions", JSON.stringify({ v: 1, ...row }));
+}
+
+let introductionsChain: Promise<unknown> = Promise.resolve();
+
+/**
+ * Read, change and write the kept introductions one at a time. Intake runs
+ * fire-and-forget per envelope, and a contact sends its offer and its bundle
+ * back to back: two unserialized writes each started from the row as it was
+ * before the other, and the later one dropped what the earlier one kept.
+ * `change` returns the new row, or `null` to write nothing.
+ */
+async function updateIntroductions(
+  accountIdB64: string,
+  change: (row: IntroductionsRow) => IntroductionsRow | null,
+): Promise<boolean> {
+  const run = introductionsChain.then(async () => {
+    const next = change(await loadIntroductions(accountIdB64));
+    if (next === null) return false;
+    await saveIntroductions(accountIdB64, next);
+    return true;
+  });
+  introductionsChain = run.catch(() => undefined);
+  return run;
 }
 
 /**
@@ -154,26 +187,24 @@ export async function intakeScopedEnvelope(args: {
       }
       case "introduction-offer": {
         const record = wasm.decodeIntroductionOffer(args.payload);
-        const row = await loadIntroductions(session.accountIdB64);
-        await saveIntroductions(session.accountIdB64, {
-          ...row,
-          offers: { ...row.offers, [sender]: { recordB64: base64Encode(record), receivedAtMs: Date.now() } },
+        const recordB64 = base64Encode(record);
+        let changed = false;
+        await updateIntroductions(session.accountIdB64, (row) => {
+          changed = row.offers[sender]?.recordB64 !== recordB64;
+          return { ...row, offers: { ...row.offers, [sender]: { recordB64, receivedAtMs: Date.now() } } };
         });
+        if (changed) setOffersTick((n) => n + 1);
         return;
       }
       case "introductions": {
         const bundle = wasm.decodeIntroductionsBundle(args.payload);
         const updated = bundle.updatedAtMs;
         bundle.free();
-        const row = await loadIntroductions(session.accountIdB64);
-        const held = row.bundles[sender];
-        if (held !== undefined && !wasm.bundleIsNewer(updated, BigInt(held.updatedAtMs))) return;
-        await saveIntroductions(session.accountIdB64, {
-          ...row,
-          bundles: {
-            ...row.bundles,
-            [sender]: { bundleB64: base64Encode(args.payload), updatedAtMs: updated.toString() },
-          },
+        const bundleB64 = base64Encode(args.payload);
+        await updateIntroductions(session.accountIdB64, (row) => {
+          const held = row.bundles[sender];
+          if (held !== undefined && !wasm.bundleIsNewer(updated, BigInt(held.updatedAtMs))) return null;
+          return { ...row, bundles: { ...row.bundles, [sender]: { bundleB64, updatedAtMs: updated.toString() } } };
         });
         return;
       }

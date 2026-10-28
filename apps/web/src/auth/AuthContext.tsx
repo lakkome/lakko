@@ -244,7 +244,6 @@ import {
 import {
   attestationGate,
   clearKeyResetOwed,
-  deviceGroupResetOutcome,
   directoryResetOutcome,
   isKeyResetOwed,
   readKeyResetOwed,
@@ -289,8 +288,8 @@ import {
   type UpgradeVerdict,
 } from "../devices/key-rotation";
 import { awaitKeyRotationPort } from "../devices/sync/key-rotation-port";
-import { rootEndorsementFor } from "../devices/lifecycle";
-import { transferRoot, transferRootWithAttestation } from "../ds/ownership";
+import { deviceGroupIdOf } from "../devices/lifecycle";
+import { transferRoot } from "../ds/ownership";
 import { DsClient } from "../ds/client";
 import { journalHex } from "../ds/access";
 import { deletePhrase } from "../backup/phrase-store";
@@ -978,8 +977,9 @@ export interface AuthApi {
     ): Promise<void>;
     /** The prepared proof (standard base64) while it is held. */
     preparedProofB64(): Promise<string | null>;
-    /** Step 9, the DeviceGroup journal. Throws the DS client's error. */
-    transferDeviceGroupRoot(attestationB64Url: string | null): Promise<void>;
+    /** Step 9, the DeviceGroup journal (a plain root transfer since
+     *  ADR-0078 phase 6). Throws the DS client's error. */
+    transferDeviceGroupRoot(): Promise<void>;
     /** The 64-byte seed of the key that was the account's before the last
      *  rotation (the channel owner handover and the journal takeovers sign
      *  with it), or `null`. */
@@ -2485,9 +2485,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
    *   3. `POST /discovery/identity` with the new bundle, the genesis
    *      self-signature and attestation, and the key-reset attestation
    *      (`409 key-generation-not-newer` = already landed);
-   *   4. the DeviceGroup: the old snapshot is dropped, a new group founded
-   *      and its journal re-rooted with the attested `PUT .../reset`
-   *      (`409` + the root probe answering 204 = already landed).
+   *   4. the DeviceGroup: the old snapshot is dropped and a new group
+   *      founded; the new seed derives a new DeviceGroup id (ADR-0078
+   *      section 6), a fresh journal the founding claims plainly.
    *
    * Each step marks itself done in the record as it lands; the record is
    * cleared once both have. Throws the step's error (an `AuthHttpError` /
@@ -2526,7 +2526,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }
     const wasm = await loadWasm();
     const attestation = base64UrlDecodeNoPad(record.attestationB64Url);
-    const attestationStdB64 = base64Encode(attestation);
     const canonical = wasm.Identity.fromSeed(ctx.seed);
     try {
       if (!bytesEqual(base64Decode(record.newSignaturePubkeyB64), canonical.signaturePublicKey)) {
@@ -2544,7 +2543,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         if (step === "directory") {
           await publishResetIdentity(canonical, ctx.accountIdBytes, attestation);
         } else {
-          await refoundDeviceGroupAfterReset(ctx, attestationStdB64);
+          await refoundDeviceGroupAfterReset(ctx);
         }
         persist(withKeyResetStepDone(record, step satisfies KeyResetStep));
       }
@@ -2596,18 +2595,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }
   }
 
-  /** Step 5: drop the old DeviceGroup, found a new one, re-root its journal
-   *  with the attestation. The handles are freed; the sync runtime loads
-   *  the persisted snapshot when the session lands. */
-  async function refoundDeviceGroupAfterReset(
-    ctx: {
-      readonly accountIdBytes: Uint8Array;
-      readonly accountIdB64: string;
-      readonly seed: Uint8Array;
-      readonly deviceKey: DeviceCipher;
-    },
-    attestationStdB64: string,
-  ): Promise<void> {
+  /** Step 5: drop the old DeviceGroup and found a new one. The new seed
+   *  derives a new DeviceGroup id (ADR-0078 section 6), so the founding's
+   *  plain claim lands on a fresh journal. The handles are freed; the sync
+   *  runtime loads the persisted snapshot when the session lands. */
+  async function refoundDeviceGroupAfterReset(ctx: {
+    readonly accountIdBytes: Uint8Array;
+    readonly accountIdB64: string;
+    readonly seed: Uint8Array;
+    readonly deviceKey: DeviceCipher;
+  }): Promise<void> {
     try {
       await deleteDeviceGroupSnapshot(ctx.accountIdB64);
     } catch (err) {
@@ -2616,28 +2613,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }
     const deviceSeed = await ensureDeviceIdentitySeed(ctx.accountIdB64, ctx.deviceKey);
     try {
-      let ensured;
-      try {
-        ensured = await ensureDeviceGroup(
-          ctx.accountIdBytes,
-          ctx.accountIdB64,
-          deviceSeed,
-          ctx.deviceKey,
-          ctx.seed,
-          { keyResetAttestB64: attestationStdB64 },
-        );
-      } catch (err) {
-        const status = (err as { status?: unknown }).status;
-        const outcome = deviceGroupResetOutcome({
-          status: typeof status === "number" ? status : 0,
-          errorCode: typeof (err as { body?: unknown }).body === "string"
-            ? errorCodeOf((err as { body: string }).body)
-            : null,
-          probeConfirmedRoot: null,
-        });
-        if (outcome === "refused") throw new KeyedError("recovery_phrase.fresh.publish_refused");
-        throw err;
-      }
+      const ensured = await ensureDeviceGroup(
+        ctx.accountIdBytes,
+        ctx.accountIdB64,
+        deviceSeed,
+        ctx.deviceKey,
+        ctx.seed,
+        { afterKeyReset: true },
+      );
       try {
         ensured.group.free();
         ensured.identity.free();
@@ -2738,15 +2721,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       fresh.seed.fill(0);
       setPendingFreshPhrase(null);
     }
+    // ADR-0078: the account's sealed push-gw subscriptions are named by ids
+    // kept in its route rows, so they are removed BEFORE the wipe.
+    try {
+      await unsubscribeFromPush(accountIdB64);
+    } catch {
+      // best-effort; the stored push token is dropped regardless.
+    }
     // ADR-0074 section 1.1: the staged wipe is the same list minus the
     // recall record and the device key that seals it.
     if (mode === "staged") await wipeAccountStaged(accountIdB64);
     else await wipeAccountLocalData(accountIdB64);
-    try {
-      await unsubscribeFromPush();
-    } catch {
-      // best-effort; the localStorage pseudonym is dropped regardless.
-    }
     anonTokens.forgetAccount(accountIdB64);
     setState({ kind: "anon" });
   }
@@ -5408,36 +5393,25 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const stateNow = await getKeyRotationState(accountIdB64, deviceKey);
       return stateNow.prepared?.proofB64 ?? null;
     },
-    async transferDeviceGroupRoot(attestationB64Url) {
+    async transferDeviceGroupRoot() {
       // Step 9: the OLD root signs a RootTransfer naming the root of the new
-      // seed; with the attestation, the new account key endorses that root
-      // and the journal records the generation.
-      const { accountIdB64, accountIdBytes, secrets } = rotationSession();
+      // seed. The DeviceGroup id itself does not move: it is derived from the
+      // seed the conversation leaves are bound to, the oldest predecessor
+      // (ADR-0078 section 6), so the chain and the members stay.
+      const { accountIdB64, secrets } = rotationSession();
       const deviceKey = await rotationDeviceKey(accountIdB64);
       const stateNow = await getKeyRotationState(accountIdB64, deviceKey);
       const oldSeedB64 = stateNow.predecessorSeedsB64[stateNow.predecessorSeedsB64.length - 1];
       if (oldSeedB64 === undefined) throw new Error("key rotation: no predecessor seed is held");
+      const journalId = await deviceGroupIdOf(accountIdB64, deviceKey, secrets.accountIdentitySeed);
+      if (journalId === null) throw new Error("key rotation: the DeviceGroup id is not derivable");
       const wasm = await loadWasm();
-      const journalId = wasm.deviceGroupJournalId(accountIdBytes);
       const oldAccount = wasm.Identity.fromSeed(base64Decode(oldSeedB64));
       const newAccount = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
       const oldRoot = wasm.dsJournalRootSigner(oldAccount, journalId);
       const newRoot = wasm.dsJournalRootSigner(newAccount, journalId);
       try {
-        const sender = new DsClient();
-        if (attestationB64Url === null) {
-          await transferRoot(sender, journalId, oldRoot, newRoot);
-          return;
-        }
-        const attestStdB64 = base64Encode(base64UrlDecodeNoPad(attestationB64Url));
-        await transferRootWithAttestation(
-          sender,
-          journalId,
-          oldRoot,
-          newRoot,
-          attestStdB64,
-          rootEndorsementFor(wasm, secrets.accountIdentitySeed, journalId, attestStdB64, newRoot.publicKey()),
-        );
+        await transferRoot(new DsClient(), journalId, oldRoot, newRoot);
       } finally {
         oldRoot.free();
         newRoot.free();
@@ -7723,11 +7697,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         });
       }
       // 1.20b: drop the push registration too. Logout intent is
-      // "no more pushes on this device until I re-auth" — the
-      // device key + push pseudonym stay on this browser for a
-      // cheap re-login, but the server-side token row goes.
+      // "no more pushes on this device until I re-auth" — the device key
+      // and the route rows stay on this browser for a cheap re-login, but
+      // the account's sealed push-gw subscriptions go (ADR-0078).
       // Fire-and-forget; failures are non-blocking.
-      const unsubscribed = unsubscribeFromPush().catch((err) => {
+      const unsubscribed = unsubscribeFromPush(storedFor).catch((err) => {
         // eslint-disable-next-line no-console
         console.warn("push unsubscribe (logout) failed", err);
       });
@@ -7803,21 +7777,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       bindContactsAccount(null);
       chats.clear();
       const wipeTarget = cached?.accountIdB64 ?? sessionAccountIdB64;
+      // 1.20b / ADR-0078: full wipe of push state too — the account's sealed
+      // push-gw subscriptions (their ids are in its route rows, so BEFORE the
+      // wipe), the browser-side subscription, the stored token. Awaited
+      // because forgetDevice's contract is "leave NOTHING per-account behind".
+      try {
+        await unsubscribeFromPush(wipeTarget);
+      } catch {
+        // best-effort — the stored token is dropped regardless.
+      }
       if (wipeTarget !== null) {
         await wipeAccountLocalData(wipeTarget);
         phraseOwedInMemory.delete(wipeTarget);
-      }
-      // 1.20b: full wipe of push state too — unsubscribe on the
-      // browser side, drop the push pseudonym from localStorage,
-      // tell `push-gw` to drop the token. Awaited because
-      // forgetDevice's contract is "leave NOTHING per-account
-      // behind"; a fire-and-forget here would race against the
-      // immediate state flip below.
-      try {
-        await unsubscribeFromPush();
-      } catch {
-        // best-effort — the localStorage pseudonym is dropped
-        // regardless inside `unsubscribeFromPush`.
       }
       keyPackageAccount = null;
       setIdentitySecrets(null);

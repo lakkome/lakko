@@ -79,9 +79,10 @@ public final class ReachCenter: ObservableObject {
     private let ds: ReachDsTransport
     /// The ids of every group this account is in (set by the chat layer).
     public var groupIdsProvider: () -> [Data] = { [] }
-    /// Every channel this account subscribes to, with its current seed epoch
-    /// (set by the app shell): the `channel` reach scopes.
-    public var channelEpochsProvider: () -> [(id: Data, epoch: UInt32)] = { [] }
+    /// The ids of every channel this account subscribes to (set by the app
+    /// shell): whether the one `channel` key is wanted, and which channel the
+    /// account left (ADR-0078 section 9).
+    public var channelIdsProvider: () -> [Data] = { [] }
     /// Every group and channel this account is in, as setting scopes (set by
     /// the app shell): what "All groups and channels" means when one of them is
     /// switched off from its info (UX section 5).
@@ -423,11 +424,29 @@ public final class ReachCenter: ObservableObject {
               let accountIdB64 else { return false }
         status = .applying
         let now = Self.nowMs()
+        let groupIds = groupIdsProvider()
+        let channelIds = channelIdsProvider()
+        // ADR-0078 section 9 — a group or channel left since the last
+        // registration: its members still hold this account's one key of
+        // that class, so the class rotates (and the profile carrying the new
+        // grants is republished in every remaining group).
+        let departures = ReachRules.departures(
+            previous: record.memberOf, groupIds: groupIds, channelIds: channelIds)
+        var leftClasses: [FfiReachClass] = []
+        if departures.leftGroup { leftClasses += [.group, .member] }
+        if departures.leftChannel { leftClasses.append(.channel) }
+        if record.memberOf != departures.membership {
+            record.memberOf = departures.membership
+            persist()
+        }
+        if !leftClasses.isEmpty {
+            rotateClasses(leftClasses, sync: false)
+        }
         func desiredSpecs() -> [ReachKeySpec] {
             ReachRules.desiredKeys(
-                setting: setting, state: reachState, groupIds: groupIdsProvider(),
+                setting: setting, state: reachState, groupIds: groupIds,
                 links: record.links, replies: record.replies,
-                channels: channelEpochsProvider(), nowMs: now,
+                channelIds: channelIds, nowMs: now,
                 allowsScope: { allowsScope(setting: $0, scope: $1) },
                 allowsFof: { allowsContactsOfContacts(setting: $0) })
         }
@@ -472,7 +491,7 @@ public final class ReachCenter: ObservableObject {
         record.registeredB64 = diff.add.map { $0.publicKey.base64EncodedString() }
         record.registeredOpen = open
         record.replies.removeAll { $0.expiresAtMs <= now }
-        record.links.removeAll { $0.expiresAtMs <= now }
+        record.links.removeAll { !$0.isLive(nowMs: now) }
         persist()
         status = .applied
         await applyEveryone()
@@ -547,6 +566,12 @@ public final class ReachCenter: ObservableObject {
     /// Apply a setting a Settings transition produced: stamp it, keep it, and
     /// act on it (register / remove keys, open or close the mailbox, republish
     /// the profiles with the grants it now allows).
+    ///
+    /// ADR-0078 section 9, decision 4 — a change made HERE rotates the `group`
+    /// and `channel` keys, so a group or channel the setting no longer allows
+    /// stops holding a working key (one key serves every group and channel).
+    /// A setting adopted from another device arrives with that device's
+    /// bumped counters and is not rotated again.
     public func updateSetting(_ next: FfiVisibilitySetting) {
         guard isActive else { return }
         var stamped = next
@@ -558,10 +583,8 @@ public final class ReachCenter: ObservableObject {
         setting = stamped
         record.settingEnvelopeB64 = envelope.base64EncodedString()
         persist()
-        grantRevision &+= 1
-        sync()
-        onGrantsChanged?()
         onDeviceEnvelope?(envelope)
+        rotateClasses([.group, .channel], sync: true)
     }
 
     /// Accept a setting another of this account's devices sent, when strictly
@@ -723,33 +746,35 @@ public final class ReachCenter: ObservableObject {
 
     // MARK: - Rotation
 
-    /// Rotate `(class, scope)` — a new version, the old key unregistered on the
-    /// next sync. Called when a contact is removed (`contact`, `fof`) and when a
-    /// group shrinks (`group` and `member` of that group).
-    public func rotate(_ reachClass: FfiReachClass, scope: Data = Data()) {
-        guard isActive else { return }
-        reachState = ReachRules.bumping(reachClass, scope: scope, in: reachState, nowMs: Self.nowMs())
-        let envelope = try? composeReachStateEnvelope(state: reachState)
-        record.reachStateEnvelopeB64 = envelope?.base64EncodedString()
-        persist()
-        grantRevision &+= 1
-        sync()
-        onGrantsChanged?()
-        if let envelope { onDeviceEnvelope?(envelope) }
+    /// Rotate one class — a new version, the old key unregistered on the next
+    /// sync. Called when a contact is removed (`contact`, `fof`).
+    public func rotate(_ reachClass: FfiReachClass) {
+        rotateClasses([reachClass], sync: true)
     }
 
     /// A group lost a member: rotate this account's `group` and `member` keys
-    /// for it in one registration and one republish.
+    /// in one registration and one republish. Since ADR-0078 section 9 they
+    /// are the account's one key per class, so the profile carrying them is
+    /// republished in EVERY group. `_groupId` is kept for the callers.
     public func rotateGroup(_ groupId: Data) {
-        guard isActive, !groupId.isEmpty, groupId.count <= 64 else { return }
+        guard !groupId.isEmpty, groupId.count <= 64 else { return }
+        rotateClasses([.group, .member], sync: true)
+    }
+
+    /// Bump each account-wide class in `classes` once, persist and hand the
+    /// state to the other devices, then republish the profiles. With `sync`
+    /// a registration pass follows (a pass already running asks for it).
+    private func rotateClasses(_ classes: [FfiReachClass], sync runSync: Bool) {
+        guard isActive, !classes.isEmpty else { return }
         let now = Self.nowMs()
-        reachState = ReachRules.bumping(.group, scope: groupId, in: reachState, nowMs: now)
-        reachState = ReachRules.bumping(.member, scope: groupId, in: reachState, nowMs: now)
+        for reachClass in classes where ReachRules.isAccountWide(reachClass) {
+            reachState = ReachRules.bumping(reachClass, scope: Data(), in: reachState, nowMs: now)
+        }
         let envelope = try? composeReachStateEnvelope(state: reachState)
         record.reachStateEnvelopeB64 = envelope?.base64EncodedString()
         persist()
         grantRevision &+= 1
-        sync()
+        if runSync { sync() }
         onGrantsChanged?()
         if let envelope { onDeviceEnvelope?(envelope) }
     }
@@ -772,6 +797,7 @@ public final class ReachCenter: ObservableObject {
 
     private func grant(_ reachClass: FfiReachClass, scope: Data) -> FfiReachGrant? {
         guard let seed = accountSeed else { return nil }
+        let scope = ReachRules.isAccountWide(reachClass) ? Data() : scope
         return try? deriveReachGrant(
             accountSeed: seed, class: reachClass, scopeId: scope,
             version: ReachRules.version(of: reachClass, scope: scope, in: reachState))
@@ -793,15 +819,15 @@ public final class ReachCenter: ObservableObject {
         return out
     }
 
-    /// The `channel` grant a member card for `channelId` at seed epoch
-    /// `epoch` carries, or `nil` when the setting does not let that channel's
-    /// members find the owner.
-    public func channelGrant(channelId: Data, epoch: UInt32) -> FfiReachGrant? {
-        guard let seed = accountSeed,
-              allowsScope(setting: setting, scope: FfiScopeId(kind: .channel, id: channelId))
+    /// The `channel` grant a member card for `channelId` carries, or `nil`
+    /// when the setting does not let that channel's members find the owner.
+    /// ADR-0078 section 9: the account's one `channel` key, the same in every
+    /// channel and no longer tied to the channel's seed epoch; it rotates when
+    /// a channel is left or the setting changes.
+    public func channelGrant(channelId: Data) -> FfiReachGrant? {
+        guard allowsScope(setting: setting, scope: FfiScopeId(kind: .channel, id: channelId))
         else { return nil }
-        return try? deriveReachGrant(
-            accountSeed: seed, class: .channel, scopeId: channelId, version: epoch)
+        return grant(.channel, scope: Data())
     }
 
     /// Whether the members of `groupId` may find the owner (UX section 6.2).
@@ -859,7 +885,8 @@ public final class ReachCenter: ObservableObject {
 
     /// A `link` grant for a new `/i/` or `/c/` link, REGISTERED before it is
     /// returned (a link shared before its key is registered would be refused).
-    public func newLinkGrant(linkId: Data, expiresAtMs: UInt64) async throws -> FfiReachGrant {
+    /// `expiresAtMs` `nil` = the link never expires.
+    public func newLinkGrant(linkId: Data, expiresAtMs: UInt64?) async throws -> FfiReachGrant {
         guard let seed = accountSeed else { throw ReachError.notActive }
         let grant = try deriveReachGrant(
             accountSeed: seed, class: .link, scopeId: linkId, version: ReachRules.initialVersion)
@@ -1284,15 +1311,19 @@ public final class ReachCenter: ObservableObject {
 
     // MARK: - Introductions storage (ADR-0060 section 4)
 
-    func storeOffer(_ record: Data, fromAccountKeyB64 key: String) {
-        guard isActive else { return }
-        storeOfferValue(key, record.base64EncodedString())
+    /// Keep a contact's offered record; returns whether the held set changed.
+    @discardableResult
+    func storeOffer(_ record: Data, fromAccountKeyB64 key: String) -> Bool {
+        guard isActive else { return false }
+        return storeOfferValue(key, record.base64EncodedString())
     }
 
-    private func storeOfferValue(_ key: String, _ value: String) {
-        guard record.offers[key] != value else { return }
+    @discardableResult
+    private func storeOfferValue(_ key: String, _ value: String) -> Bool {
+        guard record.offers[key] != value else { return false }
         record.offers[key] = value
         persist()
+        return true
     }
 
     func storeBundle(_ bundle: FfiIntroductionsBundle, fromAccountKeyB64 key: String) {

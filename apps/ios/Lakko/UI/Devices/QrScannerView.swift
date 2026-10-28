@@ -30,17 +30,26 @@ public struct QrScannerView: UIViewControllerRepresentable {
     /// Called with the catalog key of the failure (ADR-0061): the caller
     /// renders it, so the message follows a live language switch.
     public var onError: (String) -> Void
+    /// Decides whether a read code is the one the caller wants. A refused
+    /// code is reported to ``onRejected`` and the camera keeps scanning;
+    /// `nil` accepts the first code read.
+    public var accept: ((String) -> Bool)?
+    public var onRejected: (String) -> Void
 
     public init(
         onDetected: @escaping (String) -> Void,
-        onError: @escaping (String) -> Void
+        onError: @escaping (String) -> Void,
+        accept: ((String) -> Bool)? = nil,
+        onRejected: @escaping (String) -> Void = { _ in }
     ) {
         self.onDetected = onDetected
         self.onError = onError
+        self.accept = accept
+        self.onRejected = onRejected
     }
 
     public func makeCoordinator() -> Coordinator {
-        Coordinator(onDetected: onDetected, onError: onError)
+        Coordinator(onDetected: onDetected, onError: onError, accept: accept, onRejected: onRejected)
     }
 
     public func makeUIViewController(context: Context) -> ScannerViewController {
@@ -61,13 +70,26 @@ public struct QrScannerView: UIViewControllerRepresentable {
     public final class Coordinator: NSObject, ScannerViewControllerDelegate {
         let onDetected: (String) -> Void
         let onError: (String) -> Void
+        let accept: ((String) -> Bool)?
+        let onRejected: (String) -> Void
 
         init(
             onDetected: @escaping (String) -> Void,
-            onError: @escaping (String) -> Void
+            onError: @escaping (String) -> Void,
+            accept: ((String) -> Bool)?,
+            onRejected: @escaping (String) -> Void
         ) {
             self.onDetected = onDetected
             self.onError = onError
+            self.accept = accept
+            self.onRejected = onRejected
+        }
+
+        public func scanner(_ vc: ScannerViewController, shouldAccept text: String) -> Bool {
+            guard let accept else { return true }
+            if accept(text) { return true }
+            onRejected(text)
+            return false
         }
 
         public func scanner(_ vc: ScannerViewController, didDetect text: String) {
@@ -86,6 +108,12 @@ public protocol ScannerViewControllerDelegate: AnyObject {
     func scanner(_ vc: ScannerViewController, didDetect text: String)
     /// `message` is a catalog key (ADR-0061), rendered by the receiver.
     func scanner(_ vc: ScannerViewController, didFail message: String)
+    /// `false` keeps the camera scanning past this code.
+    func scanner(_ vc: ScannerViewController, shouldAccept text: String) -> Bool
+}
+
+public extension ScannerViewControllerDelegate {
+    func scanner(_ vc: ScannerViewController, shouldAccept text: String) -> Bool { true }
 }
 
 public final class ScannerViewController: UIViewController,
@@ -195,6 +223,7 @@ public final class ScannerViewController: UIViewController,
                 readable.type == .qr,
                 let text = readable.stringValue
             else { continue }
+            if delegate?.scanner(self, shouldAccept: text) == false { continue }
             hasDetected = true
             delegate?.scanner(self, didDetect: text)
             break

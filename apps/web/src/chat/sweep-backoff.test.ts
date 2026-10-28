@@ -30,7 +30,7 @@ vi.mock("./commit-outbox", () => ({
 import init from "../../wasm/lakko_ffi_wasm";
 import { ContactsClient } from "../contacts/client";
 import { dsAccess } from "../ds/access";
-import { fakeAccessSigner, fakeRootAuthority } from "../ds/access-test-doubles";
+import { fakeAccessSigner, fakeRootAuthority, withCommitRoute } from "../ds/access-test-doubles";
 import { DsHttpError, type DsClient } from "../ds/client";
 import { NoJournalAuthorityError } from "../ds/ownership";
 import type { DiscoveryClient } from "../discovery/client";
@@ -161,10 +161,12 @@ function sweepingGroup(): { group: WasmGroup; order: string[]; addMember: () => 
   };
 }
 
+/** ADR-0081: `register` is the registration half of the ONE `POST .../commit`
+ *  request (`withCommitRoute`): a refusal there appends no row. */
 function client(register: () => Promise<void>): { contacts: ContactsClient; registrations: () => number } {
   let n = 0;
   let id = 100;
-  const ds = {
+  const ds = withCommitRoute({
     registerGroupEpoch: vi.fn(async () => {
       n += 1;
       await register();
@@ -172,7 +174,7 @@ function client(register: () => Promise<void>): { contacts: ContactsClient; regi
     publishGroup: vi.fn(async () => ({ id: (id += 1), createdAt: "t" })),
     publishMailbox: vi.fn(async () => ({ id: (id += 1), createdAt: "t" })),
     fetchGroup: vi.fn(async () => ({ messages: [], hasMore: false })),
-  } as unknown as DsClient;
+  }) as unknown as DsClient;
   const contacts = new ContactsClient({} as unknown as DiscoveryClient, ds, {
     identityProvider: () => IDENTITY_TOKEN,
     onPersist: async () => {},
@@ -204,7 +206,7 @@ describe("the sweep adapter backs off a refused registration", () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
     const g = sweepingGroup();
     const { contacts, registrations } = client(async () => {
-      throw new DsHttpError(401, "/access", "proof required");
+      throw new DsHttpError(401, "/commit", "proof required");
     });
     const sweep = () => contacts.sweepIfCommitter(null, g.group, CURSOR, () => {}, ACT, () => {});
 
@@ -235,7 +237,7 @@ describe("the sweep adapter backs off a refused registration", () => {
     const g = sweepingGroup();
     let refuse = true;
     const { contacts } = client(async () => {
-      if (refuse) throw new DsHttpError(403, "/access", "");
+      if (refuse) throw new DsHttpError(403, "/commit", "");
     });
     const sweep = () => contacts.sweepIfCommitter(null, g.group, CURSOR, () => {}, ACT, () => {});
     await expect(sweep()).rejects.toBeInstanceOf(DsHttpError);
@@ -251,7 +253,7 @@ describe("the sweep adapter backs off a refused registration", () => {
     const g = sweepingGroup();
     let refuse = true;
     const { contacts } = client(async () => {
-      if (refuse) throw new DsHttpError(401, "/access", "");
+      if (refuse) throw new DsHttpError(401, "/commit", "");
     });
     const sweep = () => contacts.sweepIfCommitter(null, g.group, CURSOR, () => {}, ACT, () => {});
     await expect(sweep()).rejects.toBeInstanceOf(DsHttpError);
@@ -269,10 +271,11 @@ describe("the sweep adapter backs off a refused registration", () => {
     const g = sweepingGroup();
     let refuse = true;
     const { contacts, registrations } = client(async () => {
-      if (refuse) throw new DsHttpError(409, "/access", "");
+      if (refuse) throw new DsHttpError(409, "/commit", "");
     });
     const sweep = () => contacts.sweepIfCommitter(null, g.group, CURSOR, () => {}, ACT, () => {});
-    await expect(sweep()).rejects.toBeInstanceOf(DsHttpError);
+    // ADR-0081: a 409 on the commit route is a lost verdict, not an error.
+    expect(await sweep()).toEqual({ kind: "lost" });
     refuse = false;
     expect((await sweep()).kind).toBe("committed");
     expect(registrations()).toBe(2);

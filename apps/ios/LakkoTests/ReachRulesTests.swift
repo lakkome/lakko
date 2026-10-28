@@ -44,31 +44,68 @@ final class ReachRulesTests: XCTestCase {
 
     // MARK: - Which keys are registered
 
-    /// Nobody: still `contact` (contacts always write) and `member` per group
-    /// (a co-member must always deliver a Welcome for a new device), never
-    /// `group` or `fof`.
+    /// Nobody: still `contact` (contacts always write) and the one `member`
+    /// key while in any group (a co-member must always deliver a Welcome for
+    /// a new device), never `group` or `fof`.
     func testNobodyRegistersContactAndMemberKeysOnly() {
         let specs = desired(setting(mode: .nobody))
-        XCTAssertEqual(classes(specs), ["contact", "member:161", "member:178"])
+        XCTAssertEqual(classes(specs), ["contact", "member"])
         XCTAssertFalse(ReachRules.mailboxOpen(setting(mode: .nobody)))
     }
 
-    /// The default for a new account (2.1 + 2.2.1): `group` for every group
-    /// and `fof`.
-    func testTheDefaultRegistersGroupAndFofKeys() {
+    /// ADR-0078 section 9 — the default for a new account (2.1 + 2.2.1): ONE
+    /// `group` and ONE `member` key for every group, never one per group.
+    func testTheDefaultRegistersOneGroupAndOneMemberKey() {
         let specs = desired(defaultVisibilitySetting())
-        XCTAssertEqual(
-            Set(classes(specs)),
-            ["contact", "member:161", "member:178", "group:161", "group:178", "fof"])
+        XCTAssertEqual(Set(classes(specs)), ["contact", "member", "group", "fof"])
+        XCTAssertEqual(specs.count, 4, "no key per group")
+        XCTAssertTrue(specs.allSatisfy { $0.scopeId.isEmpty }, "no group id names a key")
     }
 
-    /// Only the ones I choose: `group` only for the chosen group.
-    func testChosenRegistersGroupKeysForTheChosenGroupOnly() {
+    /// Only the ones I choose: the one `group` key while any group is chosen,
+    /// none while none is.
+    func testChosenRegistersTheGroupKeyWhileAnyGroupIsChosen() {
         let specs = desired(setting(
             mode: .some, groups: .chosen, chosen: [FfiScopeId(kind: .group, id: groupB)]))
-        XCTAssertTrue(classes(specs).contains("group:178"))
-        XCTAssertFalse(classes(specs).contains("group:161"))
+        XCTAssertTrue(classes(specs).contains("group"))
         XCTAssertFalse(classes(specs).contains("fof"))
+        let none = desired(setting(mode: .some, groups: .chosen, chosen: []))
+        XCTAssertFalse(classes(none).contains("group"))
+    }
+
+    /// The one `channel` key while any channel the account is in is allowed.
+    func testOneChannelKeyWhileAnyChannelIsAllowed() {
+        let channel = Data(repeating: 0xC1, count: 32)
+        let specs = ReachRules.desiredKeys(
+            setting: defaultVisibilitySetting(), state: emptyState, groupIds: [], links: [],
+            replies: [], channelIds: [channel, Data(repeating: 0xC2, count: 32)], nowMs: 1,
+            allowsScope: { allowsScope(setting: $0, scope: $1) },
+            allowsFof: { allowsContactsOfContacts(setting: $0) })
+        XCTAssertEqual(specs.filter { $0.reachClass == .channel }.map(\.scopeId), [Data()])
+        XCTAssertFalse(classes(specs).contains("member"), "no group, no member key")
+    }
+
+    /// ADR-0078 section 9 — leaving a group (or a channel) rotates that
+    /// class; a first registration, a join and an empty (not yet loaded)
+    /// list rotate nothing.
+    func testDeparturesAreASetDifferenceOverGroupsAndChannels() {
+        let c1 = Data(repeating: 0xC1, count: 32)
+        let first = ReachRules.departures(previous: nil, groupIds: [groupA, groupB], channelIds: [c1])
+        XCTAssertFalse(first.leftGroup)
+        XCTAssertFalse(first.leftChannel)
+        let joined = ReachRules.departures(
+            previous: first.membership, groupIds: [groupA, groupB, Data([7])], channelIds: [c1])
+        XCTAssertFalse(joined.leftGroup)
+        let left = ReachRules.departures(previous: first.membership, groupIds: [groupA], channelIds: [c1])
+        XCTAssertTrue(left.leftGroup)
+        XCTAssertFalse(left.leftChannel)
+        let unloaded = ReachRules.departures(previous: first.membership, groupIds: [], channelIds: [])
+        XCTAssertFalse(unloaded.leftGroup)
+        XCTAssertFalse(unloaded.leftChannel)
+        XCTAssertEqual(unloaded.membership, first.membership, "an empty list keeps the last membership")
+        let channelLeft = ReachRules.departures(
+            previous: first.membership, groupIds: [groupA, groupB], channelIds: [Data([9])])
+        XCTAssertTrue(channelLeft.leftChannel)
     }
 
     /// Everyone opens the mailbox and allows every group and fof.
@@ -98,22 +135,29 @@ final class ReachRulesTests: XCTestCase {
         XCTAssertEqual(diff.remove, [c])
     }
 
-    func testARotationBumpsOneScopeOnly() {
-        // Every scope starts at 0, as on web and Android (ADR-0060 section 1).
+    /// ADR-0078 section 9 — a rotation of an account-wide class moves its one
+    /// key, whatever scope the caller names; a `link` scope stays per link.
+    func testARotationBumpsTheWholeClass() {
+        // Every class starts at 0, as on web and Android (ADR-0060 section 1).
         let bumped = ReachRules.bumping(.member, scope: groupA, in: emptyState, nowMs: 50)
-        XCTAssertEqual(ReachRules.version(of: .member, scope: groupA, in: bumped), 1)
-        XCTAssertEqual(ReachRules.version(of: .member, scope: groupB, in: bumped), 0)
+        XCTAssertEqual(ReachRules.version(of: .member, scope: Data(), in: bumped), 1)
+        XCTAssertEqual(ReachRules.version(of: .member, scope: groupB, in: bumped), 1)
         XCTAssertEqual(ReachRules.version(of: .contact, scope: Data(), in: bumped), 0)
-        let again = ReachRules.bumping(.member, scope: groupA, in: bumped, nowMs: 10)
+        let again = ReachRules.bumping(.member, scope: Data(), in: bumped, nowMs: 10)
         XCTAssertEqual(ReachRules.version(of: .member, scope: groupA, in: again), 2)
         XCTAssertGreaterThan(again.updatedAtMs, bumped.updatedAtMs, "the stamp never goes back")
+        let link = ReachRules.bumping(.link, scope: Data([1]), in: emptyState, nowMs: 1)
+        XCTAssertEqual(ReachRules.version(of: .link, scope: Data([1]), in: link), 1)
+        XCTAssertEqual(ReachRules.version(of: .link, scope: Data([2]), in: link), 0)
     }
 
     // MARK: - Which received grant is kept (C-68)
 
-    private func grant(_ c: FfiReachClass, scope: Data = Data(repeating: 7, count: 16)) throws -> FfiReachGrant {
-        let s: Data = (c == .contact || c == .fof) ? Data() : scope
-        return try deriveReachGrant(accountSeed: accountSeed, class: c, scopeId: s, version: 1)
+    private func grant(
+        _ c: FfiReachClass, scope: Data = Data(repeating: 7, count: 16), version: UInt32 = 1
+    ) throws -> FfiReachGrant {
+        let s: Data = ReachRules.isAccountWide(c) ? Data() : scope
+        return try deriveReachGrant(accountSeed: accountSeed, class: c, scopeId: s, version: version)
     }
 
     func testAContactGrantIsKeptOnlyFromTheOtherParticipantOfAOneToOne() throws {
@@ -160,7 +204,7 @@ final class ReachRulesTests: XCTestCase {
     func testTheWriteSeedPrefersContactThenThisGroupsMember() throws {
         let member = ReachRules.HeldGrant(grant: try grant(.member), scopeHex: "aa", storedAtMs: 1)
         let otherMember = ReachRules.HeldGrant(
-            grant: try grant(.member, scope: Data(repeating: 8, count: 16)), scopeHex: "bb", storedAtMs: 2)
+            grant: try grant(.member, version: 2), scopeHex: "bb", storedAtMs: 2)
         let reply = ReachRules.HeldGrant(grant: try grant(.reply), scopeHex: nil, storedAtMs: 3)
         let contact = ReachRules.HeldGrant(grant: try grant(.contact), scopeHex: nil, storedAtMs: 4)
         XCTAssertEqual(
@@ -173,14 +217,14 @@ final class ReachRulesTests: XCTestCase {
 
     /// A replayed older version never displaces the newer grant of one scope.
     func testMergingKeepsTheNewestVersion() throws {
-        let v2 = try deriveReachGrant(accountSeed: accountSeed, class: .member, scopeId: groupA, version: 2)
-        let v1 = try deriveReachGrant(accountSeed: accountSeed, class: .member, scopeId: groupA, version: 1)
+        let v2 = try deriveReachGrant(accountSeed: accountSeed, class: .member, scopeId: Data(), version: 2)
+        let v1 = try deriveReachGrant(accountSeed: accountSeed, class: .member, scopeId: Data(), version: 1)
         let held = ReachRules.merging(
             ReachRules.HeldGrant(grant: v2, scopeHex: "aa", storedAtMs: 1), into: [])
         let replayed = ReachRules.merging(
             ReachRules.HeldGrant(grant: v1, scopeHex: "aa", storedAtMs: 9), into: held)
         XCTAssertEqual(replayed.map(\.version), [2])
-        let v3 = try deriveReachGrant(accountSeed: accountSeed, class: .member, scopeId: groupA, version: 3)
+        let v3 = try deriveReachGrant(accountSeed: accountSeed, class: .member, scopeId: Data(), version: 3)
         let rotated = ReachRules.merging(
             ReachRules.HeldGrant(grant: v3, scopeHex: "aa", storedAtMs: 10), into: held)
         XCTAssertEqual(rotated.map(\.version), [3])
@@ -241,15 +285,40 @@ final class ReachRulesTests: XCTestCase {
         XCTAssertEqual(c.profileGrants(groupId: groupA, oneToOne: false).map(\.class), [.member])
     }
 
-    /// A rotation changes the grant handed out for exactly that scope.
-    func testRotatingAGroupChangesItsGrants() throws {
+    /// ADR-0078 section 9 — a shrink of one group rotates the account's one
+    /// `group` and `member` key: every group's profile carries the new grants.
+    func testRotatingAGroupChangesTheGrantsOfEveryGroup() throws {
         let c = try center()
         let before = c.profileGrants(groupId: groupA, oneToOne: false)
+        XCTAssertEqual(before, c.profileGrants(groupId: groupB, oneToOne: false), "one key for every group")
+        var republished = 0
+        c.onGrantsChanged = { republished += 1 }
         c.rotateGroup(groupA)
         let after = c.profileGrants(groupId: groupA, oneToOne: false)
         XCTAssertEqual(after.map(\.version), before.map { $0.version + 1 })
         XCTAssertNotEqual(after.map(\.seed), before.map(\.seed))
-        XCTAssertEqual(c.profileGrants(groupId: groupB, oneToOne: false).map(\.version), [0, 0])
+        XCTAssertEqual(c.profileGrants(groupId: groupB, oneToOne: false), after)
+        XCTAssertEqual(republished, 1, "the profiles are republished once")
+    }
+
+    /// ADR-0078 section 9, decision 4 — a setting change made on this device
+    /// rotates the `group` and `channel` keys and republishes the profiles.
+    func testASettingChangeRotatesTheGroupAndChannelKeys() throws {
+        let c = try center()
+        let channel = Data(repeating: 0xC1, count: 32)
+        let groupBefore = try XCTUnwrap(c.profileGrants(groupId: groupA, oneToOne: false).first { $0.class == .group })
+        let channelBefore = try XCTUnwrap(c.channelGrant(channelId: channel))
+        let memberBefore = try XCTUnwrap(c.profileGrants(groupId: groupA, oneToOne: false).first { $0.class == .member })
+        var republished = 0
+        c.onGrantsChanged = { republished += 1 }
+        c.updateSetting(setContactsOfContacts(setting: c.setting, on: false))
+        let groupAfter = try XCTUnwrap(c.profileGrants(groupId: groupA, oneToOne: false).first { $0.class == .group })
+        XCTAssertEqual(groupAfter.version, groupBefore.version + 1)
+        XCTAssertEqual(c.channelGrant(channelId: channel)?.version, channelBefore.version + 1)
+        XCTAssertEqual(
+            c.profileGrants(groupId: groupA, oneToOne: false).first { $0.class == .member }?.version,
+            memberBefore.version, "the member key is not the setting's")
+        XCTAssertGreaterThan(republished, 0)
     }
 
     /// A kept grant authorises writes to its giver's mailbox; one refused by
@@ -417,23 +486,48 @@ extension ReachRulesTests {
         _ = await c.syncNow()
         XCTAssertEqual(ds.reads, 1)
 
-        ds.registered = [DsReachKeyAdd(publicKey: try pk(seed, .member, groupA, 2), expiresAtMs: nil)]
+        ds.registered = [DsReachKeyAdd(publicKey: try pk(seed, .member, Data(), 2), expiresAtMs: nil)]
         c.groupIdsProvider = { [self.groupA] }
         ds.updates.removeAll()
         _ = await c.syncNow()
 
-        XCTAssertEqual(ds.reads, 2, "the new group's slots were looked up")
+        XCTAssertEqual(ds.reads, 2, "the member slot was looked up once a group appeared")
         let added = Set(ds.updates.flatMap { $0.add.map(\.publicKey) })
-        XCTAssertTrue(added.contains(try pk(seed, .member, groupA, 2)))
-        XCTAssertFalse(added.contains(try pk(seed, .member, groupA, 0)))
-        XCTAssertFalse(added.contains(try pk(seed, .member, groupA, 1)))
+        XCTAssertTrue(added.contains(try pk(seed, .member, Data(), 2)))
+        XCTAssertFalse(added.contains(try pk(seed, .member, Data(), 0)))
+        XCTAssertFalse(added.contains(try pk(seed, .member, Data(), 1)))
+    }
+
+    /// ADR-0078 section 9 — leaving a group rotates the class key and
+    /// republishes the profile in every remaining group: the next
+    /// registration removes the old `member` key and adds the new one.
+    func testLeavingAGroupRotatesTheClassKeyAndRepublishes() async throws {
+        let ds = FakeReachDs()
+        let (c, seed) = try restoredCenter(ds)
+        c.groupIdsProvider = { [self.groupA, self.groupB] }
+        _ = await c.syncNow()
+        let memberV0 = try pk(seed, .member, Data(), 0)
+        XCTAssertTrue(Set(ds.updates.flatMap { $0.add.map(\.publicKey) }).contains(memberV0))
+
+        var republished = 0
+        c.onGrantsChanged = { republished += 1 }
+        c.groupIdsProvider = { [self.groupA] }
+        ds.updates.removeAll()
+        _ = await c.syncNow()
+
+        XCTAssertEqual(republished, 1, "the remaining groups get the new grants")
+        XCTAssertEqual(
+            c.profileGrants(groupId: groupA, oneToOne: false).first { $0.class == .member }?.version, 1)
+        let update = try XCTUnwrap(ds.updates.last)
+        XCTAssertTrue(update.add.map(\.publicKey).contains(try pk(seed, .member, Data(), 1)))
+        XCTAssertTrue(update.remove.contains(memberV0), "the key the departed group's members hold goes")
     }
 
     /// The pure recovery: the HIGHEST registered version per slot, never one
     /// above the probe limit, nothing for a slot with no registered key.
     func testRecoveredVersionsTakeTheHighestRegisteredOne() throws {
         let contact = ReachRules.VersionSlot(reachClass: .contact, scopeId: Data())
-        let member = ReachRules.VersionSlot(reachClass: .member, scopeId: groupA)
+        let member = ReachRules.VersionSlot(reachClass: .member, scopeId: Data())
         let fof = ReachRules.VersionSlot(reachClass: .fof, scopeId: Data())
         func key(_ slot: ReachRules.VersionSlot, _ v: UInt32) -> Data {
             Data(ReachRules.className(slot.reachClass).utf8) + slot.scopeId + Data([UInt8(truncatingIfNeeded: v)])
@@ -456,7 +550,7 @@ extension ReachRulesTests {
         let peer = try Identity.fromSeed(seed: Data(repeating: 0x41, count: 32)).signaturePublicKey()
         let peerB64 = peer.base64EncodedString()
         let groupHex = DsClient.pseudonymHex(groupA)
-        let member = try deriveReachGrant(accountSeed: accountSeed, class: .member, scopeId: groupA, version: 3)
+        let member = try deriveReachGrant(accountSeed: accountSeed, class: .member, scopeId: Data(), version: 3)
         let contact = try grant(.contact)
         XCTAssertTrue(c.keep(member, carrier: .groupProfile, fromAccountKeyB64: peerB64, scopeHex: groupHex))
         XCTAssertTrue(c.keep(contact, carrier: .oneToOneProfile(fromOtherParticipant: true),

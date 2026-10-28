@@ -20,7 +20,7 @@ import { ChatClient } from "./client";
 import { bindContactsAccount } from "../contacts/local-store";
 import { resetKnockReadSlotsForTests } from "./knock-cursor";
 import type { DsClient } from "../ds/client";
-import { fakeAccessSigner } from "../ds/access-test-doubles";
+import { fakeAccessSigner, withCommitRoute } from "../ds/access-test-doubles";
 import {
   Role,
   type Group as WasmGroup,
@@ -100,7 +100,7 @@ function fakeDs(
 ): { ds: DsClient; registrations: string[]; knockReads: number[] } {
   const registrations: string[] = [];
   const knockReads: number[] = [];
-  const ds = {
+  const ds = withCommitRoute({
     fetchGroup: vi.fn(async () => ({ messages: journal, hasMore: false })),
     fetchKnocks: vi.fn(async (_g: Uint8Array, opts: { after?: number }) => {
       knockReads.push(opts.after ?? 0);
@@ -109,7 +109,7 @@ function fakeDs(
     registerGroupEpoch: vi.fn(async (_g: Uint8Array, epoch: bigint) => {
       registrations.push(`${epoch}`);
     }),
-  } as unknown as DsClient;
+  }) as unknown as DsClient;
   return { ds, registrations, knockReads };
 }
 

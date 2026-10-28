@@ -49,6 +49,11 @@ Reached from the menu of the Chats screen (the one that holds New group), as
   loaded) shows its row from what was saved with it: chat, author, excerpt and
   the attachment's kind, without a thumbnail. The thumbnail appears, and the
   row opens, once the message is there.
+- The date on a row is the message's own date (carried with the save, so it
+  shows before the message is held), not the day it was saved.
+- Any message can be saved, including messages of the conversation's older
+  history (from before a group was recreated). A saved message keeps opening
+  after its conversation moves on to a new group (maintainer, 2026-10-27).
 
 What saving does not do: it does not copy the message. If its author deletes
 it for everyone, it leaves Saved, as it leaves the pinned bar.

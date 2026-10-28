@@ -46,7 +46,6 @@ final class ApiEndpointsTests: XCTestCase {
         XCTAssertEqual(AuthClient.defaultBaseURL, ApiEndpoints.resolve(apiBase: base, service: .auth))
         XCTAssertEqual(WebauthnClient.defaultBaseURL, AuthClient.defaultBaseURL)
         XCTAssertEqual(CallJwtClient.defaultBaseURL, AuthClient.defaultBaseURL)
-        XCTAssertEqual(TurnCredentialClient.defaultBaseURL, AuthClient.defaultBaseURL)
         XCTAssertEqual(DsClient.defaultBaseURL, ApiEndpoints.resolve(apiBase: base, service: .ds))
         XCTAssertEqual(StorageClient.defaultBaseURL, ApiEndpoints.resolve(apiBase: base, service: .storage))
         XCTAssertEqual(DiscoveryClient.defaultBaseURL, ApiEndpoints.resolve(apiBase: base, service: .discovery))

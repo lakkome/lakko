@@ -105,6 +105,14 @@ use str0m::{Candidate, Event, Input, Output, Rtc, RtcConfig};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+/// A peer id in the shape an admission token carries (32 lower-case hex,
+/// ADR-0078 section 2), unique within this test process.
+fn fresh_peer_id() -> PeerId {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    PeerId::from_string(format!("{:032x}", NEXT.fetch_add(1, Ordering::Relaxed)))
+}
+
 /// Maximum wall-clock budget for the full ICE + DTLS
 /// handshake. str0m's example chat.rs uses similar
 /// numbers; on a loopback socket the real handshake
@@ -1261,7 +1269,7 @@ async fn synthetic_client_completes_handshake_with_media_task() {
 
     // 2. Synthetic client on its own UDP socket.
     let mut client = SyntheticClient::new().await;
-    let client_id = lakko_svc_sfu::peer::PeerId::fresh();
+    let client_id = fresh_peer_id();
 
     // 3. Offer / answer exchange.
     let (offer_sdp, pending, _mid) = client.create_audio_publisher_offer();
@@ -1325,7 +1333,7 @@ async fn unspecified_bind_with_advertise_ip_completes_handshake() {
     );
 
     let mut client = SyntheticClient::new().await;
-    let client_id = lakko_svc_sfu::peer::PeerId::fresh();
+    let client_id = fresh_peer_id();
 
     let (offer_sdp, pending, _mid) = client.create_audio_publisher_offer();
     let answer_sdp = media
@@ -1527,13 +1535,12 @@ async fn two_clients_cross_fanout_forwards_media_verbatim() {
     //    track in this test (B is a pure subscriber), so
     //    the SFU never renegotiates toward A.
     let peers = PeerRegistry::new();
-    let b_id = PeerId::fresh();
+    let b_id = fresh_peer_id();
     let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
     let registered = peers
         .register(Peer {
             id: b_id.clone(),
-            call_id: "cross-fanout-test".to_owned(),
-            account_id: "subscriber-b".to_owned(),
+            room: "cross-fanout-test".to_owned(),
             outbound: Some(b_tx),
         })
         .await;
@@ -1546,7 +1553,7 @@ async fn two_clients_cross_fanout_forwards_media_verbatim() {
     // 2. Two synthetic clients on their own UDP sockets.
     let mut a = SyntheticClient::new().await;
     let mut b = SyntheticClient::new().await;
-    let a_id = PeerId::fresh();
+    let a_id = fresh_peer_id();
 
     // B subscribes first (RecvOnly) — establishes the
     // SFU-side MediaPeer + transport without announcing an
@@ -1634,14 +1641,13 @@ async fn two_clients_cross_fanout_forwards_media_verbatim() {
 #[allow(clippy::too_many_lines)]
 async fn simulcast_publisher_negotiates_and_forwards_a_layer_over_the_live_sfu() {
     let peers = PeerRegistry::new();
-    let b_id = PeerId::fresh();
+    let b_id = fresh_peer_id();
     let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
     assert!(
         peers
             .register(Peer {
                 id: b_id.clone(),
-                call_id: "simulcast-test".to_owned(),
-                account_id: "subscriber-b".to_owned(),
+                room: "simulcast-test".to_owned(),
                 outbound: Some(b_tx),
             })
             .await,
@@ -1654,7 +1660,7 @@ async fn simulcast_publisher_negotiates_and_forwards_a_layer_over_the_live_sfu()
 
     let mut a = SyntheticClient::new().await;
     let mut b = SyntheticClient::new().await;
-    let a_id = PeerId::fresh();
+    let a_id = fresh_peer_id();
 
     // B subscribes first (RecvOnly) — establishes transport; the SFU adds the
     // downstream video track by renegotiation.
@@ -1792,13 +1798,12 @@ async fn sframe_sealed_frame_round_trips_through_the_live_sfu() {
     // 1. Media task + registry (B is the subscriber with an intercept
     //    channel; A publishes). Identical to the verbatim cross-fanout.
     let peers = PeerRegistry::new();
-    let b_id = PeerId::fresh();
+    let b_id = fresh_peer_id();
     let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
     let registered = peers
         .register(Peer {
             id: b_id.clone(),
-            call_id: "sframe-fanout-test".to_owned(),
-            account_id: "subscriber-b".to_owned(),
+            room: "sframe-fanout-test".to_owned(),
             outbound: Some(b_tx),
         })
         .await;
@@ -1810,7 +1815,7 @@ async fn sframe_sealed_frame_round_trips_through_the_live_sfu() {
 
     let mut a = SyntheticClient::new().await;
     let mut b = SyntheticClient::new().await;
-    let a_id = PeerId::fresh();
+    let a_id = fresh_peer_id();
 
     let (b_offer, b_pending) = b.create_subscriber_offer();
     let b_answer = media
@@ -1949,13 +1954,12 @@ async fn golden_vector_round_trips_through_the_live_sfu() {
     // 1. Media task + A-publisher / B-subscriber over the live SFU (same setup
     //    as the arbitrary-payload sibling above).
     let peers = PeerRegistry::new();
-    let b_id = PeerId::fresh();
+    let b_id = fresh_peer_id();
     let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
     let registered = peers
         .register(Peer {
             id: b_id.clone(),
-            call_id: "golden-fanout-call".to_owned(),
-            account_id: "subscriber-b".to_owned(),
+            room: "golden-fanout-call".to_owned(),
             outbound: Some(b_tx),
         })
         .await;
@@ -1967,7 +1971,7 @@ async fn golden_vector_round_trips_through_the_live_sfu() {
 
     let mut a = SyntheticClient::new().await;
     let mut b = SyntheticClient::new().await;
-    let a_id = PeerId::fresh();
+    let a_id = fresh_peer_id();
 
     let (b_offer, b_pending) = b.create_subscriber_offer();
     let b_answer = media
@@ -2053,13 +2057,12 @@ async fn golden_vector_round_trips_through_the_live_sfu() {
 #[tokio::test]
 async fn fanout_never_crosses_calls_over_the_live_sfu() {
     let peers = PeerRegistry::new();
-    let b_id = PeerId::fresh();
+    let b_id = fresh_peer_id();
     let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
     let registered = peers
         .register(Peer {
             id: b_id.clone(),
-            call_id: "call-beta".to_owned(),
-            account_id: "subscriber-b".to_owned(),
+            room: "call-beta".to_owned(),
             outbound: Some(b_tx),
         })
         .await;
@@ -2071,7 +2074,7 @@ async fn fanout_never_crosses_calls_over_the_live_sfu() {
 
     let mut a = SyntheticClient::new().await;
     let mut b = SyntheticClient::new().await;
-    let a_id = PeerId::fresh();
+    let a_id = fresh_peer_id();
 
     // B subscribes in call BETA; A publishes in call ALPHA.
     let (b_offer, b_pending) = b.create_subscriber_offer();
@@ -2298,13 +2301,12 @@ async fn multi_frame_sframe_stream_round_trips_through_the_live_sfu() {
 
     // 1. Media task + registry (B is the subscriber with an intercept channel).
     let peers = PeerRegistry::new();
-    let b_id = PeerId::fresh();
+    let b_id = fresh_peer_id();
     let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
     let registered = peers
         .register(Peer {
             id: b_id.clone(),
-            call_id: "sframe-stream-test".to_owned(),
-            account_id: "subscriber-b".to_owned(),
+            room: "sframe-stream-test".to_owned(),
             outbound: Some(b_tx),
         })
         .await;
@@ -2316,7 +2318,7 @@ async fn multi_frame_sframe_stream_round_trips_through_the_live_sfu() {
 
     let mut a = SyntheticClient::new().await;
     let mut b = SyntheticClient::new().await;
-    let a_id = PeerId::fresh();
+    let a_id = fresh_peer_id();
 
     let (b_offer, b_pending) = b.create_subscriber_offer();
     let b_answer = media
@@ -2479,14 +2481,13 @@ async fn multi_frame_sframe_stream_round_trips_through_the_live_sfu() {
 #[allow(clippy::too_many_lines)]
 async fn frame_descriptor_survives_the_relay_to_a_subscriber() {
     let peers = PeerRegistry::new();
-    let b_id = PeerId::fresh();
+    let b_id = fresh_peer_id();
     let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
     assert!(
         peers
             .register(Peer {
                 id: b_id.clone(),
-                call_id: "frame-descriptor-test".to_owned(),
-                account_id: "subscriber-b".to_owned(),
+                room: "frame-descriptor-test".to_owned(),
                 outbound: Some(b_tx),
             })
             .await,
@@ -2501,7 +2502,7 @@ async fn frame_descriptor_survives_the_relay_to_a_subscriber() {
     // does under `WebRTC-GenericDescriptorAdvertised`.
     let mut a = SyntheticClient::new_with_frame_descriptor().await;
     let mut b = SyntheticClient::new_with_frame_descriptor().await;
-    let a_id = PeerId::fresh();
+    let a_id = fresh_peer_id();
 
     let (b_offer, b_pending) = b.create_video_subscriber_offer();
     let b_answer = media
@@ -2666,6 +2667,342 @@ async fn frame_descriptor_survives_the_relay_to_a_subscriber() {
     );
 }
 
+/// **ADR-0083, screen share** — a publisher's video line declared in its
+/// offer's `screen_mids` reaches a subscriber over the live SFU as a screen
+/// track: the SFU's renegotiation offer names it under the MSID stream id
+/// `<publisher>~screen` (the `~` restored after str0m drops it), and the
+/// publisher's frame arrives at the subscriber byte for byte. The
+/// subscriber has said, in `video-wants`, that it shows only the light
+/// picture of this publisher: a screen is forwarded all the same.
+///
+/// Opacity is unaffected: the SFU relays the payload as it arrived (C-39).
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_declared_screen_line_reaches_a_subscriber_as_a_screen_track_verbatim() {
+    use lakko_svc_sfu::protocol::{VideoQuality, VideoWant};
+    let peers = PeerRegistry::new();
+    let b_id = fresh_peer_id();
+    let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
+    assert!(
+        peers
+            .register(Peer {
+                id: b_id.clone(),
+                room: "screen-share-test".to_owned(),
+                outbound: Some(b_tx),
+            })
+            .await,
+        "fresh PeerId must register cleanly"
+    );
+
+    let (media, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+        .await
+        .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::new_with_frame_descriptor().await;
+    let mut b = SyntheticClient::new_with_frame_descriptor().await;
+    let a_id = fresh_peer_id();
+
+    let (b_offer, b_pending) = b.create_video_subscriber_offer();
+    let b_answer = media
+        .accept_offer(b_id.clone(), "screen-share-call".to_owned(), b_offer)
+        .await
+        .expect("SFU accepts B's RecvOnly video subscriber offer");
+    b.accept_answer(b_pending, &b_answer)
+        .expect("B applies the SFU's answer");
+
+    // A publishes one video line and declares it as its screen.
+    let (a_offer, a_pending, screen_mid) = a.create_video_publisher_offer();
+    let a_answer = media
+        .accept_offer_with_screen(
+            a_id.clone(),
+            "screen-share-call".to_owned(),
+            a_offer,
+            Vec::new(),
+            Vec::new(),
+            vec![screen_mid.to_string()],
+        )
+        .await
+        .expect("SFU accepts A's screen-share offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    // B shows only the light picture of A: a camera main track would be
+    // paused, a screen is not.
+    media
+        .set_video_wants(
+            b_id.clone(),
+            vec![VideoWant {
+                peer: a_id.to_string(),
+                quality: VideoQuality::Light,
+            }],
+        )
+        .expect("the wants are queued");
+
+    let descriptor: Vec<u8> = vec![0xf0, 0x01, 0x2a, 0x00, 0x05, 0x00, 0x02, 0xd0];
+    let payload: Vec<u8> = (0..3000_u32)
+        .map(|i| {
+            u8::try_from(i % 241)
+                .unwrap_or(0)
+                .wrapping_mul(11)
+                .wrapping_add(5)
+        })
+        .collect();
+
+    let deadline = Instant::now() + CROSS_FANOUT_DEADLINE;
+    let mut reneg_answered = false;
+    let mut pending_reneg: Option<String> = None;
+    let mut offers: Vec<String> = Vec::new();
+    let mut frame_idx: u64 = 0;
+    let mut received = false;
+
+    while Instant::now() < deadline {
+        let _ = a.drain().await;
+        let b_payloads = b.drain().await;
+        if b_payloads
+            .iter()
+            .any(|p| p.as_slice() == payload.as_slice())
+        {
+            received = true;
+            break;
+        }
+
+        while let Ok(frame) = b_rx.try_recv() {
+            if let ServerFrame::SdpOffer { sdp } = frame {
+                offers.push(sdp.clone());
+                pending_reneg = Some(sdp);
+            }
+        }
+        if !reneg_answered && b.is_connected() {
+            if let Some(sdp) = pending_reneg.take() {
+                if let Ok(answer) = b.answer_renegotiation(&sdp) {
+                    if media
+                        .accept_renegotiation_answer(b_id.clone(), answer)
+                        .await
+                        .is_ok()
+                    {
+                        reneg_answered = true;
+                    }
+                }
+            }
+        }
+
+        if a.is_connected() && b.is_connected() && reneg_answered {
+            a.write_video_frame_with_descriptor(screen_mid, &payload, &descriptor, frame_idx);
+            frame_idx += 1;
+        }
+
+        let a_sock = a.socket.clone();
+        let b_sock = b.socket.clone();
+        let mut abuf = [0u8; 2048];
+        let mut bbuf = [0u8; 2048];
+        tokio::select! {
+            r = a_sock.recv_from(&mut abuf) => {
+                if let Ok((n, src)) = r {
+                    a.feed_receive(&abuf[..n], src, sfu_addr);
+                }
+            }
+            r = b_sock.recv_from(&mut bbuf) => {
+                if let Ok((n, src)) = r {
+                    b.feed_receive(&bbuf[..n], src, sfu_addr);
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(5)) => {
+                a.feed_timeout();
+                b.feed_timeout();
+            }
+        }
+    }
+
+    assert!(
+        received,
+        "subscriber B never received A's screen frame within \
+         {CROSS_FANOUT_DEADLINE:?}; a_connected={} b_connected={} \
+         reneg_answered={}",
+        a.is_connected(),
+        b.is_connected(),
+        reneg_answered,
+    );
+    let msid_of_screen = format!("a=msid:{a_id}~screen ");
+    assert!(
+        offers.iter().any(|sdp| sdp.contains(&msid_of_screen)),
+        "the SFU's offer to B must name A's screen under `<peer>~screen`; \
+         offers were:\n{offers:?}"
+    );
+    let msid_of_main = format!("a=msid:{a_id} ");
+    assert!(
+        !offers.iter().any(|sdp| sdp.contains(&msid_of_main)),
+        "a declared screen line is never opened as a main track"
+    );
+}
+
+/// **ADR-0083, a screen share that ends** — when the publisher stops its
+/// screen line (a port-0 m-line in its next offer, what a browser sends
+/// after `RTCRtpTransceiver.stop()`), the SFU stops the subscriber's line
+/// for it too, so the subscriber's track ends. Before, the line stayed open
+/// forever, and a second share of the same publisher arrived under the same
+/// stream id beside the dead track of the first: a browser that played that
+/// stream showed nothing ("Waiting for ...'s screen"), seen on the test
+/// stack with Safari sharing to Chrome.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_stopped_screen_line_is_stopped_on_the_subscriber() {
+    let peers = PeerRegistry::new();
+    let b_id = fresh_peer_id();
+    let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
+    assert!(
+        peers
+            .register(Peer {
+                id: b_id.clone(),
+                room: "screen-stop-test".to_owned(),
+                outbound: Some(b_tx),
+            })
+            .await,
+        "fresh PeerId must register cleanly"
+    );
+    let (media, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+        .await
+        .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::new_with_frame_descriptor().await;
+    let mut b = SyntheticClient::new_with_frame_descriptor().await;
+    let a_id = fresh_peer_id();
+
+    let (b_offer, b_pending) = b.create_video_subscriber_offer();
+    let b_answer = media
+        .accept_offer(b_id.clone(), "screen-stop-call".to_owned(), b_offer)
+        .await
+        .expect("SFU accepts B's subscriber offer");
+    b.accept_answer(b_pending, &b_answer)
+        .expect("B applies the SFU's answer");
+
+    // A sends a microphone beside its screen, as a browser does: a line
+    // that stays when the screen line stops keeps the BUNDLE group.
+    let (a_offer, a_pending, screen_mid) = {
+        let mut change = a.rtc.sdp_api();
+        let _audio = change.add_media(
+            MediaKind::Audio,
+            Direction::SendOnly,
+            Some("screen-stop-publisher".to_owned()),
+            None,
+            None,
+        );
+        let mid = change.add_media(
+            MediaKind::Video,
+            Direction::SendOnly,
+            Some("screen-stop-publisher-screen".to_owned()),
+            None,
+            None,
+        );
+        let (offer, pending) = change.apply().expect("two lines are a change");
+        (offer.to_sdp_string(), pending, mid)
+    };
+    let a_answer = media
+        .accept_offer_with_screen(
+            a_id.clone(),
+            "screen-stop-call".to_owned(),
+            a_offer,
+            Vec::new(),
+            Vec::new(),
+            vec![screen_mid.to_string()],
+        )
+        .await
+        .expect("SFU accepts A's screen-share offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    let deadline = Instant::now() + CROSS_FANOUT_DEADLINE;
+    // Phase 1: B is offered A's screen and answers. Phase 2: A stops the
+    // line; B must then be offered a stop of its own line, and accept it.
+    let mut opened = false;
+    let mut open_offer: Option<String> = None;
+    let mut stopped_by_a = false;
+    let mut stop_offer: Option<String> = None;
+    let mut stop_answered = false;
+    let msid_of_screen = format!("a=msid:{a_id}~screen ");
+
+    while Instant::now() < deadline && !stop_answered {
+        let _ = a.drain().await;
+        let _ = b.drain().await;
+        while let Ok(frame) = b_rx.try_recv() {
+            if let ServerFrame::SdpOffer { sdp } = frame {
+                if !opened && sdp.contains(&msid_of_screen) {
+                    open_offer = Some(sdp);
+                } else if stopped_by_a && sdp.contains("m=video 0 ") {
+                    stop_offer = Some(sdp);
+                }
+            }
+        }
+        if b.is_connected() {
+            if let Some(sdp) = open_offer.take() {
+                let answer = b
+                    .answer_renegotiation(&sdp)
+                    .expect("B answers the screen offer");
+                media
+                    .accept_renegotiation_answer(b_id.clone(), answer)
+                    .await
+                    .expect("SFU applies B's answer");
+                opened = true;
+            }
+        }
+        if opened && !stopped_by_a && a.is_connected() {
+            let mut change = a.rtc.sdp_api();
+            change.stop_media(screen_mid);
+            let (offer, pending) = change.apply().expect("stopping a line is a change");
+            let answer = media
+                .accept_offer_with_screen(
+                    a_id.clone(),
+                    "screen-stop-call".to_owned(),
+                    offer.to_sdp_string(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .await
+                .expect("SFU accepts A's offer that stops its screen");
+            a.accept_answer(pending, &answer)
+                .expect("A applies the SFU's answer");
+            stopped_by_a = true;
+        }
+        if let Some(sdp) = stop_offer.take() {
+            let answer = b.answer_renegotiation(&sdp).expect("B accepts the stop");
+            media
+                .accept_renegotiation_answer(b_id.clone(), answer)
+                .await
+                .expect("SFU applies B's answer to the stop");
+            stop_answered = true;
+        }
+
+        let a_sock = a.socket.clone();
+        let b_sock = b.socket.clone();
+        let mut abuf = [0u8; 2048];
+        let mut bbuf = [0u8; 2048];
+        tokio::select! {
+            r = a_sock.recv_from(&mut abuf) => {
+                if let Ok((n, src)) = r {
+                    a.feed_receive(&abuf[..n], src, sfu_addr);
+                }
+            }
+            r = b_sock.recv_from(&mut bbuf) => {
+                if let Ok((n, src)) = r {
+                    b.feed_receive(&bbuf[..n], src, sfu_addr);
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(5)) => {
+                a.feed_timeout();
+                b.feed_timeout();
+            }
+        }
+    }
+
+    assert!(opened, "B was never offered A's screen");
+    assert!(stopped_by_a, "A never stopped its screen line");
+    assert!(
+        stop_answered,
+        "after A stopped its screen line, B was never offered a stop of its own \
+         line for it (a `m=video 0` line) within {CROSS_FANOUT_DEADLINE:?}"
+    );
+}
+
 /// **The case the live failure was, and the harness did not cover** — a
 /// subscriber that joined a call **audio-only**, and later has a video track
 /// renegotiated onto it by the SFU.
@@ -2694,14 +3031,13 @@ async fn frame_descriptor_survives_the_relay_to_a_subscriber() {
 #[allow(clippy::too_many_lines)]
 async fn audio_only_subscriber_is_offered_video_on_libwebrtcs_own_extmap_id() {
     let peers = PeerRegistry::new();
-    let b_id = PeerId::fresh();
+    let b_id = fresh_peer_id();
     let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
     assert!(
         peers
             .register(Peer {
                 id: b_id.clone(),
-                call_id: "audio-only-join".to_owned(),
-                account_id: "subscriber-b".to_owned(),
+                room: "audio-only-join".to_owned(),
                 outbound: Some(b_tx),
             })
             .await,
@@ -2714,7 +3050,7 @@ async fn audio_only_subscriber_is_offered_video_on_libwebrtcs_own_extmap_id() {
 
     let mut a = SyntheticClient::new_with_frame_descriptor().await;
     let mut b = SyntheticClient::new_with_frame_descriptor().await;
-    let a_id = PeerId::fresh();
+    let a_id = fresh_peer_id();
 
     // B joins AUDIO-ONLY — no video m-line, so nothing pins the frame
     // descriptor's id for this peer.
@@ -2869,14 +3205,13 @@ async fn audio_only_subscriber_is_offered_video_on_libwebrtcs_own_extmap_id() {
 #[allow(clippy::too_many_lines)]
 async fn a_peer_joining_a_call_in_progress_receives_the_tracks_already_in_it() {
     let peers = PeerRegistry::new();
-    let b_id = PeerId::fresh();
+    let b_id = fresh_peer_id();
     let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
     assert!(
         peers
             .register(Peer {
                 id: b_id.clone(),
-                call_id: "late-joiner".to_owned(),
-                account_id: "subscriber-b".to_owned(),
+                room: "late-joiner".to_owned(),
                 outbound: Some(b_tx),
             })
             .await,
@@ -2888,7 +3223,7 @@ async fn a_peer_joining_a_call_in_progress_receives_the_tracks_already_in_it() {
         .expect("UDP bind on loopback:0 succeeds");
 
     let mut a = SyntheticClient::new_with_frame_descriptor().await;
-    let a_id = PeerId::fresh();
+    let a_id = fresh_peer_id();
 
     // A joins FIRST and publishes.
     let (a_offer, a_pending, publisher_mid) = a.create_video_publisher_offer();
@@ -3107,14 +3442,13 @@ async fn a_late_joiners_first_keyframe_is_requested_and_pli_bursts_collapse() {
     use lakko_svc_sfu::media::KEYFRAME_REQUEST_MIN_INTERVAL;
 
     let peers = PeerRegistry::new();
-    let b_id = PeerId::fresh();
+    let b_id = fresh_peer_id();
     let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
     assert!(
         peers
             .register(Peer {
                 id: b_id.clone(),
-                call_id: "keyframe-relay".to_owned(),
-                account_id: "subscriber-b".to_owned(),
+                room: "keyframe-relay".to_owned(),
                 outbound: Some(b_tx),
             })
             .await
@@ -3136,7 +3470,7 @@ async fn a_late_joiners_first_keyframe_is_requested_and_pli_bursts_collapse() {
 
     // A joins first, connects, and starts streaming into an empty call.
     let mut a = SyntheticClient::new_with_frame_descriptor().await;
-    let a_id = PeerId::fresh();
+    let a_id = fresh_peer_id();
     let (a_offer, a_pending, publisher_mid) = a.create_video_publisher_offer();
     let a_answer = media
         .accept_offer(a_id.clone(), "keyframe-call".to_owned(), a_offer)
@@ -3419,14 +3753,13 @@ async fn a_lost_audio_packet_does_not_hold_back_the_frames_after_it() {
     let payload = |i: u64| format!("audio frame {i:04} of the lost-packet test").into_bytes();
 
     let peers = PeerRegistry::new();
-    let b_id = PeerId::fresh();
+    let b_id = fresh_peer_id();
     let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
     assert!(
         peers
             .register(Peer {
                 id: b_id.clone(),
-                call_id: "audio-gap-test".to_owned(),
-                account_id: "subscriber-b".to_owned(),
+                room: "audio-gap-test".to_owned(),
                 outbound: Some(b_tx),
             })
             .await,
@@ -3438,7 +3771,7 @@ async fn a_lost_audio_packet_does_not_hold_back_the_frames_after_it() {
 
     let mut a = SyntheticClient::new().await;
     let mut b = SyntheticClient::new_releasing_audio_at_once().await;
-    let a_id = PeerId::fresh();
+    let a_id = fresh_peer_id();
 
     let (b_offer, b_pending) = b.create_subscriber_offer();
     let b_answer = media
@@ -3567,8 +3900,9 @@ fn audio_m_line(sdp: &str) -> Option<&str> {
 }
 
 /// Redundant audio (RED, RFC 2198, ADR-0067 step 3) crosses the SFU as it
-/// was sent, to the subscribers that can take it, and plain Opus still
-/// reaches everyone.
+/// was sent, to the subscribers that can take it, and reaches a subscriber
+/// without RED under that subscriber's Opus payload type (ADR-0071,
+/// amended 2026-10-26).
 ///
 /// A client builds the RED container before SFrame seals the frame, so what
 /// the SFU sees under the `red` payload type is ciphertext it can neither
@@ -3580,15 +3914,19 @@ fn audio_m_line(sdp: &str) -> Option<&str> {
 ///   what libwebrtc does when a packet's redundancy does not fit.
 /// - B subscribes and negotiated `red`: it gets every packet, each under the
 ///   payload type it was sent with, payload bytes verbatim.
-/// - C subscribes and knows Opus alone: it gets the Opus packets and none of
-///   the RED ones.
+/// - C subscribes and knows Opus alone (Firefox has no `audio/red`): it gets
+///   every packet too, the RED ones under its Opus payload type, payload
+///   bytes verbatim. The sealed frame's trailer says which are RED
+///   containers; C's client takes the primary frame out after opening. Before
+///   the amendment C was sent no RED packet, so a Firefox participant heard
+///   nobody whose browser sends RED.
 ///
 /// The SDP side is asserted too: the SFU's answer to A and its offer to B
 /// list `red` before `opus` (libwebrtc sends RED only then), and its offer
 /// to C is the same offer, which C narrows to Opus.
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn red_audio_reaches_only_the_subscribers_that_negotiated_it() {
+async fn red_audio_reaches_red_subscribers_as_red_and_others_as_opus() {
     const RED_PT: u8 = 63;
     const OPUS_PT: u8 = 111;
     const PACKETS: u64 = 12;
@@ -3597,15 +3935,14 @@ async fn red_audio_reaches_only_the_subscribers_that_negotiated_it() {
 
     let peers = PeerRegistry::new();
     let mut register = Vec::new();
-    for account in ["subscriber-b", "subscriber-c"] {
-        let id = PeerId::fresh();
+    for _subscriber in ["subscriber-b", "subscriber-c"] {
+        let id = fresh_peer_id();
         let (tx, rx) = mpsc::channel::<ServerFrame>(64);
         assert!(
             peers
                 .register(Peer {
                     id: id.clone(),
-                    call_id: "red-test".to_owned(),
-                    account_id: account.to_owned(),
+                    room: "red-test".to_owned(),
                     outbound: Some(tx),
                 })
                 .await,
@@ -3622,7 +3959,7 @@ async fn red_audio_reaches_only_the_subscribers_that_negotiated_it() {
     let mut a = SyntheticClient::new_rtp_mode(true).await;
     let mut b = SyntheticClient::new_rtp_mode(true).await;
     let mut c = SyntheticClient::new_rtp_mode(false).await;
-    let a_id = PeerId::fresh();
+    let a_id = fresh_peer_id();
 
     for (client, id) in [(&mut b, &b_id), (&mut c, &c_id)] {
         let (offer, pending) = client.create_subscriber_offer();
@@ -3746,23 +4083,13 @@ async fn red_audio_reaches_only_the_subscribers_that_negotiated_it() {
         "the red subscriber gets every packet, each under the payload type it was \
          sent with, payload verbatim"
     );
-    let opus_only: Vec<(u8, Vec<u8>)> = sent
-        .iter()
-        .filter(|(pt, _)| *pt == OPUS_PT)
-        .cloned()
-        .collect();
+    let as_opus: Vec<(u8, Vec<u8>)> = sent.iter().map(|(_, p)| (OPUS_PT, p.clone())).collect();
     assert_eq!(
-        c.rtp_packets, opus_only,
-        "the subscriber without red gets the Opus packets and no RED packet"
+        c.rtp_packets, as_opus,
+        "the subscriber without red gets every packet under its Opus payload type, \
+         payload verbatim"
     );
-    // On the wire, not only in what C's own stack accepted: C would discard
-    // a payload type it does not know, so count the media datagrams the SFU
-    // actually sent it.
-    assert_eq!(
-        c.rtp_in.len(),
-        opus_only.len(),
-        "the SFU sends a subscriber without red no RED packet at all"
-    );
+    assert_eq!(c.rtp_in.len(), sent.len());
     assert_eq!(b.rtp_in.len(), sent.len());
 }
 
@@ -3799,14 +4126,13 @@ async fn run_audio_level(sends_anyway: bool) -> AudioLevelRun {
     let payload = |i: u64| format!("sealed audio packet {i:04} of the level test").into_bytes();
 
     let peers = PeerRegistry::new();
-    let b_id = PeerId::fresh();
+    let b_id = fresh_peer_id();
     let (tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
     assert!(
         peers
             .register(Peer {
                 id: b_id.clone(),
-                call_id: "level-test".to_owned(),
-                account_id: "subscriber-b".to_owned(),
+                room: "level-test".to_owned(),
                 outbound: Some(tx),
             })
             .await
@@ -3819,7 +4145,7 @@ async fn run_audio_level(sends_anyway: bool) -> AudioLevelRun {
     // browser's, has the audio level in it.
     let mut a = SyntheticClient::new_rtp_mode(false).await;
     let mut b = SyntheticClient::new_rtp_mode(false).await;
-    let a_id = PeerId::fresh();
+    let a_id = fresh_peer_id();
 
     let (b_offer, b_pending) = b.create_subscriber_offer();
     let b_answer = media
@@ -4043,14 +4369,13 @@ impl VideoPair {
     /// until B has assembled one of A's frames.
     async fn streaming(call: &str) -> Self {
         let peers = PeerRegistry::new();
-        let b_id = PeerId::fresh();
+        let b_id = fresh_peer_id();
         let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
         assert!(
             peers
                 .register(Peer {
                     id: b_id.clone(),
-                    call_id: call.to_owned(),
-                    account_id: "subscriber-b".to_owned(),
+                    room: call.to_owned(),
                     outbound: Some(b_tx),
                 })
                 .await,
@@ -4071,7 +4396,7 @@ impl VideoPair {
             .expect("B applies the SFU's answer");
         let (a_offer, a_pending, mid) = a.create_video_publisher_offer();
         let a_answer = media
-            .accept_offer(PeerId::fresh(), call.to_owned(), a_offer)
+            .accept_offer(fresh_peer_id(), call.to_owned(), a_offer)
             .await
             .expect("SFU accepts A's publisher offer");
         a.accept_answer(a_pending, &a_answer)
@@ -4689,15 +5014,14 @@ async fn register_subscribers(
     n: usize,
 ) -> Vec<(PeerId, mpsc::Receiver<ServerFrame>)> {
     let mut out = Vec::new();
-    for i in 0..n {
-        let id = PeerId::fresh();
+    for _ in 0..n {
+        let id = fresh_peer_id();
         let (tx, rx) = mpsc::channel::<ServerFrame>(64);
         assert!(
             peers
                 .register(Peer {
                     id: id.clone(),
-                    call_id: call.to_owned(),
-                    account_id: format!("subscriber-{i}"),
+                    room: call.to_owned(),
                     outbound: Some(tx),
                 })
                 .await,
@@ -4874,7 +5198,7 @@ async fn run_uplink_loss(video_fec: bool, withhold_downlink: bool) -> UplinkLoss
     }
     let (a_offer, a_pending, mid) = a.create_video_publisher_offer();
     let publisher_answer = media_task
-        .accept_offer(PeerId::fresh(), "uplink-loss-call".to_owned(), a_offer)
+        .accept_offer(fresh_peer_id(), "uplink-loss-call".to_owned(), a_offer)
         .await
         .expect("SFU accepts A's publisher offer");
     a.accept_answer(a_pending, &publisher_answer)
@@ -5344,7 +5668,7 @@ async fn video_fec_is_not_negotiated_when_the_switch_is_off() {
 
     let mut a = SyntheticClient::new_rtp_mode_video(true).await;
     let mut b = SyntheticClient::new_rtp_mode_video(true).await;
-    let a_id = PeerId::fresh();
+    let a_id = fresh_peer_id();
 
     let (b_offer, b_pending) = b.create_video_subscriber_offer();
     assert!(
@@ -5780,7 +6104,7 @@ async fn run_bitrate_control(bitrate: BitrateControl) -> BitrateRun {
         "the publisher does offer transport-wide congestion control"
     );
     let publisher_answer = media
-        .accept_offer(PeerId::fresh(), "bitrate-call".to_owned(), a_offer)
+        .accept_offer(fresh_peer_id(), "bitrate-call".to_owned(), a_offer)
         .await
         .expect("SFU accepts A's publisher offer");
     a.accept_answer(a_pending, &publisher_answer)
@@ -5876,7 +6200,7 @@ async fn run_jittery_uplink() -> Vec<(Duration, u64)> {
     let mut a = SyntheticClient::new_rtp_mode_video_publisher(false).await;
     let (a_offer, a_pending, mid) = a.create_video_publisher_offer();
     let answer = media
-        .accept_offer(PeerId::fresh(), "jittery-uplink".to_owned(), a_offer)
+        .accept_offer(fresh_peer_id(), "jittery-uplink".to_owned(), a_offer)
         .await
         .expect("SFU accepts the publisher offer");
     a.accept_answer(a_pending, &answer)
@@ -6005,7 +6329,7 @@ async fn run_lossy_subscriber() -> (Vec<(bool, Vec<u8>)>, u64) {
         .expect("B applies the SFU's answer");
     let (a_offer, a_pending, mid) = a.create_video_publisher_offer();
     let answer = media
-        .accept_offer(PeerId::fresh(), "lossy-call".to_owned(), a_offer)
+        .accept_offer(fresh_peer_id(), "lossy-call".to_owned(), a_offer)
         .await
         .expect("SFU accepts the publisher offer");
     a.accept_answer(a_pending, &answer)
@@ -6397,7 +6721,7 @@ async fn run_uplink_dip(case: DipCase) -> DipRun {
         .expect("B applies the SFU's answer");
     let (a_offer, a_pending, mid) = a.create_video_publisher_offer();
     let a_answer = media_task
-        .accept_offer(PeerId::fresh(), call.to_owned(), a_offer)
+        .accept_offer(fresh_peer_id(), call.to_owned(), a_offer)
         .await
         .expect("SFU accepts A's publisher offer");
     a.accept_answer(a_pending, &a_answer)
@@ -7413,7 +7737,7 @@ async fn run_simulcast(case: SimulcastCase) -> SimulcastRun {
             .expect("B applies the SFU's answer");
         joined = Some(Instant::now());
     }
-    let a_id = PeerId::fresh();
+    let a_id = fresh_peer_id();
     // The publisher's mids of its light and main picture, once offered.
     let mut pub_mids: Option<(Mid, Mid)> = None;
     {
@@ -9533,7 +9857,7 @@ async fn three_senders_and_the_subscribers_wants() {
     b.accept_answer(b_pending, &b_answer)
         .expect("B applies the SFU's answer");
 
-    let a_id = PeerId::fresh();
+    let a_id = fresh_peer_id();
     let (a_offer, a_pending, pub_main, pub_light, pub_middle) =
         a.create_three_sender_publisher_offer();
     let a_answer = media_task
@@ -10170,6 +10494,7 @@ async fn a_sender_nobody_watches_is_switched_off_and_comes_back_at_a_key_frame()
             if let ServerFrame::PublishBudget {
                 main_kbps,
                 middle_kbps,
+                ..
             } = frame
             {
                 budgets.push((Instant::now(), main_kbps, middle_kbps));
@@ -11246,7 +11571,7 @@ async fn run_downlink(case: DownlinkCase) -> DownlinkRun {
     let mut publisher_answers = Vec::new();
     for _ in 0..PUBLISHERS {
         let mut client = SyntheticClient::build(rtp_client()).await;
-        let id = PeerId::fresh();
+        let id = fresh_peer_id();
         let (offer, pending, main, light, middle) = client.create_three_sender_publisher_offer();
         let answer = media_task
             .accept_offer_with_copies(

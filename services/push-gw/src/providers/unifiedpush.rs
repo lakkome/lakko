@@ -73,7 +73,7 @@ const TTL_SECONDS: u32 = 4 * 60 * 60;
 const CALL_TTL_SECONDS: u32 = 60;
 
 /// UnifiedPush provider. Stateless — the subscriber's endpoint URL
-/// (stored in `push_tokens.token` as UTF-8 bytes) is the only
+/// (carried in a sealed subscription as UTF-8 bytes) is the only
 /// per-device routing information.
 pub(crate) struct UnifiedPushProvider {
     http: reqwest::Client,
@@ -170,9 +170,9 @@ mod wire {
         /// Schema-version byte. Legacy clients drop unknown
         /// versions and fall back to long-poll catch-up.
         pub(super) v: u8,
-        /// Hex-encoded device pseudonym — the receiver matches
-        /// against its own known pseudonym to detect mis-routes.
-        pub(super) d: String,
+        /// Hex-encoded subscription id (ADR-0078) — the receiver
+        /// handles the wake only when it holds this subscription.
+        pub(super) s: String,
         /// Optional hex-encoded group pseudonym — lets the client
         /// jump straight to the right journal cursor.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -191,8 +191,8 @@ mod wire {
     impl From<&WakePayload> for WakeBody {
         fn from(p: &WakePayload) -> Self {
             Self {
-                v: 1,
-                d: hex::encode(p.device_pseudonym),
+                v: 2,
+                s: hex::encode(p.subscription_id),
                 g: p.group_pseudonym.map(hex::encode),
                 p: p.envelope_pointer,
                 k: p.kind.wire_tag(),
@@ -209,7 +209,7 @@ mod tests {
     async fn rejects_non_https_endpoint() {
         let provider = UnifiedPushProvider::new();
         let payload = WakePayload {
-            device_pseudonym: [0; 32],
+            subscription_id: [0; 16],
             group_pseudonym: None,
             envelope_pointer: None,
             kind: WakeKind::Message,
@@ -228,7 +228,7 @@ mod tests {
     async fn rejects_non_utf8_token() {
         let provider = UnifiedPushProvider::new();
         let payload = WakePayload {
-            device_pseudonym: [0; 32],
+            subscription_id: [0; 16],
             group_pseudonym: None,
             envelope_pointer: None,
             kind: WakeKind::Message,
@@ -248,7 +248,7 @@ mod tests {
 
         let body = |kind| {
             serde_json::to_string(&wire::WakeBody::from(&WakePayload {
-                device_pseudonym: [0x03; 32],
+                subscription_id: [0x03; 16],
                 group_pseudonym: Some([0x04; 32]),
                 envelope_pointer: Some(11),
                 kind,

@@ -105,7 +105,7 @@ internal enum class SplitPollOutcome {
  * G-37 — the split-poll ordering, as a pure orchestration over injected steps so
  * it is unit-testable without an Android `Context` or a live FFI `Group`.
  *
- * Same shape (and same reason) as [runCrashSafeCommit]: the property being fixed
+ * Same shape (and same reason) as [prepareCrashSafeCommit]: the property being fixed
  * is an ORDERING property between a network wait, a lock, and a state mutation,
  * and an ordering property is only actually pinned if a test can run it.
  *
@@ -208,7 +208,7 @@ internal suspend fun <T> runSplitPoll(
  * narrowing the lock, and a type is something a host test can drive. The
  * repository itself needs an Android `Context` and live FFI handles, so the
  * alternative would be a test that re-implements the lookup and proves nothing
- * about production. Same reasoning as [runSplitPoll] and [runCrashSafeCommit].
+ * about production. Same reasoning as [runSplitPoll] and [prepareCrashSafeCommit].
  *
  * ## Why `getOrPut` is safe here
  *

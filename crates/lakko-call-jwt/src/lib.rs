@@ -23,13 +23,23 @@
 //! {
 //!   "iss": "lakko-auth",
 //!   "aud": "lakko-sfu",
-//!   "sub": "<account_id_hex>",        // 16-byte UUIDv7
-//!   "call_id": "<call_id_hex>",       // 16-byte random
+//!   "room": "<room_hex>",             // 32 bytes, BLAKE3 over the call id
+//!   "peer_id": "<peer_id_hex>",       // 16 random bytes, fresh per token
 //!   "role": "participant" | "publisher" | "subscriber",
 //!   "iat": <unix-seconds>,
 //!   "exp": <iat + 3600>
 //! }
 //! ```
+//!
+//! ## No account in the token (ADR-0078 section 2)
+//!
+//! The token names no account and no call: `room` is a one-way function of
+//! the 16-byte call id that only the call's members know
+//! (`lakko_sfu_proto::room_id`), and `peer_id` is drawn at random by the
+//! issuer for each token. Auth mints it against an anonymous `call-join`
+//! token, not a session, so neither the issuer nor the SFU can tie a join
+//! to an account. The claim set is closed (`deny_unknown_fields`): a token
+//! carrying a `sub` or a `call_id` does not parse.
 //!
 //! Audit-side invariants live in
 //! [`docs/security/calls.md`](../../docs/security/calls.md)
@@ -93,20 +103,37 @@ pub enum CallRole {
     Subscriber,
 }
 
+/// Length of the `room` claim: 32 bytes as lower-case hex.
+pub const ROOM_HEX_LEN: usize = 64;
+
+/// Length of the `peer_id` claim: 16 bytes as lower-case hex.
+pub const PEER_ID_HEX_LEN: usize = 32;
+
+/// Whether `s` is exactly `len` lower-case hex characters.
+#[must_use]
+pub fn is_lower_hex(s: &str, len: usize) -> bool {
+    s.len() == len && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// The CallJwt claim set serialised as the JWT payload.
+///
+/// Closed: an unknown claim (a `sub`, a `call_id`) fails the parse, so no
+/// token naming an account can be accepted by a verifier built on this
+/// crate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CallJwtClaims {
     /// `iss` — issuer; always [`JWT_ISSUER`].
     pub iss: String,
     /// `aud` — audience; always [`JWT_AUDIENCE`].
     pub aud: String,
-    /// `sub` — account_id, 16-byte UUIDv7 as lower-case hex
-    /// (no separators). The SFU pseudonymises this further
-    /// for log lines; the auth service has no obligation to
-    /// hide it from itself.
-    pub sub: String,
-    /// 16-byte random call_id as lower-case hex.
-    pub call_id: String,
+    /// The room the token admits to: 32 bytes as lower-case hex,
+    /// `lakko_sfu_proto::room_id(call_id)`. Knowing it is the capability to
+    /// probe the room; only members of the call can compute it.
+    pub room: String,
+    /// The SFU peer id this token admits as: 16 random bytes as lower-case
+    /// hex, drawn by the issuer per token. The SFU keys the peer on it.
+    pub peer_id: String,
     /// Participation role.
     pub role: CallRole,
     /// `iat` — issued-at, unix seconds.
@@ -320,6 +347,12 @@ pub fn verify_jwt(
     if claims.aud != JWT_AUDIENCE {
         return Err(JwtError::Format("aud != lakko-sfu"));
     }
+    if !is_lower_hex(&claims.room, ROOM_HEX_LEN) {
+        return Err(JwtError::Format("room must be 64 lower-case hex"));
+    }
+    if !is_lower_hex(&claims.peer_id, PEER_ID_HEX_LEN) {
+        return Err(JwtError::Format("peer_id must be 32 lower-case hex"));
+    }
     if now_secs >= claims.exp {
         return Err(JwtError::Expired);
     }
@@ -465,11 +498,87 @@ mod tests {
         CallJwtClaims {
             iss: JWT_ISSUER.into(),
             aud: JWT_AUDIENCE.into(),
-            sub: "00112233445566778899aabbccddeeff".into(),
-            call_id: "0102030405060708090a0b0c0d0e0f10".into(),
+            room: "0102030405060708090a0b0c0d0e0f100102030405060708090a0b0c0d0e0f10".into(),
+            peer_id: "00112233445566778899aabbccddeeff".into(),
             role: CallRole::Participant,
             iat: now,
             exp: now + JWT_TTL_SECS,
+        }
+    }
+
+    /// ADR-0078 section 2: a minted token's payload names no account and no
+    /// call id - its keys are exactly the closed claim set.
+    #[test]
+    fn a_minted_jwt_has_no_sub_and_no_call_id() {
+        let key = fixture_key();
+        let jwt = mint_jwt(&key, &fixture_claims(1_700_000_000)).unwrap();
+        let payload_b64 = jwt.split('.').nth(1).unwrap();
+        let payload = URL_SAFE_NO_PAD.decode(payload_b64).unwrap();
+        let object: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&payload).unwrap();
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["aud", "exp", "iat", "iss", "peer_id", "role", "room"]
+        );
+        assert!(!object.contains_key("sub"));
+        assert!(!object.contains_key("call_id"));
+    }
+
+    /// A token carrying an account (`sub`) does not parse at all.
+    #[test]
+    fn a_token_with_a_sub_claim_is_refused() {
+        let key = fixture_key();
+        let now = 1_700_000_000;
+        let mut value = serde_json::to_value(fixture_claims(now)).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("sub".into(), "00112233445566778899aabbccddeeff".into());
+        let header = JwsHeader {
+            alg: JWS_ALG.into(),
+            typ: "JWT".into(),
+            kid: key.kid.clone(),
+        };
+        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+        let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).unwrap());
+        let input = format!("{header_b64}.{payload_b64}");
+        let sig = URL_SAFE_NO_PAD.encode(key.signing.sign(input.as_bytes()).to_bytes());
+        let jwt = format!("{input}.{sig}");
+        assert!(matches!(
+            verify_jwt(&key.verifying, &key.kid, &jwt, now + 1),
+            Err(JwtError::Encode(_))
+        ));
+    }
+
+    #[test]
+    fn malformed_room_or_peer_id_is_refused() {
+        let key = fixture_key();
+        let now = 1_700_000_000;
+        for (room, peer) in [
+            (
+                "ab".to_owned(),
+                "00112233445566778899aabbccddeeff".to_owned(),
+            ),
+            (
+                "AB".repeat(32),
+                "00112233445566778899aabbccddeeff".to_owned(),
+            ),
+            ("ab".repeat(32), "0011".to_owned()),
+            (
+                "ab".repeat(32),
+                "00112233445566778899AABBCCDDEEFF".to_owned(),
+            ),
+        ] {
+            let mut claims = fixture_claims(now);
+            claims.room = room;
+            claims.peer_id = peer;
+            let jwt = mint_jwt(&key, &claims).unwrap();
+            assert!(matches!(
+                verify_jwt(&key.verifying, &key.kid, &jwt, now + 1),
+                Err(JwtError::Format(_))
+            ));
         }
     }
 

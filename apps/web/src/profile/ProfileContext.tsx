@@ -43,7 +43,15 @@ import { ChatClient } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
 import { loadKeyAliases, loadRenames, subscribeAcceptedChanged } from "../contacts/local-store";
 import { loadWasm, type Wasm } from "../wasm";
-import { EMPTY_OWN_PROFILE, loadOwnProfile, saveOwnProfile, type OwnProfile } from "./own-profile";
+import {
+  EMPTY_OWN_PROFILE,
+  loadOwnProfile,
+  saveOwnProfile,
+  saveOwnProfileFields,
+  type OwnProfile,
+} from "./own-profile";
+import { avatarToWasm, type AvatarData } from "./avatar-model";
+import { OWN_AVATAR_KEY, avatarLookupChanged, bindAvatarRuntime, setAvatarLookup } from "./avatar-runtime";
 import { IdbProfileBackend } from "./profile-idb";
 import {
   ACCOUNT_ID_BYTES,
@@ -97,6 +105,10 @@ export interface ProfileApi {
    *  every group this device is in and send it to this account's other
    *  devices. `null` clears the name. */
   saveOwnDisplayName(name: string | null): Promise<void>;
+  /** ADR-0084 — save the name and the photo together (the photo already
+   *  uploaded), publish into every group and send to this account's other
+   *  devices. A new or removed photo is a new profile, like a name. */
+  saveOwnProfileFields(fields: { readonly displayName: string | null; readonly avatar: AvatarData | null }): Promise<void>;
   /** The account's username was just claimed (a guest chose one): keep the
    *  certificate the register call returned (`null`: fetched as usual) and
    *  publish the own profile, now with the username and the certificate, to
@@ -147,8 +159,7 @@ export interface ProfileApi {
   ownUsernameCertificate(): Uint8Array | null;
   /** The 16-byte auth account id a person CLAIMED in their profile, as 32
    *  lower-case hex characters, or `null` when none is held. For the viewer's
-   *  own key it is the signed-in account. Reactive. What the call roster
-   *  derives the ADR-0021 peer tag from. */
+   *  own key it is the signed-in account. Reactive. */
   accountIdHexOf(keyB64: string): string | null;
   /** Every stored profile that carries an account id, as
    *  `(personKeyB64, accountIdHex)` pairs. The own account is not among them
@@ -172,6 +183,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
   const [version, setVersion] = createSignal(0);
   const bump = (): void => {
     setVersion((v) => v + 1);
+    avatarLookupChanged();
   };
 
   // Derived synchronously from the signed-in account, not set by an effect:
@@ -225,6 +237,16 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     },
   );
   const unsubscribeStore = store.subscribe(bump);
+  // ADR-0084 — the one avatar component looks a person's photo up here.
+  setAvatarLookup((keyB64) => {
+    const own = chats.identity();
+    if (keyB64 === OWN_AVATAR_KEY || (own !== null && isOwnKeyB64(own, keyB64))) {
+      return untrack(ownProfile).avatar;
+    }
+    const canonical = untrack(aliases).get(keyB64) ?? keyB64;
+    return store.avatarOf(keyB64) ?? (canonical === keyB64 ? null : store.avatarOf(canonical));
+  });
+  onCleanup(() => setAvatarLookup(null));
 
   const scoped = new ScopedDiscoveryClient(() => auth.identitySecrets()?.sessionToken ?? null);
   const [ownCert, setOwnCert] = createSignal<Uint8Array | null>(null);
@@ -295,6 +317,13 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     },
     now: () => Date.now(),
     decodeKey: base64Decode,
+    // A lookup that could not reach the directory tries again by itself; the
+    // screen shows the name without the username meanwhile.
+    scheduleRetry: (retry, delayMs) => {
+      setTimeout(() => {
+        void retry().then(bump);
+      }, delayMs);
+    },
   });
 
   function verifyIfClaimed(keyB64: string, username: string | null): void {
@@ -337,9 +366,9 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     // (signed out mid-publish) sends none.
     const grants = groupIdB64 === undefined ? [] : grantsFor(groupIdB64);
     try {
-      // ADR-0048 v2 — the own account id rides along so a member who never
-      // accepted this account as a contact can still derive its ADR-0021 peer
-      // tag and name its call tile. `undefined` for a session without one.
+      // ADR-0048 v2 — the own account id rides along (the username
+      // certificate binds the username to it). `undefined` for a session
+      // without one.
       // ADR-0060 v3 — the username certificate, and the grants.
       return w.composeProfileEnvelope(
         own.displayName,
@@ -348,6 +377,8 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
         ownAccountIdBytes() ?? undefined,
         username === null ? undefined : (ownCert() ?? undefined),
         grants,
+        // ADR-0084 — the saved photo, in every envelope this account sends.
+        own.avatar === null ? undefined : avatarToWasm<InstanceType<Wasm["ProfileAvatar"]>>(w, own.avatar),
       );
     } finally {
       // `composeProfileEnvelope` takes the grants by value (moved into the
@@ -471,6 +502,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       boundAccount = account;
       // The previous account's username certificate, held or on its way.
       ownCertSlot.rebind(account);
+      bindAvatarRuntime(account);
       if (account === null) {
         unbindOwnProfileSync();
         scheduler.stop();
@@ -539,6 +571,8 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
   const unsubscribeOwnAdopted = subscribeOwnProfileAdopted(() => {
     setOwnProfileTick((t) => t + 1);
     bump();
+    // ADR-0084 — a photo saved on another device is the own photo here too,
+    // and the member cards follow; the groups already got it.
   });
 
   const unsubscribeRenames = subscribeAcceptedChanged(() => {
@@ -567,6 +601,15 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       setOwnProfileTick((t) => t + 1);
       bump();
       // ADR-0048 section 4a — and to this account's other devices.
+      ownProfileChanged();
+      await scheduler.profileChanged(chats.groups().map((g) => g.groupIdB64));
+    },
+    async saveOwnProfileFields(fields) {
+      const account = accountId();
+      if (account === null) throw new Error("no session");
+      saveOwnProfileFields(account, fields, Date.now());
+      setOwnProfileTick((t) => t + 1);
+      bump();
       ownProfileChanged();
       await scheduler.profileChanged(chats.groups().map((g) => g.groupIdB64));
     },

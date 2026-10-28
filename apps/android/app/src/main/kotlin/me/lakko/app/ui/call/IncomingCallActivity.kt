@@ -73,6 +73,9 @@ public class IncomingCallActivity : ComponentActivity() {
                         callerName = current.callerName,
                         video = current.video,
                         avatarSeed = current.callIdHex,
+                        // ADR-0084 — the caller's photo, from the key mirrored
+                        // beside the name.
+                        personKey = me.lakko.app.ui.components.personKeyBytes(current.callerKeyB64),
                         // Set when the user tapped Accept on the NOTIFICATION
                         // rather than opening this screen: their choice is
                         // already made, so it is taken as soon as the screen

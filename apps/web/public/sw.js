@@ -250,7 +250,11 @@ async function networkFirstWithCacheFallback(req) {
  * behalf, we receive the plaintext JSON). The body shape is
  * defined by `WakeBody` in `services/push-gw/src/providers/webpush.rs`:
  *
- *     { v: 1, d: <device_hex>, g: <push_gid_or_legacy_group_hex>?, p: <pointer>?, k: "c"? }
+ *     { v: 2, s: <subscription_id_hex>, g: <push_gid_hex>?, p: <pointer>?, k: "c"? }
+ *
+ * `s` (ADR-0078) is the push-gw subscription id the wake was delivered for:
+ * the wake is handled only when the bound account's route row for `g`
+ * holds that id. There is no device pseudonym any more.
  *
  * `k` is the wake KIND: `"c"` marks a call, absent marks a message.
  * It rides inside the RFC 8291 encryption, so the browser's push
@@ -269,9 +273,9 @@ function parseWakeBody(data) {
   try {
     const json = data.json();
     if (json === null || typeof json !== "object") return null;
-    if (json.v !== 1) return null;
+    if (json.v !== 2) return null;
     return {
-      deviceHex: typeof json.d === "string" ? json.d : null,
+      subHex: typeof json.s === "string" ? json.s : null,
       groupHex: typeof json.g === "string" ? json.g : null,
       pointer: typeof json.p === "number" ? json.p : null,
       // Anything that is not the call tag is a message, so an older
@@ -398,7 +402,7 @@ async function handlePush(wake) {
       renotify: false,
       data,
       icon: "/icon-192.png",
-      badge: "/icon-96.png",
+      badge: "/badge-96.png",
     });
   } catch {
     // Some browsers + private modes don't allow showing notifications
@@ -518,14 +522,13 @@ async function handleCallNotice(call) {
  * whether a wake is handled at all, and as whom.
  *
  * Returns `{ accountId, groupHex }` — `groupHex` the REAL DS group id
- * (lowercase hex) of one of the bound account's groups, or `null` for a
- * wake that names no group (a device wake) — or `null` when the wake must be
- * dropped:
+ * (lowercase hex) of one of the bound account's groups — or `null` when the
+ * wake must be dropped:
  *
  *   * no binding row (no account signed in for push on this browser);
- *   * the wake's `d` is not the bound device pseudonym;
- *   * its `g` names none of the bound account's groups: neither the
- *     account-scoped reverse map nor that account's own known groups.
+ *   * the wake carries no well-formed subscription id `s`;
+ *   * the bound account holds no route row for its `g`, or that row's
+ *     subscription id is not the wake's `s` (ADR-0078).
  *
  * A pure mirror of `wakeBoundAccount` + `resolveWakeTarget` in
  * `public/sw-push-decrypt.js` (which the tests pin), kept inline so a CLASSIC
@@ -541,54 +544,39 @@ async function admitWake(wake) {
     binding = null;
   }
   if (binding === null || typeof binding.accountId !== "string") return null;
-  const bound = normalisedPseudonymHex(binding.devicePseudonymHex);
-  const presented = normalisedPseudonymHex(wake.deviceHex);
-  if (bound === null || presented === null || bound !== presented) return null;
+  const presented = normalisedSubIdHex(wake.subHex);
+  if (presented === null || typeof wake.groupHex !== "string") return null;
   const accountId = binding.accountId;
-  if (typeof wake.groupHex !== "string") return { accountId, groupHex: null };
-  const wakeHex = wake.groupHex.toLowerCase();
   let route = null;
   try {
-    route = await lookupRouteFor(accountId, wakeHex);
+    route = await lookupRouteFor(accountId, wake.groupHex.toLowerCase());
   } catch {
     route = null;
   }
-  if (route !== null) {
-    try {
-      const bytes = base64Decode(route.groupIdB64);
-      if (bytes.length === 32) return { accountId, groupHex: bytesToHex(bytes) };
-    } catch {
-      // A malformed row falls through to the legacy read below.
-    }
-  }
-  let legacy = null;
+  if (route === null || normalisedSubIdHex(route.subIdHex) !== presented) return null;
   try {
-    legacy = await resolveAccountFor(accountId, wakeHex);
+    const bytes = base64Decode(route.groupIdB64);
+    if (bytes.length === 32) return { accountId, groupHex: bytesToHex(bytes) };
   } catch {
-    legacy = null;
+    // A malformed row is a miss.
   }
-  if (legacy === null) return null;
-  return { accountId, groupHex: wakeHex };
+  return null;
 }
 
 /** The `wake_binding` row, or `null`. READ-ONLY. */
 async function readWakeBinding() {
   const row = await idbGet("lakko-push-routing", "wake_binding", "current");
-  if (
-    row === undefined ||
-    typeof row.devicePseudonymHex !== "string" ||
-    typeof row.accountId !== "string"
-  ) {
+  if (row === undefined || typeof row.accountId !== "string") {
     return null;
   }
-  return { devicePseudonymHex: row.devicePseudonymHex, accountId: row.accountId };
+  return { accountId: row.accountId };
 }
 
 /**
- * `(account, push_gid) → { accountId, groupIdB64 }` from the plaintext
- * `account_routes` index, or `null`. The row key is built exactly as
- * `routeRowKey` in `src/push/group-routing-store.ts` builds it; a row naming
- * another account is a miss. READ-ONLY.
+ * `(account, push_gid) → { accountId, groupIdB64, subIdHex }` from the
+ * plaintext `account_routes` index, or `null`. The row key is built exactly
+ * as `routeRowKey` in `src/push/group-routing-store.ts` builds it; a row
+ * naming another account is a miss. READ-ONLY.
  */
 async function lookupRouteFor(accountId, pushGidHex) {
   const row = await idbGet(
@@ -603,7 +591,11 @@ async function lookupRouteFor(accountId, pushGidHex) {
   ) {
     return null;
   }
-  return { accountId: row.accountId, groupIdB64: row.groupIdB64 };
+  return {
+    accountId: row.accountId,
+    groupIdB64: row.groupIdB64,
+    subIdHex: typeof row.subIdHex === "string" ? row.subIdHex : undefined,
+  };
 }
 
 /** Mirror of `routeRowKey` in `src/push/group-routing-store.ts`. */
@@ -611,33 +603,11 @@ function routeRowKey(accountId, pushGidHex) {
   return `${accountId}\0${pushGidHex.toLowerCase()}`;
 }
 
-/**
- * LEGACY — does the bound account itself know `groupHex` as a raw group
- * id? Reads ONLY that account's snapshot row (`knownGroupIds` is stored
- * unencrypted), never another account's. READ-ONLY.
- */
-async function resolveAccountFor(accountId, groupHex) {
-  const row = await idbGet("lakko-mls", "snapshots", accountId);
-  const known = Array.isArray(row?.knownGroupIds) ? row.knownGroupIds : [];
-  for (const kg of known) {
-    let bytes;
-    try {
-      bytes = base64Decode(kg);
-    } catch {
-      continue;
-    }
-    if (bytesToHex(bytes) === groupHex) {
-      return { accountId, groupIdBytes: bytes };
-    }
-  }
-  return null;
-}
-
-/** A 64-char hex pseudonym, lowercased, or `null`. */
-function normalisedPseudonymHex(s) {
-  if (typeof s !== "string" || s.length !== 64) return null;
+/** A 32-char hex subscription id, lowercased, or `null`. */
+function normalisedSubIdHex(s) {
+  if (typeof s !== "string" || s.length !== 32) return null;
   const lower = s.toLowerCase();
-  return /^[0-9a-f]{64}$/.test(lower) ? lower : null;
+  return /^[0-9a-f]{32}$/.test(lower) ? lower : null;
 }
 
 // ----- background decrypt (1.21) -------------------------------
@@ -751,13 +721,10 @@ function buildDecryptDeps(wasm, core) {
     // design (push_gid is a one-way derivation; group_id is a public DS
     // routing address — see `src/push/group-routing-store.ts`) precisely
     // so this read needs no device key. READ-ONLY: the SW never writes
-    // push-routing state. `null` on a miss → the core falls back to the
-    // legacy raw-group_id read; a throw is treated as a miss by the core.
+    // push-routing state. `null` on a miss; a throw is treated as a miss by
+    // the core. ADR-0078: the row also carries this device's subscription id,
+    // which must equal the wake's `s`.
     lookupRoute: lookupRouteFor,
-    // LEGACY fallback — does the BOUND account know `g` as a raw group id?
-    // `knownGroupIds` is stored UNENCRYPTED, so this needs no device key.
-    // Never searches another account's snapshot.
-    resolveAccount: resolveAccountFor,
     // `docs/ux/calls.md` section 2.1 — is this conversation muted? READ-ONLY:
     // the encrypted cross-device sync row the app wrote
     // (`src/devices/sync/sync-state-idb.ts`), unwrapped under the same device

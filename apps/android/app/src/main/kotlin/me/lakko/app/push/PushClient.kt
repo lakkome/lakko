@@ -9,6 +9,7 @@ import io.ktor.client.engine.HttpClientEngine
 import me.lakko.app.config.ApiEndpoints
 import me.lakko.app.config.ApiService
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -18,7 +19,6 @@ import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import me.lakko.app.anon.AnonTokenContext
@@ -26,7 +26,6 @@ import me.lakko.app.anon.AnonTokenSource
 import me.lakko.app.anon.AnonTokens
 import me.lakko.app.anon.AnonymousHttp
 import me.lakko.app.anon.sendWithToken
-import me.lakko.app.auth.base64Encode
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
@@ -34,44 +33,39 @@ import kotlin.coroutines.cancellation.CancellationException
  *
  * Mirror of:
  *
- *   * `apps/web/src/push/client.ts` (1.20b)
- *   * `apps/ios/Lakko/Push/PushClient.swift` (1.20c)
+ *   * `apps/web/src/push/client.ts`
+ *   * `apps/ios/Lakko/Push/PushClient.swift`
  *
- * Two endpoints from the user-device side:
+ * Since ADR-0078 section 3 push-gw holds no device pseudonym and no token in
+ * the clear. Endpoints used from the device:
  *
- *   * `POST /push/register` — bind a
- *     `(device_pseudonym, provider)` pair to an FCM token.
- *     Idempotent: the server UPSERTs the row.
- *   * `POST /push/unregister` — drop a token. Called on
- *     logout + forgetDevice.
+ *   * `POST /push/subscribe` — store (or replace) one sealed subscription
+ *     `{sub_id, push_gid, wake_pk, sealed}`: `sealed` is this device's tokens
+ *     sealed under the group's unlock key (`sealPushSubscription`), `sub_id`
+ *     16 random bytes this device keeps per subscription ([PushRouteStore]).
+ *     Re-sending an id replaces its row, which is how a new token reaches
+ *     push-gw.
+ *   * `POST /push/unsubscribe` — drop one row by its `sub_id`.
+ *   * `GET /push/wake-key` — the X25519 key every wake is sealed to.
  *
- * Plus `/push/group/subscribe` / `/push/group/unsubscribe` (ADR-0042 /
- * ADR-0043).
+ * The two writes spend one `push-register` anonymous token each (ADR-0054
+ * S3) and go out on the anonymous client: no session, no cookie, its own
+ * connection pool (invariant #5).
  *
- * Every one of the four spends one `push-register` anonymous token
- * (ADR-0054 S3) and goes out on the anonymous client: no session, no
- * cookie, its own connection pool. push-gw stays anonymous by design
- * (invariant #5).
- *
- * It never WAKES anyone: since ADR-0054 a group wake is the
- * `x-lakko-wake` header on the signed DS publish (see
- * `me.lakko.app.ds.DsWake`), and the DS asks push-gw over the internal
- * network. `/push/notify-group` is no longer reachable from a client.
+ * It never WAKES anyone: a group wake is the `x-lakko-wake` header on the
+ * signed DS publish (see `me.lakko.app.ds.DsWake`).
  *
  * ## Default base URL
  *
- * `http://10.0.2.2:8085` — Android-emulator loopback alias,
- * port `8085` matching `lakko-svc-push-gw`'s dev bind. Override
- * via the constructor for physical devices (LAN IP) and
- * production (Cloudflare tunnel URL).
+ * `http://10.0.2.2:8085` — Android-emulator loopback alias, port `8085`
+ * matching `lakko-svc-push-gw`'s dev bind. Override via the constructor.
  */
 public class PushClient(
     public val baseUrl: String = DEFAULT_BASE_URL,
     /** Ktor engine. Production: [AnonymousHttp.engine] (its own pool). Tests:
-     *  `MockEngine` for deterministic responses without a
-     *  network. */
+     *  `MockEngine` for deterministic responses without a network. */
     engine: HttpClientEngine? = null,
-    /** Where the four routes draw their `push-register` token. */
+    /** Where the two writes draw their `push-register` token. */
     private val anonTokens: AnonTokenSource = AnonTokens.shared,
 ) : AutoCloseable {
 
@@ -94,156 +88,73 @@ public class PushClient(
         client.close()
     }
 
-    /** Provider names — must match the snake_case `serde`
-     *  rename on `ProviderKind` in
-     *  `services/push-gw/src/provider.rs`. */
-    @Serializable
-    public enum class Provider {
-        @SerialName("apns")
-        APNS,
-        @SerialName("fcm")
-        FCM,
-        @SerialName("web_push")
-        WEB_PUSH,
-        @SerialName("unified_push")
-        UNIFIED_PUSH,
-    }
-
-    /**
-     * Bind `(devicePseudonym, provider) → tokenBytes`.
-     * Idempotent.
-     *
-     * @param devicePseudonym 32 raw bytes (mirror of the
-     *                        `DEVICE_LEN` constant in
-     *                        `services/push-gw/src/registry.rs`).
-     * @param provider        Which delivery path this token is
-     *                        for.
-     * @param tokenBytes      Provider-opaque bytes. For FCM
-     *                        this is the UTF-8 encoded
-     *                        registration token string the
-     *                        Firebase SDK handed us.
-     */
-    public suspend fun register(
-        devicePseudonym: ByteArray,
-        provider: Provider,
-        tokenBytes: ByteArray,
+    /** Store (or replace) one sealed subscription (ADR-0078). */
+    public suspend fun subscribe(
+        subId: ByteArray,
+        pushGid: ByteArray,
+        wakePk: ByteArray,
+        sealed: ByteArray,
     ) {
-        require(devicePseudonym.size == PSEUDONYM_LEN) {
-            "devicePseudonym must be $PSEUDONYM_LEN bytes"
+        require(subId.size == SUBSCRIPTION_ID_LEN) { "subId must be $SUBSCRIPTION_ID_LEN bytes" }
+        require(pushGid.size == KEY_LEN && wakePk.size == KEY_LEN) {
+            "pushGid and wakePk must be $KEY_LEN bytes"
         }
-        require(tokenBytes.isNotEmpty()) { "tokenBytes must be non-empty" }
-
-        val req = RegisterRequest(
-            device_pseudonym = pseudonymHex(devicePseudonym),
-            provider = provider,
-            token = base64Encode(tokenBytes),
+        require(sealed.isNotEmpty()) { "sealed must be non-empty" }
+        val req = SubscribeRequest(
+            sub_id = b64url(subId),
+            push_gid = b64url(pushGid),
+            wake_pk = b64url(wakePk),
+            sealed = b64url(sealed),
         )
-        val response: HttpResponse = tokenPost("/push/register") { setBody(req) }
+        val response: HttpResponse = tokenPost("/push/subscribe") { setBody(req) }
         if (!response.status.isSuccess()) {
             throw PushHttpError(
                 status = response.status.value,
-                endpoint = "/push/register",
+                endpoint = "/push/subscribe",
                 body = response.safeReadBody(),
             )
         }
-        val resp: RegisterResponse = response.body()
-        if (!resp.ok) {
-            throw PushHttpError(
-                status = 200,
-                endpoint = "/push/register",
-                body = "server reported ok=false",
-            )
+        if (!response.body<OkResponse>().ok) {
+            throw PushHttpError(status = 200, endpoint = "/push/subscribe", body = "server reported ok=false")
         }
     }
 
-    // -----------------------------------------------------------------
-    // Group fan-out (Phase 1.20e)
-    // -----------------------------------------------------------------
-
-    /**
-     * Subscribe this device to push wakes for `groupPseudonym`.
-     * Idempotent — re-subscribing the same `(device, group)`
-     * pair returns `false` (no insert) and is a no-op.
-     */
-    public suspend fun subscribeGroup(
-        devicePseudonym: ByteArray,
-        groupPseudonym: ByteArray,
-    ): Boolean {
-        require(devicePseudonym.size == PSEUDONYM_LEN) {
-            "devicePseudonym must be $PSEUDONYM_LEN bytes"
+    /** Drop one subscription by its id. Idempotent: `false` when it was
+     *  already gone. */
+    public suspend fun unsubscribe(subId: ByteArray): Boolean {
+        require(subId.size == SUBSCRIPTION_ID_LEN) { "subId must be $SUBSCRIPTION_ID_LEN bytes" }
+        val response: HttpResponse = tokenPost("/push/unsubscribe") {
+            setBody(UnsubscribeRequest(sub_id = b64url(subId)))
         }
-        require(groupPseudonym.size == PSEUDONYM_LEN) {
-            "groupPseudonym must be $PSEUDONYM_LEN bytes"
-        }
-        val req = GroupSubscribeRequest(
-            device_pseudonym = pseudonymHex(devicePseudonym),
-            group_pseudonym = pseudonymHex(groupPseudonym),
-        )
-        val response: HttpResponse = tokenPost("/push/group/subscribe") { setBody(req) }
         if (!response.status.isSuccess()) {
             throw PushHttpError(
                 status = response.status.value,
-                endpoint = "/push/group/subscribe",
+                endpoint = "/push/unsubscribe",
                 body = response.safeReadBody(),
             )
         }
-        return response.body<GroupSubscribeResponse>().inserted
+        return response.body<UnsubscribeResponse>().removed
     }
 
-    /** Drop a `(device, group)` subscription. Idempotent. */
-    public suspend fun unsubscribeGroup(
-        devicePseudonym: ByteArray,
-        groupPseudonym: ByteArray,
-    ): Boolean {
-        require(devicePseudonym.size == PSEUDONYM_LEN)
-        require(groupPseudonym.size == PSEUDONYM_LEN)
-        val req = GroupUnsubscribeRequest(
-            device_pseudonym = pseudonymHex(devicePseudonym),
-            group_pseudonym = pseudonymHex(groupPseudonym),
-        )
-        val response: HttpResponse = tokenPost("/push/group/unsubscribe") { setBody(req) }
+    /** push-gw's X25519 wake key. No token: it is public. */
+    public suspend fun wakeKey(): ByteArray {
+        val response: HttpResponse = try {
+            client.get("$baseUrl/push/wake-key")
+        } catch (cause: CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            throw PushNetworkError("/push/wake-key", cause)
+        }
         if (!response.status.isSuccess()) {
-            throw PushHttpError(
-                status = response.status.value,
-                endpoint = "/push/group/unsubscribe",
-                body = response.safeReadBody(),
-            )
+            throw PushHttpError(response.status.value, "/push/wake-key", response.safeReadBody())
         }
-        return response.body<GroupUnsubscribeResponse>().removed
-    }
-
-    /**
-     * Drop a previously-registered token. Idempotent: returns
-     * `false` if the row was already gone.
-     */
-    public suspend fun unregister(
-        devicePseudonym: ByteArray,
-        provider: Provider,
-    ): Boolean {
-        require(devicePseudonym.size == PSEUDONYM_LEN) {
-            "devicePseudonym must be $PSEUDONYM_LEN bytes"
+        val key = runCatching {
+            java.util.Base64.getUrlDecoder().decode(response.body<WakeKeyResponse>().key)
+        }.getOrNull()
+        if (key == null || key.size != KEY_LEN) {
+            throw PushHttpError(response.status.value, "/push/wake-key", "malformed key")
         }
-        val req = UnregisterRequest(
-            device_pseudonym = pseudonymHex(devicePseudonym),
-            provider = provider,
-        )
-        val response: HttpResponse = tokenPost("/push/unregister") { setBody(req) }
-        if (!response.status.isSuccess()) {
-            throw PushHttpError(
-                status = response.status.value,
-                endpoint = "/push/unregister",
-                body = response.safeReadBody(),
-            )
-        }
-        val resp: UnregisterResponse = response.body()
-        if (!resp.ok) {
-            throw PushHttpError(
-                status = 200,
-                endpoint = "/push/unregister",
-                body = "server reported ok=false",
-            )
-        }
-        return resp.removed
+        return key
     }
 
     // -----------------------------------------------------------------
@@ -277,12 +188,13 @@ public class PushClient(
         public val DEFAULT_BASE_URL: String
             get() = ApiEndpoints.baseUrlFor(ApiService.PUSH_GW)
 
-        /** Raw device pseudonym length — must match
-         *  `DEVICE_LEN` in
-         *  `services/push-gw/src/registry.rs`. */
-        public const val PSEUDONYM_LEN: Int = 32
+        /** Length of a subscription id (mirror of `PUSH_SUBSCRIPTION_ID_LEN`). */
+        public const val SUBSCRIPTION_ID_LEN: Int = 16
 
-        /** Lowercase-hex encode the device pseudonym. */
+        /** Length of a `push_gid`, a wake public key and push-gw's wake key. */
+        public const val KEY_LEN: Int = 32
+
+        /** Lowercase-hex encode bytes (route-store keys, subscription ids). */
         public fun pseudonymHex(bytes: ByteArray): String {
             val sb = StringBuilder(bytes.size * 2)
             for (b in bytes) {
@@ -292,6 +204,9 @@ public class PushClient(
             }
             return sb.toString()
         }
+
+        private fun b64url(bytes: ByteArray): String =
+            java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
 
         private const val HEX: String = "0123456789abcdef"
     }
@@ -303,56 +218,33 @@ public class PushClient(
 
 @Serializable
 @Suppress("ConstructorParameterNaming")
-private data class RegisterRequest(
-    val device_pseudonym: String,
-    val provider: PushClient.Provider,
-    val token: String,
+private data class SubscribeRequest(
+    val sub_id: String,
+    val push_gid: String,
+    val wake_pk: String,
+    val sealed: String,
 )
 
 @Serializable
-private data class RegisterResponse(
+private data class OkResponse(
     val ok: Boolean,
 )
 
 @Serializable
 @Suppress("ConstructorParameterNaming")
-private data class UnregisterRequest(
-    val device_pseudonym: String,
-    val provider: PushClient.Provider,
+private data class UnsubscribeRequest(
+    val sub_id: String,
 )
 
 @Serializable
-private data class UnregisterResponse(
+private data class UnsubscribeResponse(
     val ok: Boolean,
     val removed: Boolean,
 )
 
-// 1.20e — group fan-out wire shapes.
-
 @Serializable
-@Suppress("ConstructorParameterNaming")
-private data class GroupSubscribeRequest(
-    val device_pseudonym: String,
-    val group_pseudonym: String,
-)
-
-@Serializable
-private data class GroupSubscribeResponse(
-    val ok: Boolean,
-    val inserted: Boolean,
-)
-
-@Serializable
-@Suppress("ConstructorParameterNaming")
-private data class GroupUnsubscribeRequest(
-    val device_pseudonym: String,
-    val group_pseudonym: String,
-)
-
-@Serializable
-private data class GroupUnsubscribeResponse(
-    val ok: Boolean,
-    val removed: Boolean,
+private data class WakeKeyResponse(
+    val key: String,
 )
 
 private suspend fun HttpResponse.safeReadBody(): String {

@@ -3,6 +3,7 @@
 
 package me.lakko.app
 
+import kotlinx.coroutines.launch
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -78,6 +79,7 @@ import me.lakko.app.auth.SessionAccount
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.contacts.InviteIntake
+import me.lakko.app.contacts.publishLink
 import me.lakko.app.feed.reporting
 import me.lakko.app.push.LakkoMessagingService
 import me.lakko.app.push.PushIntake
@@ -103,6 +105,7 @@ import me.lakko.app.ui.contacts.ContactsScreen
 import me.lakko.app.ui.contacts.ContactsViewModel
 import me.lakko.app.ui.contacts.InviteLandingScreen
 import me.lakko.app.ui.contacts.InviteLandingViewModel
+import me.lakko.app.ui.contacts.keepsLinkParked
 import me.lakko.app.transport.AntiCensorshipManager
 import me.lakko.app.ui.devices.DevicesScreen
 import me.lakko.app.ui.settings.SettingsScreen
@@ -229,6 +232,32 @@ class MainActivity : ComponentActivity() {
         // ADR-0073 R.5 — a conversation that continues in a new group keeps
         // its row through the lineage register of the synced state.
         chatRepository.lineageRecorder = { successor, root -> deviceGroupSync.recordLineage(successor, root) }
+        // ADR-0065 section 4 — a saved message its author deleted for everyone
+        // leaves the saved list, as it leaves the pinned bar.
+        chatRepository.onMessagesDeleted = { segmentHex, ids ->
+            val gone = me.lakko.app.chat.savedDeletedIn(deviceGroupSync.saved.value, segmentHex, ids)
+            if (gone.isNotEmpty()) {
+                lifecycleScope.launch {
+                    try {
+                        deviceGroupSync.applySavedChanges(
+                            gone.map {
+                                uniffi.lakko_ffi_uniffi.composeSavedRemoval(
+                                    me.lakko.app.devices.sync.Hlc.mint(),
+                                    it.conversation,
+                                    it.messageId,
+                                )
+                            },
+                        )
+                    } catch (cause: Throwable) {
+                        if (cause is kotlinx.coroutines.CancellationException) throw cause
+                        android.util.Log.w("MainActivity", "saved removal of a deleted message failed: ${cause.javaClass.simpleName}")
+                    }
+                }
+            }
+        }
+        // ADR-0079 section 4 — the contacts runtime reads the synced
+        // link-record register (auto-accept, the link list, revocations).
+        contactsRepository.deviceGroupSync = deviceGroupSync
         // ADR-0075 (amended 2026-10-13) - the account's devices keep the
         // recovery address in one register of the synced state.
         authRepository.recoveryAddressPort = object : me.lakko.app.auth.RecoveryAddressPort {
@@ -292,9 +321,7 @@ class MainActivity : ComponentActivity() {
         // notification carries the wake extras
         // (EXTRA_WAKE_GROUP / EXTRA_WAKE_POINTER). `onNewIntent`
         // below handles the warm-start variants of both.
-        handleInviteIntent(intent)
-        handleGroupJoinIntent(intent)
-        handleCallJoinIntent(intent)
+        handleLakkoLinkIntent(intent)
         handleFeedImportIntent(intent)
         handleFeedFileIntent(intent)
         handleWakeIntent(intent)
@@ -365,11 +392,20 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         me.lakko.app.calls.IncomingCallRinger.attach(applicationContext)
         me.lakko.app.calls.IncomingCallRinger.setAppForeground(true)
+        me.lakko.app.devices.DeviceCardCenter.foreground = true
+    }
+
+    /** ADR-0080 section 3: the person's touches and keys on this device are
+     *  what refreshes its device card; never a timer. */
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        me.lakko.app.devices.DeviceCardCenter.noteAction()
     }
 
     override fun onPause() {
         super.onPause()
         me.lakko.app.calls.IncomingCallRinger.setAppForeground(false)
+        me.lakko.app.devices.DeviceCardCenter.foreground = false
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -380,9 +416,7 @@ class MainActivity : ComponentActivity() {
         // tree doesn't observe `getIntent()` directly — we
         // publish into the appropriate intake whose StateFlow
         // drives the re-render.
-        handleInviteIntent(intent)
-        handleGroupJoinIntent(intent)
-        handleCallJoinIntent(intent)
+        handleLakkoLinkIntent(intent)
         handleFeedImportIntent(intent)
         handleFeedFileIntent(intent)
         handleWakeIntent(intent)
@@ -391,61 +425,23 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Extract an invite slug from [intent]'s `data` URI when
-     * the URL matches `https?://lakko.me/i/<slug>`, then hand
-     * it to [InviteIntake.publish] so the Compose router can
-     * navigate to the landing screen.
+     * An opened `https?://lakko.me/{i,g,c}/<slug>#<secret>` app link: read by
+     * [me.lakko.app.contacts.lakkoLinkFromPath] and handed to [InviteIntake]
+     * so the Compose router opens the matching landing. A QR code scanned on
+     * the Contacts screen goes through the same two functions.
      *
-     * Defensive against:
-     *   * Non-VIEW intents (LAUNCHER taps land here too on
-     *     every restart with the same Intent stored as the
-     *     "last intent" — those don't carry a `data` URI
-     *     unless the user actually deep-linked in).
-     *   * Wrong-host URLs (the manifest filter narrows to
-     *     `lakko.me`, but if the user opens the same URL on a
-     *     self-hosted mirror that happens to match the http
-     *     filter we still want to handle it).
-     *   * Empty or whitespace slugs (the manifest's
-     *     `pathPrefix="/i/"` allows `/i/` with no slug at all
-     *     — extract to "" + skip).
+     * Non-VIEW intents (a launcher tap re-delivering the last intent) and a
+     * path with an empty slug (the manifest's `pathPrefix` allows `/i/`
+     * alone) are ignored. The `#<link secret>` fragment travels with the
+     * slug; `Uri.fragment` is decoded and never sent. A link that lost it is
+     * refused as damaged on the landing, not here.
      */
-    private fun handleInviteIntent(intent: Intent) {
+    private fun handleLakkoLinkIntent(intent: Intent) {
         if (intent.action != Intent.ACTION_VIEW) return
         val uri = intent.data ?: return
         val path = uri.path ?: return
-        // Manifest filter pinned `pathPrefix="/i/"`; the slug
-        // is everything after that. `substringAfter` returns
-        // the original string when the separator is missing —
-        // guard with a startsWith check first.
-        if (!path.startsWith("/i/")) return
-        val slug = path.removePrefix("/i/").trim().removeSuffix("/")
-        if (slug.isEmpty()) return
-        // Sealed links (2026-09-28): the `#<link secret>` fragment opens the
-        // link, so it travels with the slug as one argument; a link that lost
-        // it is refused as damaged on the landing, before any request.
-        inviteIntake.publish(
-            me.lakko.app.discovery.InviteLinkArgument(slug, uri.fragment?.takeIf { it.isNotBlank() }).encode(),
-        )
-    }
-
-    /**
-     * ADR-0028 (G-3) — extract a group join-ticket slug from [intent]'s `data`
-     * URI when the URL matches `https?://lakko.me/g/<slug>`, then hand it to
-     * [InviteIntake.publishGroupJoin]. Mirror of [handleInviteIntent] for the
-     * `/g/` deep-link.
-     */
-    private fun handleGroupJoinIntent(intent: Intent) {
-        if (intent.action != Intent.ACTION_VIEW) return
-        val uri = intent.data ?: return
-        val path = uri.path ?: return
-        if (!path.startsWith("/g/")) return
-        val slug = path.removePrefix("/g/").trim().removeSuffix("/")
-        if (slug.isEmpty()) return
-        // Sealed links — the `#<link secret>` fragment opens the link and its
-        // preview. It is read here and nowhere else: `Uri.fragment` is decoded
-        // and never sent. A URL that lost it, or carries a wrong one, is
-        // refused as damaged on the landing, not here.
-        inviteIntake.publishGroupJoin(slug, uri.fragment?.takeIf { it.isNotBlank() })
+        val link = me.lakko.app.contacts.lakkoLinkFromPath(path, uri.fragment) ?: return
+        inviteIntake.publishLink(link)
     }
 
     /**
@@ -479,28 +475,6 @@ class MainActivity : ComponentActivity() {
             else -> null
         } ?: return
         me.lakko.app.ui.feed.FeedImportIntake.publishFile(uri)
-    }
-
-    /**
-     * ADR-0032 (G-21/G-22) — extract a multi-joiner call-invite slug from
-     * [intent]'s `data` URI when the URL matches `https?://lakko.me/c/<slug>`,
-     * then hand it to [InviteIntake.publishCallJoin]. Mirror of
-     * [handleInviteIntent] for the `/c/` deep-link. Unlike the other two, the
-     * call-join landing is a PUBLIC route honoured in any auth state (an
-     * anonymous visitor gets the ADR-0032 guest-join path).
-     */
-    private fun handleCallJoinIntent(intent: Intent) {
-        if (intent.action != Intent.ACTION_VIEW) return
-        val uri = intent.data ?: return
-        val path = uri.path ?: return
-        if (!path.startsWith("/c/")) return
-        val slug = path.removePrefix("/c/").trim().removeSuffix("/")
-        if (slug.isEmpty()) return
-        // Sealed links: the fragment opens the capability and travels with
-        // the slug; the landing refuses a link without it as damaged.
-        inviteIntake.publishCallJoin(
-            me.lakko.app.discovery.InviteLinkArgument(slug, uri.fragment?.takeIf { it.isNotBlank() }).encode(),
-        )
     }
 
     /**
@@ -769,10 +743,46 @@ private fun AppRoot(
     when (val current = state) {
         AuthState.Loading -> InsetRoot { LoadingScreen() }
         is AuthState.Anon -> InsetRoot {
-            AnonRoot(
-                repository = authRepository,
-                cachedUsername = current.cachedUsername,
-            )
+            // ADR-0079 (amended 2026-10-26) - a tapped `/i/` link from a
+            // person who is not signed in shows the inviter card first, with
+            // Create an account / I already have an account. A live link stays
+            // parked, so once a session lands it is opened again (live -> the
+            // invite page, dead -> Contacts); a dead link is dropped.
+            val anonInviteSlug by inviteIntake.pendingInviteSlug.collectAsStateWithLifecycle()
+            // The parked link the visitor already chose an account for, and
+            // the screen chosen (sign up or sign in).
+            var answeredInviteSlug by androidx.compose.runtime.saveable.rememberSaveable {
+                androidx.compose.runtime.mutableStateOf<String?>(null)
+            }
+            var anonStartRoute by androidx.compose.runtime.saveable.rememberSaveable {
+                androidx.compose.runtime.mutableStateOf<String?>(null)
+            }
+            val parkedInvite = anonInviteSlug
+            if (parkedInvite != null && parkedInvite != answeredInviteSlug) {
+                // Back drops the link and leaves the ordinary Welcome screen.
+                androidx.activity.compose.BackHandler { inviteIntake.consume() }
+                val choose = { route: String, page: me.lakko.app.ui.contacts.SignedOutInviteState ->
+                    anonStartRoute = route
+                    if (page.keepsLinkParked) {
+                        answeredInviteSlug = parkedInvite
+                    } else {
+                        answeredInviteSlug = null
+                        inviteIntake.consume()
+                    }
+                }
+                me.lakko.app.ui.contacts.SignedOutInviteScreen(
+                    slug = parkedInvite,
+                    preview = { contactsRepository.previewInviteLink(it) },
+                    onCreateAccount = { page -> choose(AnonRoutes.SIGNUP, page) },
+                    onHaveAccount = { page -> choose(AnonRoutes.LOGIN, page) },
+                )
+            } else {
+                AnonRoot(
+                    repository = authRepository,
+                    cachedUsername = current.cachedUsername,
+                    startRoute = anonStartRoute,
+                )
+            }
         }
         // Signed in, but this device does not hold the account's keys:
         // the restore prompt (another device, a passkey that carries the
@@ -951,7 +961,11 @@ private fun AppRoot(
                 )
             }
             // The 1x1 call's ringing banner and in-call screen.
-            OneToOneCallOverlay(host = callHost, nameForGroup = resolveOneToOneName)
+            OneToOneCallOverlay(
+                host = callHost,
+                nameForGroup = resolveOneToOneName,
+                keyForGroup = { chatRepository.oneToOnePeerKey(it) },
+            )
             // A call-link call that is connecting, waiting to be admitted, or
             // just ended, on screens other than its landing.
             LinkCallNoticeBar(
@@ -1023,7 +1037,7 @@ private fun AppRoot(
     }
     val rollbackAlert by authRepository.rollbackAlert.collectAsState()
     rollbackAlert?.let {
-        me.lakko.app.ui.auth.BackupRollbackAlertDialog(
+        me.lakko.app.ui.auth.BackupRollbackRefusedDialog(
             onDismiss = { authRepository.dismissRollbackAlert() },
         )
     }
@@ -1324,6 +1338,25 @@ private fun SessionRoot(
             authRepository.onKeyRotationEnvelope(envelope)
         }
         onDispose { me.lakko.app.devices.sync.DeviceGroupSyncRepository.keyRotationSink = null }
+    }
+    // ADR-0081 decision 4 - a device that lost or fell behind its DeviceGroup
+    // knocks under this account's login handle, after its own directory
+    // KeyPackage (the signed device binding a sibling checks) is published;
+    // a sibling admits only knocks naming the handle.
+    DisposableEffect(authRepository, chatRepository) {
+        me.lakko.app.devices.sync.DeviceGroupSyncRepository.loginHandleProvider = {
+            val session = authRepository.state.value as? me.lakko.app.auth.AuthState.Session
+            session?.account?.username?.takeIf { it.isNotBlank() }?.let { name ->
+                runCatching { uniffi.lakko_ffi_uniffi.loginHandle(name) }.getOrNull()
+            }
+        }
+        me.lakko.app.devices.sync.DeviceGroupSyncRepository.directoryKeyPackagePublisher = {
+            chatRepository.republishKeyPackage()
+        }
+        onDispose {
+            me.lakko.app.devices.sync.DeviceGroupSyncRepository.loginHandleProvider = null
+            me.lakko.app.devices.sync.DeviceGroupSyncRepository.directoryKeyPackagePublisher = null
+        }
     }
     // This device adopted rotated account keys (as the device that changed
     // them, or as a kept device): every directory row of the account was
@@ -1669,8 +1702,12 @@ private fun SessionRoot(
         .collectAsStateWithLifecycle()
     LaunchedEffect(openDevicesRequested) {
         if (!openDevicesRequested) return@LaunchedEffect
-        navController.navigate(Routes.DEVICES) { launchSingleTop = true }
-        me.lakko.app.devices.NewDeviceNotices.consumeOpenDevices()
+        // docs/ux/profile-screen.md §6 — a link leaving Settings > Profile
+        // with unsaved changes asks first.
+        me.lakko.app.ui.profile.ProfileLeaveGuard.run {
+            navController.navigate(Routes.DEVICES) { launchSingleTop = true }
+            me.lakko.app.devices.NewDeviceNotices.consumeOpenDevices()
+        }
     }
 
     //
@@ -1683,8 +1720,10 @@ private fun SessionRoot(
     LaunchedEffect(pendingInviteSlug, guestShell) {
         if (guestShell) return@LaunchedEffect
         val slug = pendingInviteSlug ?: return@LaunchedEffect
-        navController.navigate(Routes.invite(slug)) { launchSingleTop = true }
-        inviteIntake.consume()
+        me.lakko.app.ui.profile.ProfileLeaveGuard.run {
+            navController.navigate(Routes.invite(slug)) { launchSingleTop = true }
+            inviteIntake.consume()
+        }
     }
 
     // ADR-0063 section 4 — channels join the foreground poll: while the app is
@@ -1709,6 +1748,32 @@ private fun SessionRoot(
                 }
                 // The interval, or sooner when this device just published.
                 me.lakko.app.feed.awaitChannelPostSyncTick()
+            }
+        }
+    }
+
+    // ADR-0065 section 3 — the keep tick, in the foreground only: every 10
+    // minutes the owed blob deletes are retried and at most four due buckets
+    // (one conversation's pinned files, the saved list, the own photo) is
+    // kept; each bucket comes due about once a month, spread over time.
+    LaunchedEffect(lifecycleOwner, identitySecrets) {
+        val secrets = identitySecrets ?: return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            // The first run a minute after the landing (or the return to the
+            // foreground), then every ten minutes: the same on every client.
+            kotlinx.coroutines.delay(KEEP_FIRST_TICK_MS)
+            while (true) {
+                try {
+                    val own = me.lakko.app.profile.OwnProfileStore.load(chatRepository.context, secrets.accountId)?.avatar
+                    val buckets = chatRepository.pinnedKeepBuckets() +
+                        me.lakko.app.storage.KeepBucket("saved", me.lakko.app.storage.blobHexes(deviceGroupSync.savedBlobIds())) +
+                        me.lakko.app.storage.KeepBucket("profile", me.lakko.app.storage.blobHexes(me.lakko.app.profile.avatarBlobIds(own)))
+                    me.lakko.app.storage.BlobLifetime.tick(chatRepository.context, buckets)
+                } catch (cause: Throwable) {
+                    if (cause is kotlinx.coroutines.CancellationException) throw cause
+                    android.util.Log.w("MainActivity", "keep tick failed: ${cause.javaClass.simpleName}")
+                }
+                kotlinx.coroutines.delay(KEEP_TICK_MS)
             }
         }
     }
@@ -1741,7 +1806,7 @@ private fun SessionRoot(
     LaunchedEffect(pendingFeedImport, pendingFeedFile, guestShell) {
         if (guestShell) return@LaunchedEffect
         if (pendingFeedImport == null && pendingFeedFile == null) return@LaunchedEffect
-        navController.navigate(Routes.FEED_IMPORT) { launchSingleTop = true }
+        me.lakko.app.ui.profile.ProfileLeaveGuard.run { navController.navigate(Routes.FEED_IMPORT) { launchSingleTop = true } }
     }
 
     // ADR-0028 (G-3) — a tapped `/g/<slug>` group join-ticket link pushes the
@@ -1750,8 +1815,10 @@ private fun SessionRoot(
     LaunchedEffect(pendingGroupJoin, guestShell) {
         if (guestShell) return@LaunchedEffect
         val link = pendingGroupJoin ?: return@LaunchedEffect
-        navController.navigate(Routes.groupJoin(link)) { launchSingleTop = true }
-        inviteIntake.consumeGroupJoin()
+        me.lakko.app.ui.profile.ProfileLeaveGuard.run {
+            navController.navigate(Routes.groupJoin(link)) { launchSingleTop = true }
+            inviteIntake.consumeGroupJoin()
+        }
     }
 
     // A notification tap (Phase 1.20d2) opens the matching chat when the group
@@ -1765,12 +1832,14 @@ private fun SessionRoot(
         val knownThread = chatState.threads.firstOrNull {
             it.groupIdHex.equals(wake.groupHex, ignoreCase = true)
         }
-        if (knownThread != null) {
-            navController.navigate(Routes.chat(knownThread.groupIdHex)) { launchSingleTop = true }
-        } else {
-            navController.navigateToTab(Routes.CHATS)
+        me.lakko.app.ui.profile.ProfileLeaveGuard.run {
+            if (knownThread != null) {
+                navController.navigate(Routes.chat(knownThread.groupIdHex)) { launchSingleTop = true }
+            } else {
+                navController.navigateToTab(Routes.CHATS)
+            }
+            pushIntake.consume()
         }
-        pushIntake.consume()
     }
 
     val appContext = LocalContext.current.applicationContext
@@ -1930,6 +1999,14 @@ private fun SessionRoot(
                     me.lakko.app.ui.devices.NewDeviceNoticeBanner(
                         onOpenDevices = { navController.navigate(Routes.DEVICES) { launchSingleTop = true } },
                     )
+                    val invitedAll by contactsRepository.invited.collectAsStateWithLifecycle()
+                    val contactsNow by contactsRepository.state.collectAsStateWithLifecycle()
+                    val invitedShown = remember(invitedAll, contactsNow.accepted) {
+                        me.lakko.app.contacts.PendingContacts.shown(
+                            invitedAll,
+                            contactsNow.accepted.mapTo(HashSet()) { me.lakko.app.auth.base64Encode(it.request.fromPubkey) },
+                        )
+                    }
                     ChatListScreen(
                         modifier = Modifier.weight(1f),
                         repository = chatRepository,
@@ -1941,15 +2018,15 @@ private fun SessionRoot(
                         onSubscribeToChannel = { id, handle ->
                             navController.navigate(Routes.channelSubscribe(id, handle))
                         },
-                        // Section 4.3 — a found person goes to Contacts, which
-                        // owns the request flow because it asks for an
-                        // introduction the search field has no room for.
-                        onFoundPerson = { username ->
-                            me.lakko.app.contacts.PendingContactLookup.publish(username)
-                            navController.navigateToTab(Routes.CONTACTS)
-                        },
+                        // Only the plain lookup row (no people search wired)
+                        // reaches this; the people search sends the request
+                        // from its own row (who-can-find-me.md section 6.1).
                         channels = channelsState,
                         deviceGroupSync = deviceGroupSync,
+                        // ADR-0079 — the people added through their invite
+                        // link, listed at once.
+                        invited = invitedShown,
+                        onOpenPendingChat = { hex -> navController.navigate(Routes.pendingChat(hex)) },
                         // docs/ux/chat-folders.md — the editor and Settings >
                         // Chat folders are pushed destinations.
                         onEditFolder = { id -> navController.navigate(Routes.folderEdit(id, null)) },
@@ -1959,6 +2036,8 @@ private fun SessionRoot(
                             )
                         },
                         onOpenFolderSettings = { navController.navigate(Routes.FOLDERS) },
+                        // docs/ux/saved-messages-and-file-lifetime.md section 3.
+                        onOpenSaved = { navController.navigate(Routes.SAVED) },
                         // docs/ux/calls.md section 2.1.1 — a muted
                         // conversation's call never takes the screen over, so
                         // the list offers it on that chat's own row instead.
@@ -2135,20 +2214,17 @@ private fun SessionRoot(
                             )
                         },
                     )
-                    // docs/ux/navigation.md section 4.3 — a username the
-                    // conversation list's one lookup row resolved. The add
-                    // sheet opens with it filled in, and the slot is consumed
-                    // so a later visit does not re-open it.
-                    val foundUsername by me.lakko.app.contacts.PendingContactLookup
-                        .pendingUsername.collectAsStateWithLifecycle()
                     ContactsScreen(
                         viewModel = contactsVm,
                         onOpenContact = { key -> navController.navigate(Routes.contact(key)) },
                         onOpenChat = { hex -> navController.navigate(Routes.chat(hex)) },
-                        prefillUsername = foundUsername,
-                        onPrefillConsumed = {
-                            me.lakko.app.contacts.PendingContactLookup.consume()
-                        },
+                        onOpenPendingChat = { hex -> navController.navigate(Routes.pendingChat(hex)) },
+                        // docs/ux/who-can-find-me.md section 6.1 — the same
+                        // people search as the Chats field, people only.
+                        peopleSearch = peopleSearch,
+                        // A scanned /i/, /g/ or /c/ link takes the route an
+                        // opened app link takes.
+                        onScannedLink = { link -> inviteIntake.publishLink(link) },
                     )
                 }
                 // docs/ux/navigation.md section 5 — Calls: recent calls across
@@ -2221,6 +2297,10 @@ private fun SessionRoot(
                         // is not evidence of an eviction.
                         chatMembershipEnded = { hex -> chatRepository.isGroupActive(hex) == false },
                         resolveChat = { linked, key -> chatRepository.chatGroupIdHexFor(linked, key) },
+                        // Section 2.1 (amended 2026-10-24) - a person the
+                        // viewer removed keeps the one-to-one; the header
+                        // still opens their card through it.
+                        removedPeerChat = { key -> chatRepository.chatGroupIdHexFor(null, key) },
                         // UX 6.2.4 — after the delete, land wherever the chat
                         // was opened from: pop the deleted chat off the stack
                         // too when this screen was pushed from it.
@@ -2262,6 +2342,7 @@ private fun SessionRoot(
                     }
                     SettingsScreen(
                         displayName = ownProfile?.displayName,
+                        ownAvatar = ownProfile?.avatar,
                         username = account.username.takeIf { it.isNotBlank() },
                         onOpenProfile = { navController.navigate(Routes.PROFILE) },
                         onOpenPasskeys = { navController.navigate(Routes.PASSKEYS) },
@@ -2288,14 +2369,6 @@ private fun SessionRoot(
                 // ADR-0075 / UX 19.2 - Settings > Account > Recovery email.
                 composable(Routes.RECOVERY_EMAIL) {
                     me.lakko.app.ui.auth.RecoveryEmailScreen(
-                        repository = authRepository,
-                        onDone = { navController.popBackStack() },
-                        onBack = { navController.popBackStack() },
-                    )
-                }
-                // ADR-0076 - change the username.
-                composable(Routes.CHANGE_USERNAME) {
-                    me.lakko.app.ui.auth.ChangeUsernameScreen(
                         repository = authRepository,
                         onDone = { navController.popBackStack() },
                         onBack = { navController.popBackStack() },
@@ -2526,15 +2599,68 @@ private fun SessionRoot(
                                 me.lakko.app.profile.OwnProfileStore.load(ctx, accountId)
                             },
                             username = account.username.takeIf { it.isNotBlank() },
-                            onSaved = { updated ->
-                                me.lakko.app.profile.OwnProfileStore.save(ctx, accountId, updated)
-                                chatRepository.publishOwnProfileToAllGroups()
-                                // ADR-0048 section 4a — and to the account's
-                                // other devices, with the name's stored stamp.
-                                me.lakko.app.reach.ReachManager.get(ctx).publishOwnProfileToDevices()
+                            repository = authRepository,
+                            deps = remember(accountId) {
+                                // docs/ux/profile-screen.md §5 — the three steps of Save.
+                                object : me.lakko.app.ui.profile.ProfileSaveDeps {
+                                    override suspend fun upload(
+                                        bytes: ByteArray,
+                                        mime: String,
+                                        side: Int,
+                                    ): me.lakko.app.profile.AvatarBlob {
+                                        val ref = me.lakko.app.chat.AttachmentBridge.encryptAndUpload(
+                                            bytes = bytes,
+                                            mime = mime,
+                                            name = null,
+                                        )
+                                        val blob = me.lakko.app.profile.avatarBlobOf(
+                                            ref.blobId,
+                                            ref.key,
+                                            ref.nonce,
+                                            bytes.size.toLong(),
+                                            side,
+                                        )
+                                        // The owner's own photo is never downloaded again.
+                                        me.lakko.app.avatar.AvatarImages.putOwn(ctx, blob, bytes)
+                                        return blob
+                                    }
+
+                                    override fun proofLive(): Boolean = authRepository.freshProofLive()
+
+                                    override suspend fun changeUsername(
+                                        newUsername: String,
+                                    ): me.lakko.app.auth.RenameResult = authRepository.changeUsername(newUsername)
+
+                                    override fun publish(
+                                        name: String?,
+                                        avatar: me.lakko.app.profile.AvatarRefs?,
+                                    ) {
+                                        val session = (authRepository.state.value as? me.lakko.app.auth.AuthState.Session)
+                                            ?.account?.username?.takeIf { it.isNotBlank() }
+                                        val previous = me.lakko.app.profile.OwnProfileStore.load(ctx, accountId)?.avatar
+                                        val stored = me.lakko.app.profile.OwnProfileStore.update(ctx, accountId) { held ->
+                                            me.lakko.app.profile.applyOwnProfileChange(
+                                                current = held,
+                                                newName = name,
+                                                newAvatar = avatar,
+                                                username = held?.username ?: session,
+                                                nowMs = System.currentTimeMillis(),
+                                            )
+                                        }
+                                        if (stored) {
+                                            chatRepository.publishOwnProfileToAllGroups()
+                                            // ADR-0048 section 4a — and to the account's
+                                            // other devices, with the name's stored stamp.
+                                            me.lakko.app.reach.ReachManager.get(ctx).publishOwnProfileToDevices()
+                                            // ADR-0065 section 6 — a replaced or removed photo's
+                                            // blobs go from the server (retried when it fails).
+                                            val gone = me.lakko.app.profile.replacedAvatarBlobs(previous, avatar)
+                                            if (gone.isNotEmpty()) me.lakko.app.storage.BlobLifetime.delete(ctx, gone)
+                                        }
+                                    }
+                                }
                             },
                             onBack = { navController.popBackStack() },
-                            onChangeUsername = { navController.navigate(Routes.CHANGE_USERNAME) },
                         )
                     } else {
                         LoadingScreen()
@@ -2574,6 +2700,18 @@ private fun SessionRoot(
                     )
                 }
                 // docs/ux/chat-folders.md section 4 — Settings > Chat folders.
+                // ADR-0065 section 4 / UX section 3 — the saved messages.
+                composable(Routes.SAVED) {
+                    me.lakko.app.ui.chat.SavedScreen(
+                        sync = deviceGroupSync,
+                        repository = chatRepository,
+                        onBack = { navController.popBackStack() },
+                        onOpenMessage = { hex, messageId ->
+                            me.lakko.app.chat.PendingMessageJump.publish(hex, messageId)
+                            navController.navigate(Routes.chat(hex))
+                        },
+                    )
+                }
                 composable(Routes.FOLDERS) {
                     me.lakko.app.ui.chat.ChatFoldersSettingsScreen(
                         repository = chatRepository,
@@ -2654,14 +2792,37 @@ private fun SessionRoot(
                     InviteLandingScreen(
                         viewModel = inviteVm,
                         onDone = { navController.popBackStack() },
-                        onOpenChat = { hex ->
-                            navController.navigate(Routes.chat(hex)) {
+                        // ADR-0079 — the page closes into the chat with the inviter.
+                        onOpenChat = { target ->
+                            val route = when (target) {
+                                is me.lakko.app.ui.contacts.InviteChatTarget.Pending ->
+                                    Routes.pendingChat(target.accountIdHex)
+                                is me.lakko.app.ui.contacts.InviteChatTarget.Conversation ->
+                                    Routes.chat(target.groupIdHex)
+                                is me.lakko.app.ui.contacts.InviteChatTarget.Contact ->
+                                    Routes.contact(target.routeKey)
+                            }
+                            navController.navigate(route) {
                                 popUpTo(Routes.INVITE) { inclusive = true }
                             }
                         },
-                        onOpenContact = { key ->
-                            navController.navigate(Routes.contact(key)) {
-                                popUpTo(Routes.INVITE) { inclusive = true }
+                        // Amended 2026-10-19 — a link that does not work:
+                        // Contacts, nothing else shown.
+                        onOpenContacts = {
+                            navController.popBackStack(Routes.INVITE, inclusive = true)
+                            navController.navigateToTab(Routes.CONTACTS)
+                        },
+                    )
+                }
+                composable(Routes.PENDING_CHAT) { entry ->
+                    val accountIdHex = entry.arguments?.getString("accountIdHex") ?: return@composable
+                    me.lakko.app.ui.chat.PendingChatScreen(
+                        accountIdHex = accountIdHex,
+                        contacts = contactsRepository,
+                        onBack = { navController.popBackStack() },
+                        onConnected = { hex ->
+                            navController.navigate(Routes.chat(hex)) {
+                                popUpTo(Routes.PENDING_CHAT) { inclusive = true }
                             }
                         },
                     )
@@ -2708,6 +2869,14 @@ private const val APP_POLL_RETRY_BACKOFF_MS: Long = 5_000L
 /** App-level receive loop: a pass that returned sooner than this waits out the rest. */
 private const val APP_POLL_MIN_ITERATION_MS: Long = 1_000L
 
+/** ADR-0065 section 3 — the keep tick's cadence while the app is in front;
+ *  chosen. Each bucket is due about once a month, so this only bounds how
+ *  late a due keep can be. */
+private const val KEEP_TICK_MS: Long = 10L * 60L * 1000L
+
+/** ADR-0065 section 3 — the first keep tick, after the landing. */
+private const val KEEP_FIRST_TICK_MS: Long = 60L * 1000L
+
 /** Navigation routes of the session shell. */
 private object Routes {
     const val CHATS = "chats"
@@ -2747,12 +2916,12 @@ private object Routes {
     const val RECOVERY = "settings/recovery"
     const val RECOVERY_EMAIL = "settings/recovery_email"
     const val SAVE_PHRASE = "settings/save_phrase"
-    const val CHANGE_USERNAME = "settings/change_username"
     const val ANTI_CENSORSHIP = "settings/anti_censorship"
     const val CHANNELS_I_SHARE = "settings/channels_i_share"
     const val LANGUAGE = "settings/language"
     /** docs/ux/chat-folders.md section 4. */
     const val FOLDERS = "settings/folders"
+    const val SAVED = "chats/saved"
     /** The folder editor; both arguments are hex (URL-safe by construction). */
     const val FOLDER_EDIT = "folder_edit?folder={folder}&prefill={prefill}"
     fun folderEdit(folderIdHex: String?, prefill: uniffi.lakko_ffi_uniffi.FolderConversationRef?): String {
@@ -2784,6 +2953,10 @@ private object Routes {
     fun safetyNumber(key: String): String = "contact/$key/safety"
     const val INVITE = "invite/{slug}"
     fun invite(slug: String): String = "invite/${android.net.Uri.encode(slug)}"
+    /** ADR-0079 section 5 — the chat with a person added through their
+     *  invite link before their app answered; hex (URL-safe by construction). */
+    const val PENDING_CHAT = "invited/{accountIdHex}"
+    fun pendingChat(accountIdHex: String): String = "invited/$accountIdHex"
     const val GROUP_JOIN = "group_join/{slug}"
     fun groupJoin(link: me.lakko.app.chat.GroupJoinLink): String =
         "group_join/${android.net.Uri.encode(me.lakko.app.chat.composeGroupJoinArgument(link))}"
@@ -2852,9 +3025,22 @@ private fun InsetRoot(content: @Composable () -> Unit) {
 private fun AnonRoot(
     repository: AuthRepository,
     cachedUsername: String?,
+    /** The screen the signed-out invite page chose (sign in or create an
+     *  account), or `null` for Welcome. Opened over Welcome, so Back from it
+     *  returns there. */
+    startRoute: String? = null,
 ) {
     val appContext = LocalContext.current.applicationContext
     val nav = rememberNavController()
+    var startRouteOpened by androidx.compose.runtime.saveable.rememberSaveable {
+        androidx.compose.runtime.mutableStateOf(false)
+    }
+    LaunchedEffect(startRoute) {
+        if (startRoute != null && !startRouteOpened) {
+            startRouteOpened = true
+            nav.navigate(startRoute) { launchSingleTop = true }
+        }
+    }
 
     NavHost(navController = nav, startDestination = AnonRoutes.WELCOME) {
         composable(AnonRoutes.WELCOME) {

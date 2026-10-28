@@ -82,6 +82,14 @@ new link.`) and `/c/` (see [`call-links.md`](call-links.md) section 5).
 kind): `Too many requests from this network right now. Try again in a minute.`
 and `Try again`. Never shown as an invalid link.
 
+**Could not load the link** (added 2026-10-23; the ledger could not be asked:
+the network failed, or the server answered with an error other than "no such
+link", on `/g/` and `/c/`): `Could not reach Lakko. Check your connection and
+try again.` and `Try again`, which fetches the link again. Never shown as an
+invalid link. Only the fetch can end here; anything after the ledger answered
+is damaged or invalid. `/i/` has the same rule with its own copy
+([`contact-invite-link.md`](contact-invite-link.md)).
+
 **Invalid or expired link** - unchanged: `This invite link is invalid or has
 expired.` and a link to open Lakko.
 
@@ -95,10 +103,13 @@ the join lands.
 
 ## 4. What the link looks like
 
-`https://lakko.me/g/<slug>#<link secret, base64url, 16 chars>` for both the
-pointer form (`<slug>` = the ledger id, 8 chars) and the inline form (`<slug>` =
-the whole SEALED capability, base64url). A pointer link is therefore about 45
-characters (ADR-0028 amendment of 2026-09-27). `Copy link` copies the fragment
+`https://lakko.me/g/<slug>#<link secret, base64url, 16 chars>`, `<slug>` = the
+ledger id, 8 chars, so a link is about 45 characters (ADR-0028 amendment of
+2026-09-27). There is no other form (the inline form that carried the whole
+sealed capability in the path was removed on 2026-10-19): when the upload
+fails, a network failure included, no link is made and the person sees the
+ordinary error with the button back for another try; a link in the old inline
+shape opens as an invalid link. `Copy link` copies the fragment
 with it, and must: since 2026-09-28 a link without its fragment opens nothing
 and is shown as damaged. The same shape holds for `/i/` and `/c/`.
 

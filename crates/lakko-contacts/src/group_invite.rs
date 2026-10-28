@@ -55,8 +55,8 @@
 //!
 //! The whole signed capability now travels sealed under the same link secret
 //! ([`crate::link_seal`], [`seal_link`] / [`open_link`]): the discovery
-//! ledger stores the sealed blob only, a link is `/g/<id>#<secret>` or (the
-//! inline fallback) `/g/<sealed blob>#<secret>`, and a link without its
+//! ledger stores the sealed blob only, a link is `/g/<id>#<secret>` (the inline
+//! form was removed on 2026-10-19), and a link without its
 //! fragment is damaged rather than accepting whatever capability the ledger
 //! returns. The preview stays sealed separately INSIDE the capability, not
 //! folded into its plaintext, because the plaintext capability travels
@@ -78,14 +78,25 @@
 //! [64 bytes]   signature                           — Ed25519 over the above
 //! ```
 //!
-//! Preview plaintext (inside the AEAD):
+//! Preview plaintext (inside the AEAD), one of two kinds told apart by the
+//! first byte:
 //!
 //! ```text
-//! u8   preview version (= 1)
+//! u8   kind (= 1, a group)
 //! u8   group_name_len  ‖ group_name    — UTF-8, the display-name rule, 0 = none
 //! u8   inviter_len     ‖ inviter_name  — UTF-8, the display-name rule, 0 = none
 //! u16be member_count
+//!
+//! u8   kind (= 2, a channel's co-publisher link, ADR-0078 section 6)
+//! [16] channel_id
+//! u8   channel_name_len ‖ channel_name — UTF-8, the display-name rule, 0 = none
 //! ```
+//!
+//! A co-publisher link carries the channel id here, never in the capability:
+//! since ADR-0078 the PublisherGroup id is derived from the owner's seed, so
+//! nothing inverts it, and the plaintext capability rides the join
+//! attribution to the knock journal in the clear, where a channel id next to
+//! the group id would name the channel's journal to the Delivery Service.
 //!
 //! Multi-byte integers are big-endian. The signature covers everything from
 //! the schema-version byte through the sealed preview inclusive. v1 (no
@@ -120,16 +131,28 @@ pub use crate::link_seal::{LINK_SECRET_B64URL_LEN, LINK_SECRET_LEN};
 /// HKDF-SHA256 `info` domain for the preview key (see [`preview_key`]).
 pub const PREVIEW_KEY_DOMAIN_V1: &[u8] = b"lakko/group-invite/preview-key/v1\x00";
 
-/// Preview plaintext version byte.
+/// Preview plaintext kind byte of a group preview.
 const PREVIEW_VERSION: u8 = 1;
+
+/// Preview plaintext kind byte of a channel co-publisher preview (ADR-0078
+/// section 6): it carries the channel id.
+const PREVIEW_KIND_CHANNEL: u8 = 2;
+
+/// Length of the channel id a channel preview carries (ADR-0010).
+pub const PREVIEW_CHANNEL_ID_LEN: usize = 16;
 
 /// Longest name the preview carries, in bytes (the one-byte length prefix;
 /// the display-name rule caps a name at 255 bytes anyway).
 pub const MAX_PREVIEW_NAME_BYTES: usize = 255;
 
-/// Longest preview plaintext: version, two length-prefixed names, the count.
+/// Longest preview plaintext: kind, two length-prefixed names, the count.
 const MAX_PREVIEW_PLAINTEXT_LEN: usize =
     1 + 1 + MAX_PREVIEW_NAME_BYTES + 1 + MAX_PREVIEW_NAME_BYTES + 2;
+
+// A channel preview (kind, channel id, one name) fits inside the group
+// preview's bound, so it changes no wire or ledger width.
+const _: () =
+    assert!(1 + PREVIEW_CHANNEL_ID_LEN + 1 + MAX_PREVIEW_NAME_BYTES <= MAX_PREVIEW_PLAINTEXT_LEN);
 
 /// Longest sealed preview on the wire (nonce + ciphertext + tag). A link that
 /// claims more is refused before any allocation.
@@ -181,11 +204,20 @@ pub struct GroupInvitePreview {
     pub inviter_name: Option<String>,
     /// How many people were in the group when the link was minted.
     pub member_count: u16,
+    /// ADR-0078 section 6: the channel a co-publisher link is for. When set,
+    /// `group_name` is the channel's name, and `inviter_name` must be `None`
+    /// and `member_count` 0 (a channel preview carries neither).
+    pub channel_id: Option<[u8; PREVIEW_CHANNEL_ID_LEN]>,
 }
 
 impl GroupInvitePreview {
     /// Refuse a preview that the decoder would refuse, before sealing it.
     fn validate(&self) -> Result<()> {
+        if self.channel_id.is_some() && (self.inviter_name.is_some() || self.member_count != 0) {
+            return Err(ContactError::InvalidArgument(
+                "a channel group-invite preview carries no inviter name and no member count".into(),
+            ));
+        }
         for (what, name) in [
             ("group name", &self.group_name),
             ("inviter name", &self.inviter_name),
@@ -206,6 +238,15 @@ impl GroupInvitePreview {
 
     fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(MAX_PREVIEW_PLAINTEXT_LEN);
+        if let Some(channel_id) = &self.channel_id {
+            out.push(PREVIEW_KIND_CHANNEL);
+            out.extend_from_slice(channel_id);
+            let bytes = self.group_name.as_deref().map_or(&[][..], str::as_bytes);
+            let len = u8::try_from(bytes.len()).unwrap_or(u8::MAX);
+            out.push(len);
+            out.extend_from_slice(&bytes[..usize::from(len)]);
+            return out;
+        }
         out.push(PREVIEW_VERSION);
         for name in [&self.group_name, &self.inviter_name] {
             let bytes = name.as_deref().map_or(&[][..], str::as_bytes);
@@ -221,6 +262,9 @@ impl GroupInvitePreview {
     fn decode(plain: &[u8]) -> Result<Self> {
         let mut cur = plain;
         let version = take_u8(&mut cur)?;
+        if version == PREVIEW_KIND_CHANNEL {
+            return Self::decode_channel(cur);
+        }
         if version != PREVIEW_VERSION {
             return Err(ContactError::InvalidEncoding(format!(
                 "unsupported group-invite preview version {version}",
@@ -253,6 +297,39 @@ impl GroupInvitePreview {
             group_name,
             inviter_name,
             member_count: u16::from_be_bytes([count[0], count[1]]),
+            channel_id: None,
+        })
+    }
+
+    /// The rest of a channel preview, after its kind byte.
+    fn decode_channel(mut cur: &[u8]) -> Result<Self> {
+        let raw_id = take_n(&mut cur, PREVIEW_CHANNEL_ID_LEN)?;
+        let mut channel_id = [0u8; PREVIEW_CHANNEL_ID_LEN];
+        channel_id.copy_from_slice(raw_id);
+        let len = usize::from(take_u8(&mut cur)?);
+        let group_name = if len == 0 {
+            None
+        } else {
+            let raw = take_n(&mut cur, len)?;
+            let text = core::str::from_utf8(raw).map_err(|_| {
+                ContactError::InvalidEncoding("group-invite preview name is not UTF-8".into())
+            })?;
+            check_display_name(text).map_err(|e| {
+                ContactError::InvalidEncoding(format!("group-invite preview name refused: {e}"))
+            })?;
+            Some(text.to_string())
+        };
+        if !cur.is_empty() {
+            return Err(ContactError::InvalidEncoding(format!(
+                "trailing {} bytes after group-invite preview",
+                cur.len(),
+            )));
+        }
+        Ok(Self {
+            group_name,
+            inviter_name: None,
+            member_count: 0,
+            channel_id: Some(channel_id),
         })
     }
 }
@@ -681,6 +758,7 @@ mod tests {
             group_name: Some(long_name.clone()),
             inviter_name: Some(long_name),
             member_count: 7,
+            channel_id: None,
         };
         let secret = generate_link_key();
         let wire = compose_with_preview(
@@ -724,6 +802,92 @@ mod tests {
         ));
     }
 
+    /// ADR-0078 section 6: a co-publisher link carries the channel id in its
+    /// sealed preview, and the same secret that opens the link opens it.
+    #[test]
+    fn a_channel_preview_carries_the_channel_id_through_the_link() {
+        let preview = GroupInvitePreview {
+            group_name: Some("Daily notes".into()),
+            inviter_name: None,
+            member_count: 0,
+            channel_id: Some([0xC4; PREVIEW_CHANNEL_ID_LEN]),
+        };
+        let secret = generate_link_key();
+        let wire =
+            compose_with_preview(&fixture_signing(), &[0x5a; 32], 0, &preview, &secret).unwrap();
+        let sealed = seal_link(&secret, &wire).unwrap();
+        let (cap, _) = open_link(&secret, &sealed).unwrap();
+        let opened = cap.open_preview(&secret).unwrap().expect("preview");
+        assert_eq!(opened, preview);
+        assert_eq!(opened.channel_id, Some([0xC4; PREVIEW_CHANNEL_ID_LEN]));
+        // The plaintext capability (what the join attribution carries to the
+        // knock journal) does not contain the channel id.
+        assert!(!wire
+            .windows(PREVIEW_CHANNEL_ID_LEN)
+            .any(|w| w == [0xC4; PREVIEW_CHANNEL_ID_LEN]));
+    }
+
+    #[test]
+    fn a_channel_preview_without_a_name_round_trips() {
+        let preview = GroupInvitePreview {
+            group_name: None,
+            inviter_name: None,
+            member_count: 0,
+            channel_id: Some([0x01; PREVIEW_CHANNEL_ID_LEN]),
+        };
+        let plain = preview.encode();
+        assert_eq!(plain.len(), 1 + PREVIEW_CHANNEL_ID_LEN + 1);
+        assert_eq!(GroupInvitePreview::decode(&plain).unwrap(), preview);
+        assert_eq!(
+            crate::fuzz_api::group_invite_preview_plaintext(&plain),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn a_channel_preview_refuses_an_inviter_or_a_count() {
+        for (inviter, count) in [(Some("Ann".to_string()), 0u16), (None, 3)] {
+            let preview = GroupInvitePreview {
+                group_name: Some("Daily notes".into()),
+                inviter_name: inviter,
+                member_count: count,
+                channel_id: Some([0x01; PREVIEW_CHANNEL_ID_LEN]),
+            };
+            assert!(compose_with_preview(
+                &fixture_signing(),
+                &[0x5a; 32],
+                0,
+                &preview,
+                &generate_link_key()
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn a_damaged_channel_preview_is_refused() {
+        let preview = GroupInvitePreview {
+            group_name: Some("Daily notes".into()),
+            inviter_name: None,
+            member_count: 0,
+            channel_id: Some([0x01; PREVIEW_CHANNEL_ID_LEN]),
+        };
+        let plain = preview.encode();
+        for cut in 0..plain.len() {
+            assert!(
+                GroupInvitePreview::decode(&plain[..cut]).is_err(),
+                "cut {cut}"
+            );
+        }
+        let mut trailing = plain.clone();
+        trailing.push(0);
+        assert!(GroupInvitePreview::decode(&trailing).is_err());
+        let mut bad_name = plain;
+        let last = bad_name.len() - 1;
+        bad_name[last] = b'\n';
+        assert!(GroupInvitePreview::decode(&bad_name).is_err());
+    }
+
     /// The fuzz hook reaches the plaintext decoder directly: a real preview
     /// round-trips, and what the decoder refuses (a wrong version, a name that
     /// fails the display-name rule, trailing bytes, a truncation) is `None`.
@@ -733,6 +897,7 @@ mod tests {
             group_name: Some("Book club".into()),
             inviter_name: None,
             member_count: 7,
+            channel_id: None,
         };
         let plain = preview.encode();
         assert_eq!(
@@ -741,7 +906,7 @@ mod tests {
         );
 
         let mut wrong_version = plain.clone();
-        wrong_version[0] = PREVIEW_VERSION + 1;
+        wrong_version[0] = PREVIEW_KIND_CHANNEL + 1;
         assert_eq!(
             crate::fuzz_api::group_invite_preview_plaintext(&wrong_version),
             None
@@ -973,6 +1138,7 @@ mod tests {
             group_name: Some("Weekend plans".to_string()),
             inviter_name: Some("Anna Weber".to_string()),
             member_count: 4,
+            channel_id: None,
         }
     }
 
@@ -1078,6 +1244,7 @@ mod tests {
             group_name: None,
             inviter_name: None,
             member_count: u16::MAX,
+            channel_id: None,
         };
         let wire = compose_with_preview(
             &fixture_signing(),
@@ -1099,6 +1266,7 @@ mod tests {
                 group_name: Some(bad.to_string()),
                 inviter_name: None,
                 member_count: 1,
+                channel_id: None,
             };
             assert!(
                 compose_with_preview(
@@ -1119,6 +1287,7 @@ mod tests {
             ),
             inviter_name: Some("\u{41C}\u{430}\u{440}\u{438}\u{44F}".to_string()),
             member_count: 3,
+            channel_id: None,
         };
         let wire = compose_with_preview(
             &fixture_signing(),

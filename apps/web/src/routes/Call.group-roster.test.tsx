@@ -170,7 +170,9 @@ describe("a person who left the call", () => {
     const { book } = mountGroupCall();
     await settle();
     expect(tileNames().sort()).toEqual(["local", "peer-b", "peer-c"]);
-    expect(one(".lk-call-status").textContent).toContain("3");
+    expect(all(TILE)).toHaveLength(3);
+    // The call is named by its group (none here), not counted.
+    expect(one(".lk-call-status").textContent).toContain("Group call");
     expect(wants(book)).toEqual({ b: "middle", c: "middle" });
   });
 
@@ -182,8 +184,6 @@ describe("a person who left the call", () => {
     expect(callState.participants().map((p) => p.id)).toEqual(["local", "peer-b"]);
     expect(tileNames().sort()).toEqual(["local", "peer-b"]);
     expect(all(TILE)).toHaveLength(2);
-    expect(one(".lk-call-status").textContent).toContain("2");
-    expect(one(".lk-call-status").textContent).not.toContain("3");
   });
 
   it("leaves the remaining person asked for the main picture", async () => {
@@ -205,7 +205,7 @@ describe("a person who left the call", () => {
     callActions.participantJoined(person("peer-c"));
     await settle();
     expect(tileNames().sort()).toEqual(["local", "peer-b", "peer-c"]);
-    expect(one(".lk-call-status").textContent).toContain("3");
+    expect(all(TILE)).toHaveLength(3);
   });
 
   it("is dropped from the roster drawer too", async () => {
@@ -433,6 +433,5 @@ describe("leaving a group call takes the screen down and closes the session", ()
     expect(() => callActions.participantLeft("peer-c")).not.toThrow();
     await settle();
     expect(all(TILE)).toHaveLength(2);
-    expect(one(".lk-call-status").textContent).toContain("2");
   });
 });

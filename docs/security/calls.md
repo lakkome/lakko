@@ -526,6 +526,12 @@ covers the verifier's `kid` discrimination.
 
 ### C-21: `POST /call/jwt` requires a valid session token
 
+**Superseded by [ADR-0078](../adr/0078-servers-cannot-link-accounts.md)
+section 2 (2026-10-16), see C-76.** The route takes no session any more: it
+spends one anonymous `call-join` token, the body carries `room` and `role`,
+and the minted token names no account. The text below records the
+2026-05 design; the tests it names were replaced by the C-76 tests.
+
 Bearer-auth via the same `webauthn::require_session`
 middleware passkey routes use. A request without
 `Authorization: Bearer <session-token>` (or with an
@@ -858,6 +864,14 @@ Tests: 10 cases in
 lakko-svc-discovery test count: 28 → 38.
 
 ### C-30: `/c/<slug>` URL plumbing — discrimination contract
+
+**Amended 2026-10-19 (the inline form is removed, ADR-0028 / ADR-0009 head
+notes).** There is no discrimination left: a `/c/`, `/g/` or `/i/` slug is
+the 6-byte ledger id (8 base64url characters) or it is refused before any
+request, so a link in the old inline shape opens as a dead link; a failed
+upload mints no link on any client. The byte-length rule, the inline floor
+and the inline tests below are history (the 32-byte id was already replaced
+by the 6-byte one on 2026-09-27).
 
 The owner-shared URL has the shape
 `<origin>/c/<base64url>`. The joiner-side dispatcher
@@ -1770,15 +1784,17 @@ integration) asserts:
    `fanout_never_crosses_calls_over_the_live_sfu`
    (live e2e). `lakko-security`: APPROVE.
 
-4. **Account ids are pseudonymised in every outbound
-   frame and every log line.** The `account_pseudonym`
-   field on `ServerFrame::PeerJoined` is the first 8 hex
-   characters of the JWT `sub`. The full account id never
-   crosses the SFU's outbound surface; tracing log lines
-   from `services/sfu/src/signaling.rs` use the same
-   8-char truncation. Test: `pseudonymise_truncates`
-   (unit) + assertions inside
-   `two_peers_in_same_call_see_each_other` (integration).
+4. **The SFU holds no account id** (since
+   [ADR-0078](../adr/0078-servers-cannot-link-accounts.md)
+   section 2, 2026-10-16; until then the `account_pseudonym`
+   field and the log lines carried the first 8 hex
+   characters of the JWT `sub`). The admission token
+   carries a room and a random `peer_id`, the SFU keys a
+   peer on that id, and no frame carries an account
+   pseudonym or a `peer_tag`. Tests:
+   `peer::tests::the_peer_type_has_no_account_field`
+   (unit) + `two_peers_in_same_call_see_each_other`
+   (integration). See C-76.
 
 5. **Broadcast respects sender exclusion.** A `signal-
    relay` with `to = RelayTarget::Call` reaches every
@@ -2616,6 +2632,13 @@ including `open_or_create_is_idempotent`,
 ## TURN-credential invariants (G3-{1,2}-turn)
 
 ### C-51: TURN credential follows the coturn `static-auth-secret` REST scheme; bound to a per-call expiry
+
+**Amended by [ADR-0078](../adr/0078-servers-cannot-link-accounts.md)
+section 2 (2026-10-16):** `POST /call/turn-credential` is gone. A credential
+is minted beside the call token in the `POST /call/jwt` answer (one
+anonymous `call-join` token), and the username tag is 16 random bytes per
+credential (`<unix_expiry_secs>:<random_hex>`), so coturn and its logs see
+no account id. The scheme and expiry below are unchanged.
 
 `POST /call/turn-credential` (services/auth) mints a
 short-lived credential the WebRTC `RTCIceServer.urls`
@@ -3611,6 +3634,17 @@ has to be re-seamed onto the sweep, and the ones that matter are the ones whose
 correctness argument mentions an epoch.** The named-seam requirement and the
 test-pinning above are unchanged; what changed is which operation the seam wraps.
 
+**AMENDED 2026-10-19 by the [ADR-0081](../adr/0081-devicegroup-commits-cannot-strand.md)
+second amendment.** The direct-commit removal is deleted on all three clients
+(a group with no role table is refused, C-86), and with it
+`publishRemoveThenRotate`, the seam tests listed above and their inverted-order
+companions. A rotation now starts only from the sweep's tail (the committing
+device) and the poll's membership-shrink diff (every other member). Both fire
+only after the roster shrank, so the rotation follows the Remove commit by
+construction, and there is no removal call site left that a refactor could
+reorder against it. The shrink entry point keeps its own tests on each client;
+the enforcement table above describes the state before this amendment.
+
 Invariants: **#2** (the envelope is opaque to the DS and to push-gw either way —
 this is not a server-visible property but a client sequencing one), **#4** (a
 member without the current secret defers rather than downgrading; the rotation adds
@@ -4362,7 +4396,8 @@ fully in effect.
 | Per-participant nonce salt | ❌ | ✅ | Same derivation chain |
 | SFrame header (sender leaf + counter + timestamp) | ✅ | ✅ | Forwarding metadata only |
 | Encrypted frame body | ✅ (opaque) | ✅ (decoded) | AEAD-sealed |
-| JWT `(account_id, call_id, role, expires_at)` | ✅ (validate via cached JWKS) | ✅ (mint via `POST /call/jwt`) | Claims shape per ADR-0008, which ADR-0011 superseded for the SFU choice; the shape itself survives in `crates/lakko-call-jwt`. C-15..C-23 |
+| JWT `(room, peer_id, role, iat, exp)` | ✅ (validate via cached JWKS) | ✅ (mint via `POST /call/jwt`, paid by an anonymous `call-join` token) | Since ADR-0078 section 2 no `sub` and no `call_id`; the room is a one-way function of the call id. C-15..C-20, C-22, C-23, C-76 |
+| Who a peer is | ❌ | ✅ | A sealed, leaf-signed announcement over `signal-relay` (C-76); the ADR-0021 `peer_tag` is gone |
 | Ed25519 signing seed for call JWTs | ❌ | ❌ (stays on `services/auth` host) | Persisted in `call_jwt_signing_key.seed`. Public half published at `/.well-known/jwks.json` |
 | Plaintext SDP / ICE | ❌ | ✅ | 1x1 rides MLS; group rides the Rust SFU's own signaling channel (ADR-0011), which never sees keys |
 
@@ -4807,7 +4842,9 @@ every other member's device then accepted.
 
 - `join_from_welcome` refuses a Welcome whose GroupContext carries the `0xFF02`
   role table but no readable `0xFF03` (plain `Error::Group`), so no device ever
-  holds a conversation it cannot classify;
+  holds a conversation it cannot classify; since 2026-10-19 it also refuses a
+  Welcome with no role table at all, and neither refusal leaves anything in
+  the provider (C-86);
 - `group_kind_unchanged` at the peer commit gate and `proposal_keeps_group_kind`
   at the receipt gate and in the sweep refuse a `GroupContextExtensions` rewrite
   that changes or drops the kind (`GroupKindChanged`); the four role rewrites
@@ -4879,11 +4916,13 @@ account that ran the reset.
 and `src/key_reset.rs` (`verify_upload_attestation`, `floor_refuses`);
 `crates/lakko-attest/src/key_reset.rs` (`verify_key_reset_binding`, no
 freshness, because a retried upload may legitimately be days old and an applied
-generation cannot be applied again); migration `0026`. The DS applies the same
+generation cannot be applied again); migration `0026`. The DS applied the same
 artefact to the DeviceGroup journal (`services/ds/src/key_reset.rs`,
-`ds_group_owner.key_generation`, migration `0009`): a Reset from any signer is
-heard only with an attestation for exactly that journal at a strictly greater
-generation. Clients never attempt the heal: the landing rule (web
+`ds_group_owner.key_generation`, migration `0009`) until ADR-0078 phase 6
+(2026-10-16) removed the journal id from the attestation and the attested arm
+from the DS (migration `0012` drops the column): a reset now founds a new
+DeviceGroup journal at the id the new seed derives (C-79) and claims it
+plainly. Clients never attempt the heal: the landing rule (web
 `apps/web/src/auth/landing-rule.ts`, iOS `KeyResetLanding`, Android
 `LandingVerdict` in `IdentityPublication.kt`) lands, wipes or publishes-because-nothing-is-published, and
 never uploads over a different published key. Pinned by discovery's DB-gated
@@ -5048,3 +5087,673 @@ request (ADR-0078 phase 5). Nor the ADR-0073 continuity path, which has no
 carrier for a reset account's new mailbox (a recorded no-op on all three
 clients, the ADR's open question).
 
+## Calls admitted without an account (C-76)
+
+### C-76: No server in the call path learns which account is in which call
+
+[ADR-0078](../adr/0078-servers-cannot-link-accounts.md) section 2, phase 2.
+**The rule.** `POST /call/jwt` takes no session; it spends one anonymous
+`call-join` token and mints a token whose closed claim set is `iss`, `aud`,
+`room`, `peer_id`, `role`, `iat`, `exp`, where `room =
+BLAKE3-derive-key("lakko/sfu/room/v1", call_id)` and `peer_id` is 16 random
+bytes. The SFU keys a peer on that id and stores no account; the room-state
+probe `GET /v1/rooms/{room}` needs no token; a TURN credential rides the same
+answer with a random username tag. Who a peer is travels only inside the
+call: each participant sends a peer announcement (its SFU peer id, signed with
+its MLS leaf key) sealed under `BLAKE3-derive-key("lakko/call/relay/v1",
+call_seed)`, and a receiver accepts it only when the relay sender is the
+announced peer and the signer is an account-bound leaf of the call's roster.
+The camera media state is sealed under the same key.
+
+**Why it is indexed.** Before this auth saw `(account_id, call_id)` at every
+admission and stored it for the ADR-0033 throttle, the token's `sub` reached
+the SFU, the SFU sent every client a `peer_tag` derived from the account id
+and an `account_pseudonym`, the probe minted a token, and the TURN username
+named the account. Together that was a per-call attendance list held by the
+operator.
+
+**Where it is enforced.** `crates/lakko-call-jwt` (closed claims),
+`crates/lakko-sfu-proto` (`room_id`, no `peer_tag`), `crates/lakko-calls/src/relay.rs`
+(seal, open, compose, verify; fuzz `relay_open`), `services/auth/src/call_jwt.rs`
++ `room_cap.rs` + `turn.rs`, migrations `0034` / `0035`,
+`services/sfu/src/{peer,router,signaling}.rs`, and the three clients' SFU
+sessions (web `calls/call-relay.ts`, iOS `Calls/CallRelay.swift`, Android
+`calls/CallRelay.kt`). Tests: `a_minted_jwt_has_no_sub_and_no_call_id` and
+`a_token_with_a_sub_claim_is_refused` (lakko-call-jwt);
+`a_minted_jwt_names_no_account`, `the_call_admission_tables_are_gone`,
+`a_mint_without_a_token_is_refused`, `the_room_cap_refuses_past_its_limit`
+(services/auth, DB-gated); `the_peer_type_has_no_account_field`,
+`the_room_probe_needs_no_jwt`, `the_call_id_route_is_gone` (services/sfu);
+the relay unit tests in `lakko-calls`. Host-tested on 2026-10-16; not
+deployed and no call placed.
+**Does NOT** cover: the SFU still sees the set of random peer ids in a room,
+their addresses and timing (class (c), ADR-0078 section 12); the media loop's
+logs still name the random peer id and the room (section 11); the room cap
+lives in one auth process's memory; a link-call joiner cannot see before its
+Welcome whether the owner is present.
+
+
+
+## Push the server cannot read at rest (C-77)
+
+### C-77: push-gw stores no device pseudonym and no token in the clear, and a wake is opened only by push-gw and accepted only when signed by a member
+
+[ADR-0078](../adr/0078-servers-cannot-link-accounts.md) section 3, phase 3.
+**The rule.** A push-gw subscription row is `(sub_id, push_gid, wake_pk,
+sealed)`: `sub_id` is 16 random bytes the device keeps per subscription,
+`wake_pk` the public half of the group's wake key, `sealed` the device's
+provider tokens under the group's unlock key; both keys are derived from the
+push routing secret (`lakko/push/wake-sign/v1`, `lakko/push/wake-unlock/v1`),
+which no server holds. The `x-lakko-wake` header is a box to push-gw's X25519
+key over the `push_gid`, the kind, a nonce, a timestamp, the unlock key and a
+signature by the wake key. The DS forwards it unread. push-gw delivers only a
+wake whose signature verifies, whose timestamp is within 10 minutes and whose
+nonce it has not seen, and only to the rows whose `(push_gid, wake_pk)` match;
+the unlock key is used for that wake and never stored.
+
+**Why it is indexed.** Before this the push-gw database was the device x group
+graph in the clear (`push_group_subscriptions` joined to `push_tokens` keyed by
+a device pseudonym), the DS saw which group a publish woke, and since ADR-0057
+it stored a peppered `push_gid` per journal.
+
+**Where it is enforced.** `crates/lakko-contacts/src/push_wake.rs` and
+`push_routing.rs` (derivations golden-pinned; fuzz `push_wake_open`);
+`services/push-gw` migration `0006_sealed_subscriptions.sql`, `src/notify.rs`,
+`src/wake_guard.rs`, `src/wake_key.rs`, with `tests/sealed_wake_tests.rs`
+asserting no column holds a token or a pseudonym and an unsigned or forged wake
+is refused; `services/ds` migration `0011_drop_push_bindings.sql` and the test
+that no DS table names a push binding. Host-tested on 2026-10-16; not walked
+live and not deployed.
+
+**Does NOT** hide co-membership from a live push-gw (it opens every
+subscription a wake names, the class (b) residual), nor the timing link between
+a publish at the DS and a wake at push-gw, nor stop an evicted member signing
+wakes until the next ADR-0043 rotation (rate-capped), nor hide a group's
+subscription tokens from an operator who is a member of that group.
+
+
+
+## Tokens, reach keys, ledgers and logs that name nobody (C-78)
+
+### C-78: No anonymous-token issuance follows a spend, no reach key names a group, no invite row names its owner, no server log line carries an identifier
+
+[ADR-0078](../adr/0078-servers-cannot-link-accounts.md) sections 8 to 11,
+phase 8.
+**The rule.** Four properties, one per section:
+
+- *Tokens.* A client refills its anonymous-token pool on a randomised
+  schedule that does not look at spending (a first top-up within 20 s of a
+  session being bound, then every 30 to 90 minutes per context, to a target
+  of about a day of use); a take never starts an issuance. The issuance and
+  the spends travel on separate connections.
+- *Reach keys.* `group`, `member` and `channel` are one key per class per
+  account (`lakko_contacts::reach`: a scope on those classes is refused), so
+  a mailbox write under one does not say which group or channel its writer
+  shares with the owner. The class rotates when a group shrinks, when the
+  account leaves a group or a channel, and when the setting is changed, and
+  the profile is republished in every remaining group.
+- *Ledgers.* No invite ledger row (`/i/`, `/c/`, `/g/`) carries an owner
+  account id or an issuer key: each holds the public half of a revocation
+  key minted for that link alone, whose seed only the minting device keeps;
+  there is no route that lists an account's links, and account deletion
+  deletes no invite by owner.
+- *Logs.* No `tracing` line at info or above in a service names an account
+  id, identity key, journal id, mailbox, call or room id, channel id,
+  `push_gid`, device pseudonym, push token, blob id, or a prefix of one;
+  request spans record the route template, never the URI.
+
+**Why it is indexed.** Before this, the token issuer and the spending
+service could pair an issuance with the spend it refilled for by time; a
+`group` reach key per group told the DS which group a writer shared with the
+owner; the ledgers named every link's owner and issuer; and the services'
+logs carried account ids, journal ids and the like, so a log alone rebuilt
+much of the graph.
+
+**Where it is enforced.** Tokens: web `tokens/anon-token-pool.ts`, iOS
+`AntiAbuse/AnonTokenPool.swift`, Android `anon/AnonTokenPool.kt` (the test
+"the pool refills on a timer, not on spend" on each). Reach keys:
+`crates/lakko-contacts/src/reach.rs` and the three clients' reach rules
+(web `reach/reach-model.ts`, iOS `Reach/ReachRules.swift`, Android
+`reach/ReachRules.kt`). Ledgers: `services/discovery` migration
+`0031_ownerless_invite_ledgers.sql` and the test
+`no_ledger_table_has_an_owner_or_issuer_column`; the clients' own-link
+records (web `contacts/minted-links.ts`, iOS `Contacts/OwnLinkStore.swift`,
+Android `contacts/OwnLinkStore.kt`). Logs: `crates/lakko-log-hygiene` (the
+source lint over every service and the capture tests in `services/discovery`
+and `services/ds`), both in CI. Host-tested on 2026-10-16; not walked live,
+not deployed.
+**Does NOT** cover network origin and timing (class (c), section 12): the
+issuer and a spending service on one host still see the same address. A
+link this device has no record of (minted on another device, or a record
+lost) cannot be revoked from here and lives until it expires. The capture
+tests cover the routes they drive, not every log line; the lint judges
+names (fields, format arguments, inline captures), so an identifier held in
+an innocuously named variable is caught only by a capture test, on the routes
+it drives.
+
+
+
+## Unlinkable journal ids and durable PublisherGroup commits (C-79, C-82)
+
+### C-79: A DeviceGroup or PublisherGroup journal id is not computable from an account id or a channel id
+
+[ADR-0078](../adr/0078-servers-cannot-link-accounts.md) section 6, phase 6.
+**The rule.** The DeviceGroup journal id is
+`BLAKE3-derive-key("lakko/device-group/id/v2", account_seed)` and the
+PublisherGroup journal id is
+`BLAKE3-derive-key("lakko/pubgrp/id/v3", owner_account_seed ‖ channel_id)`.
+The account seed is the lineage seed: the oldest own predecessor after an
+ADR-0074 rotation (a rotation keeps the DeviceGroup and its journal; the root
+moves by a plain transfer), else the current seed; an ADR-0073 key reset
+clears the predecessors, so the new seed names a new journal, which the
+resetting device founds and claims plainly. Only the channel owner computes a
+PublisherGroup id; a co-publisher opens the group under the id its `/g/` link
+conveyed (`publisher_group_load_joined`), and the link's sealed preview
+carries the channel id (preview kind 2), since the group id no longer reveals
+it.
+
+**Why it is indexed.** Before this both ids were public functions of an
+identifier the servers hold: `DeviceGroup::group_id_for(account_id)` and a
+`lakko/pubgrp/v2/` prefix over the channel id. Any party holding an account id
+or a channel id could name the journal, so the DS journal table linked
+accounts to their device groups and channels to their publishers.
+
+**Where it is enforced.** `crates/lakko-mls/src/device_group.rs`
+(`group_id_for`, `load`, `load_by_group_id`; `join_from_welcome` binds no id)
+and `src/publisher_group.rs` (`publisher_group_id_for`, `load_joined`);
+`crates/lakko-attest/src/key_reset.rs` (version 2, 145 bytes, no journal id);
+`services/ds` (no attested reset, migration `0012`);
+`crates/lakko-contacts/src/group_invite.rs` (channel preview); both FFI
+surfaces (`deviceGroupIdFor`, `loadDeviceGroupById`, `publisherGroupIdFor`,
+`publisherGroupLoadJoined`, `composeCoPublisherInviteCapability`). Pinned by
+proptests (`group_id_is_not_computable_from_the_account_id`,
+`group_id_is_not_computable_from_the_channel_id`, each id a pure function of
+its secret), goldens, and the group-invite preview round-trip tests (the
+`group_invite_preview_decode` fuzz target covers the new branch).
+Host-tested on 2026-10-16; not walked live and not deployed.
+
+**What this does NOT do.** It does not hide that a journal exists, how big it
+is or when its epoch changes (the epoch-key registrations are on the DS), and
+it does nothing about network origin and timing (class (c)). A fresh device
+joining by name cannot check the joined DeviceGroup against the account the
+redeem names by id any more; the binding is the recovery row sealed under the
+group's exporter and the restore's check of the phrase against the published
+identity.
+
+### C-82: A channel PublisherGroup commit is recorded with its N+1 state before any of its effects leaves the device
+
+G-50, the [ADR-0040](../adr/0040-durable-pending-commit-outbox.md) treatment.
+**The rule.** A co-publisher approve or a channel rotation reads the
+channels-service epoch before the commit, then records a
+`PublisherCommitEntry` (kind, channel, group, the MLS epoch the commit moved
+to, the channels-service epoch the reseal binds to, the approve's commit,
+Welcome and joiner key, the landed steps) together with the N+1 provider
+snapshot, fail-closed, before any step runs. The steps then run in order:
+the journal (the N+1 epoch key registered with the channel's root; for an
+approve the commit published, a registration refusal stopping it; for a
+rotation best effort, since a rotation commit is not published), the
+Welcome, the reseal through the ADR-0030 staged fanout at the recorded
+target (done once the service is at or past it), the appointment (never
+holding the entry). Each step is recorded as it lands. A restart resumes the
+remaining steps and drops an entry whose restored group is below its target
+epoch (a commit none of whose steps ran).
+
+**Where it is enforced.** Web `apps/web/src/channels/publisher-commit-outbox.ts`,
+the channel log row (`channel-log-codec.ts`, entries and snapshot in one
+IndexedDB put; a failed write poisons the in-memory state until the next
+hydration), `rotation-cron.ts`, `copublisher.ts`; iOS
+`Channels/PublisherCommitOutbox.swift`, `ChannelPublisherCommits.swift`,
+`ChannelPublisherIdentity.swift` (the channel provider made durable),
+`CoPublisher.swift`, `RotationCron.swift`; Android
+`channels/PublisherCommitOutbox.kt`, `CoPublisher.kt` (`recordCommit`,
+`commitPorts`, `replayPublisherCommits`), `RotationCron.kt`. Pinned by the
+three platforms' outbox suites (order, resume after a failure, replay
+verdict, reseal already landed, rotation registration best effort, approve
+registration required, appointment never holds the entry, codec).
+Unit-tested on 2026-10-16; not walked live.
+
+**What this does NOT do.** It does not survive Forget device (the provider and
+the records are deleted with the account). Since ADR-0081 (2026-10-18) the
+journal step is one `POST .../commit` carrying the N+1 registration and the
+commit, a rotation's commit included (a co-publisher still learns a
+rotation's seed through the reseal), proven under the epoch the commit left,
+whose access seed the record keeps (`proofEpoch`, `proofSeedB64`), so a replay
+after a restart can still send a commit that never reached the DS and always
+learns the answer (C-80). A `409` or a definitive refusal marks the journal
+step lost: an approve then delivers no Welcome and appoints nobody, and the
+owner's PublisherGroup stays ahead of its journal (the eager merge is not
+undone). A rotation whose journal step got no answer keeps its entry for that
+step alone while the reseal runs. On web a refused record leaves the tab without channel writes
+until it reloads.
+
+## An epoch registered only with its commit (C-80)
+
+### C-80: An epoch key exists on the DS only together with the commit row that reaches it
+
+[ADR-0081](../adr/0081-devicegroup-commits-cannot-strand.md) decision 1 and
+open question 1 (decided 2026-10-18 by the maintainer), amending ADR-0057
+and ADR-0040.
+
+**The rule.** A new epoch of a group journal is registered only by
+`POST /ds/group/{hex}/commit`. The body is `{"statement_b64", "row_b64"}`
+(`lakko_ds_proof::commit_body_json`): an Append `RegisterEpoch` statement
+for epoch N+1 signed by the journal root or a registrar (ADR-0057), and the
+journal row (the commit, in the journal's envelope). The request proof is
+signed by a key of epoch N (the epoch the commit leaves; any other proof
+epoch is `400`). In one transaction behind the journal's lock row the DS
+verifies the statement and the proof, accepts the Append at `latest + 1`
+under the ADR-0057 rank rules, appends the row and records `BLAKE3(row)`
+and the row id with the registration (`ds_group_access.commit_row_hash`,
+`commit_message_id`, migration `0013`). A re-send of the same key and the
+same row at a registered epoch appends nothing and answers the original row
+(`200`), whatever retained key proves it; any other commit at a registered
+epoch, or an epoch other than `latest + 1`, is `409`, decided before the
+write tier is consulted. `PUT /ds/group/{hex}/access` refuses a plain Append
+for every journal (`400 {"error":"append-needs-commit"}`, checked before the
+signature); the claim (a journal's first registration), the ADR-0057 Replace
+from a higher rank (which clears a replaced epoch's row binding), the
+registrar set and the root transfer stay on their routes. So a registration
+without its row cannot be created, and a commit cannot be on the journal
+without its epoch's key.
+
+**Where it is enforced.** `services/ds/src/commit.rs` (the route),
+`ownership.rs` (`append_needs_commit`, the binding cleared on a Replace),
+`journal.rs` (`insert_row` inside the transaction); `lakko-ds-proof`
+`commit.rs` (the body and the statement); `DsStatementSigner.commit` on
+UniFFI and wasm (the `register_epoch` builder is removed from both). On the
+clients: the DeviceGroup commit outbox (web
+`devices/device-group-commit.ts` + `device-group-commit-runtime.ts`, iOS
+`Devices/DeviceGroupCommit.swift` + `DeviceGroupCommitRuntime.swift`,
+Android `devices/DeviceGroupCommit.kt` + `DeviceGroupCommits.kt`): the entry
+beside the N snapshot, the commit route, N+1 made current fail-closed, the
+Welcome, the entry deleted; `409` deletes the entry; an owed entry is
+finished before any new DeviceGroup commit and on every sync pass. Ordinary
+groups: a direct commit is STAGED (`lakko-mls` `stage_add_members`,
+`stage_remove_member`, `stage_set_group_roles`, an invariant-#3 change of
+the same day with the property tests in `tests/staged_direct_commit.rs`),
+its ADR-0040 entry and the snapshot carrying the staged commit are written
+fail-closed, then the commit route is called, and only an answer merges it;
+the ADR-0045 staged sweep does the same. On both, a `409` or a definitive
+refusal abandons (per group) and drops the entry, and a network failure
+leaves the entry and the staged commit for the owed verdict, which re-sends
+the same row. PublisherGroup commits
+(C-82) send their journal step through the same route. Pinned by the
+DB-gated tests in `services/ds/src/commit.rs` (fields pinned, row and key
+appended together, a rolled-back transaction leaves neither, the identical
+re-send, conflicts, every rank, a higher-rank Replace still repairs, a plain
+Append refused while claim and Replace work) and by the outbox, sweep and
+direct-commit suites of the three clients. Host-tested on 2026-10-18; not
+walked live, not deployed.
+
+**What this does NOT do.** A claim registers its first epoch without a row,
+and a Replace re-registers an epoch without one; both are owner- or
+admin-rank acts the rest of ADR-0057 governs. It does not undo a
+PublisherGroup commit that lost its epoch: that group merges eagerly, so the
+owner's group stays ahead of its journal (its subscribers are resealed
+regardless). A staged commit freezes the group's membership operations until
+its verdict; on Android the owed verdict runs at chat open and after a
+membership action, not at every poll. The DS still never reads the row
+(invariant #2).
+
+## Invite links that make contacts (C-83)
+
+### C-83: A contact request is taken without a card only through a live invite link of the account
+
+**Statement.** A device accepts an incoming contact request by itself, with
+no request card, only when the request's sealed plaintext carries a link
+answer (`link_id ‖ link_secret`, ADR-0079 section 2) that names a contact
+link held in the account's synced link-record register (ADR-0079 section 4)
+as live (not revoked, not expired, not used up), whose stored secret equals
+the answer's in constant time, and the sender's key is not one the link was
+already answered for. A request whose answer names a revoked, expired, used
+up or unknown link is shown as an ordinary request card with a note; one
+already answered is dropped. *(Amended 2026-10-19: expiry is judged at the
+request's DS stamp, and a request on a link that does not count is dropped
+with a signed refusal instead of a card; see below.)* A revocation in the register is final: no later
+write, from any device and at any stamp, makes the link live again.
+
+**Only one device answers (reworked 2026-10-17).** A device that decides to
+accept builds nothing until it has CLAIMED the request on the account's own
+DeviceGroup journal: it seals a `lakko/link-claim/v1\0` envelope naming
+`link_id(16) ‖ requester_account_key(32)`, records the sealed bytes durably,
+publishes them, reads the journal until a fetch that started after the
+publish has read it to its head, and asks the core
+(`lakko_contacts::link_claim::link_claim_outcome`): **the earliest claim for
+the request from a device in the CURRENT DeviceGroup roster wins, and the
+device whose leaf posted it builds** (one-to-one, Welcome, contact, use
+count). The core decides over claims the client feeds it, each a DS message
+id and an author leaf key: another device's author is the leaf key resolved
+from the MLS-authenticated sender at receipt (C-68), never read from the
+envelope; this device's own claims carry its own leaf key. A device cannot
+decrypt its own MLS application messages, so it recognises its own claim rows
+by the sealed bytes it recorded before the publish: the publish answer files
+the row's id at once, and the receive loop matches every row against the
+recorded bytes before processing it and before the batch persists. A crash
+between the publish and the recording of the id therefore loses nothing: the
+earlier own claim is still recognised and still wins, and the later
+duplicate changes nothing. A claim from a device no longer in the roster is
+passed over, so a removed device cannot leave a request unanswered: a device
+that lost, or that holds no claim and saw one from a roster device, keeps the
+request unshown until the link register says it was answered (or the link is
+dead), re-checking against the current roster at every pass, and the next
+earliest current claim's author builds when the winner is removed first.
+**The build is ordered so a removed winner is never followed by a second
+one-to-one and a requester is never left without the Welcome (2026-10-17):**
+the winner founds the one-to-one in ONE commit with every other current
+device of the account, records the founding durably, and publishes a
+**link-founded note** (`lakko-contacts::link_founded`: the request key, the
+group id and the founding Welcome, at most 32 768 bytes) into the account's
+own DeviceGroup BEFORE any Welcome is written to anyone; only after that
+publish succeeded does it write the Welcome to the account's own mailbox and
+then the requester's. Every device keeps the earliest note per request from a
+sender leaf the roster resolves at receipt (C-68). Before any device builds
+(the first winner and any device that takes over), a note held for the
+request means it never founds: it writes the note's Welcome to the
+requester's mailbox with the request's reply grant (byte-identical for every
+added leaf; a duplicate is ignored; a failed write keeps the request), then
+records the use. A retry of the founder resumes its recorded founding, so
+nothing is founded twice.
+Journal order is the DS arrival order, which every device reads identically.
+The won claim is recorded durably before the build, so a winner that fails
+retries from it at its next pass; a device whose claim is not the winner
+never builds. A request is decided only once the device holds its synced
+state (no timer, no fallback to a card while it loads): until then it is
+kept, unshown, in the device's stored inbox, and a journal read that times
+out or finds the device offline leaves it so for the next pass.
+
+**Why it holds.** The verdict is one function in `lakko-sync`
+(`SyncedState::link_answer_verdict` over `LinkRecordEntry::verdict`), on both
+FFI surfaces, and no client re-derives it. The secret compare goes through
+`lakko_contacts::link_seal::link_secrets_match` / `LinkAnswer::matches`
+(`SecretBytes`, constant time). The register's fold orders a revoked entry
+above any live one before the HLC stamp (`beats`), so a revocation survives
+any arrival order. The request's link answer is inside the HPKE-sealed
+contact-request plaintext, so the Delivery Service and the discovery ledger
+never see it (invariants #2, #5). The secret itself is the 12-byte link
+secret the URL fragment carries (ADR-0028 amendment 2026-09-28), so a party
+that never held the link cannot produce an answer.
+
+**Where it is enforced.** `crates/lakko-contacts/src/request.rs` (the
+`link_answer_len(u8) ‖ link_id(16) ‖ link_secret(12)` field, 0 or 28 bytes,
+fail-closed), `crates/lakko-sync/src/synced/link_record.rs` (the register,
+its envelope `lakko/sync/link-record/v1\0` at version byte `0x02`, the
+verdict, the record's revocation seed), `crates/lakko-sync/src/synced/state.rs`
+(`beats`, persisted state version 4), `crates/lakko-contacts/src/link_claim.rs`
+(the 69-byte claim envelope, fail-closed, its own `IncomingEnvelope::LinkClaim`
+kind, `link_claim_outcome` / `link_claim_winner` /
+`link_claim_answered_elsewhere` over `ObservedLinkClaim { message_id,
+author_key }` and the roster keys), `crates/lakko-contacts/src/link_founded.rs` (the link-founded note, length-prefixed Welcome bounded at 32 768 bytes, fail-closed, its own `IncomingEnvelope::LinkFounded` kind, fuzz `link_founded_decode`). Clients: web
+`contacts/MailboxContext.tsx` (`decideLinkRequests`) + `contacts/link-claims.ts`
++ `contacts/inbox-store.ts` (the `undecided` / `dead` row state) +
+`devices/sync/DeviceGroupSyncContext.tsx` (`postLinkClaim`,
+`linkClaimRoster`, the own-row byte match and the claim intake in the apply
+loop); iOS `Contacts/ContactsRepository.swift`
+(`decideLinkRequests`), `Contacts/LinkClaims.swift`,
+`Contacts/LinkRequestInbox.swift`, `Devices/Sync/DeviceGroupSyncRepository.swift`
+(`postLinkClaim`, `linkClaimRoster`, `matchOwnLinkClaim`, `receiveLinkClaim`,
+`waitForJournalReadPastNow`); Android
+`contacts/ContactsRepository.kt` (`decideLinkRequests`),
+`contacts/LinkClaims.kt`, `devices/sync/DeviceGroupSyncRepository.kt`
+(`postLinkClaim`, `linkClaimRoster`, `matchOwnLinkClaim`, `receiveLinkClaim`,
+`awaitJournalReadPastNow`). The NSE
+suppresses a claim (`lakko-ffi-extension/src/link_claim.rs`, golden). Pinned by
+the proptests `a_mismatched_secret_is_never_accepted`,
+`the_matching_secret_accepts_exactly_a_live_contact_link`,
+`a_revocation_is_final_in_any_order`,
+`exactly_one_device_wins_across_any_interleaving`,
+`an_unrecorded_earlier_own_claim_still_wins`,
+`a_removed_devices_claim_hands_the_request_to_the_next_current_claim` and
+`a_use_and_an_envelope_keep_the_revocation_seed`, the request and claim
+codecs' round-trip and refusal tests, the fuzz targets
+`contact_request_decode_and_verify`, `synced_state_decode` and
+`link_claim_decode` and `link_founded_decode`, and the client unit tests of the step rule and of the build order (`runLinkBuild` / `runBuild`: the note before any Welcome; a takeover that is not a member of the founded group and holds a note forwards and never founds; no Welcome on a straddled note) (web
+`link-claims.test.ts`, iOS `LinkClaimsTests`, Android `LinkClaimsTest`).
+Unit-tested 2026-10-16 and, for the rework, 2026-10-17; not walked live.
+
+**The readability rule (2026-10-17).** A DeviceGroup message sealed at
+epoch N that lands on the journal after a concurrent DeviceGroup commit to
+N+1 cannot be read by the other devices (OpenMLS keeps no past epochs;
+`max_past_epochs` stays unset, `lakko-mls` untouched). Every row's epoch is
+in its public framing, so every device computes the same answer: a claim or
+link-founded note row **counts only if the epoch it was sealed at equals the
+journal's epoch at that row's position** (the epoch after the last commit
+before it that took effect: sealed at the journal's epoch at its row, and
+the device's group moved past that epoch after it). The decision takes only
+counting claims, so a straddled claim never wins, for its author too (it is
+dropped and claimed again at the current epoch); the founder writes no
+Welcome until its note's row counts (re-posted otherwise). The rule is
+`lakko-contacts::journal_epoch` (`JournalEpochs`) on both FFI surfaces; each
+client keeps the record per DeviceGroup next to the claim record and feeds
+every row it reads. It reads the journal, not the device's current epoch,
+because a device that merged its own commit is ahead of the journal until it
+reads that commit's row. Property tests
+`a_straddled_claim_never_wins_and_one_device_builds` (exactly one builder
+across interleavings of claims and commits) and `a_straddled_note_never_counts`.
+
+**When a link counts, and the refusal (amended 2026-10-19).** The verdict
+judges expiry at the moment the request was written, the DS server stamp of
+its mailbox row (`created_at`, set by MariaDB, kept by each client with the
+undecided request across a restart; a stamp that does not parse counts as
+written after any expiry), and revocation and uses now
+(`LinkRecordEntry::counts_for_request(pressed_at_ms)`). A device holding no
+record of the link answers `Unknown` and waits, never refuses. A revocation
+wins until the account has answered (a recorded founding or a held
+link-founded note): before that, a won claim on a dead link refuses instead of
+building. A request on a link that does not count is no longer shown as a
+card: it is dropped silently and the requester is sent a **link refusal**
+(`lakko-contacts::link_refusal`, 135 bytes: domain `lakko/link-refusal/v1\0`,
+version, `link_id(16)`, `requester_account_key(32)`, an Ed25519 signature by
+the inviter's account key over everything before it; fuzz
+`link_refusal_decode`), as a sealed mailbox row of kind `LinkRefusal` (5)
+through the request's reply grant. The requester removes its pending contact
+and the messages held for it only when `verify_link_refusal` succeeds against
+that pending contact's stated inviter key, the link id it stored, and its own
+account key, so a refusal signed by anyone else, for another link, or for
+another person removes nothing. On the inviting side the client writes no
+pending contact before the ledger consume answered live.
+
+**What this does NOT do.** It does not authenticate the inviter's name on the
+invite page beyond the capability's signature: the name is the inviter's own
+claim, signed by their account key. A device of the account whose register
+has not yet received a revocation may build while another device refuses the
+same request (amended 2026-10-19; the requester then sees whichever lands
+first). A refusal says the inviter's app judged the link dead; it does not
+prove when. The readability rule does not cover a
+forked DeviceGroup (two of the account's devices committing at one epoch with
+both commits taking effect on different devices), nor an own claim or note
+published before an own commit the device had already merged when it read
+its very first batch (no journal record yet). A request a device lost leaves
+its store only when the register says it was answered or the link is dead;
+if that never comes (the winner's use never reaches the register while the
+winner stays in the roster) it stays stored, unshown. It does not stop a
+device of the account from claiming a request nobody sent
+(that only keeps its own account's devices from answering a request that does
+not exist). The revocation seed travels in the synced record, so any device of
+the account can delete the ledger row: that is the point of the rework, and it
+means a device of the account that is compromised can delete any of the
+account's link rows (it could already revoke them in the register).
+
+### C-84: A device card names nothing about its sender, travels only in the account's DeviceGroup, and the city behind it is looked up without a record
+
+[ADR-0080](../adr/0080-device-cards.md).
+**The rule.** A device card (`lakko-contacts::device_card`, domain
+`lakko/device-card/v1\0`) carries platform, model, app version, system,
+city, country and two times, and nothing that names the sender. It is sent
+only as a DeviceGroup `ServiceEnvelope`; a receiver stores it under the
+DeviceGroup leaf signature key it resolves from the MLS-authenticated sender
+leaf at receipt (C-68: never a leaf index), keeps it only when its
+`updated_at_ms` is strictly newer, and drops it when the leaf leaves the
+roster. A card met in any other group is dropped. The decode is bounded and
+fail-closed (closed platform set, byte bounds, no control or format
+characters, compose refuses what decode refuses). The city comes from
+`GET /discovery/locate`, which takes no session, no token and no account,
+reads only the source address the per-IP limiter already trusts, stores
+nothing and writes no log line naming the address or the answer; a device on
+the anti-censorship connection (native) or with "Show my city to my other
+devices" off asks nothing and sends an empty city.
+
+**Where it is enforced.** Core `crates/lakko-contacts/src/device_card.rs`
+(15 unit tests, fuzz `device_card_decode`), the dispatcher arm in
+`incoming_envelope.rs`; both FFI surfaces (`device_card.rs`); the NSE decodes
+it only to suppress it (`lakko-ffi-extension/src/device_card.rs`, golden).
+`services/discovery/src/locate.rs` and the route tests in `main.rs`
+(`locate_logs_neither_the_address_nor_the_answer` captures every event and
+span at TRACE; `locate_answers_for_the_trusted_source_address_without_a_session`
+runs over a pool that is never reached). Clients: web
+`apps/web/src/devices/device-card-intake.ts` (sender resolution) and
+`device-card-runtime.ts`; iOS `Devices/DeviceCardCenter.swift` and
+`DeviceGroupSyncRepository.receiveDeviceCard`; Android
+`devices/DeviceCardCenter.kt` and `DeviceGroupSyncRepository.receiveDeviceCard`.
+Host-tested 2026-10-16; not walked live, not deployed.
+
+**What this does NOT do.** It does not hide from an operator watching both
+discovery and the Delivery Service that a locate request and a DeviceGroup
+publish came from one address (ADR-0078 class (c)). A device's card is its
+own statement; nothing checks that the model or city are true. The web
+client has no anti-censorship connection, so its locate always uses its own
+address unless the switch is off.
+
+## A device replaces only its own leaf without a passkey (C-85)
+
+### C-85: Under the attested-removal policy a DeviceGroup removal merges only with an attestation or the removed leaf's own proof naming the commit's epoch and a KeyPackage it adds
+
+[ADR-0081](../adr/0081-devicegroup-commits-cannot-strand.md) "Amendment
+(2026-10-19)", amending [ADR-0015](../adr/0015-device-removal-authorization.md);
+closes G-52.
+
+**The rule.** When a DeviceGroup carries the ADR-0015 policy,
+`DeviceGroup::process_incoming_verifying_removals` merges a commit that
+removes leaves only when each removed leaf is covered: by an ADR-0015
+attestation bound to the account, `SHA-256("lakko/action/remove-device/v1" ‖
+pubkey)` and freshness; or by a self-removal proof that names this
+DeviceGroup's id, the epoch the commit leaves, the removed leaf's signature
+key and the `KeyPackageRef` of a KeyPackage the same commit adds, and
+verifies under that removed leaf's key. The proof
+(`crates/lakko-mls/src/self_removal.rs`) is 137 bytes,
+`version ‖ epoch ‖ removed_pubkey ‖ key_package_ref ‖ signature`, over
+`"lakko/devicegroup/self-removal/v1\0" ‖ group_id_len ‖ group_id ‖ epoch ‖
+removed_pubkey ‖ key_package_ref`. The epoch makes a proof single-use: the
+replacement keeps the removed leaf's signature key, so without it a member
+holding a used proof could later remove the rejoined device by re-adding the
+stale KeyPackage (OpenMLS builds that commit), and an epoch has one commit
+(C-80); the attestation is 121 bytes under
+`lakko/device-attest/v1`, and the gate tries each entry of the envelope's
+removal-authorisation slot as both, so neither stands in for the other.
+
+**Where it is enforced.** The gate in `device_group.rs` over the removed
+leaves and added refs `Group::process_incoming_gated` hands it; the
+one-commit replacement `Group::replace_member` /
+`DeviceGroup::replace_device_at` (`replaceDeviceAt` on UniFFI and wasm); the
+knock field `self_removal_proof = 16` of `PairingQr`
+(`buildRejoinKnock` / `encodeRejoinKnock`, decoded as exactly 0 or 137 bytes;
+the device reads the epoch with an empty knock, a probe);
+the sibling's check before it builds (`deviceGroupSelfRemovalCovers`) and its
+answered-knock check (`containsLeafOfKeyPackage`). Clients: web
+`devices/device-group-rejoin.ts` and `devices/sync/DeviceGroupSyncContext.tsx`;
+iOS `Devices/Sync/DeviceGroupRejoin.swift` and
+`DeviceGroupSyncRepository.checkKnocks`; Android
+`devices/sync/DeviceGroupRejoin.kt` and `DeviceGroupSyncRepository.checkKnocks`.
+Pinned by the self-removal tests in `device_group.rs`, the codec tests in
+`self_removal.rs`, the pairing tests in `pairing.rs`, fuzz
+`self_removal_proof_decode`, and each client's admission-verdict suite.
+Host-tested 2026-10-19; not walked live, not deployed.
+
+**What this does NOT do.** It lets the holder of a leaf's key replace that
+leaf by a KeyPackage it chose, in one commit at one epoch; a member holding
+its key can already commit adds, so this gives it nothing it lacked, and it
+never authorises the removal of another device. A device that no longer holds its old leaf key is a new device: it
+is only added, and the old leaf stays until a person removes it with the
+passkey flow. Whether a knock is admitted at all is the sibling's directory,
+binding and tombstone check (ADR-0081 decision 4), not the proof.
+
+
+## A conversation is joined only from a Welcome with a role table and a kind (C-86)
+
+### C-86: `join_from_welcome` refuses a Welcome without the `0xFF02` role table or a readable `0xFF03` kind, and leaves nothing behind
+
+[ADR-0081](../adr/0081-devicegroup-commits-cannot-strand.md) "Amendment
+(2026-10-19, second)", amending [ADR-0062](../adr/0062-conversation-kind.md).
+
+**The rule.** A device holds an ordinary conversation only if the Welcome it
+joined from carries the ADR-0022 role table and the ADR-0062 kind. A Welcome
+without the role table is refused with the typed `RefusalReason::NoRoleTable`;
+one with the table and no readable kind is refused as under C-70. Either
+refusal leaves nothing in the OpenMLS provider: no group state, and the
+KeyPackage the Welcome was sealed to stays usable. The two groups that carry
+no role table by design join only through their own entry points, and those
+refuse a conversation Welcome.
+
+**Why it is indexed.** Every membership change of a conversation is a proposal
+(ADR-0045), and a group with no role table has no owner, no rank 0 and no
+committer, so its membership could only change by a direct commit. Before this,
+`join_from_welcome` checked the kind only when a role table was present and
+accepted a table-less Welcome outright, and no client checked after joining;
+so the clients kept a direct-commit path for a group they could be handed. With
+the admission closed, those paths were deleted.
+
+**Where it is enforced.** `crates/lakko-mls/src/group.rs`: `join_admitted`
+runs `admit_welcome` (the role-table and kind decision), the expected-group-id
+check of a table-less entry point, and the ADR-0050 binding check on
+`StagedWelcome` before `into_group`. Entry points:
+`Group::join_from_welcome` (a conversation), `PublisherGroup::join_from_welcome`
+(the ADR-0028 OQ3 co-publisher join; refuses a Welcome for another group id),
+`DeviceGroup::join_from_welcome` and `DeviceGroup::join_welcome_before_account`
+(the ADR-0056 by-name pairing join). FFI: `publisherGroupJoinFromWelcome` /
+`deviceGroupJoinWelcomeByName` on UniFFI, `PublisherGroup.joinFromWelcome` /
+`DeviceGroup.joinWelcomeByName` on wasm; the NSE surface exposes no join. On the
+clients every membership operation refuses a group with no role table with the
+same typed refusal (web `noRoleTableRefusal`, iOS `requireRoleTable`, Android
+`noRoleTableRefusal`). Pinned by the admission tests and the proptest
+`welcome_admission_follows_the_table` in `group.rs`, the entry-point tests in
+`device_group.rs` and `publisher_group.rs`, and one refusal test per client.
+Host-tested 2026-10-19; not walked live, not deployed.
+
+**What this does NOT do.** It does not stop a client running other code from
+creating a table-less group and committing in it; it keeps every device that
+runs these checks out of such a group, and refuses any membership operation
+on one if it were reached. It changes nothing for a PublisherGroup or a
+DeviceGroup. Invariants **#3** (a join condition; external review under G-39)
+and **#4** (refuse, never fall back); **#2** and **#5** untouched.
+
+
+## One screen share per call, named alike on every device (C-87)
+
+### C-87: every device that received the same share states names the same current share, and a device whose share is superseded stops it
+
+[ADR-0083](../adr/0083-screen-share.md).
+
+**The rule.** A call shows at most one screen share. A share is announced by a
+share state the sharer signs with its MLS leaf key (call id, peer id, `seq`,
+sharing or stopped, a sound flag). A start takes `seq` one above the highest it
+has seen; a stop carries the `seq` of the share it stops. Every device folds
+the states it accepted into the current share: the greatest `(seq,
+signer_key)` it has seen, unless that one was stopped; a state for a lower id
+changes nothing, so a superseded share is over for good. A device whose own
+share is superseded stops its capture and sends `stopped`.
+
+**Why it is indexed.** Each device hears two starts in its own order, so a rule
+that keeps the start heard last leaves two shares alive, or none, depending on
+who looks. The fold depends only on the set of states received, so two devices
+that received the same states agree whatever the order. The state is signed
+because it makes another device act: the SFU stamps the relay sender and could
+otherwise re-attribute one participant's sealed state to another.
+
+**Where it is enforced.** `crates/lakko-calls/src/screen_share.rs`:
+`compose_screen_share`, `decode_screen_share` (bounded, exact),
+`verify_screen_share` (call id, the peer id and leaf key the caller bound to
+the sender, roster membership, signature), and the fold `ScreenShareState`.
+Carried sealed on the SFU relay (`relay::classify_relay_plaintext` ->
+`RelayPayload::ScreenShare`) in a group call and as
+`CallSignalingPayload.screen_share = 17` in a one-to-one call. On UniFFI and
+wasm as `composeCallScreenShare`, `verifyCallScreenShare` and
+`CallScreenShareState`. Pinned by the proptest
+`the_current_share_does_not_depend_on_arrival_order`, the tie and
+supersede tests in `screen_share.rs`, and the fuzz target
+`screen_share_decode`. Host-tested 2026-10-25; not walked live, not deployed.
+
+**What this does NOT do.** It does not stop anyone from starting a share; there
+is no moderation. It does not hide that a share exists from the SFU, which
+sees one more opaque track. In a group call the share media is sealed with
+SFrame under stream indices 2 (picture) and 5 (sound); in a one-to-one call it
+travels as the camera does there. Invariants **#4** (a group share that cannot
+be sealed is not sent); **#2**, **#3** and **#5** untouched.

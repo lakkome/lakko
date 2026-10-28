@@ -17,7 +17,7 @@ import androidx.security.crypto.MasterKey
  *   * `apps/web/src/auth/export-key-store.ts`
  *   * `apps/ios/Lakko/Auth/ExportKeyStore.swift`
  *
- * Caches the raw 32-byte OPAQUE export key in
+ * Caches the raw 64-byte OPAQUE export key in
  * [EncryptedSharedPreferences], AES-256-GCM value encryption +
  * AES-256-SIV key encryption with the master key in the Android
  * Keystore. Same posture as [me.lakko.app.backup.PhraseStore] and
@@ -42,7 +42,7 @@ import androidx.security.crypto.MasterKey
  * ## Storage layout
  *
  * `EncryptedSharedPreferences` named `"lakko-export-key"`. Keys:
- * `"export-key-v1:<accountIdB64>"`. Value: base64-encoded 32
+ * `"export-key-v1:<accountIdB64>"`. Value: base64-encoded 64
  * raw export-key bytes.
  */
 public object ExportKeyStore {
@@ -50,16 +50,19 @@ public object ExportKeyStore {
     private const val PREFS_NAME = "lakko-export-key"
     private const val KEY_PREFIX = "export-key-v1:"
 
-    /** Fixed export-key length pinned by the OPAQUE ciphersuite. */
-    public const val EXPORT_KEY_LENGTH: Int = 32
+    /** Fixed export-key length pinned by the OPAQUE ciphersuite:
+     *  `EXPORT_KEY_LEN` in `crates/lakko-auth-client/src/cipher_suite.rs`
+     *  (SHA-512). It read 32 until 2026-10-22, so no export key was ever
+     *  stored on Android and every write threw. */
+    public const val EXPORT_KEY_LENGTH: Int = 64
 
     /**
-     * Persist `exportKey` (32 bytes) for `accountIdB64`.
+     * Persist `exportKey` (64 bytes) for `accountIdB64`.
      * Overwrites any prior row. Caller is responsible for
      * zeroing `exportKey` after this returns; the function does
      * not retain a reference past return.
      *
-     * @throws IllegalArgumentException when `exportKey.size != 32`.
+     * @throws IllegalArgumentException when `exportKey.size != 64`.
      */
     public fun putExportKey(
         context: Context,

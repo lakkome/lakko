@@ -151,17 +151,17 @@ pub(crate) fn now_ms() -> u64 {
 
 /// One registered epoch key of a group.
 #[derive(Clone, Copy, Debug)]
-struct EpochKey {
-    epoch: u64,
-    key: VerifyingKey,
+pub(crate) struct EpochKey {
+    pub(crate) epoch: u64,
+    pub(crate) key: VerifyingKey,
     /// The rank that registered it (member 1, admin 2, root 3).
-    rank: u8,
+    pub(crate) rank: u8,
 }
 
 /// The rows of a group's registered access keys, newest epoch first, as the
 /// query returns them. A row that does not parse is skipped rather than
 /// trusted (this server wrote every row from a validated key).
-fn parse_key_rows(rows: Vec<(u64, Vec<u8>, u8)>) -> Vec<EpochKey> {
+pub(crate) fn parse_key_rows(rows: Vec<(u64, Vec<u8>, u8)>) -> Vec<EpochKey> {
     rows.into_iter()
         .filter_map(|(epoch, pk, rank)| {
             VerifyingKey::from_bytes(&pk)
@@ -177,7 +177,7 @@ fn parse_key_rows(rows: Vec<(u64, Vec<u8>, u8)>) -> Vec<EpochKey> {
 /// that many epochs from `H` onward, so the maximum over `keys` is the
 /// journal's `H`. `None` only for a journal with no such registration in
 /// reach, which then has the two-newest write tier alone.
-fn admin_floor(keys: &[EpochKey]) -> Option<u64> {
+pub(crate) fn admin_floor(keys: &[EpochKey]) -> Option<u64> {
     keys.iter()
         .filter(|k| k.rank >= Rank::Admin.to_byte())
         .map(|k| k.epoch)
@@ -212,6 +212,24 @@ async fn group_keys(
     .fetch_all(pool)
     .await
     .map_err(db_error("load group access keys"))?;
+    Ok(parse_key_rows(rows))
+}
+
+/// [`group_keys`] read on `conn` (inside a statement transaction, after
+/// [`lock_group`], so the keys are the ones the decision runs against).
+pub(crate) async fn group_keys_on(
+    conn: &mut MySqlConnection,
+    group_id: &[u8; PSEUDONYM_LEN],
+) -> Result<Vec<EpochKey>, HandlerError> {
+    let rows: Vec<(u64, Vec<u8>, u8)> = sqlx::query_as(
+        "SELECT epoch, access_pk, registered_rank FROM ds_group_access WHERE group_id = ? \
+         ORDER BY epoch DESC LIMIT ?",
+    )
+    .bind(&group_id[..])
+    .bind(MAX_RETAINED_EPOCHS)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(registration_db_error("load group access keys"))?;
     Ok(parse_key_rows(rows))
 }
 
@@ -742,7 +760,8 @@ pub(crate) mod tests {
         assert!(parsed.get("latest_epoch").is_none());
     }
 
-    /// ADR-0054: the wake header is parsed before the append, so a malformed
+    /// ADR-0054: the wake header (since ADR-0078 a sealed blob) is parsed
+    /// before the append, so a malformed
     /// one stores nothing; a valid one on a claimed publish is accepted (the
     /// test waker is dormant, so nothing leaves the process); a mailbox never
     /// takes one; an unclaimed group validates it and drops the wake.
@@ -758,18 +777,17 @@ pub(crate) mod tests {
             StatusCode::NO_CONTENT
         );
         let uri = messages_uri("group", &gid);
-        let good = format!(
+        // ADR-0078: a wake sealed to push-gw; the DS checks its shape only.
+        let mut blob = vec![5u8; lakko_contacts::push_wake::PUSH_WAKE_LEN];
+        blob[0] = lakko_contacts::push_wake::PUSH_WAKE_VERSION_V1;
+        let good = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&blob);
+        let wake = crate::wake::WAKE_HEADER;
+        let old_spelling = format!(
             "{};message",
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([5u8; 32])
         );
-        let wake = crate::wake::WAKE_HEADER;
 
-        for bad in [
-            "",
-            "x;message",
-            &format!("{good}x"),
-            &good.replace("message", "ring"),
-        ] {
+        for bad in ["", "x;message", &format!("{good}x"), &old_spelling] {
             let (status, _) = send_with(
                 &app,
                 Req {
@@ -1277,8 +1295,6 @@ pub(crate) mod tests {
             notifiers: journal::Notifiers::default(),
             waker: std::sync::Arc::new(crate::wake::Waker::dormant()),
             anon_tokens: lakko_anon_token_server::TokenVerifier::new(db, None),
-            binding_pepper: None,
-            attest_key: None,
         };
         let app = crate::build_app(state);
         let uri = format!("/ds/group/{}/knock", hex::encode([3u8; PSEUDONYM_LEN]));

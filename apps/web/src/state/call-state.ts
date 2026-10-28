@@ -85,6 +85,9 @@ export interface Participant {
    *  speaker (LiveKit metadata). The UI promotes them to the
    *  large active-speaker tile. */
   readonly speaking: boolean;
+  /** ADR-0084 - the person's profile key (or `self` for this device), whose
+   *  photo the tile shows while the camera is off. Absent until known. */
+  readonly personKeyB64?: string | undefined;
 }
 
 /**
@@ -408,11 +411,11 @@ export const callActions = {
   setQuality(id: string, tier: QualityTier): void {
     patchParticipant(id, { quality: tier });
   },
-  /** Rename a participant in place. The SFU adapter re-runs its name
-   *  resolution when a profile lands mid-call (ADR-0048 v2 carries the
-   *  account id the ADR-0021 peer tag is derived from), so a tile that
-   *  joined as a pseudonym picks up the person's name. No-op on unknown id
-   *  or an unchanged name. */
+  /** Rename a participant in place. The SFU adapter names a tile when the
+   *  peer's sealed announcement verifies (ADR-0078 section 2) and re-runs
+   *  its name resolution when a profile lands mid-call, so a tile that
+   *  joined unnamed picks up the person's name. No-op on unknown id or an
+   *  unchanged name. */
   setParticipantName(id: string, displayName: string): void {
     setParticipants((list) =>
       list.some((p) => p.id === id && p.displayName !== displayName)
@@ -426,6 +429,11 @@ export const callActions = {
    *  avatar). The LOCAL camera uses `setCamera`. No-op on unknown id. */
   setParticipantCamera(id: string, on: boolean): void {
     patchParticipant(id, { camOn: on });
+  },
+  /** ADR-0084 - name the person behind a tile (their profile key), for the
+   *  photo shown while their camera is off. No-op on unknown id. */
+  setParticipantPerson(id: string, personKeyB64: string | null): void {
+    patchParticipant(id, { personKeyB64: personKeyB64 ?? undefined });
   },
   /** Set the currently-speaking participant. Pass `null` to
    *  clear (no one speaking). The UI promotes the speaker to
@@ -585,14 +593,14 @@ export const callActions = {
   setSelectedAudioOutput(id: string | null): void {
     setSettings((s) => ({ ...s, selectedAudioOutput: id }));
   },
-  /** Show one line under the status row for `CALL_NOTICE_MS`, replacing any
-   *  line already up. */
-  showNotice(text: string): void {
+  /** Show one line under the status row for `CALL_NOTICE_MS` (or
+   *  `durationMs`), replacing any line already up. */
+  showNotice(text: string, durationMs: number = CALL_NOTICE_MS): void {
     setNotice(text);
     if (noticeTimer !== null) clearTimeout(noticeTimer);
     noticeTimer = setTimeout(() => {
       noticeTimer = null;
       setNotice(null);
-    }, CALL_NOTICE_MS);
+    }, durationMs);
   },
 };

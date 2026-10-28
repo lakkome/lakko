@@ -33,42 +33,37 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
     case directorySearch = "directory-search"
     /// Claiming a conversation-backup vault (ADR-0064). No route spends it yet.
     case vaultClaim = "vault-claim"
-    /// Uploading an attachment blob (ADR-0065). No route spends it yet.
+    /// Buying an upload pass, `POST /blob/pass/upload` (ADR-0065).
     case blobUpload = "blob-upload"
-    /// Reading an attachment blob (ADR-0065). No route spends it yet.
+    /// Buying a read pass, `POST /blob/pass/read` (ADR-0065).
     case blobRead = "blob-read"
     /// A write to someone's mailbox carrying no reach proof (ADR-0078):
     /// to an open (Everyone) mailbox, an unclaimed one, or a closed one.
     case mailboxWrite = "mailbox-write"
+    /// `POST /call/jwt` (ADR-0078 section 2): one SFU call admission (a join,
+    /// a reconnect, the TURN credential of a one-to-one call).
+    case callJoin = "call-join"
 
-    /// Tokens asked for per issuance (ADR-0054 S5): a lookup is the common
-    /// action; the others are rare, so a small batch leaves little unspent
-    /// bearer value lying on the device. The sizes for `vault-claim`,
-    /// `blob-upload` and `blob-read` are chosen, not measured: nothing spends
-    /// those contexts yet, so there is no usage to size them from.
-    public var batchSize: Int {
+    /// Tokens a context keeps on hand: about a day of use plus a reserve, so
+    /// a spend finds a token without waiting for an issuance (ADR-0078
+    /// section 8). A scheduled refill tops the context up to this in one
+    /// issuance. Chosen, not measured; the same numbers on web and Android.
+    public var poolTarget: Int {
         switch self {
-        case .discoveryLookup: return 8
-        case .pushRegister: return 4
-        case .inviteConsume: return 2
-        case .dsKnock: return 2
-        case .discoveryRegister: return 1
-        case .channelSubscribe: return 2
-        case .directorySearch: return 1
-        case .vaultClaim: return 4
-        case .blobUpload: return 2
-        case .blobRead: return 2
-        case .mailboxWrite: return 2
-        }
-    }
-
-    /// A background refill starts when the context holds fewer than this:
-    /// below 2 for lookups (so a search rarely waits), empty for the rest
-    /// (for the vault and blob contexts that is likewise chosen, not measured).
-    public var lowWater: Int {
-        switch self {
-        case .discoveryLookup: return 2
-        default: return 1
+        case .discoveryLookup: return 32
+        case .pushRegister: return 8
+        case .inviteConsume: return 4
+        case .dsKnock: return 8
+        case .discoveryRegister: return 2
+        case .channelSubscribe: return 4
+        case .directorySearch: return 4
+        case .vaultClaim: return 8
+        case .blobUpload: return 4
+        case .blobRead: return 4
+        case .mailboxWrite: return 4
+        // ADR-0078 section 2: a join, a reconnect, the TURN credential of a
+        // one-to-one call. Chosen, not measured.
+        case .callJoin: return 4
         }
     }
 }

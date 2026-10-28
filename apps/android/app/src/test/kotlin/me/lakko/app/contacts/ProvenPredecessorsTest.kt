@@ -192,8 +192,9 @@ class ProvenPredecessorsTest {
     }
 
     @Test
-    fun `the ledger rows to revoke are the listed and the recorded ones, each once`() {
-        assertEquals(listOf("a", "b", "c"), spentLinkSlugs(listOf("a", "b"), listOf("b", "c")))
-        assertTrue(spentLinkSlugs(emptyList(), emptyList()).isEmpty())
+    fun `the ledger rows to revoke are the recorded ones, each once`() {
+        // ADR-0078 section 10: no owner list adds the other devices' links.
+        assertEquals(listOf("a", "b", "c"), spentLinkSlugs(listOf("a", "b", "b", "c")))
+        assertTrue(spentLinkSlugs(emptyList()).isEmpty())
     }
 }

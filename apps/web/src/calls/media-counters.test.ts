@@ -12,6 +12,7 @@ import {
   describeGivenChanges,
   describeShown,
   describeShownPeers,
+  InboundCounterLog,
   readMedia,
   readSender,
 } from "./media-counters";
@@ -471,5 +472,44 @@ describe("the middle sender and the middle track in the counters", () => {
     expect(lines[1]).toBe(
       "call media interval video#2 pkts=1000 lost=10 nack=4 jb_ms=50 jb_target_ms=100 jb_net_ms=20 pli=1 freezes=2 freeze_s=1.50 decoded=300 dropped=3 layer=middle",
     );
+  });
+});
+
+describe("InboundCounterLog (the one-to-one call)", () => {
+  it("logs each interval's change and the whole call once at the end", () => {
+    const log = new InboundCounterLog();
+    const first = log.interval([audio(), video()]);
+    expect(first).toEqual([
+      "call media interval audio#1 pkts=500 lost=5 nack=0 jb_ms=0 jb_target_ms=- jb_net_ms=- concealed=1.0%",
+      "call media interval video#2 pkts=1000 lost=10 nack=4 jb_ms=50 jb_target_ms=100 jb_net_ms=20 pli=1 freezes=2 freeze_s=1.50 decoded=300 dropped=3 layer=-",
+    ]);
+    const second = log.interval([
+      audio({ packetsReceived: 600, concealedSamples: 9_600, totalSamplesReceived: 576_000 }),
+      video({ packetsReceived: 1100 }),
+    ]);
+    expect(second[0]).toBe(
+      "call media interval audio#1 pkts=100 lost=0 nack=0 jb_ms=- jb_target_ms=- jb_net_ms=- concealed=5.0%",
+    );
+    expect(second[1]).toMatch(/^call media interval video#2 pkts=100 /);
+    const total = log.total();
+    expect(total[0]).toBe(
+      "call media total audio#1 pkts=600 lost=5 nack=0 jb_ms=0 jb_target_ms=- jb_net_ms=- concealed=1.7%",
+    );
+    expect(total).toHaveLength(2);
+    expect(log.total()).toEqual([]);
+  });
+
+  it("says nothing at the end of a call that was never read", () => {
+    expect(new InboundCounterLog().total()).toEqual([]);
+  });
+
+  it("ignores everything but the receivers", () => {
+    const log = new InboundCounterLog();
+    expect(
+      log.interval([
+        { id: "CP1", type: "candidate-pair", bytesReceived: 9 },
+        { id: "OT1", type: "outbound-rtp", kind: "video", bytesSent: 9 },
+      ]),
+    ).toEqual([]);
   });
 });

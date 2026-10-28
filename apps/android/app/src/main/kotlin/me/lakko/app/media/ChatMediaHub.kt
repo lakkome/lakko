@@ -85,6 +85,33 @@ public class ChatMediaHub(
         }
     }
 
+    private val mutableFailures = MutableStateFlow<Map<String, MediaFailure>>(emptyMap())
+
+    /** docs/ux/saved-messages-and-file-lifetime.md 4.1 / 4.2 — why the last
+     *  load of each key failed; cleared when it succeeds. */
+    public val failures: StateFlow<Map<String, MediaFailure>> = mutableFailures.asStateFlow()
+
+    /** Why [key]'s last load failed, or `null`. */
+    public fun failureFor(key: String): MediaFailure? = mutableFailures.value[key]
+
+    /** Download and AEAD-open a FILE attachment (the file chip's Save):
+     *  the bytes, or the failure. */
+    public suspend fun loadBytes(ref: AttachmentRef): Result<ByteArray> {
+        val key = mediaKey(ref.blobId)
+        return try {
+            val bytes = withContext(Dispatchers.IO) {
+                cache.get(key)?.readBytes() ?: AttachmentBridge.downloadAndDecrypt(ref, storage)
+            }
+            mutableFailures.update { it - key }
+            Result.success(bytes)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            mutableFailures.update { it + (key to mediaFailureOf(e)) }
+            Result.failure(e)
+        }
+    }
+
     /** A file already filed under [key], or `null`. */
     public fun fileFor(key: String): File? = cache.get(key)
 
@@ -115,12 +142,15 @@ public class ChatMediaHub(
         val deferred = synchronized(inflight) {
             inflight[key] ?: scope.async(Dispatchers.IO, start = CoroutineStart.LAZY) {
                 try {
-                    cache.put(key, name, fallback, fetch())
+                    cache.put(key, name, fallback, fetch()).also { mutableFailures.update { it - key } }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {
                     // No blob id, key or name in the log line.
                     Log.w(TAG, "media download failed: ${e.javaClass.simpleName}")
+                    // UX 4.1 / 4.2 — gone, limited or failed, told apart.
+                    val failure = mediaFailureOf(e)
+                    mutableFailures.update { it + (key to failure) }
                     null
                 } finally {
                     synchronized(inflight) { inflight.remove(key) }

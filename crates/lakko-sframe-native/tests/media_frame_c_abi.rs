@@ -13,8 +13,10 @@ use lakko_sframe_native::{
     lakko_sframe_call_key_ring_open_media_frame_with_overlap,
     lakko_sframe_call_key_ring_participant_key, lakko_sframe_media_clear_prefix_len,
     lakko_sframe_participant_key_free, lakko_sframe_seal_framed, lakko_sframe_seal_media_frame,
-    CallKeyRing, LakkoSframeStatus, ParticipantKey, LAKKO_SFRAME_MAX_CLEAR_PREFIX_LEN,
-    LAKKO_SFRAME_MEDIA_CODEC_OPUS, LAKKO_SFRAME_MEDIA_CODEC_OTHER, LAKKO_SFRAME_MEDIA_CODEC_VP8,
+    lakko_sframe_seal_media_frame_for_codec, CallKeyRing, LakkoSframeStatus, ParticipantKey,
+    LAKKO_SFRAME_MAX_CLEAR_PREFIX_LEN, LAKKO_SFRAME_MEDIA_CODEC_OPUS,
+    LAKKO_SFRAME_MEDIA_CODEC_OTHER, LAKKO_SFRAME_MEDIA_CODEC_RED_OPUS,
+    LAKKO_SFRAME_MEDIA_CODEC_VP8,
 };
 
 const SEED: [u8; 32] = [0x42; 32];
@@ -187,6 +189,51 @@ fn the_two_layouts_do_not_open_as_each_other_via_c_abi() {
     assert_ne!(status, LakkoSframeStatus::Ok);
     assert!(ptr.is_null());
 
+    unsafe {
+        lakko_sframe_participant_key_free(pk);
+        lakko_sframe_call_key_ring_free(ring);
+    }
+}
+
+fn seal_for(pk: *mut ParticipantKey, frame: &[u8], codec: u8) -> Vec<u8> {
+    let mut ptr: *mut u8 = std::ptr::null_mut();
+    let mut len = 0usize;
+    let status = unsafe {
+        lakko_sframe_seal_media_frame_for_codec(
+            pk,
+            frame.as_ptr(),
+            frame.len(),
+            codec,
+            &mut ptr,
+            &mut len,
+        )
+    };
+    assert_eq!(status, LakkoSframeStatus::Ok);
+    take(ptr, len)
+}
+
+/// A native sender whose audio is a RED container (`audio/red`) seals it
+/// with the trailer saying so; every other codec seals as the codec's own
+/// frame, with the prefix the codec's rule gives.
+#[test]
+fn seal_for_codec_marks_red_in_the_trailer() {
+    let ring = ring();
+    let pk = sender(ring);
+    let mut container = vec![0xef, 0x0f, 0x00, 0x02, 0x6f, 0xaa, 0xbb];
+    container.extend_from_slice(b"primary");
+    let red = seal_for(pk, &container, LAKKO_SFRAME_MEDIA_CODEC_RED_OPUS);
+    let parts = lakko_calls::MediaFrameParts::split(&red).expect("split");
+    assert_eq!(parts.content, lakko_calls::MediaContent::RedOpus);
+    assert!(parts.clear_prefix.is_empty());
+    assert_eq!(open(ring, &red), Ok(container.clone()));
+
+    let opus = seal_for(pk, &container, LAKKO_SFRAME_MEDIA_CODEC_OPUS);
+    let parts = lakko_calls::MediaFrameParts::split(&opus).expect("split");
+    assert_eq!(parts.content, lakko_calls::MediaContent::Codec);
+
+    let key = seal_for(pk, &vp8_key_frame(), LAKKO_SFRAME_MEDIA_CODEC_VP8);
+    assert_eq!(&key[..10], &vp8_key_frame()[..10]);
+    assert_eq!(open(ring, &key), Ok(vp8_key_frame()));
     unsafe {
         lakko_sframe_participant_key_free(pk);
         lakko_sframe_call_key_ring_free(ring);

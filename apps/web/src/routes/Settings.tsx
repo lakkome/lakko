@@ -31,10 +31,12 @@ import { setTheme, useTheme, type Theme } from "../ui/theme";
 import { currentLanguage, supportedLanguages, t } from "../l10n";
 import { LanguagePicker } from "../l10n/LanguagePicker";
 import { WhoCanFindMeList, WhoCanFindMeSection } from "../settings/WhoCanFindMe";
+import { setShowCityToOwnDevices, showCityToOwnDevices } from "../devices/device-card-runtime";
 import { RecoveryPage } from "../settings/RecoveryPage";
 import { ProtectionCard } from "../auth/protect/ProtectionCard";
 import { refreshProtection } from "../auth/protect/protection-state";
 import Profile from "./Profile";
+import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { ChatFoldersSection } from "../chat/folders/ChatFoldersSection";
 import { paths } from "./paths";
 import { isDesktop } from "../platform";
@@ -126,6 +128,7 @@ export default function Settings(): JSX.Element {
             label={displayName().length > 0 ? displayName() : username()}
             id={username()}
             size="md"
+            personKey={OWN_AVATAR_KEY}
           />
           <div>
             <div class="lk-settings-me-name">
@@ -164,6 +167,7 @@ export default function Settings(): JSX.Element {
           </Show>
           <Show when={shown() === "privacy"}>
             <WhoCanFindMeSection />
+            <ShowCitySection />
           </Show>
           <Show when={shown() === "privacy-groups"}>
             <WhoCanFindMeList />
@@ -392,11 +396,47 @@ function AboutSection(): JSX.Element {
             <span class="lk-card-row-sub">{t("settings.about.protection.body")}</span>
           </div>
         </div>
+        <div class="lk-card-row">
+          <span class="lk-card-row-icon">
+            <Icon name="globe" size={18} />
+          </span>
+          <div class="lk-card-row-body">
+            <span class="lk-card-row-sub">{t("settings.about.city_data")}</span>
+          </div>
+        </div>
       </section>
       <Show when={showsShortcutList(isDesktop())}>
         <KeyboardShortcutsCard />
       </Show>
     </>
+  );
+}
+
+/** Settings > Privacy: "Show my city to my other devices" (ADR-0080; per
+ *  device, on by default). */
+function ShowCitySection(): JSX.Element {
+  return (
+    <section class="lk-card">
+      <div class="lk-card-row">
+        <span class="lk-card-row-icon">
+          <Icon name="devices" size={18} />
+        </span>
+        <div class="lk-card-row-body">
+          <span class="lk-card-row-title">{t("settings.privacy.show_city")}</span>
+          <span class="lk-card-row-sub">{t("settings.privacy.show_city.sub")}</span>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={showCityToOwnDevices()}
+          class="lk-card-row-action"
+          classList={{ primary: showCityToOwnDevices() }}
+          onClick={() => setShowCityToOwnDevices(!showCityToOwnDevices())}
+        >
+          {showCityToOwnDevices() ? t("common.on") : t("common.off")}
+        </button>
+      </div>
+    </section>
   );
 }
 

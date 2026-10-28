@@ -356,8 +356,8 @@ async fn a_rotation_keeps_the_devices_that_hold_the_new_key_and_no_others() {
     assert_eq!(attestation.key_generation, 2);
     assert_eq!(attestation.new_signature_pubkey, pubkey(&k1));
     assert_eq!(
-        attestation.device_group_journal_id,
-        lakko_attest::device_group_journal_id(&account.id)
+        attestation.account_ref,
+        lakko_attest::key_reset_account_ref(&account.id)
     );
 
     // Kept: the password (byte for byte), TOTP, the passkey. Gone: the

@@ -105,8 +105,8 @@ function deps(
   return {
     forbidden,
     deps: {
-      readWakeBinding: async () => ({ devicePseudonymHex: "dd".repeat(32), accountId: "acct" }),
-      resolveAccount: async () => ({ accountId: "acct", groupIdBytes: GROUP_BYTES }),
+      readWakeBinding: async () => ({ accountId: "acct" }),
+      lookupRoute: async () => ({ accountId: "acct", groupIdB64: Buffer.from(GROUP_BYTES).toString("base64"), subIdHex: "dd".repeat(16) }),
       getDeviceKey: async () => ({}),
       getIdentitySeed: async () => new Uint8Array(64),
       loadSnapshot: async () => ({ snapshotBytes: new Uint8Array([1]), knownGroupIds: [] }),
@@ -124,7 +124,7 @@ function deps(
   };
 }
 
-const wake = { deviceHex: "dd".repeat(32), groupHex: GROUP_HEX, pointer: 42 };
+const wake = { subHex: "dd".repeat(16), groupHex: GROUP_HEX, pointer: 42 };
 
 describe("an offer becomes a ring", () => {
   it("classifies a fresh offer as a ring naming the call", async () => {
@@ -192,8 +192,8 @@ describe("a muted conversation is announced without interrupting", () => {
     const { deps: d } = deps([row(42, offer())], { muted: true, senderName: "Anna" });
     const bound = {
       ...d,
-      readWakeBinding: async () => ({ devicePseudonymHex: "dd".repeat(32), accountId: "bound" }),
-      resolveAccount: async (accountId: string) => ({ accountId, groupIdBytes: GROUP_BYTES }),
+      readWakeBinding: async () => ({ accountId: "bound" }),
+      lookupRoute: async (accountId: string) => ({ accountId: accountId, groupIdB64: Buffer.from(GROUP_BYTES).toString("base64"), subIdHex: "dd".repeat(16) }),
       lookupMuted: async (accountId: string) => {
         asked.push(`muted:${accountId}`);
         return true;

@@ -48,7 +48,7 @@
 import { expect, test } from "@playwright/test";
 
 import { box, openCase } from "./harness";
-import { SURFACE_GAP_PX } from "../../src/chat/MessageMenu";
+import { SURFACE_GAP_PX } from "../../src/chat/message-menu-placement";
 
 const MENU = "[role='menu']";
 const PLAY = "button.lakko-voice-play";

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!--
+  Adaptive launcher icon background: the brand gradient of the design
+  system, 135 degrees from #312e81 (top-left) to #818cf8 (bottom-right).
+  A shape gradient's angle runs counter-clockwise from left-to-right, so
+  315 points to the bottom-right.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="315"
+        android:startColor="#312E81"
+        android:endColor="#818CF8"
+        android:type="linear" />
+</shape>

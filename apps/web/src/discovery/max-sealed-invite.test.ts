@@ -4,8 +4,9 @@
 // The client's `/i/` ceiling must be the length of the longest sealed blob the
 // core composes. A hand-copied number drifted twice (the link grant of
 // ADR-0060, then its mailbox binding of ADR-0078) and refused every web invite
-// link before the upload; this composes a maximal capability through the wasm
-// and compares.
+// link before the upload; this composes a maximal capability (the longest
+// label and the longest inviter preview of ADR-0079) through the wasm and
+// compares.
 
 import { beforeAll, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
@@ -26,7 +27,7 @@ beforeAll(async () => {
 });
 
 describe("MAX_SEALED_INVITE_BYTES", () => {
-  it("is the sealed length of a capability with the longest label", () => {
+  it("is the sealed length of a capability with the longest label and preview", () => {
     const seed = new Uint8Array(32).fill(0x11);
     const identity = Identity.fromSeed(seed);
     const linkId = generateLinkId();
@@ -41,6 +42,10 @@ describe("MAX_SEALED_INVITE_BYTES", () => {
       "l".repeat(64),
       linkId,
       grant,
+      // 63 four-byte scalars and one three-byte scalar: 255 bytes in 64
+      // scalars, the longest name both display-name bounds admit.
+      `${"\u{1F600}".repeat(63)}\u{20AC}`,
+      "a".repeat(32),
     );
     expect(mint.sealed.length).toBe(MAX_SEALED_INVITE_BYTES);
   });

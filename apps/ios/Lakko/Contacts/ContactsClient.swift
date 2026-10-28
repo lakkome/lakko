@@ -958,7 +958,8 @@ public final class ContactsClient {
         recipientX25519Pubkey: Data,
         profile: FfiProfile? = nil,
         introMessage: Data,
-        reach: ContactRequestReach = .none
+        reach: ContactRequestReach = .none,
+        linkAnswer: FfiLinkAnswer? = nil
     ) async throws -> SendResult {
         // ADR-0074 section 3.5a rule 1 — resolve before addressing. A bundle
         // carried by a link or a search result may name a key its owner has
@@ -982,7 +983,8 @@ public final class ContactsClient {
             profile: profile,
             introMessage: introMessage,
             replyGrant: try await reach.replyGrant(recipientAccountId),
-            plan: await reach.plan(recipientSignaturePubkey)
+            plan: await reach.plan(recipientSignaturePubkey),
+            linkAnswer: linkAnswer
         )
         return SendResult(
             recipientUsername: "",
@@ -1019,7 +1021,8 @@ public final class ContactsClient {
         profile: FfiProfile?,
         introMessage: Data,
         replyGrant: FfiReachGrant?,
-        plan: MailboxWritePlan?
+        plan: MailboxWritePlan?,
+        linkAnswer: FfiLinkAnswer? = nil
     ) async throws -> PublishedRequest {
         // ADR-0078 — the recipient's mailbox comes from a binding verified
         // against the key the envelope is sealed for (a link's grant, a
@@ -1064,6 +1067,9 @@ public final class ContactsClient {
                 // ADR-0060 section 6 — the requester's single-use `reply`
                 // grant: the recipient writes the accept and the ack with it.
                 replyGrant: replyGrant,
+                // ADR-0079 section 2 — the `/i/` link this request is sent
+                // from, sealed to the recipient.
+                linkAnswer: linkAnswer,
                 introMessage: introMessage
             )
         }
@@ -1163,6 +1169,40 @@ public final class ContactsClient {
         return PublishedAck(messageId: publish.id, createdAt: publish.createdAt)
     }
 
+    // MARK: - Link refusal
+
+    /// ADR-0079 amendment of 2026-10-19 — answer a request whose invite link
+    /// no longer counts with a link refusal: signed by this account's key
+    /// over the link id and the requester's account key, sealed as a
+    /// `linkRefusal` row to the mailbox the requester's `reply` grant names
+    /// (the path an ack takes). Throws when there is nowhere to write or the
+    /// write fails; the caller keeps the request for the next pass.
+    public func sendLinkRefusal(
+        inviterSigningSeed: Data,
+        linkId: Data,
+        originalRequest: IncomingContactRequest,
+        plan: MailboxWritePlan?
+    ) async throws {
+        guard let plan else {
+            NSLog("ADR-0079: no verified mailbox for the requester; the refusal was not sent")
+            throw ContactsError.wrap(MailboxUnknown())
+        }
+        let wire: Data
+        do {
+            wire = try composeLinkRefusal(
+                inviterSigningSeed: inviterSigningSeed, linkId: linkId,
+                requesterAccountKey: originalRequest.fromPubkey)
+        } catch {
+            throw ContactsError.wrap(error)
+        }
+        do {
+            let row = try plan.target.seal(kind: .linkRefusal, body: wire)
+            _ = try await ds.publishMailbox(pseudonym: plan.target.address, payload: row, writeAuth: plan.auth)
+        } catch {
+            throw ContactsError.wrap(error)
+        }
+    }
+
     // MARK: - Poll
 
     /// Poll the user's stranger-inbox mailbox for new
@@ -1235,6 +1275,8 @@ public final class ContactsClient {
                 // The co-publisher join reads its own rows
                 // (``CoPublisher/pollForCoPublishWelcome``).
                 continue
+            case .linkRefusal:
+                events.append(.linkRefusal(body))
             case .welcome:
                 events.append(
                     .welcome(
@@ -1278,12 +1320,15 @@ public final class ContactsClient {
                 let intro: String?
                 let profile: ProfileClaim?
                 var replyGrant: FfiReachGrant?
+                var linkAnswer: FfiLinkAnswer?
                 do {
                     let opened = try parsed.openEnvelope(
                         recipientX25519Priv: myX25519Secret
                     )
                     intro = String(data: opened.introMessage, encoding: .utf8) ?? ""
                     replyGrant = opened.replyGrant
+                    // ADR-0079 section 2 — the link this request answers.
+                    linkAnswer = opened.linkAnswer
                     // ADR-0048 — `nil` when the request carried no profile, or
                     // one that failed its bounds (the request itself stays
                     // valid). Bound by the caller to `fromPubkey`, which the
@@ -1296,7 +1341,8 @@ public final class ContactsClient {
                             // Envelope v2 — the requester's account id, or
                             // `nil` when it sent none (ADR-0021 tile match).
                             accountId: $0.accountId,
-                            usernameCertificate: $0.usernameCertificate
+                            usernameCertificate: $0.usernameCertificate,
+                            avatar: ProfileAvatar($0.avatar)
                         )
                     }
                 } catch {
@@ -1314,7 +1360,7 @@ public final class ContactsClient {
                     profile: profile,
                     createdAt: message.createdAt
                 )
-                events.append(.contactRequest(req, replyGrant: replyGrant))
+                events.append(.contactRequest(req, replyGrant: replyGrant, linkAnswer: linkAnswer))
             }
         }
         return PollResult(events: events, cursor: cursor, hasMore: hasMore)
@@ -1402,6 +1448,9 @@ public struct IncomingContactRequest: Equatable, Codable {
     /// request carried none (or one that failed its bounds). A claim bound to
     /// ``fromPubkey``; its username is shown only once verified.
     public let profile: ProfileClaim?
+    /// The time the DS stamped on the row (ISO-8601, server-set). For a
+    /// request through an invite link it decides the link's expiry (ADR-0079
+    /// amendment of 2026-10-19); persisted with the request.
     public let createdAt: String
 
     public init(
@@ -1422,6 +1471,16 @@ public struct IncomingContactRequest: Equatable, Codable {
         self.intro = intro
         self.profile = profile
         self.createdAt = createdAt
+    }
+
+    /// The DS stamp as Unix ms, or `nil` when it does not parse.
+    public var createdAtMs: UInt64? {
+        let withFrac = ISO8601DateFormatter()
+        withFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        guard let date = withFrac.date(from: createdAt) ?? plain.date(from: createdAt),
+              date.timeIntervalSince1970 >= 0 else { return nil }
+        return UInt64(date.timeIntervalSince1970 * 1000)
     }
 }
 
@@ -1491,10 +1550,17 @@ public enum IncomingMailboxEvent: Equatable {
     /// A verified request, with the requester's `reply` grant (ADR-0060
     /// section 6) — SECRET, handed to ``ReachCenter`` at receipt and never
     /// persisted with the pending request.
-    case contactRequest(IncomingContactRequest, replyGrant: FfiReachGrant? = nil)
+    /// ADR-0079 section 2 — `linkAnswer` names the `/i/` link of this
+    /// account the request is sent through, or `nil`. SECRET.
+    case contactRequest(
+        IncomingContactRequest, replyGrant: FfiReachGrant? = nil, linkAnswer: FfiLinkAnswer? = nil)
     case welcome(messageId: Int64, welcomeBytes: Data, createdAt: String)
     /// 1.9b1 — original recipient's accept-reply.
     case contactAck(IncomingContactAck)
+    /// ADR-0079 amendment of 2026-10-19 — a link refusal, NOT yet verified:
+    /// the receiver checks it against each pending contact
+    /// (`verifyLinkRefusal`) before it removes anything.
+    case linkRefusal(Data)
 }
 
 /// Result of ``ContactsClient/pollStrangerInbox(...)``.

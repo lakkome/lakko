@@ -27,7 +27,7 @@ import androidx.security.crypto.MasterKey
  * notifies under, so it is sensitive and stored **encrypted at
  * rest** — the SAME [EncryptedSharedPreferences] posture as
  * [me.lakko.app.auth.AccountIdentitySeedStore] /
- * [me.lakko.app.push.DevicePushId] (AES-256-GCM value encryption +
+ * [me.lakko.app.push.PushDeviceTokens] (AES-256-GCM value encryption +
  * AES-256-SIV key encryption, master key hardware-backed in the
  * Android Keystore, invariant #7). Foreground-only — the
  * FirebaseMessagingService silent-push path never needs the raw

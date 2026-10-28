@@ -194,7 +194,7 @@ export default function NewGroup(): JSX.Element {
                     disabled={busy() || !addable(c)}
                     onChange={() => toggle(c.signaturePubkeyB64)}
                   />
-                  <Avatar label={labelOf(c)} id={c.signaturePubkeyB64} />
+                  <Avatar label={labelOf(c)} id={c.signaturePubkeyB64} personKey={c.signaturePubkeyB64} />
                   <div class="lk-row-body">
                     <span class="lk-row-title">{labelOf(c)}</span>
                     <Show when={!addable(c)}>

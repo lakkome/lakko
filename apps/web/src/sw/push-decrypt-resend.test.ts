@@ -222,8 +222,8 @@ function deps(messages: ReturnType<typeof msg>[], overrides: Record<string, unkn
   return {
     forbidden,
     deps: {
-      readWakeBinding: async () => ({ devicePseudonymHex: "dd".repeat(32), accountId: ACCOUNT_ID }),
-      resolveAccount: async () => ({ accountId: ACCOUNT_ID, groupIdBytes: GROUP_BYTES }),
+      readWakeBinding: async () => ({ accountId: ACCOUNT_ID }),
+      lookupRoute: async () => ({ accountId: ACCOUNT_ID, groupIdB64: Buffer.from(GROUP_BYTES).toString("base64"), subIdHex: "dd".repeat(16) }),
       getDeviceKey: async () => ({}),
       getIdentitySeed: async () => new Uint8Array(64),
       loadSnapshot: async () => ({ snapshotBytes: new Uint8Array([1]), knownGroupIds: [] }),
@@ -253,7 +253,7 @@ function deps(messages: ReturnType<typeof msg>[], overrides: Record<string, unkn
   };
 }
 
-const wake = { deviceHex: "dd".repeat(32), groupHex: SECOND_HEX, pointer: 42 };
+const wake = { subHex: "dd".repeat(16), groupHex: SECOND_HEX, pointer: 42 };
 
 describe("decryptPushPreview and a re-sent message", () => {
   it("a re-send whose original this device holds posts nothing", async () => {

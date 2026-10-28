@@ -94,12 +94,16 @@ export type SFrameStreamIndex = number;
 export const SFRAME_STREAM_AUDIO: SFrameStreamIndex = 0;
 /** The stream index of a participant's camera (the main sender). */
 export const SFRAME_STREAM_CAMERA: SFrameStreamIndex = 1;
-/** Reserved for a screen share. Nothing is sealed under it yet. */
+/** The stream index of a screen share's picture (ADR-0083,
+ *  `sframeStreamScreen()` in the core). */
 export const SFRAME_STREAM_SCREEN_SHARE: SFrameStreamIndex = 2;
 /** The stream index of the camera's light sender (ADR-0070 step 1). */
 export const SFRAME_STREAM_CAMERA_LIGHT: SFrameStreamIndex = 3;
 /** The stream index of the camera's middle sender (ADR-0070 step 5). */
 export const SFRAME_STREAM_CAMERA_MIDDLE: SFrameStreamIndex = 4;
+/** The stream index of a screen share's sound (ADR-0083,
+ *  `sframeStreamScreenAudio()` in the core). */
+export const SFRAME_STREAM_SCREEN_AUDIO: SFrameStreamIndex = 5;
 
 /** Map an `RTCRtpSender` track `kind` to the ADR-0035 stream index of a
  *  participant's microphone or main camera. Anything that is not `"video"`
@@ -155,6 +159,24 @@ export interface SFrameTransformOptions {
    * codec; an audio sender's frames keep nothing.
    */
   readonly mediaKind?: "audio" | "video";
+  /**
+   * `"decrypt"` only: whether this browser decodes `audio/red` itself. A
+   * frame marked as a RED container goes to an Opus decoder as its primary
+   * frame when the frame's metadata does not name the codec and this is
+   * `false` (ADR-0071, amended 2026-10-26).
+   */
+  readonly redDecodes?: boolean;
+}
+
+/** Whether this browser decodes `audio/red` (RFC 2198) itself. Read on the
+ *  main thread, since a worker has no `RTCRtpReceiver`. */
+export function browserDecodesRed(): boolean {
+  try {
+    const codecs = RTCRtpReceiver.getCapabilities?.("audio")?.codecs ?? [];
+    return codecs.some((c) => c.mimeType.toLowerCase() === "audio/red");
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -371,14 +393,18 @@ export function attachSenderSFrame(
     readonly seed: Uint8Array;
     readonly localLeaf: number;
     readonly streamIndex?: SFrameStreamIndex;
+    /** The media kind, when the sender has no track yet (a sender sealed as
+     *  soon as its transceiver appears, before the camera is put on it). */
+    readonly kind?: "audio" | "video";
   },
 ): string {
   transportOrRefuse();
+  const kind = opts.kind ?? (sender.track?.kind === "video" ? "video" : "audio");
   // The sender's track is set by the caller's `addTrack` before this attach
   // (the native-shim sequencing), so without a stated index its kind is the
   // authoritative stream for every frame this transform seals: audio -> 0,
   // camera -> 1 (ADR-0035).
-  const streamIndex = opts.streamIndex ?? streamIndexOfKind(sender.track?.kind ?? "audio");
+  const streamIndex = opts.streamIndex ?? streamIndexOfKind(kind);
   if (!Number.isInteger(streamIndex) || streamIndex < 0 || streamIndex > 255) {
     throw new Error(`SFrame stream index ${String(streamIndex)} is outside 0..=255`);
   }
@@ -389,7 +415,7 @@ export function attachSenderSFrame(
     seed: opts.seed,
     localLeaf: opts.localLeaf,
     streamIndex,
-    mediaKind: sender.track?.kind === "video" ? "video" : "audio",
+    mediaKind: kind,
   };
   const attachedId = attachTransform(sender, options);
   attachedSenders.set(attachedId, sender);
@@ -419,6 +445,7 @@ export function attachReceiverSFrame(
     operation: "decrypt",
     id,
     seed: opts.seed,
+    redDecodes: browserDecodesRed(),
     // No stream index on the receive side: each inbound frame's header carries
     // the whole KID `(sender_leaf << 8) | stream_index`, which the worker reads
     // per frame to select (and lazily derive) the right per-stream key. One

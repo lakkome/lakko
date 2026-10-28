@@ -67,11 +67,11 @@ export function pollStepAfterBatch(active: boolean | null): "stop-removed" | "co
 }
 
 /**
- * Whether the ADR-0057 fork repair may run on this handle. The repair resets
- * the account's DeviceGroup chain, so it runs only on a group known to be
- * active: never on a removed device (it is not forked, it is out), and not on
- * a handle whose state could not be read.
+ * Whether the ADR-0081 rejoin may start on this handle. The rejoin drops the
+ * device's DeviceGroup state, so it starts only on a group known to be
+ * active: never on a removed device (it is not behind, it is out - it wipes
+ * itself), and not on a handle whose state could not be read.
  */
-export function forkRepairAllowed(active: boolean | null): boolean {
+export function rejoinAllowed(active: boolean | null): boolean {
   return active === true;
 }

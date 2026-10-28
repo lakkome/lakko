@@ -35,6 +35,7 @@ members = [
     "crates/lakko-feed",
     "crates/lakko-vault",
     "crates/lakko-l10n",
+    "crates/lakko-log-hygiene",
     "crates/lakko-discovery-client",
     "crates/lakko-tuf",
     "crates/lakko-ffi-uniffi",
@@ -112,6 +113,11 @@ futures = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# ADR-0080 - the city database (DB-IP City Lite, MaxMind format) behind
+# `GET /discovery/locate`. ISC licence; default features off (no mmap, no
+# unsafe string decoding).
+maxminddb = { version = "0.32", default-features = false }
+
 # SMTP client for the one letter `services/auth` sends (ADR-0075 recovery
 # email code). Minimal features: the SMTP transport and the message builder
 # over tokio with rustls (ring provider, bundled web PKI roots). Default
@@ -163,6 +169,7 @@ lakko-pow = { path = "crates/lakko-pow", version = "0.0.0" }
 lakko-pow-server = { path = "crates/lakko-pow-server", version = "0.0.0" }
 lakko-anon-token = { path = "crates/lakko-anon-token", version = "0.0.0" }
 lakko-anon-token-server = { path = "crates/lakko-anon-token-server", version = "0.0.0" }
+lakko-log-hygiene = { path = "crates/lakko-log-hygiene", version = "0.0.0" }
 lakko-mnemonic = { path = "crates/lakko-mnemonic", version = "0.0.0" }
 lakko-ui-rules = { path = "crates/lakko-ui-rules", version = "0.0.0" }
 lakko-feed = { path = "crates/lakko-feed", version = "0.0.0" }

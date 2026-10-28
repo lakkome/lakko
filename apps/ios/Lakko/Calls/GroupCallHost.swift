@@ -86,17 +86,22 @@ final class GroupCallHost: ObservableObject {
         var sfuBaseUrl: @MainActor () -> String?
         var microphoneGranted: @MainActor () async -> Bool
         var cameraGranted: @MainActor (_ video: Bool) async -> Bool
-        var mintJwt: @MainActor (_ sessionToken: String, _ callIdHex: String) async throws -> String
+        /// The call token (and the TURN credential beside it) for the room of
+        /// `callId`, paid for by one anonymous `call-join` token (ADR-0078
+        /// section 2): no session reaches the issuer.
+        var mintJwt: @MainActor (_ callId: Data) async throws -> MintCallJwtResult
         var makeHandle: @MainActor (
             _ config: SfuCallSession.Config,
             _ ui: CallUiState,
-            _ callIdHex: String
+            _ turn: TurnCredential?
         ) -> GroupCallHandle
         /// The group's own name for the call screen's title — the ADR-0051
-        /// shared fact every member has, falling back through the 1x1 peer name
-        /// and the members' names, never a hex id. `nil` when it cannot be
-        /// resolved at all.
-        var conversationTitle: @MainActor (_ groupIdHex: String) -> String?
+        /// shared fact every member has — or `nil` when the group has none,
+        /// and the screen says `Group call`. Not the chat title built from the
+        /// members' names: Android and the web title a nameless group's call
+        /// `Group call`, and the three clients in one call agree (aligned
+        /// 2026-10-23).
+        var groupName: @MainActor (_ groupIdHex: String) -> String?
         var safetyNumber: (_ seed: Data) -> String?
         var mintCallId: () -> Data
         /// `docs/ux/calls.md` §6 — file the finished call's row in the
@@ -109,10 +114,16 @@ final class GroupCallHost: ObservableObject {
         var nowMs: () -> Int64
         /// Whether a call is still there, as the SFU sees it (`SfuCallState.swift`).
         /// Injectable so the probe is tested without a network.
-        var sfuCallState: @MainActor (_ sfuBaseUrl: String, _ callIdHex: String, _ jwt: String) async -> SfuCallState? = {
-            base, callIdHex, jwt in
-            await SfuCallStateProbe.fetch(sfuBaseUrl: base, callIdHex: callIdHex, jwt: jwt)
+        /// The room is `sfuRoomForCall(callId)` and the request carries no
+        /// token (ADR-0078 section 2).
+        var sfuCallState: @MainActor (_ sfuBaseUrl: String, _ roomHex: String) async -> SfuCallState? = {
+            base, roomHex in
+            await SfuCallStateProbe.fetch(sfuBaseUrl: base, roomHex: roomHex)
         }
+        /// Composes this device's peer announcement for a call in the group and
+        /// verifies everyone else's against the group's roster (ADR-0078
+        /// section 2). `nil`: no tile is named from an announcement.
+        var peerAnnouncer: @MainActor (_ groupIdHex: String, _ callId: Data) -> CallPeerAnnouncer? = { _, _ in nil }
         /// This account's own person key in the group, resolved the way a
         /// received row's sender is (C-68): the key a call this device started
         /// records as its starter. `nil` when it cannot be resolved, which
@@ -274,7 +285,9 @@ final class GroupCallHost: ObservableObject {
             callError = .key("chat.call.unavailable")
             return
         }
-        guard let token = ports.sessionToken() else {
+        // The anonymous `call-join` token that pays for the call token is drawn
+        // with the session, so a call needs one.
+        guard ports.sessionToken() != nil else {
             NSLog("group call: no session token; refusing")
             callError = .key("call.error.signed_out_start")
             return
@@ -305,9 +318,9 @@ final class GroupCallHost: ObservableObject {
             callError = .key("call.error.encryption_setup")
             return
         }
-        let jwt: String
+        let minted: MintCallJwtResult
         do {
-            jwt = try await ports.mintJwt(token, callIdHex)
+            minted = try await ports.mintJwt(callId)
         } catch {
             NSLog("group call: JWT mint failed: %@", error.localizedDescription)
             if isCurrent(attempt) {
@@ -385,16 +398,19 @@ final class GroupCallHost: ObservableObject {
         // tiles, and in a call that can grow from two people to five, naming
         // the screen after whoever happens to be the only other person would
         // rename the call when a third joined.
-        ui.setPeerName(ports.conversationTitle(groupIdHex))
+        ui.setPeerName(ports.groupName(groupIdHex))
         let config = SfuCallSession.Config(
             sfuBaseUrl: base,
-            jwt: jwt,
+            jwt: minted.jwt,
             seed: key.seed,
             localLeaf: key.localLeaf,
             audio: true,
-            video: video
+            video: video,
+            // ADR-0078 section 2: the SFU names nobody; each peer announces
+            // itself, verified against this group's roster.
+            peerAnnouncer: ports.peerAnnouncer(groupIdHex, callId)
         )
-        let handle = ports.makeHandle(config, ui, callIdHex)
+        let handle = ports.makeHandle(config, ui, minted.turn)
         self.handle = handle
         self.ui = ui
         presentation = ui
@@ -531,9 +547,14 @@ final class GroupCallHost: ObservableObject {
     /// call this device is in needs no probe: its own socket is the proof.
     func probeCallState(groupIdHex: String, callIdHex: String) async {
         if activeCallId(groupIdHex: groupIdHex).map(Self.hex) == callIdHex { return }
-        guard let base = ports.sfuBaseUrl(), let token = ports.sessionToken() else { return }
-        guard let jwt = try? await ports.mintJwt(token, callIdHex) else { return }
-        guard await ports.sfuCallState(base, callIdHex, jwt) == .ended else { return }
+        // ADR-0078 section 2: the probe names the room (a one-way function of
+        // the call id) and carries no token, so no admission token is minted
+        // to ask and the issuer never sees who probes.
+        guard let base = ports.sfuBaseUrl(),
+              let probedCallId = Self.unhex(callIdHex), probedCallId.count == 16,
+              let room = try? sfuRoomForCall(callId: probedCallId)
+        else { return }
+        guard await ports.sfuCallState(base, room) == .ended else { return }
         // Still not in it after the awaits?
         if activeCallId(groupIdHex: groupIdHex).map(Self.hex) == callIdHex { return }
         guard let callId = Self.unhex(callIdHex), callId.count == 16 else { return }
@@ -946,37 +967,35 @@ extension GroupCallHost {
             sfuBaseUrl: { SfuConfig.baseUrl },
             microphoneGranted: { await MicrophonePermission.ensureGranted() },
             cameraGranted: { video in await CameraPermission.ensureGranted(forVideo: video) },
-            mintJwt: { token, callIdHex in
-                let client = CallJwtClient()
-                client.setSessionToken(token)
-                return try await client.mint(callId: callIdHex, role: .participant).jwt
+            mintJwt: { callId in
+                try await CallJwtClient().mint(callId: callId, role: .participant)
             },
-            makeHandle: { config, ui, callIdHex in
+            makeHandle: { config, ui, turn in
                 let handle = SfuCallUi(
                     config: config,
                     ui: ui,
                     // Section 4.4: the user's own tile carries their own name
                     // from the first second; `You` only when no name is set.
                     localDisplayName: GroupCallHost.ownTileName(),
-                    resolveDisplayName: GroupCallHost.displayNameResolver(callIdHex: callIdHex, ui: ui)
+                    peerNames: GroupCallPeerNames.live(ui: ui)
                 )
                 // The SFU has a public address, so most clients reach it on a
                 // server-reflexive candidate - but one behind a symmetric NAT
                 // has none, and for it the relay is the only way into the room.
-                if let token = sessionTokenProvider(), !token.isEmpty {
-                    let turn = TurnCredentialClient()
-                    turn.setSessionToken(token)
-                    handle.session.setTurnClient(turn)
-                }
+                // The credential came with the call token (ADR-0078 section 2).
+                handle.session.setTurnClient(TurnCredentialClient(preMinted: turn))
                 return handle
             },
-            conversationTitle: { [weak repository] in repository?.conversationTitle(groupIdHex: $0) },
+            groupName: { [weak repository] in repository?.groupName(groupIdHex: $0) },
             safetyNumber: { try? callSafetyNumber(seed: $0) },
             mintCallId: { CallSession.mintCallId() },
             recordCall: { [weak repository] call in
                 repository?.recordFinishedCall(call)
             },
             nowMs: { ChatRepository.nowMs() },
+            peerAnnouncer: { [weak repository] groupIdHex, callId in
+                repository?.callPeerAnnouncer(groupIdHex: groupIdHex, callId: callId)
+            },
             // The same resolution, with the same fallback, as the participant
             // this device's own signals are folded under.
             ownPersonKey: { [weak repository] groupIdHex in
@@ -1003,27 +1022,5 @@ extension GroupCallHost {
         // Empty renders as the localized "You" at the tile
         // (``CallPeerName/tileLabel(displayName:isLocal:)``).
         return name
-    }
-
-    /// ADR-0021 — the per-call peer_tag -> name resolver, so the SFU roster
-    /// shows the name the rest of the app shows for that person. The tag is
-    /// re-derived locally (the SFU never sends a name) over every account id
-    /// the device knows — accepted contacts AND received profiles (ADR-0048
-    /// envelope v2), so a member who is not a contact is named too. A peer
-    /// nobody here can name yet, or a tag collision, gives an empty name (the
-    /// tile's unnamed state), never the pseudonym the SFU sent
-    /// (``CallTileName``).
-    ///
-    /// Not frozen at call start: the map is rebuilt on every roster event, and
-    /// a profile arriving mid-call (the newcomer's own is answered within about
-    /// thirty seconds of joining) re-labels the live roster on `ui` through the
-    /// directory's `revision`. The resolver lives as long as the closure — the
-    /// handle holds it, so a finished call drops the subscription with it.
-    static func displayNameResolver(callIdHex: String, ui: CallUiState) -> (String, String, String) -> String {
-        let resolver = GroupCallNameResolver.live(callIdHex: callIdHex)
-        resolver.follow(ProfileDirectory.shared.$revision, ui: ui)
-        return { peerId, _, peerTag in
-            resolver.resolve(peerId: peerId, peerTag: peerTag)
-        }
     }
 }

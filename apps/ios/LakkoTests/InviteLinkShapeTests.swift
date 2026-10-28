@@ -66,12 +66,20 @@ final class InviteLinkShapeTests: XCTestCase {
         XCTAssertEqual(link.count, "https://lakko.me/g/".count + 8 + 1 + 16)
     }
 
-    func testAGroupInlineLinkParsesBackToTheSealedBlob() throws {
-        let wire = try mintWithPreview(groupId: Data(repeating: 7, count: 32)).sealed
-        let url = try GroupInviteUrl.composeInlineGroupInviteUrl(
-            capabilityBytes: wire, origin: "https://lakko.me")
-        let slug = String(url.dropFirst("https://lakko.me/g/".count))
-        XCTAssertEqual(try GroupInviteUrl.parseGroupInviteSlug(slug), .inline(capabilityBytes: wire))
+    /// The inline form is gone (2026-10-19): a sealed blob in the path is a
+    /// malformed slug on every kind, so the link opens as a dead one.
+    func testAnInlineSlugIsRefusedOnEveryKind() throws {
+        let sealed = try mintWithPreview(groupId: Data(repeating: 7, count: 32)).sealed
+        let slug = base64UrlEncodeNoPad(sealed)
+        XCTAssertThrowsError(try GroupInviteUrl.parseGroupInviteSlug(slug))
+        XCTAssertThrowsError(try CallInviteUrl.parseCallInviteSlug(slug))
+        XCTAssertNil(ContactsRepository.parseInviteSlug(slug))
+        for len in [100, 400, 938] {
+            let other = base64UrlEncodeNoPad(Data(repeating: 0x33, count: len))
+            XCTAssertThrowsError(try GroupInviteUrl.parseGroupInviteSlug(other))
+            XCTAssertThrowsError(try CallInviteUrl.parseCallInviteSlug(other))
+            XCTAssertNil(ContactsRepository.parseInviteSlug(other))
+        }
     }
 
     func testAGroupSlugOfAnyOtherShapeIsRefused() {
@@ -102,14 +110,6 @@ final class InviteLinkShapeTests: XCTestCase {
         let slug = String(url.dropFirst("https://lakko.me/c/".count))
         XCTAssertEqual(slug.count, 8)
         XCTAssertEqual(try CallInviteUrl.parseCallInviteSlug(slug), .pointer(blobId: blobId))
-    }
-
-    func testACallInlineLinkParsesBack() throws {
-        let bytes = Data(repeating: 0x33, count: CallInviteUrl.inlineMinLen)
-        let url = try CallInviteUrl.composeInlineCallInviteUrl(
-            capabilityBytes: bytes, origin: "https://lakko.me")
-        let slug = String(url.dropFirst("https://lakko.me/c/".count))
-        XCTAssertEqual(try CallInviteUrl.parseCallInviteSlug(slug), .inline(capabilityBytes: bytes))
     }
 
     func testACallSlugOfTheRetiredWidthIsRefused() {
@@ -206,26 +206,77 @@ final class InviteLinkShapeTests: XCTestCase {
 
     // MARK: - The landing, end to end
 
-    func testTheLandingRefusesAWrongSecretOnAnInlineLink() async throws {
+    func testTheLandingRefusesAWrongSecret() async throws {
         let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
         let vm = try landing(
-            slug: base64UrlEncodeNoPad(mint.sealed),
+            slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug,
             fragment: anySecretShape,
-            scope: GroupInviteDiscoveryURLProtocol.freshScope(.ok))
+            scope: GroupInviteDiscoveryURLProtocol.freshScope(.capability(mint.sealed)))
         await vm.run()
         XCTAssertEqual(vm.state, .damaged)
         XCTAssertNil(vm.preview)
     }
 
-    func testTheLandingShowsThePreviewUnderTheRightSecret() async throws {
+    /// An inline `/g/` link (the removed form) opens as an invalid link and
+    /// asks the ledger nothing, even under its own secret.
+    func testTheLandingTreatsAnInlineLinkAsDead() async throws {
         let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
+        let scope = GroupInviteDiscoveryURLProtocol.freshScope(.capability(mint.sealed))
         let vm = try landing(
             slug: base64UrlEncodeNoPad(mint.sealed),
             fragment: base64UrlEncodeNoPad(mint.linkSecret),
-            scope: GroupInviteDiscoveryURLProtocol.freshScope(.ok))
+            scope: scope)
+        await vm.run()
+        XCTAssertEqual(vm.state, .invalid)
+        XCTAssertTrue(GroupInviteDiscoveryURLProtocol.requests(scope)
+            .filter { $0.path.hasPrefix("/discovery/") }.isEmpty)
+    }
+
+    func testTheLandingShowsThePreviewUnderTheRightSecret() async throws {
+        let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
+        let vm = try landing(
+            slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug,
+            fragment: base64UrlEncodeNoPad(mint.linkSecret),
+            scope: GroupInviteDiscoveryURLProtocol.freshScope(.capability(mint.sealed)))
         await vm.run()
         XCTAssertEqual(vm.state, .ready)
         XCTAssertEqual(vm.preview?.groupName, "Hiking club")
+    }
+
+    /// A server error or a dropped connection on the fetch says nothing
+    /// about the link: it is offered again, never shown as invalid; Try again
+    /// fetches it once more.
+    func testAFetchThatFailsIsOfferedAgainNotInvalid() async throws {
+        let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
+        for mode in [GroupInviteDiscoveryURLProtocol.Mode.status(500), .network] {
+            let scope = GroupInviteDiscoveryURLProtocol.freshScope(mode)
+            let vm = try landing(
+                slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug,
+                fragment: base64UrlEncodeNoPad(mint.linkSecret),
+                scope: scope)
+            await vm.run()
+            XCTAssertEqual(vm.state, .openFailed, "\(mode)")
+            let fetches = GroupInviteDiscoveryURLProtocol.requests(scope)
+                .filter { $0.path.hasPrefix("/discovery/") }.count
+            await vm.retry()
+            XCTAssertEqual(vm.state, .openFailed, "\(mode)")
+            XCTAssertGreaterThan(
+                GroupInviteDiscoveryURLProtocol.requests(scope)
+                    .filter { $0.path.hasPrefix("/discovery/") }.count,
+                fetches, "Try again asks the ledger again (\(mode))")
+        }
+    }
+
+    /// The ledger answering that there is no such link is the link's own
+    /// state: invalid.
+    func testALinkTheLedgerDoesNotHaveIsInvalid() async throws {
+        let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
+        let vm = try landing(
+            slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug,
+            fragment: base64UrlEncodeNoPad(mint.linkSecret),
+            scope: GroupInviteDiscoveryURLProtocol.freshScope(.status(404)))
+        await vm.run()
+        XCTAssertEqual(vm.state, .invalid)
     }
 
     func testTheLandingRefusesALinkWithNoFragmentWithoutARequest() async throws {
@@ -395,7 +446,8 @@ final class InviteLinkShapeTests: XCTestCase {
             .withSessionToken("t")
         let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
         do {
-            let id = try await client.uploadGroupInvite(mint: mint, expiryMs: 0, maxUses: .max)
+            let id = try await client.uploadGroupInvite(
+                mint: mint, revocationPubkey: Data(repeating: 2, count: 32), expiryMs: 0, maxUses: .max)
             XCTFail("a 32-byte id must be refused, got \(id.count) bytes")
         } catch {}
     }
@@ -404,25 +456,47 @@ final class InviteLinkShapeTests: XCTestCase {
         let client = GroupInviteDiscoveryURLProtocol.client(
             GroupInviteDiscoveryURLProtocol.freshScope(.ok)).withSessionToken("t")
         let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
-        let id = try await client.uploadGroupInvite(mint: mint, expiryMs: 0, maxUses: .max)
+        let id = try await client.uploadGroupInvite(
+                mint: mint, revocationPubkey: Data(repeating: 2, count: 32), expiryMs: 0, maxUses: .max)
         XCTAssertEqual(id.count, 6)
         XCTAssertEqual(base64UrlEncodeNoPad(id), GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug)
     }
 
     // MARK: - Sealed uploads and opens for /i/ and /c/
 
-    /// The ledger gets the SEALED blob and clear fields only; `/i/` adds its
-    /// label and referral flag, `/c/` and `/g/` do not.
+    /// The ledger gets the SEALED blob and clear fields only, the same for
+    /// all three ledgers; ADR-0078 section 10: the link's own revocation key,
+    /// never an owner, an issuer key, a label or a referral flag.
     func testTheUploadBodiesCarryTheSealedBlobAndTheClearFields() throws {
-        let contact = try JSONSerialization.jsonObject(with: JSONEncoder().encode(InviteUploadRequest(
-            sealed: "U0VBTEVE", issuerPubkey: "S0VZ", expiryMs: 7, maxUses: 0,
-            label: "Team", bootstrapReferral: true))) as? [String: Any]
-        XCTAssertEqual(Set(contact?.keys.map { $0 } ?? []),
-                       ["sealed", "issuer_pubkey", "expiry_ms", "max_uses", "label", "bootstrap_referral"])
         let group = try JSONSerialization.jsonObject(with: JSONEncoder().encode(InviteUploadRequest(
-            sealed: "U0VBTEVE", issuerPubkey: "S0VZ", expiryMs: 0, maxUses: .max))) as? [String: Any]
-        XCTAssertEqual(Set(group?.keys.map { $0 } ?? []), ["sealed", "issuer_pubkey", "expiry_ms", "max_uses"])
+            sealed: "U0VBTEVE", revocationPubkey: "S0VZ", expiryMs: 0, maxUses: .max))) as? [String: Any]
+        XCTAssertEqual(Set(group?.keys.map { $0 } ?? []), ["sealed", "revocation_pubkey", "expiry_ms", "max_uses"])
         XCTAssertNil(group?["capability"], "the plaintext capability never reaches the ledger")
+    }
+
+    /// ADR-0079 section 1 — the longest link the core mints (the longest
+    /// label, display name and username) fits the client's `/i/` ceiling,
+    /// and the page reads the stated name back.
+    func testTheLongestContactLinkFitsTheCeilingAndCarriesItsInviter() throws {
+        let owner = try Identity.fromSeed(seed: issuerSeed)
+        // 63 four-byte letters and one three-byte letter: 255 bytes in 64
+        // scalars, the longest name the display-name rule admits.
+        let name = String(repeating: "\u{20000}", count: 63) + "\u{4E2D}"
+        let username = String(repeating: "z", count: 32)
+        let mint = try composeInviteCapability(
+            ownerSigningSeed: owner.ed25519Seed(), ownerAccountId: Data(repeating: 4, count: 16),
+            ownerX25519Pubkey: owner.x25519PublicKey(), expiryMs: 0, maxUses: 0,
+            bootstrapReferral: false, label: String(repeating: "l", count: 64),
+            linkId: Self.testLinkId,
+            linkGrant: try deriveReachGrant(
+                accountSeed: owner.ed25519Seed(), class: .link, scopeId: Self.testLinkId, version: 1),
+            inviterDisplayName: name, inviterUsername: username)
+        XCTAssertLessThanOrEqual(mint.sealed.count, DiscoveryClient.maxCapabilityBytes)
+        let cap = try InviteCapability.openLink(sealed: mint.sealed, linkSecret: mint.linkSecret)
+        XCTAssertEqual(cap.inviterDisplayName(), name)
+        XCTAssertEqual(cap.inviterUsername(), username)
+        XCTAssertEqual(OpenedInvite.statedName(displayName: nil, username: username), "@" + username)
+        XCTAssertNil(OpenedInvite.statedName(displayName: "  ", username: ""))
     }
 
     func testAContactLinkOpensUnderItsSecretOnly() throws {
@@ -435,7 +509,8 @@ final class InviteLinkShapeTests: XCTestCase {
             // binding, which the core checks against the owner key.
             linkId: Self.testLinkId,
             linkGrant: try deriveReachGrant(
-                accountSeed: owner.ed25519Seed(), class: .link, scopeId: Self.testLinkId, version: 1))
+                accountSeed: owner.ed25519Seed(), class: .link, scopeId: Self.testLinkId, version: 1),
+            inviterDisplayName: nil, inviterUsername: nil)
         XCTAssertEqual(mint.issuerPubkey, owner.signaturePublicKey())
         let cap = try InviteCapability.openLink(sealed: mint.sealed, linkSecret: mint.linkSecret)
         XCTAssertEqual(cap.ownerAccountId(), Data(repeating: 4, count: 16))

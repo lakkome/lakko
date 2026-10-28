@@ -19,6 +19,15 @@
  * switched off, a contact key rotated after a removal, a link revoked, a
  * request answered - falls out of the desired set and is removed by the same
  * diff, so narrowing never needs a separate code path.
+ *
+ * ADR-0078 section 9: `group`, `member` and `channel` keys are ONE key per
+ * class per account, not one per group or channel, so a mailbox write under
+ * one no longer names the group its writer shares with the owner. Revoking a
+ * group's members therefore means rotating the class key for every group:
+ * the class version is bumped when the account leaves a group or a channel
+ * ({@link departuresOf}), when a group shrinks, and when the setting changes,
+ * and the profile carrying the new grants is republished in every remaining
+ * group.
  */
 
 /** The reach classes, by the names the UI and the persisted book use. The
@@ -44,9 +53,10 @@ export function reachClassName(byte: number): ReachClassName | null {
   return null;
 }
 
-/** Classes whose key is account-wide (an empty scope). */
+/** Classes whose key is account-wide (an empty scope): every class but
+ *  `link` and `reply` (ADR-0078 section 9). */
 export function isAccountWideClass(cls: ReachClassName): boolean {
-  return cls === "contact" || cls === "fof";
+  return cls !== "link" && cls !== "reply";
 }
 
 /** How long a `reply` key lives: 7 days (ADR-0060 open question 2, chosen). */
@@ -112,6 +122,12 @@ export interface ReachBook {
    * was recorded.
    */
   readonly registeredForKeyHex?: string;
+  /**
+   * ADR-0078 section 9: the groups and channels (hex ids) the account was a
+   * member of at the last sync, so a later sync sees which it left. `null`
+   * until the first sync that saw any.
+   */
+  readonly memberOf?: { readonly groups: readonly string[]; readonly channels: readonly string[] } | null;
 }
 
 /** What binding a book to an account key does with its registrations. */
@@ -173,6 +189,7 @@ export const EMPTY_REACH_BOOK: ReachBook = {
   fofRotatedAtMs: 0,
   stateUpdatedAtMs: 0,
   recovery: null,
+  memberOf: null,
 };
 
 function versionKey(cls: ReachClassName, scopeHex: string): string {
@@ -192,17 +209,52 @@ export function bumpVersion(book: ReachBook, cls: ReachClassName, scopeHex: stri
   return { ...book, versions: { ...book.versions, [key]: next } };
 }
 
-/** Set `(cls, scope)` to an explicit version (a channel key follows the
- *  channel's epoch). Never moves a version backwards. */
-export function raiseVersion(
+/** Bump each account-wide class in `classes` to its next version
+ *  (ADR-0078 section 9). */
+export function rotateClasses(book: ReachBook, classes: readonly ReachClassName[]): ReachBook {
+  let next = book;
+  for (const cls of classes) next = bumpVersion(next, cls, "");
+  return next;
+}
+
+/** What the account left since the last sync (ADR-0078 section 9). */
+export interface Departures {
+  /** A group the account was in is no longer among its groups. */
+  readonly leftGroup: boolean;
+  /** A channel the account was in is no longer among its channels. */
+  readonly leftChannel: boolean;
+  /** The membership to record for the next sync. */
+  readonly memberOf: { readonly groups: readonly string[]; readonly channels: readonly string[] };
+}
+
+/**
+ * Which classes the account's departures since the last sync rotate. Pure.
+ *
+ * A group or channel present at the last sync and absent now was left (or
+ * the account was removed from it): its members still hold this account's
+ * class key, so the class is rotated. An empty current list while the last
+ * one was not is read as "not loaded yet", never as leaving everything: with
+ * no group at all no `group` or `member` key is registered anyway, so the
+ * old one stops working on its own.
+ */
+export function departuresOf(
   book: ReachBook,
-  cls: ReachClassName,
-  scopeHex: string,
-  version: number,
-): ReachBook {
-  const key = versionKey(cls, scopeHex);
-  if ((book.versions[key] ?? 0) >= version) return book;
-  return { ...book, versions: { ...book.versions, [key]: version } };
+  scopes: { readonly groupIdsHex: readonly string[]; readonly channels: readonly { readonly idHex: string }[] },
+): Departures {
+  const groups = [...new Set(scopes.groupIdsHex)].sort();
+  const channels = [...new Set(scopes.channels.map((c) => c.idHex))].sort();
+  const before = book.memberOf ?? null;
+  if (before === null) return { leftGroup: false, leftChannel: false, memberOf: { groups, channels } };
+  const left = (prev: readonly string[], now: readonly string[]): boolean =>
+    now.length > 0 && prev.some((id) => !now.includes(id));
+  return {
+    leftGroup: left(before.groups, groups),
+    leftChannel: left(before.channels, channels),
+    memberOf: {
+      groups: groups.length === 0 ? before.groups : groups,
+      channels: channels.length === 0 ? before.channels : channels,
+    },
+  };
 }
 
 /** Record a new open request. */
@@ -272,26 +324,27 @@ export interface ReachInputs {
  * The full set of keys that should be registered on the account mailbox:
  *
  * - `contact`, always (contacts can always write);
- * - `member` per group, always (ADR-0060 section 1: re-admission Welcomes);
- * - `group` per group the setting allows;
- * - `channel` per channel the setting allows, at the channel's epoch;
+ * - `member`, while the account is in any group (ADR-0060 section 1:
+ *   re-admission Welcomes);
+ * - `group`, while the setting lets the members of any group find it;
+ * - `channel`, while the setting lets the members of any channel find it;
  * - `fof` while contacts of contacts are allowed;
  * - `link` per live link, `reply` per open request, each with its expiry.
+ *
+ * ADR-0078 section 9: one `member`, one `group` and one `channel` key for
+ * the account, never one per group or channel.
  */
 export function desiredReachKeys(book: ReachBook, inputs: ReachInputs): WantedReachKey[] {
   const out: WantedReachKey[] = [];
   out.push({ cls: "contact", scopeHex: "", version: versionOf(book, "contact", ""), expiresAtMs: null });
-  for (const g of inputs.groupIdsHex) {
-    out.push({ cls: "member", scopeHex: g, version: versionOf(book, "member", g), expiresAtMs: null });
-    if (inputs.allowsGroup(g)) {
-      out.push({ cls: "group", scopeHex: g, version: versionOf(book, "group", g), expiresAtMs: null });
-    }
+  if (inputs.groupIdsHex.length > 0) {
+    out.push({ cls: "member", scopeHex: "", version: versionOf(book, "member", ""), expiresAtMs: null });
   }
-  for (const c of inputs.channels) {
-    if (inputs.allowsChannel(c.idHex)) {
-      const version = Math.max(c.epoch, versionOf(book, "channel", c.idHex));
-      out.push({ cls: "channel", scopeHex: c.idHex, version, expiresAtMs: null });
-    }
+  if (inputs.groupIdsHex.some((g) => inputs.allowsGroup(g))) {
+    out.push({ cls: "group", scopeHex: "", version: versionOf(book, "group", ""), expiresAtMs: null });
+  }
+  if (inputs.channels.some((c) => inputs.allowsChannel(c.idHex))) {
+    out.push({ cls: "channel", scopeHex: "", version: versionOf(book, "channel", ""), expiresAtMs: null });
   }
   if (inputs.allowsContactsOfContacts) {
     out.push({ cls: "fof", scopeHex: "", version: versionOf(book, "fof", ""), expiresAtMs: null });
@@ -440,8 +493,10 @@ export function adoptReachState(
 // ----------------------------------------------------------------------------
 
 /**
- * How many versions of an account-wide key (`contact`, `fof`) a restored
- * device derives when it looks for the one registered on the DS: 0..=1024.
+ * How many versions of an account-wide key a restored device derives when it
+ * looks for the one registered on the DS: 0..=1024. Since ADR-0078 section 9
+ * `group`, `member` and `channel` are account-wide too, rotated on every
+ * departure, shrink and setting change.
  * `fof` rotates on a 7-day schedule ({@link FOF_ROTATION_MS}), so 1024
  * versions cover about 19 years of weekly rotations; `contact` moves only on
  * a contact removal. One derivation cost about 0.4 ms in the debug wasm build
@@ -452,14 +507,7 @@ export function adoptReachState(
  */
 export const REACH_RECOVERY_ACCOUNT_WIDE_VERSIONS = 1024;
 
-/**
- * How many versions of a per-group key (`group`, `member`) are derived, and
- * how far past a channel's known epoch a `channel` key is looked for: 256.
- * A group's keys move only when that group shrinks (one bump per removal), so
- * 256 removals from one group; the cost is two scans per group, about 0.2 s
- * each in the same measurement, paid once per group on a restored device.
- */
-export const REACH_RECOVERY_SCOPED_VERSIONS = 256;
+
 
 /** `true` when this device holds no version state at all: nothing bumped,
  *  nothing adopted, nothing ever registered. */
@@ -482,37 +530,26 @@ export interface VersionCheck {
 }
 
 /**
- * The `(class, scope)` pairs a recovering device must check before it
- * registers anything: every versioned class it could register for its scopes
- * (contact and fof with the empty scope, group and member per group, channel
- * per channel), minus the ones whose version is already established (in
- * `versions`, or checked). Empty when the book is not recovering.
+ * The classes a recovering device must check before it registers anything:
+ * every versioned class (all account-wide since ADR-0078 section 9: contact,
+ * group, member, channel, fof), minus the ones whose version is already
+ * established (in `versions`, or checked). Empty when the book is not
+ * recovering. `scopes` is kept for the callers; no class is per scope any
+ * more.
  */
 export function versionChecksDue(
   book: ReachBook,
-  scopes: { readonly groupIdsHex: readonly string[]; readonly channels: readonly { readonly idHex: string; readonly epoch: number }[] },
+  _scopes?: unknown,
 ): VersionCheck[] {
   const recovery = book.recovery;
   if (recovery === null) return [];
   const out: VersionCheck[] = [];
-  const due = (cls: ReachClassName, scopeHex: string, from: number, to: number): void => {
-    const key = versionKey(cls, scopeHex);
+  const due = (cls: ReachClassName): void => {
+    const key = versionKey(cls, "");
     if (key in book.versions || recovery.checked[key] === true) return;
-    out.push({ cls, scopeHex, from, to });
+    out.push({ cls, scopeHex: "", from: 0, to: REACH_RECOVERY_ACCOUNT_WIDE_VERSIONS });
   };
-  due("contact", "", 0, REACH_RECOVERY_ACCOUNT_WIDE_VERSIONS);
-  due("fof", "", 0, REACH_RECOVERY_ACCOUNT_WIDE_VERSIONS);
-  for (const g of scopes.groupIdsHex) {
-    due("group", g, 0, REACH_RECOVERY_SCOPED_VERSIONS);
-    due("member", g, 0, REACH_RECOVERY_SCOPED_VERSIONS);
-  }
-  for (const c of scopes.channels) {
-    // A channel key's version is the channel epoch it was registered at, and
-    // the wanted version is never below the known epoch, so a version below
-    // it can never be re-registered; only the window above it is looked at.
-    const from = Math.max(0, Math.trunc(c.epoch));
-    due("channel", c.idHex, from, from + REACH_RECOVERY_SCOPED_VERSIONS);
-  }
+  for (const cls of ["contact", "group", "member", "channel", "fof"] as const) due(cls);
   return out;
 }
 
@@ -551,6 +588,16 @@ export function applyVersionChecks(
     checked[key] = true;
   }
   return { book: { ...book, versions, registered, recovery: { checked } }, raised };
+}
+
+function decodeMemberOf(
+  raw: unknown,
+): { readonly groups: readonly string[]; readonly channels: readonly string[] } | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const r = raw as { groups?: unknown; channels?: unknown };
+  const strings = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  return { groups: strings(r.groups), channels: strings(r.channels) };
 }
 
 function decodeRecovery(raw: unknown): ReachBook["recovery"] {
@@ -593,6 +640,7 @@ export function decodeReachBook(json: string | null | undefined): ReachBook {
       ...(typeof raw.registeredForKeyHex === "string"
         ? { registeredForKeyHex: raw.registeredForKeyHex }
         : {}),
+      memberOf: decodeMemberOf(raw.memberOf),
     };
   } catch {
     return EMPTY_REACH_BOOK;

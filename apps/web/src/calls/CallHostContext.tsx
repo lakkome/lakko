@@ -92,7 +92,7 @@ import { A } from "@solidjs/router";
 
 import { cameraStartFailure } from "./capture-fallback";
 import { composeAndUploadCallInvite } from "./composer";
-import { inlineLinkSlug, rememberMintedLink } from "../contacts/minted-links";
+import { rememberMintedLink } from "../contacts/minted-links";
 import {
   CALL_INVITE_LABEL,
   callInviteMaxUses,
@@ -111,7 +111,6 @@ import {
   type InCallInvite,
 } from "./in-call-invite";
 import { DiscoveryClient } from "../discovery/client";
-import { TurnCredentialClient } from "./turn-credential-client";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import { sendTextToConversation } from "../chat/send-text";
@@ -138,7 +137,7 @@ import {
   type QuietCallOffer,
 } from "./quiet-call-offer";
 import { ChatClient } from "../chat/client";
-import { pushGidForGroup } from "../push/group-routing";
+import { sealedWakeForGroup } from "../push/group-routing";
 import { makeCallSignalingPublisher } from "../chat/call-signaling-publish";
 import { readIsActive } from "../chat/membership-ended";
 import { memberKeysOf, peerName } from "../chat/peer-name";
@@ -150,7 +149,6 @@ import { InviteContactsPicker } from "./InviteContactsPicker";
 import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { loadAccepted } from "../contacts/local-store";
 import { onGroupMlsIdle } from "../mls/group-lock";
-import { buildPeerTagMap, personForPeerTag, type PeerTagBinding, type PeerTagMap } from "./peer-tag-map";
 import { callTileName, personNameOrNull } from "./tile-name";
 import {
   ENDED_FOR_ALL,
@@ -192,7 +190,8 @@ import { decideInboundSignaling } from "./call-host-routing";
 import { CallSoundController } from "./CallSoundController";
 import { classifyCallOutcome, type CallLogEntry } from "./call-log";
 import { useCallLog } from "./CallLogContext";
-import { CallJwtClient } from "./call-jwt-client";
+import { CallJwtClient, turnProviderForCall } from "./call-jwt-client";
+import { groupPeerAnnouncer } from "./call-relay";
 import {
   GROUP_CALL_ALONE_END_MS,
   decideGroupCallEpochChange,
@@ -232,11 +231,13 @@ import type { SfuCallState } from "./sfu-call-session";
 import {
   SFU_CALL_STATE_PROBE_MS,
   parseSfuCallState,
-  sfuCallStateInit,
-  sfuCallStateUrl,
+  sfuRoomStateUrl,
 } from "./sfu-call-state";
 import { callEndedAtMs } from "./sfu-keepalive";
 import { createSfuCallUi, type SfuCallUiHandle } from "./sfu-call-ui";
+import { OneToOneScreenShare } from "./one-to-one-screen-share";
+import { currentShareStream, screenShareActions } from "./screen-share-store";
+import { SCREEN_SHARE_NOTICE_MS } from "./screen-share-capability";
 import { groupCallTileSources } from "./group-call-tile-sources";
 import { sfuBaseUrl } from "./sfu-config";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
@@ -246,6 +247,7 @@ import { callBarWouldShow } from "./call-bar-model";
 import { t } from "../l10n";
 import { callFailureReason, callFailureText } from "./call-errors";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
+import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 
 /** A 1x1 call that ended, for the chat view's "Last call ended" line. */
 export interface EndedCallNotice {
@@ -488,10 +490,6 @@ export function qualityTierForRtt(rttMs: number | null): QualityTier {
 
 export function CallHostProvider(props: { children: JSX.Element }): JSX.Element {
   const auth = useAuth();
-  // One TURN-credential client for the session. Without it a 1x1 call
-  // resolves STUN-only ICE, and two peers that cannot reach each other
-  // directly never connect.
-  const turn = new TurnCredentialClient();
   const chats = useChats();
   const profiles = useProfiles();
   /** The name on the user's own tile (§4.4): the profile name, `You` when
@@ -510,10 +508,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     // `x-lakko-wake` header of their DS publish, which names the group's
     // opaque `push_gid` (ADR-0042). Without a resolver there is no wake at
     // all: the DS `group_id` is never put in the header in its place.
-    pushGidResolver: async (groupId) => {
+    wakeSealer: async (groupId, kind) => {
       const s = auth.state();
       if (s.kind !== "session") return null;
-      return pushGidForGroup(s.account.accountId, base64Encode(groupId));
+      return sealedWakeForGroup(s.account.accountId, base64Encode(groupId), kind);
     },
   });
 
@@ -768,8 +766,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (groupIdB64 === null) return t("chat.peer.fallback_name");
     const entry = groupEntry(groupIdB64);
     if (entry === undefined) return t("chat.peer.fallback_name");
-    const own = chats.identity();
-    const ownKeyB64 = own === null ? null : base64Encode(own.signaturePublicKey);
+    // The person key, as the chat header uses: member keys name people, and
+    // the device key never matched one, so the call title named this person
+    // beside the other one ("A, B").
+    const ownKeyB64 = ownPersonKeyB64(chats.identity());
     const memberKeysB64 = memberKeysOf(entry.group);
     // The same title the chat header and the list show (ADR-0051 §5): the
     // kind the conversation carries (ADR-0062) decides group-vs-1x1, the
@@ -788,6 +788,16 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       ),
       isGroup,
     });
+  }
+
+  /** ADR-0084 - the person a one-to-one call is with (their profile key),
+   *  whose photo the incoming-call screen shows; `null` for a group. */
+  function personKeyFor(groupIdB64: string | null): string | null {
+    if (groupIdB64 === null) return null;
+    const entry = groupEntry(groupIdB64);
+    if (entry === undefined || conversationKindOf(entry.group) === "group") return null;
+    const ownKeyB64 = ownPersonKeyB64(chats.identity());
+    return memberKeysOf(entry.group).find((k) => k !== ownKeyB64) ?? null;
   }
 
   function publisherFor(groupIdB64: string): (bytes: Uint8Array) => Promise<void> {
@@ -815,6 +825,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     camOn: videoCall(),
     quality: qualityTierForRtt(connStats()?.rttMs ?? null),
     speaking: false,
+    personKeyB64: OWN_AVATAR_KEY,
   });
 
   const remoteParticipant = (): Participant => ({
@@ -825,11 +836,79 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     camOn: remoteHasVideo(),
     quality: "good",
     speaking: false,
+    personKeyB64: personKeyFor(callGroup()) ?? undefined,
   });
 
   /** The safety number of the live 1x1 call, derived once when its key is
    *  armed. Display-only: a derivation failure never affects the call. */
   let oneToOneSafety: string | null = null;
+
+  /**
+   * The screen share of the live 1x1 call (ADR-0083 section 4), built once
+   * the call connects, with the session it belongs to. A share stream that
+   * arrives first is held until it is built.
+   */
+  let oneToOneShare: { readonly session: CallSession; readonly share: OneToOneScreenShare } | null =
+    null;
+  let heldOneToOneScreen: {
+    readonly session: CallSession;
+    readonly stream: MediaStream;
+    readonly track: MediaStreamTrack;
+  } | null = null;
+
+  function startOneToOneShare(session: CallSession, groupIdB64: string, callId: Uint8Array): void {
+    if (oneToOneShare?.session === session) {
+      oneToOneShare.share.onConnected();
+      return;
+    }
+    void loadWasm()
+      .then((wasm) => {
+        // Ended, or replaced, while the module resolved.
+        if (activeCall !== session || slotSession !== session) return;
+        if (oneToOneShare?.session === session) return;
+        const identity = chats.identity();
+        if (identity === null) return;
+        let share: OneToOneScreenShare;
+        try {
+          share = new OneToOneScreenShare({
+            wasm,
+            identity,
+            callId,
+            group: () => groupEntry(groupIdB64)?.group ?? null,
+            session: {
+              attachScreenShare: (capture) => session.attachScreenShare(capture),
+              detachScreenShare: () => session.detachScreenShare(),
+            },
+            publish: (signal) => {
+              void publisherFor(groupIdB64)(signal);
+            },
+            nameOf: (personKeyB64) => callNameOfPerson(personKeyB64) ?? "",
+            notice: (text) => callActions.showNotice(text, SCREEN_SHARE_NOTICE_MS),
+            store: screenShareActions,
+          });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("1x1 screen share unavailable", err);
+          return;
+        }
+        oneToOneShare = { session, share };
+        const held = heldOneToOneScreen;
+        heldOneToOneScreen = null;
+        if (held !== null && held.session === session) share.onRemoteTrack(held.track);
+        if (session.getState() === "connected") share.onConnected();
+      })
+      .catch(() => {
+        // Without the core nothing is shared; the call goes on.
+      });
+  }
+
+  function endOneToOneShare(session: CallSession): void {
+    if (heldOneToOneScreen?.session === session) heldOneToOneScreen = null;
+    if (oneToOneShare?.session !== session) return;
+    oneToOneShare.share.dispose();
+    oneToOneShare = null;
+    screenShareActions.reset();
+  }
 
   /**
    * Say whether this 1x1 call's media is sealed, and show its safety number
@@ -935,6 +1014,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         if (slotSession !== session) return;
         setLocalStream(s);
       },
+      onRemoteScreenStream: (stream, track) => {
+        if (slotSession !== session) return;
+        if (oneToOneShare?.session === session) oneToOneShare.share.onRemoteTrack(track);
+        else heldOneToOneScreen = { session, stream, track };
+      },
       onVideoPublishState: (s) => {
         if (slotSession !== session) return;
         setVideoPublishState(s);
@@ -951,7 +1035,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         if (s === "connected" && callJournal?.session === session) {
           callJournal.connectedAtMs ??= Date.now();
         }
+        if (s === "connected") startOneToOneShare(session, groupIdB64, callId);
         if (s === "done") {
+          endOneToOneShare(session);
           if (callJournal?.session === session) recordOneToOneCall(reason);
           endedCallIds.add(callIdHex(callId));
           activeCall = null;
@@ -999,13 +1085,18 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           oneToOneSafety = null;
         });
     }
-    // Read the token at call time rather than at build time: login, recover
-    // and pairing all replace it, and a credential minted against a stale one
-    // is refused by the relay.
-    session.setTurnProvider(async () => {
-      turn.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
-      return turn.fetchOrNull();
-    });
+    // ADR-0078 section 2: the TURN credential comes from the same anonymous
+    // exchange as an SFU call token (one `call-join` token, the room of this
+    // call id). Without it a 1x1 call resolves STUN-only ICE, and two peers
+    // that cannot reach each other directly never connect.
+    session.setTurnProvider(
+      turnProviderForCall(
+        {
+          mintForCall: async (id, role) => new CallJwtClient(await loadWasm()).mintForCall(id, role),
+        },
+        callId,
+      ),
+    );
     return session;
   }
 
@@ -1107,6 +1198,23 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           // The ended-phase effect leaves the call.
           callActions.endCall();
         }
+      }
+
+      // The other person's screen-share state (ADR-0083 section 4): for the
+      // call in the slot only, verified against the MLS sender's own leaf.
+      if (parsed.kind === "screenShare") {
+        const live = oneToOneShare;
+        if (decision.oneToOne === "apply" && live !== null && activeCall === live.session) {
+          let senderKey: Uint8Array | null = null;
+          try {
+            senderKey =
+              item.row.senderMemberKey === undefined ? null : base64Decode(item.row.senderMemberKey);
+          } catch {
+            senderKey = null;
+          }
+          live.share.receive(parsed.screenShareState, senderKey);
+        }
+        return;
       }
 
       switch (decision.oneToOne) {
@@ -1576,6 +1684,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       readonly keyedEpoch: bigint | null;
       readonly safetyNumber: string | undefined;
       readonly jwt: string;
+      /** The TURN credential minted beside the token (ADR-0078 section 2). */
+      readonly turn: RTCIceServer | null;
       /** When this device asked for the call. */
       readonly startedAtMs: number;
     }
@@ -1662,10 +1772,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           } catch {
             safetyNumber = undefined;
           }
-          // Call-admission JWT (JWS Compact, EdDSA) bound to the session.
-          const jwt = new CallJwtClient(wasm);
-          jwt.setSessionToken(secrets.sessionToken);
-          const minted = await jwt.mint(hex, "participant");
+          // Call-admission JWT (JWS Compact, EdDSA), paid for by one anonymous
+          // `call-join` token (ADR-0078 section 2): it names the room and a
+          // random peer id, never the account.
+          const minted = await new CallJwtClient(wasm).mintForCall(callId, "participant");
           return {
             ok: true,
             material: {
@@ -1677,6 +1787,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
               keyedEpoch,
               safetyNumber,
               jwt: minted.jwt,
+              turn: minted.turn,
               startedAtMs: Date.now(),
             },
           };
@@ -1711,22 +1822,24 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
               observedAtMs: m.startedAtMs,
             });
           }
-          // ADR-0021 — the per-call peer_tag -> person map, derived locally (the
-          // SFU never sends a name) over every account id this device holds: the
-          // accepted contacts' AND the ones members claimed in their profiles
-          // (ADR-0048 v2). Not frozen at call start — a newcomer's profile is
-          // answered within the first poll or so, and the roster event that
-          // named its tile may have run before it landed. The map is rebuilt
-          // whenever the profile store changes (`profiles.version` also bumps on
-          // an accepted-contacts change), and `refreshNames` re-runs the
-          // roster through it.
-          const resolveDisplayName = peerNameResolver(m.wasm, hex);
+          // ADR-0078 section 2 — the SFU names nobody. Each peer announces
+          // its own SFU peer id, signed with its MLS leaf key and sealed
+          // under the call seed; the announcement is verified against the
+          // chat group's roster at the current epoch, and the tile names the
+          // person the leaf belongs to through the one resolver.
+          const announcer = groupPeerAnnouncer(
+            m.wasm,
+            m.id,
+            callId,
+            () => groupEntry(groupIdB64)?.group ?? null,
+          );
           const handle = createSfuCallUi(
             {
               sfuBaseUrl: m.base,
               jwt: m.jwt,
               seed: m.seed,
               localLeaf: m.localLeaf,
+              peerAnnouncer: announcer,
               media: {
                 audio: true,
                 // A group video call publishes the camera at connect (SFrame-sealed
@@ -1739,17 +1852,14 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
             {
               localDisplayName: ownTileName(),
               safetyNumber: m.safetyNumber,
-              resolveDisplayName,
+              resolveDisplayName: callNameOfPerson,
               onSessionStateChange: (state) => onGroupSessionState(hex, state),
             },
           );
           // The SFU has a public address, so most clients reach it on a
           // server-reflexive candidate - but one behind a symmetric NAT has none,
           // and for it the relay is the only way into the room.
-          handle.session.setTurnProvider(async () => {
-            turn.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
-            return turn.fetchOrNull();
-          });
+          handle.session.setTurnProvider(async () => m.turn);
           started = handle;
           setGroupHandle(handle);
           setGroupSlot({ groupIdB64, callIdHex: hex, starting: false });
@@ -1812,44 +1922,6 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     }
   }
 
-  /**
-   * ADR-0021 — names a call's peers from the people this device knows.
-   *
-   * The per-call peer_tag -> person map is derived locally (the SFU never
-   * sends a name) over every account id this device holds: the accepted
-   * contacts' AND the ones people claimed in their profiles (ADR-0048 v2).
-   * Not frozen at call start: the map is rebuilt whenever the profile store
-   * changes (`profiles.version` also bumps on an accepted-contacts change).
-   * `null` while the peer is nobody this device can name yet; never a piece
-   * of the account id (`tile-name.ts`).
-   */
-  function peerNameResolver(
-    wasm: Awaited<ReturnType<typeof loadWasm>>,
-    callIdHex: string,
-  ): (peerId: string, pseudonym: string, peerTag: string | undefined) => string | null {
-    let tagMap: { version: number; map: PeerTagMap } | null = null;
-    const currentTagMap = (): PeerTagMap => {
-      const v = profiles.version();
-      if (tagMap !== null && tagMap.version === v) return tagMap.map;
-      const bindings: PeerTagBinding[] = [];
-      for (const c of loadAccepted()) {
-        if (c.accountIdHex !== undefined) {
-          bindings.push({ personKeyB64: c.signaturePubkeyB64, accountIdHex: c.accountIdHex });
-        }
-      }
-      for (const b of profiles.accountIdBindings()) bindings.push(b);
-      const map = buildPeerTagMap(bindings, (accountIdHex) =>
-        wasm.sfuPeerTag(callIdHex, accountIdHex),
-      );
-      tagMap = { version: v, map };
-      return map;
-    };
-    return (_peerId, _pseudonym, peerTag) => {
-      const person = personForPeerTag(currentTagMap(), peerTag);
-      return person === null ? null : callNameOfPerson(person);
-    };
-  }
-
   /** A person's name on a call tile: the one resolver every screen names
    *  people through, then the username they claim as plain text while it is
    *  not verified yet (`tile-name.ts`). */
@@ -1862,9 +1934,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   }
 
   // A profile, a rename or an accepted contact landing while a group call is
-  // up re-names the tiles already on screen: the adapter replays each peer's
-  // (pseudonym, peer_tag) through `resolveDisplayName`, whose map above is
-  // keyed on the same version this effect tracks.
+  // up re-names the tiles already on screen: the adapter replays the person
+  // behind each peer (from its verified announcement) through the resolver.
   createEffect(() => {
     profiles.version();
     const h = groupHandle();
@@ -1872,6 +1943,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     // A link call too: a member's username verified, a contact renamed.
     const link = linkHandle();
     if (link !== null) untrack(() => link.refreshNames());
+    const oneToOne = oneToOneShare;
+    if (oneToOne !== null) untrack(() => oneToOne.share.refreshNames());
   });
 
   /** SFU session lifecycle -> the group journal. */
@@ -1928,15 +2001,18 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    */
   async function probeGroupCallState(groupIdB64: string, callIdHex: string): Promise<void> {
     const base = sfuBaseUrl();
-    const secrets = auth.identitySecrets();
     const callId = hexToBytes(callIdHex);
-    if (base === null || secrets === null || callId === null) return;
+    if (base === null || callId === null) return;
     try {
+      // ADR-0078 section 2: the probe names the room (a one-way function of
+      // the call id) and carries no token, so no admission token is minted
+      // to ask and the issuer never sees who probes.
       const wasm = await loadWasm();
-      const jwt = new CallJwtClient(wasm);
-      jwt.setSessionToken(secrets.sessionToken);
-      const minted = await jwt.mint(callIdHex, "participant");
-      const res = await fetch(sfuCallStateUrl(base, callIdHex), sfuCallStateInit(minted.jwt));
+      const res = await fetch(sfuRoomStateUrl(base, wasm.sfuRoomForCall(callId)), {
+        credentials: "omit",
+        referrerPolicy: "no-referrer",
+        cache: "no-store",
+      });
       if (!res.ok) return;
       const state = parseSfuCallState((await res.json()) as unknown);
       if (state !== "ended") return;
@@ -1944,7 +2020,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       if (activeGroupCall?.callIdHex === callIdHex) return;
       await endGroupCallRecord(groupIdB64, callIdHex, callId);
     } catch {
-      // Unreachable SFU, a refused mint: the record stays as it is.
+      // Unreachable SFU: the record stays as it is.
     }
   }
 
@@ -2413,14 +2489,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       ownerAccountId: opts.ownerAccountId,
       ownerSignatureKey: opts.ownerSignatureKey,
       sfuBaseUrl: base,
-      sessionToken: secrets.sessionToken,
       media: { audio: true, video: opts.mediaVideo },
       localDisplayName: ownTileName(),
       ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
-      // Tiles are named by the one resolver: a member's sealed profile is
-      // filed like any received profile (which verifies a claimed username),
-      // and a person this device already knows is named before they announce.
-      resolveDisplayName: peerNameResolver(await loadWasm(), hex),
+      // Tiles are named by the one resolver: a member's verified peer
+      // announcement names the person (ADR-0078 section 2), and a member's
+      // sealed profile is filed like any received profile.
       onMemberProfile: (personKeyB64, profile) => profiles.ingest(personKeyB64, profile),
       // The link's owner ended the call for everyone: say who, then end it
       // here the way a call that ended on its own ends.
@@ -2567,6 +2641,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     try {
       const discovery = new DiscoveryClient();
       discovery.setSessionToken(secrets.sessionToken);
+      const expiryMs = callInviteExpiryMs(Date.now());
+      const maxUses = callInviteMaxUses();
       const minted = await composeAndUploadCallInvite({
         ownerSigningSeed: identity.ed25519Seed,
         ownerAccountId: secrets.accountId,
@@ -2574,8 +2650,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         discoveryClient: discovery,
         callId,
         mediaVideo: CALL_INVITE_MEDIA_VIDEO,
-        expiryMs: callInviteExpiryMs(Date.now()),
-        maxUses: callInviteMaxUses(),
+        expiryMs,
+        maxUses,
         label: CALL_INVITE_LABEL,
       });
       url = minted.url;
@@ -2585,10 +2661,19 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       void rememberMintedLink(
         base64Encode(secrets.accountId),
         "call",
-        minted.blobId === null
-          ? inlineLinkSlug(base64UrlEncodeNoPad(minted.linkId))
-          : base64UrlEncodeNoPad(minted.blobId),
-        { linkSecret: minted.linkSecret, linkId: minted.linkId },
+        base64UrlEncodeNoPad(minted.blobId),
+        {
+          linkSecret: minted.linkSecret,
+          linkId: minted.linkId,
+          // ADR-0078 section 10: the only key that revokes the ledger row.
+          revocationSeed: minted.revocationSeed,
+          facts: {
+            label: CALL_INVITE_LABEL,
+            expiryMs: Number(expiryMs),
+            maxUses,
+            bootstrapReferral: false,
+          },
+        },
       );
     } catch (err) {
       // The call runs over the SFU and owes the ledger nothing, so a failed
@@ -2930,6 +3015,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     silentRing,
     connStats,
     nameFor,
+    personKeyFor,
+    groupNameFor: (groupIdB64: string | null): string | null =>
+      groupIdB64 === null ? null : groupNames.nameOf(groupIdB64),
     hangUp,
     groupHandle,
     dismissedGroupCalls,
@@ -2962,6 +3050,10 @@ interface CallHostInternals {
   readonly silentRing: Accessor<boolean>;
   readonly connStats: Accessor<WebConnectionStats | null>;
   nameFor(groupIdB64: string | null): string;
+  /** The other person of a one-to-one call, `null` for a group. */
+  personKeyFor(groupIdB64: string | null): string | null;
+  /** The group's shared name (ADR-0051), or `null` when it has none. */
+  groupNameFor(groupIdB64: string | null): string | null;
   /**
    * End the live 1x1 call.
    *
@@ -3173,6 +3265,7 @@ export function CallHostView(): JSX.Element {
         <IncomingCallScreen
           callerName={internals.nameFor(host.callGroupIdB64())}
           callerId={host.callGroupIdB64()}
+          callerKey={internals.personKeyFor(host.callGroupIdB64())}
           video={internals.remoteWantsVideo()}
           onAccept={(withVideo) => void host.acceptIncomingCall(withVideo)}
           onDecline={() => void host.declineIncomingCall()}
@@ -3213,6 +3306,7 @@ export function CallHostView(): JSX.Element {
           <Call
             embedded={true}
             group={true}
+            groupName={internals.groupNameFor(host.groupCall()?.groupIdB64 ?? null)}
             onExit={() => void host.leaveGroupCall()}
             onEndForEveryone={
               host.startedGroupCall() ? () => void host.endGroupCallForEveryone() : undefined
@@ -3300,6 +3394,12 @@ export function CallHostView(): JSX.Element {
       <For each={[...(internals.linkHandle()?.remoteStreams().values() ?? [])]}>
         {(stream) => <RemoteAudio stream={stream} />}
       </For>
+      {/* The sound of the share on screen (ADR-0083: it plays with the call,
+          with no control of its own). The share's picture is drawn muted by
+          the call screen, so this is its one sink. */}
+      <Show when={host.inCall() ? currentShareStream() : undefined} keyed>
+        {(stream) => <RemoteAudio stream={stream} />}
+      </Show>
 
       {/* `Invite a contact` (`docs/ux/call-links.md` section 3): the same list
           of conversations a forward offers, under its own title. */}
@@ -3321,6 +3421,11 @@ export function CallHostView(): JSX.Element {
             : null
         }
         groupCall={host.callOccupant() !== null && host.callOccupant() !== "one-to-one"}
+        groupName={
+          host.callOccupant() === "group"
+            ? internals.groupNameFor(host.groupCall()?.groupIdB64 ?? null)
+            : null
+        }
         ringing={host.state() === "ringing"}
         callScreenUp={callScreenUp()}
         onExpand={() => host.expandCall()}

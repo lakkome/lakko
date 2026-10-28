@@ -170,6 +170,13 @@ public class ContactsRepository(
      *  in memory without a [Context]). */
     private val inviteSecretStore: InviteLinkSecretStore =
         appContext?.let { EncryptedInviteLinkSecretStore(it) } ?: InMemoryInviteLinkSecretStore(),
+    /** ADR-0078 section 10: the links this device minted, with their
+     *  revocation seeds; `null` = the process-wide [OwnLinkStores.current]. */
+    private val ownLinkStoreOverride: OwnLinkStore? = null,
+    /** ADR-0079 section 4 - the ledger-row deletions this device owes (it
+     *  revoked the link and the ledger has not answered yet). */
+    private val owedLinkRowDeletionStore: OwedLinkRowDeletionStore =
+        appContext?.let { SharedPrefsOwedLinkRowDeletionStore.of(it) } ?: InMemoryOwedLinkRowDeletionStore(),
     /** ADR-0073 R.2 - the accepted generation, the retired keys and the
      *  reset's `signed_at` per peer account (public values only). */
     private val resetLedgerStore: ResetLedgerStore =
@@ -197,6 +204,13 @@ public class ContactsRepository(
         }
     },
 ) {
+    /** ADR-0078 section 10 - where this device keeps its own links. */
+    private val ownLinkStore: OwnLinkStore
+        get() = ownLinkStoreOverride ?: OwnLinkStores.current
+
+    /** ADR-0079 section 4 - deletes a revoked link's ledger row once. */
+    private val linkRowDeleter: LinkRowDeleter = LinkRowDeleter(owedLinkRowDeletionStore)
+
     // -----------------------------------------------------------------
     // ADR-0073 "Phase 2 revised: silent continuity" - a contact reset their
     // account keys. Nothing here has a surface (R.0).
@@ -434,7 +448,7 @@ public class ContactsRepository(
         if (predecessors.isEmpty()) return false
         val adoptedAtMs = predecessors.maxOf { it.supersededAtMs }
         val linksDone = try {
-            withContext(Dispatchers.IO) { revokeSpentLinks(secrets, predecessors) }
+            withContext(Dispatchers.IO) { revokeSpentLinks(secrets) }
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
         } catch (cause: Throwable) {
@@ -452,56 +466,48 @@ public class ContactsRepository(
         return linksDone && requestsDone
     }
 
-    /** Revoke every ledger row a previous key of this account issued. */
-    private suspend fun revokeSpentLinks(
-        secrets: IdentitySecrets,
-        predecessors: List<me.lakko.app.auth.OwnPredecessor>,
-    ): Boolean {
+    /**
+     * Revoke the ledger rows of the links that were live when this account's
+     * keys rotated. ADR-0078 section 10: each with its own revocation seed
+     * from this device's record; there is no owner list, so a link this
+     * device has no record of is another device's to revoke (its reach key
+     * goes anyway).
+     */
+    private suspend fun revokeSpentLinks(secrets: IdentitySecrets): Boolean {
         val manager = reach()
         val accountB64 = base64Encode(secrets.accountId)
-        // The contact links the directory lists for this account (every
-        // device's), and the ledger ids this device recorded for the links
-        // it minted itself (call links included).
-        val listed = when (val list = listActiveInvites()) {
-            is me.lakko.app.discovery.ListInvitesResult.List -> list.invites.map { it.blobIdSlug }
-            me.lakko.app.discovery.ListInvitesResult.NotFoundOrNotOwner -> return false
-        }
         val recorded = manager?.spentLinkBlobsHex().orEmpty().mapNotNull { hex ->
             me.lakko.app.reach.reachUnhex(hex)?.let(::base64UrlEncodeNoPad)
         }
-        val seeds = predecessors.asReversed().map { row ->
-            Identity.fromSeed(row.phraseSeed).use { it.ed25519Seed() }
-        }
-        try {
-            authenticatedDiscoveryClient().use { discovery ->
-                for (slug in spentLinkSlugs(listed, recorded)) {
-                    val blobId = try {
-                        me.lakko.app.auth.base64UrlDecodeNoPad(slug)
-                    } catch (_: IllegalArgumentException) {
-                        continue
+        authenticatedDiscoveryClient().use { discovery ->
+            for (slug in spentLinkSlugs(recorded)) {
+                val link = ownLinkStore.get(accountB64, OwnLink.KIND_CONTACT, slug)
+                    ?: ownLinkStore.get(accountB64, OwnLink.KIND_CALL, slug)
+                    ?: continue
+                val blobId = link.blobId() ?: continue
+                val seed = link.seed() ?: continue
+                val result = try {
+                    if (link.kind == OwnLink.KIND_CALL) {
+                        discovery.revokeCallInvite(blobId, seed)
+                    } else {
+                        discovery.revokeInvite(blobId, seed)
                     }
-                    // A link the CURRENT key issued answers "not the owner"
-                    // to every previous key and stays live.
-                    val revoked = try {
-                        seeds.any { seed ->
-                            discovery.revokeInvite(blobId, seed) is me.lakko.app.discovery.RevokeInviteResult.Revoked ||
-                                discovery.revokeCallInvite(blobId, seed) is
-                                me.lakko.app.discovery.RevokeInviteResult.Revoked
-                        }
-                    } catch (_: me.lakko.app.discovery.DiscoveryClientArgError) {
-                        // Not a ledger id this client can name: nothing to revoke.
-                        false
-                    }
-                    if (revoked) {
-                        inviteSecretStore.remove(accountB64, slug)
-                        mutableState.update { state ->
-                            state.copy(outstandingInvites = state.outstandingInvites.filterNot { it.blobIdSlug == slug })
-                        }
+                } catch (_: me.lakko.app.discovery.DiscoveryClientArgError) {
+                    // Not a ledger id this client can name: nothing to revoke.
+                    me.lakko.app.discovery.RevokeInviteResult.NotFoundOrNotOwner
+                } finally {
+                    seed.fill(0)
+                }
+                // Revoked, or already gone (used up, expired, revoked
+                // elsewhere): either way the record and the row leave.
+                ownLinkStore.remove(accountB64, link.kind, slug)
+                inviteSecretStore.remove(accountB64, slug)
+                if (result is me.lakko.app.discovery.RevokeInviteResult.Revoked) {
+                    mutableState.update { state ->
+                        state.copy(outstandingInvites = state.outstandingInvites.filterNot { it.blobIdSlug == slug })
                     }
                 }
             }
-        } finally {
-            seeds.forEach { it.fill(0) }
         }
         manager?.spentLinksDone()
         return true
@@ -658,6 +664,73 @@ public class ContactsRepository(
      *  that supply no [Context] (in memory only, as before). */
     private val sentStore: SentRequestsStore? = appContext?.let { SentRequestsFiles.onDevice(it) }
 
+    /** ADR-0079 section 5 — the people added through their invite link whose
+     *  app has not answered yet, durable under the device key with what was
+     *  written to them. `null` in tests that supply no [Context]. */
+    private val pendingContactsStore: PendingContactsStore? =
+        appContext?.let { PendingContactsFiles.onDevice(it) }
+
+    /** ADR-0079 section 4 — the synced link-record register: the verdict on a
+     *  request's link answer, the use count, revocations, and (reworked
+     *  2026-10-17) the claims of link requests. Wired once at app start; the
+     *  undecided link requests are decided when its state loads and when a
+     *  claim from another device arrives. */
+    @Volatile
+    public var deviceGroupSync: me.lakko.app.devices.sync.DeviceGroupSyncRepository? = null
+        set(value) {
+            field = value
+            linkDecisionTriggers?.cancel()
+            linkDecisionTriggers = value?.let { sync ->
+                reachScope.launch {
+                    kotlinx.coroutines.flow.combine(sync.ready, sync.linkClaimsVersion) { r, v -> r to v }
+                        .collect { decideLinkRequests() }
+                }
+            }
+        }
+
+    @Volatile
+    private var linkDecisionTriggers: kotlinx.coroutines.Job? = null
+
+    /** One decision pass at a time (C-62 sub-invariant 5): the read of the
+     *  claim record, the decision and the write of the outcome never
+     *  interleave with another pass. */
+    private val linkDecisionMutex = kotlinx.coroutines.sync.Mutex()
+
+    /** The sealed store of this account's undecided link requests; `null` in
+     *  tests that supply no [Context] (the in-memory one is used then). */
+    private fun linkRequestInbox(accountB64: String): LinkRequestInbox =
+        appCtx?.let { LinkRequestInbox.onDevice(it, accountB64) }
+            ?: LinkRequestInbox(accountB64, inMemoryLinkRequests)
+
+    private val inMemoryLinkRequests: me.lakko.app.auth.SealedBlobStorage by lazy {
+        object : me.lakko.app.auth.SealedBlobStorage {
+            private val rows = HashMap<String, ByteArray>()
+            override fun read(name: String): ByteArray? = synchronized(this) { rows[name] }
+            override fun write(name: String, plaintext: ByteArray): Unit = synchronized(this) { rows[name] = plaintext }
+            override fun delete(name: String): Unit = synchronized(this) { rows.remove(name) }
+        }
+    }
+
+    private val inMemoryLinkClaims: LinkClaimStorage by lazy { InMemoryLinkClaimStorage() }
+
+    private fun linkClaimRecord(accountB64: String): LinkClaimRecord =
+        appCtx?.let { LinkClaimRecord.onDevice(it, accountB64) }
+            ?: LinkClaimRecord(accountB64, inMemoryLinkClaims)
+
+    private val mutableInvited: MutableStateFlow<List<PendingContact>> = MutableStateFlow(emptyList())
+
+    /** ADR-0079 section 5 — the inviters added through their link whose app
+     *  has not answered yet, for the bound account. */
+    public val invited: StateFlow<List<PendingContact>> = mutableInvited.asStateFlow()
+
+    private val mutableHandedOver: MutableStateFlow<Map<String, String>> = MutableStateFlow(emptyMap())
+
+    /** The one-to-one each pending contact moved into this session (account
+     *  id hex to group id hex): an open pending chat follows it there. */
+    public val handedOver: StateFlow<Map<String, String>> = mutableHandedOver.asStateFlow()
+
+    private val invitedLock = Any()
+
     /** One spend round at a time: the rotating device's owed step and the
      *  session-start retry would otherwise both re-send the same request. */
     private val spendLock = kotlinx.coroutines.sync.Mutex()
@@ -719,6 +792,7 @@ public class ContactsRepository(
             val switching = boundAccountB64 != null
             if (switching) sessionBinding.advance()
             val storedAccepted = appCtx?.let { AcceptedContactsStore.load(it, accountB64) }
+            removedContactKeys = appCtx?.let { AcceptedContactsStore.loadRemovedKeys(it, accountB64) } ?: emptySet()
             val snapshot = inboxStore?.load(accountB64) ?: ContactsInboxSnapshot()
             val storedSent = sentStore?.load(accountB64)
             mutableState.update { current ->
@@ -750,6 +824,7 @@ public class ContactsRepository(
                 waitingKnownRequests.clear()
                 waitingKnownRequests.addAll(snapshot.waiting)
             }
+            mutableInvited.value = pendingContactsStore?.load(accountB64).orEmpty()
         }
         // The learned names are per account too: screens re-read them.
         profileDirectory?.onAccountChanged()
@@ -922,9 +997,24 @@ public class ContactsRepository(
         val accountB64 = boundAccountB64
         if (ctx != null && accountB64 != null) {
             AcceptedContactsStore.save(ctx, accountB64, mutableState.value.accepted)
+            // A removed person who is a contact again was added on purpose
+            // (the adoption rule never adds a removed key).
+            val present = mutableState.value.accepted.mapTo(HashSet()) { keyHex(it.request.fromPubkey) }
+            val still = removedContactKeys.filterNot { it in present }.toSet()
+            if (still.size != removedContactKeys.size) {
+                removedContactKeys = still
+                AcceptedContactsStore.saveRemovedKeys(ctx, accountB64, still)
+            }
         }
         pushRenamesToDirectory()
     }
+
+    /** Account keys (lower-case hex) the person removed from their contacts;
+     *  the one-to-one adoption rule skips them. */
+    @Volatile
+    private var removedContactKeys: Set<String> = emptySet()
+
+    private fun keyHex(key: ByteArray): String = key.joinToString("") { "%02x".format(it) }
 
     // -----------------------------------------------------------------
     // A one-to-one conversation IS a contact
@@ -948,6 +1038,10 @@ public class ContactsRepository(
         bindAccountIfSignedIn()
         // No account, no list (see [mergeAccepted]).
         if (boundAccountB64 == null) return false
+        // A person removed from the list stays removed although the
+        // conversation remains (seen on web 2026-10-24: a removed contact
+        // came back on the next load).
+        if (removedContactKeys.contains(keyHex(signatureKey))) return false
         var changed = false
         mutableState.update { state ->
             // `update` may re-run the lambda on a lost CAS; the verdict is the
@@ -967,6 +1061,36 @@ public class ContactsRepository(
         if (changed) persistAccepted()
         return changed
     }
+
+    /**
+     * Put a person the viewer removed back on the contact list, with their
+     * one-to-one (`docs/ux/conversation-info.md` section 2.1, amended
+     * 2026-10-24): the removal is forgotten and the one-to-one rule applied.
+     * Local; sends nothing. Returns whether anything changed; a second call
+     * for a person already back changes nothing.
+     */
+    public fun restoreRemovedContact(
+        signatureKey: ByteArray,
+        accountId: ByteArray?,
+        groupIdHex: String,
+        nowMs: ULong,
+        createdAt: String,
+    ): Boolean {
+        bindAccountIfSignedIn()
+        val accountB64 = boundAccountB64 ?: return false
+        val hex = keyHex(signatureKey)
+        val wasRemoved = hex in removedContactKeys
+        if (wasRemoved) {
+            removedContactKeys = removedContactKeys - hex
+            appCtx?.let { AcceptedContactsStore.saveRemovedKeys(it, accountB64, removedContactKeys) }
+        }
+        val adopted = adoptOneToOnePeer(signatureKey, accountId, groupIdHex, nowMs, createdAt)
+        return wasRemoved || adopted
+    }
+
+    /** Whether the viewer removed the person holding [signatureKey] from
+     *  their contact list. */
+    public fun isRemovedContact(signatureKey: ByteArray): Boolean = keyHex(signatureKey) in removedContactKeys
 
     /**
      * Record [groupIdHex] as the one-to-one with the contact holding
@@ -1215,6 +1339,7 @@ public class ContactsRepository(
                         messageId = result.messageId,
                         createdAt = result.createdAt,
                         introMessage = introMessage.toByteArray(Charsets.UTF_8),
+                        recipientKeyB64 = result.recipientSignaturePubkey?.let { base64Encode(it) },
                     ),
                 )
             }
@@ -1327,6 +1452,7 @@ public class ContactsRepository(
                     messageId = result.messageId,
                     createdAt = result.createdAt,
                     introMessage = introMessage,
+                    recipientKeyB64 = result.recipientSignaturePubkey?.let { base64Encode(it) },
                 ),
             )
         }
@@ -1441,19 +1567,46 @@ public class ContactsRepository(
                     val fetchedRequests = result.events.filterIsInstance<
                         IncomingMailboxEvent.ContactRequest>(
                     ).map { it.request }
+                    // ADR-0048 §3 — a request's profile is bound to its
+                    // signature-verified `from_pubkey`; store it (strictly newer
+                    // only) for EVERY fetched request, before any is set aside.
+                    // A request through one of this account's invite links is
+                    // kept off the request list and accepted with no card
+                    // (ADR-0079), so a store limited to the listed requests
+                    // dropped its name, and the new contact read "Member" until
+                    // the person's profile arrived in the one-to-one. Web and
+                    // iOS store it at this point too.
+                    profileDirectory?.let { directory ->
+                        for (req in fetchedRequests) {
+                            val profile = req.profile ?: continue
+                            directory.onProfileReceived(
+                                signatureKeyB64 = java.util.Base64.getEncoder()
+                                    .encodeToString(req.fromPubkey),
+                                profile = profile,
+                            )
+                        }
+                    }
                     // ADR-0073 R.7 case 1 / UX 16.6 — a request from an
                     // account that is ALREADY a contact is never a request
                     // row: the R.2 check runs on the sender's account and the
                     // request is answered silently or dropped. The ones that
                     // waited for a verdict are judged again first.
-                    val newIncoming = retryWaitingKnownRequests() +
-                        fetchedRequests.filterNot { handleKnownContactRequest(it) }
+                    val newIncoming = triageLinkAnswers(
+                        retryWaitingKnownRequests() +
+                            fetchedRequests.filterNot { handleKnownContactRequest(it) },
+                    )
                     val welcomes = result.events.filterIsInstance<
                         IncomingMailboxEvent.Welcome>(
                     )
                     val acks = result.events.filterIsInstance<
                         IncomingMailboxEvent.ContactAck>(
                     ).map { it.ack }
+                    // ADR-0079 amendment of 2026-10-19 — refusals of this
+                    // account's link requests: the pending contact goes,
+                    // silently, when the refusal verifies.
+                    for (refusal in result.events.filterIsInstance<IncomingMailboxEvent.LinkRefusal>()) {
+                        applyLinkRefusal(refusal.refusal, sender.signaturePubkey)
+                    }
                     // ADR-0060 §6 — a request's reply key is kept for the
                     // accept and the ack (bound to the signature-verified
                     // sender). This device's own reply key is NOT retired on
@@ -1488,6 +1641,10 @@ public class ContactsRepository(
                                 chatRepo.oneToOnePeerKey(joinedHex)?.let { peer ->
                                     reach()?.retireRepliesTo(peer)
                                 }
+                                // ADR-0079 section 5 — a one-to-one with a
+                                // person added through their link: what was
+                                // written to them goes out now, in order.
+                                handOverJoinedPendingContacts()
                             } catch (e: kotlinx.coroutines.CancellationException) {
                                 throw e
                             } catch (e: Throwable) {
@@ -1512,19 +1669,6 @@ public class ContactsRepository(
                                     joinFailure = InboxError.WELCOME_JOIN_FAILED
                                 }
                             }
-                        }
-                    }
-                    // ADR-0048 §3 — a request's profile is bound to its
-                    // signature-verified `from_pubkey`; store it (strictly newer
-                    // only) so the request card can say who is asking.
-                    profileDirectory?.let { directory ->
-                        for (req in newIncoming) {
-                            val profile = req.profile ?: continue
-                            directory.onProfileReceived(
-                                signatureKeyB64 = java.util.Base64.getEncoder()
-                                    .encodeToString(req.fromPubkey),
-                                profile = profile,
-                            )
                         }
                     }
                     // The session ended (or switched) during the poll: this batch
@@ -1607,6 +1751,12 @@ public class ContactsRepository(
                     if (acks.isNotEmpty()) persistSent()
                     persistInboxCursor()
                 }
+                // ADR-0079 — a pending contact whose one-to-one exists already,
+                // a link revoked on another device of the account, and the
+                // undecided link requests.
+                handOverJoinedPendingContacts()
+                revokeLinksRevokedElsewhere()
+                decideLinkRequests()
             } catch (e: ContactsError) {
                 // Background long-polls surface failures on the `lastError`
                 // slot too — the UI renders one plain sentence, never the
@@ -1793,7 +1943,15 @@ public class ContactsRepository(
             removedKey = removed?.request?.fromPubkey
             if (changed) state.copy(accepted = remaining) else state
         }
-        if (changed) persistAccepted()
+        if (changed) {
+            val ctx = appCtx
+            val accountB64 = boundAccountB64
+            removedKey?.let { removedContactKeys = removedContactKeys + keyHex(it) }
+            if (ctx != null && accountB64 != null) {
+                AcceptedContactsStore.saveRemovedKeys(ctx, accountB64, removedContactKeys)
+            }
+            persistAccepted()
+        }
         // ADR-0060 §1 — the removed person held this account's `contact` key
         // (and, through their contacts, its `fof` key): both rotate, the old
         // ones come off the mailbox at once, and the remaining one-to-ones get
@@ -1834,265 +1992,878 @@ public class ContactsRepository(
         persistInboxPending()
     }
 
-    /**
-     * Joiner-side: open + verify an invite-link slug, fetch the
-     * capability bytes from the discovery directory, consume
-     * (atomically bumps the server's used-counter + records
-     * this joiner in the dedup side table), and drive the
-     * full Accept flow — `sendContactRequestToBundle` →
-     * `ChatRepository.startGroupWith`. Surfaces every distinct
-     * step as an [AcceptInviteResult] variant so the
-     * `InviteLandingScreen` (1.15e11b) can render the right
-     * outcome copy.
-     *
-     * Steps:
-     *   1. base64url-decode the 8-character slug to recover the
-     *      6-byte `blob_id`.
-     *   2. `DiscoveryClient.fetchInvite(blobId)` → capability
-     *      wire bytes (404 → `NotFound`).
-     *   3. `InviteCapability.decodeAndVerify(wire)` — local
-     *      Ed25519 signature check (a malicious server cannot
-     *      serve substituted bytes; the joiner re-verifies).
-     *   4. `isValidNow(now)` — expiry check. Expired → return
-     *      `Expired` without touching the consume counter.
-     *   5. `DiscoveryClient.consumeInvite(blobId, capabilityBytes,
-     *      joinerAccountId)` — atomic counter bump + dedup tag.
-     *      `Exhausted` / `AlreadyConsumed` short-circuit out
-     *      here without further side effects.
-     *   6. `ContactsClient.sendContactRequestToBundle(...)` —
-     *      ship a ContactRequest to the inviter's stranger
-     *      inbox (the bundle is already in hand from the
-     *      capability; no discovery lookup needed).
-     *   7. If a [ChatRepository] is wired,
-     *      `ChatRepository.startGroupWith(...)` — fetch the
-     *      inviter's KeyPackage + create the 1×1 MLS group +
-     *      ship the Welcome.
-     *
-     * The pending request list is **not** touched on this
-     * path — invites bypass the stranger-inbox + Accept dance
-     * by design (the cryptographic provenance is already
-     * established by the signature on the capability). The
-     * accepted-contacts list gets a fresh row with the
-     * resulting `groupIdHex` so the joiner can immediately
-     * Open Chat.
-     */
-    public suspend fun acceptInviteLink(slug: String): AcceptInviteResult {
-        val secrets = authRepo.identitySecrets.value
-            ?: return AcceptInviteResult.RequiresReauth
-        // Asked after every await below: an accept that outlives its account
-        // must not start a chat, or file a contact, as the next one.
-        val bound = sessionBinding.capture()
-        // Sealed links (2026-09-28): the argument is `<slug>#<secret>`; a
-        // missing or malformed secret is refused before any request.
-        val link = me.lakko.app.discovery.InviteLinkArgument.decode(slug.trim())
-        val secret = me.lakko.app.discovery.inviteLinkSecretOf(link.fragment)
-            ?: return AcceptInviteResult.Damaged
-        // ADR-0028 amendment of 2026-09-27: a pointer slug is the 8-character
-        // ledger id (6 bytes); anything longer is an inline sealed link (the
-        // inviter's upload failed in transport). The pre-amendment
-        // 43-character id is neither.
-        val blobId = me.lakko.app.discovery.decodeInviteBlobId(link.slug)
-        val sealed: ByteArray = if (blobId != null) {
-            try {
-                authenticatedDiscoveryClient().use { discovery ->
-                    discovery.fetchInvite(blobId)
-                }
-            } catch (e: Throwable) {
-                me.lakko.app.rethrowIfCancelled(e)
-                if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return AcceptInviteResult.RateLimited
-                return AcceptInviteResult.Failed(message = e.message ?: "fetch failed")
-            } ?: return AcceptInviteResult.NotFound
-        } else {
-            inlineSealedInviteOrNull(link.slug) ?: return AcceptInviteResult.MalformedSlug
-        }
+    // ---- ADR-0079: the invite page (B) and the pending contact --------------
 
-        bound.ensureCurrent()
+    /**
+     * The signed-out invite page (`docs/ux/contact-invite-link.md` section 3,
+     * "Signed out", amended 2026-10-26; ADR-0079 amendment of 2026-10-26):
+     * open the link with no session, only to say who invites. The ledger
+     * serves the sealed blob without a session and the name is sealed under
+     * the link's secret, so the card is built on the device. Nothing is
+     * consumed and nothing is sent; signing in or creating an account then
+     * opens the parked link again through [openInviteLink].
+     */
+    public suspend fun previewInviteLink(slug: String): InvitePreviewResult {
+        val link = me.lakko.app.discovery.InviteLinkArgument.decode(slug.trim())
+        val secret = me.lakko.app.discovery.inviteLinkSecretOf(link.fragment) ?: return InvitePreviewResult.Dead
+        // Every link is a ledger pointer; any other slug is a dead link.
+        val blobId = me.lakko.app.discovery.decodeInviteBlobId(link.slug) ?: return InvitePreviewResult.Dead
+        val sealed: ByteArray = try {
+            // Deliberately the bare client: no session token is attached.
+            discoveryClientFactory().use { discovery -> discovery.fetchInvite(blobId) }
+        } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
+            if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return InvitePreviewResult.RateLimited
+            return InvitePreviewResult.Failed
+        } ?: return InvitePreviewResult.Dead
         val cap = try {
             me.lakko.app.discovery.openSealedInviteLink(sealed, secret) { bytes, key ->
                 InviteCapability.openLink(bytes, key)
             }
         } catch (_: me.lakko.app.discovery.InviteLinkDamaged) {
-            // A wrong secret, a tampered link and a blob a server swapped in
-            // under a live id all fail the same way: the damaged state.
-            return AcceptInviteResult.Damaged
+            return InvitePreviewResult.Dead
         }
-        // The consume dedup tag is computed over the PLAINTEXT capability.
-        val capabilityBytes = cap.wire()
         return cap.use { capability ->
-            val nowMs = System.currentTimeMillis().toULong()
-            if (!capability.isValidNow(nowMs)) {
-                return@use AcceptInviteResult.Expired
-            }
-            // ADR-0060 §6 — the link grant lets this device write the request
-            // (and the 1:1 Welcome) into the inviter's closed mailbox. Used
-            // for this flow only and never kept.
-            // ADR-0078: sealed to the mailbox the link grant's binding names,
-            // verified against the capability's owner key (a refused binding
-            // writes nothing).
-            val linkReach = try {
-                verifiedGrantDest(capability.linkGrant(), capability.ownerSignaturePubkey(), mailboxCrypto) { seed ->
-                    me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(seed))
-                }
-            } catch (_: Throwable) {
-                null
-            }
+            if (!capability.isValidNow(System.currentTimeMillis().toULong())) return@use InvitePreviewResult.Dead
+            InvitePreviewResult.Preview(
+                displayName = capability.inviterDisplayName(),
+                username = capability.inviterUsername(),
+                label = capability.label(),
+                ownerAccountId = capability.ownerAccountId(),
+            )
+        }
+    }
 
-            // Snapshot the bundle fields we need post-consume.
-            val inviterAccountId = capability.ownerAccountId()
-            val inviterSigPubkey = capability.ownerSignaturePubkey()
-            val inviterX25519Pubkey = capability.ownerX25519Pubkey()
-
-            // ADR-0016 rule 2 / ADR-0073 R.2 — the capability's inline bundle
-            // never went through the fetch gate. An inviter whose account is
-            // pinned to another key the directory cannot explain (neither a
-            // proven rotation nor an attested reset) is refused HERE: before the use
-            // is consumed, before the request is sealed, before the chat is
-            // founded and its Welcome sealed. A stranger passes untouched.
-            try {
-                useClientWith(secrets) { client, _ ->
-                    client.gateBundleRecipient(
-                        recipientAccountId = inviterAccountId,
-                        recipientSignaturePubkey = inviterSigPubkey,
-                    )
-                }
-            } catch (cancel: kotlinx.coroutines.CancellationException) {
-                throw cancel
-            } catch (e: Throwable) {
-                return@use AcceptInviteResult.Failed(
-                    message = e.message ?: "inviter identity refused",
-                )
+    /**
+     * Open an `/i/<slug>#<secret>` link for the invite page
+     * (`docs/ux/contact-invite-link.md` section 3): fetch the sealed blob,
+     * open it under the fragment's secret, and decide the page's state. No
+     * use of the link is spent and nothing is sent here.
+     */
+    public suspend fun openInviteLink(slug: String): InviteOpenResult {
+        val secrets = authRepo.identitySecrets.value ?: return InviteOpenResult.RequiresReauth
+        val bound = sessionBinding.capture()
+        // Sealed links (2026-09-28): the argument is `<slug>#<secret>`; a
+        // missing or malformed secret is a damaged link, shown exactly like
+        // one that no longer works.
+        val link = me.lakko.app.discovery.InviteLinkArgument.decode(slug.trim())
+        val secret = me.lakko.app.discovery.inviteLinkSecretOf(link.fragment) ?: return InviteOpenResult.Dead
+        // Every link is a ledger pointer; any other slug (an inline sealed
+        // blob, the form removed on 2026-10-19, included) is a dead link.
+        val blobId = me.lakko.app.discovery.decodeInviteBlobId(link.slug) ?: return InviteOpenResult.Dead
+        val sealed: ByteArray = try {
+            authenticatedDiscoveryClient().use { discovery -> discovery.fetchInvite(blobId) }
+        } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
+            if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return InviteOpenResult.RateLimited
+            return InviteOpenResult.Failed(message = e.message ?: "fetch failed")
+        } ?: return InviteOpenResult.Dead
+        if (!bound.isCurrent) return InviteOpenResult.RequiresReauth
+        val cap = try {
+            me.lakko.app.discovery.openSealedInviteLink(sealed, secret) { bytes, key ->
+                InviteCapability.openLink(bytes, key)
             }
+        } catch (_: me.lakko.app.discovery.InviteLinkDamaged) {
+            return InviteOpenResult.Dead
+        }
+        return cap.use { capability ->
+            if (!capability.isValidNow(System.currentTimeMillis().toULong())) return@use InviteOpenResult.Dead
+            val ownerAccountId = capability.ownerAccountId()
+            if (ownerAccountId.contentEquals(secrets.accountId)) return@use InviteOpenResult.Own
+            val opened = OpenedInvite(
+                blobId = blobId,
+                capabilityBytes = capability.wire(),
+                ownerAccountId = ownerAccountId,
+                ownerSignaturePubkey = capability.ownerSignaturePubkey(),
+                ownerX25519Pubkey = capability.ownerX25519Pubkey(),
+                linkId = capability.linkId(),
+                linkSecret = secret,
+                linkGrant = capability.linkGrant(),
+                displayName = capability.inviterDisplayName(),
+                username = capability.inviterUsername(),
+                label = capability.label(),
+            )
+            classifyOpenedInvite(opened)
+        }
+    }
 
-            // ADR-0073 R.7 case 1 / UX 16.6 — a link from a person who is
-            // already a contact (a reset loses their contacts; they may hand
-            // out a new link) opens the existing contact: no request is sent
-            // and no use of the link is spent. The gate above ran R.2 first,
-            // so an attested reset was accepted there and an unproven change
-            // refused. "Already a contact" is the pin or a verified binding
-            // naming the row's own key ([establishedContact]).
-            establishedContact(inviterAccountId)?.let { existing ->
-                return@use AcceptInviteResult.ExistingContact(
+    /**
+     * The page an opened link shows now ([invitePageKind]): the own link,
+     * an established contact, a pending one, or the ordinary page. Local
+     * reads only, so the page asks again whenever the contact list or the
+     * pending contacts change while it is open (the inviter's answer to an
+     * earlier Add landing).
+     */
+    public fun classifyOpenedInvite(invite: OpenedInvite): InviteOpenResult {
+        val ownAccountId = authRepo.identitySecrets.value?.accountId
+        val isOwn = ownAccountId != null && invite.ownerAccountId.contentEquals(ownAccountId)
+        // ADR-0073 R.7 case 1 / UX 16.6 — "already a contact" is the pin or
+        // a verified binding naming the row's own key.
+        val established = if (isOwn) null else establishedContact(invite.ownerAccountId)
+        val ownerHex = me.lakko.app.ds.hexOf(invite.ownerAccountId)
+        return when (invitePageKind(isOwn, established != null, pendingContact(ownerHex) != null)) {
+            InvitePageKind.OWN -> InviteOpenResult.Own
+            InvitePageKind.ALREADY -> {
+                val existing = established ?: return InviteOpenResult.Opened(invite)
+                InviteOpenResult.KnownContact(
                     routeKey = base64UrlEncodeNoPad(existing.request.fromPubkey),
+                    groupIdHex = existing.groupIdHex,
+                    statedName = invite.statedName,
+                    invite = invite,
                 )
             }
+            InvitePageKind.PENDING -> InviteOpenResult.PendingInviter(
+                accountIdHex = ownerHex,
+                statedName = invite.statedName,
+                invite = invite,
+            )
+            InvitePageKind.DEFAULT -> InviteOpenResult.Opened(invite)
+        }
+    }
 
-            // Consume — atomic counter bump + per-joiner dedup. An inline link
-            // has no ledger row, so nothing to consume.
-            val consumeResult = if (blobId == null) {
-                me.lakko.app.discovery.ConsumeInviteResult.Consumed(usedCount = 0, maxUses = 0)
-            } else try {
-                authenticatedDiscoveryClient().use { discovery ->
-                    discovery.consumeInvite(blobId, capabilityBytes, secrets.accountId)
-                }
+    /**
+     * **Add** on the invite page (ADR-0079 sections 2 and 5, amended
+     * 2026-10-19), in the order [InviteAddOrder] pins: the link's ledger use
+     * is spent first; a link used up or gone since the page opened keeps
+     * NOTHING (no pending contact, no held message) and the page goes to
+     * Contacts. Only then the inviter is recorded as a pending contact, BEFORE
+     * the request carrying the link answer is sent (an answer that comes back
+     * at once always finds it), and removed again when the send fails. This
+     * device founds no conversation: the inviter's device does, and its
+     * Welcome lands here.
+     */
+    public suspend fun addThroughInviteLink(invite: OpenedInvite): InviteAddResult {
+        val secrets = authRepo.identitySecrets.value ?: return InviteAddResult.RequiresReauth
+        val bound = sessionBinding.capture()
+        // ADR-0016 rule 2 / ADR-0073 R.2 — the capability's inline bundle never
+        // went through the fetch gate: the pin question is asked of it before
+        // anything is spent or sealed (an attested reset is accepted there).
+        try {
+            useClientWith(secrets) { client, _ ->
+                client.gateBundleRecipient(
+                    recipientAccountId = invite.ownerAccountId,
+                    recipientSignaturePubkey = invite.ownerSignaturePubkey,
+                )
+            }
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (e: Throwable) {
+            return InviteAddResult.Failed(message = e.message ?: "inviter identity refused")
+        }
+        if (!bound.isCurrent) return InviteAddResult.RequiresReauth
+        val accountB64 = boundAccountB64 ?: return InviteAddResult.RequiresReauth
+        val contact = PendingContact(
+            accountIdHex = me.lakko.app.ds.hexOf(invite.ownerAccountId),
+            signaturePubkeyB64 = base64Encode(invite.ownerSignaturePubkey),
+            x25519PubkeyB64 = base64Encode(invite.ownerX25519Pubkey),
+            displayName = invite.displayName.orEmpty(),
+            username = invite.username.orEmpty(),
+            addedAtMs = System.currentTimeMillis(),
+            linkIdHex = me.lakko.app.ds.hexOf(invite.linkId),
+        )
+        // A live one-to-one with the inviter, when the visitor removed them
+        // and the conversation remains (amended 2026-10-24): the inviter's
+        // devices answer such a request by restoring, never by founding, so
+        // nothing is pending; the inviter is put back once the request is
+        // sent, and the page opens that chat.
+        val liveGroupIdHex = withContext(Dispatchers.Default) { chatRepo?.liveOneToOneWith(invite.ownerSignaturePubkey) }
+        if (liveGroupIdHex != null) {
+            val restored = try {
+                InviteRestoreOrder.run(
+                    consumeLive = {
+                        val consumed = try {
+                            consumeInviteUse(invite, secrets.accountId)
+                        } catch (e: Throwable) {
+                            me.lakko.app.rethrowIfCancelled(e)
+                            if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return InviteAddResult.RateLimited
+                            if (me.lakko.app.anon.isAnonTokenQuotaExhausted(e)) return InviteAddResult.RateLimited
+                            return InviteAddResult.Failed(message = e.message ?: "consume failed")
+                        }
+                        consumed !is me.lakko.app.discovery.ConsumeInviteResult.Exhausted &&
+                            consumed !is me.lakko.app.discovery.ConsumeInviteResult.NotFound
+                    },
+                    sendRequest = {
+                        if (!bound.isCurrent) return InviteAddResult.RequiresReauth
+                        sendLinkAnswer(invite, secrets)
+                    },
+                    restore = {
+                        if (!bound.isCurrent) return InviteAddResult.RequiresReauth
+                        restoreRemovedContact(
+                            signatureKey = invite.ownerSignaturePubkey,
+                            accountId = invite.ownerAccountId,
+                            groupIdHex = liveGroupIdHex,
+                            nowMs = System.currentTimeMillis().toULong(),
+                            createdAt = java.time.Instant.now().toString(),
+                        )
+                    },
+                )
             } catch (e: Throwable) {
                 me.lakko.app.rethrowIfCancelled(e)
-                if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) {
-                    return@use AcceptInviteResult.RateLimited
-                }
-                // ADR-0054 - the consume spends an `invite-consume` token.
-                if (me.lakko.app.anon.isAnonTokenQuotaExhausted(e)) {
-                    return@use AcceptInviteResult.AllowanceUsed
-                }
-                return@use AcceptInviteResult.Failed(
-                    message = me.lakko.app.anon.anonTokenFailureCopy(e, "")
-                        ?: e.message ?: "consume failed",
+                return InviteAddResult.Failed(message = e.message ?: "request send failed")
+            }
+            return when (restored) {
+                InviteRestoreOrder.Outcome.DEAD -> InviteAddResult.Dead
+                InviteRestoreOrder.Outcome.RESTORED -> InviteAddResult.Restored(liveGroupIdHex)
+            }
+        }
+        val outcome = try {
+            InviteAddOrder.run(
+                // The ledger's soft use count. Used before by this account:
+                // sent again, the inviter's device answers it either way.
+                consumeLive = {
+                    val consumed = try {
+                        consumeInviteUse(invite, secrets.accountId)
+                    } catch (e: Throwable) {
+                        me.lakko.app.rethrowIfCancelled(e)
+                        if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return InviteAddResult.RateLimited
+                        if (me.lakko.app.anon.isAnonTokenQuotaExhausted(e)) return InviteAddResult.RateLimited
+                        return InviteAddResult.Failed(message = e.message ?: "consume failed")
+                    }
+                    consumed !is me.lakko.app.discovery.ConsumeInviteResult.Exhausted &&
+                        consumed !is me.lakko.app.discovery.ConsumeInviteResult.NotFound
+                },
+                recordPending = {
+                    if (!bound.isCurrent) return InviteAddResult.RequiresReauth
+                    updateInvited(accountB64) { PendingContacts.adding(contact, it) }
+                },
+                sendRequest = { sendLinkAnswer(invite, secrets) },
+                forgetPending = {
+                    updateInvited(accountB64) { list -> list.filterNot { it.accountIdHex == contact.accountIdHex } }
+                },
+            )
+        } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
+            return InviteAddResult.Failed(message = e.message ?: "request send failed")
+        }
+        if (outcome == InviteAddOrder.Outcome.DEAD) return InviteAddResult.Dead
+        return InviteAddResult.Added(contact)
+    }
+
+    /**
+     * **Open chat** on the page of a person already in the contacts
+     * (`docs/ux/contact-invite-link.md` section 3, amended 2026-10-24), in
+     * the order [KnownContactAnswerOrder] pins: the link still carries its
+     * answer, so an inviter who removed this account and sent a new link gets
+     * it back. The ledger consume first; a dead link sends nothing; no
+     * pending contact is written, since the inviter already is one. The page
+     * opens the chat on [KnownContactAnswerResult.Sent] and
+     * [KnownContactAnswerResult.Dead] alike.
+     */
+    public suspend fun answerAsKnownContact(invite: OpenedInvite): KnownContactAnswerResult {
+        val secrets = authRepo.identitySecrets.value ?: return KnownContactAnswerResult.RequiresReauth
+        val bound = sessionBinding.capture()
+        return try {
+            // The same pin question Add asks before anything is spent.
+            useClientWith(secrets) { client, _ ->
+                client.gateBundleRecipient(
+                    recipientAccountId = invite.ownerAccountId,
+                    recipientSignaturePubkey = invite.ownerSignaturePubkey,
                 )
             }
-            bound.ensureCurrent()
-            when (consumeResult) {
-                is me.lakko.app.discovery.ConsumeInviteResult.Exhausted ->
-                    return@use AcceptInviteResult.Exhausted
-                is me.lakko.app.discovery.ConsumeInviteResult.NotFound ->
-                    return@use AcceptInviteResult.NotFound
-                is me.lakko.app.discovery.ConsumeInviteResult.AlreadyConsumed ->
-                    return@use AcceptInviteResult.AlreadyAccepted
-                is me.lakko.app.discovery.ConsumeInviteResult.Consumed -> {
-                    // Drop the consumeResult counters — the UI
-                    // doesn't need them for the V1 flow.
-                }
-            }
-
-            // Ship a ContactRequest to the inviter's stranger
-            // inbox. The bundle is inline in the capability —
-            // no discovery round-trip needed.
-            val sendResult = try {
-                useClientWith(secrets) { client, sender ->
-                    client.sendContactRequestToBundle(
-                        senderSigningSeed = sender.signingSeed,
-                        senderAccountId = secrets.accountId,
-                        senderSignaturePubkey = sender.signaturePubkey,
-                        recipientAccountId = inviterAccountId,
-                        recipientSignaturePubkey = inviterSigPubkey,
-                        recipientX25519Pubkey = inviterX25519Pubkey,
-                        introMessage = ByteArray(0),
-                        // ADR-0048 §2 — who is asking, sealed to the inviter.
-                        senderProfile = ownProfileForWire(secrets.accountId),
-                        // ADR-0060 §6 — this device's own reply key.
-                        replyGrant = reach()?.mintReply(inviterSigPubkey),
-                        reach = linkReach,
-                    )
-                }
-            } catch (e: Throwable) {
-                me.lakko.app.rethrowIfCancelled(e)
-                return@use AcceptInviteResult.Failed(
-                    message = e.message ?: "ContactRequest send failed",
+            if (!bound.isCurrent) return KnownContactAnswerResult.RequiresReauth
+            when (
+                KnownContactAnswerOrder.run(
+                    consumeLive = {
+                        val consumed = consumeInviteUse(invite, secrets.accountId)
+                        consumed !is me.lakko.app.discovery.ConsumeInviteResult.Exhausted &&
+                            consumed !is me.lakko.app.discovery.ConsumeInviteResult.NotFound
+                    },
+                    sendRequest = {
+                        if (!bound.isCurrent) return KnownContactAnswerResult.RequiresReauth
+                        sendLinkAnswer(invite, secrets)
+                    },
                 )
+            ) {
+                KnownContactAnswerOrder.Outcome.SENT -> KnownContactAnswerResult.Sent
+                KnownContactAnswerOrder.Outcome.DEAD -> KnownContactAnswerResult.Dead
             }
-
-            // Drive the chat-side startGroupWith if wired.
-            bound.ensureCurrent()
-            val groupIdHex = if (chatRepo != null) {
-                try {
-                    chatRepo.startGroupWith(
-                        recipientAccountId = inviterAccountId,
-                        recipientSignaturePubkey = inviterSigPubkey,
-                        // ADR-0062 — an accepted invite creates a one-to-one,
-                        // fixed in the group.
-                        kind = uniffi.lakko_ffi_uniffi.GroupKind.ONE_TO_ONE,
-                        recipientReach = linkReach,
-                    )
-                } catch (_: Throwable) {
-                    null
-                }
+        } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
+            if (me.lakko.app.discovery.isDiscoveryRateLimited(e) || me.lakko.app.anon.isAnonTokenQuotaExhausted(e)) {
+                KnownContactAnswerResult.RateLimited
             } else {
-                null
+                KnownContactAnswerResult.Failed(message = e.message ?: "answer failed")
             }
+        }
+    }
 
-            // Append the new contact to the accepted list so
-            // the user sees the result + can immediately Open
-            // Chat. Construct a synthetic IncomingContactRequest
-            // shell — the invite flow bypassed the stranger
-            // inbox, but the AcceptedContact UI shape expects
-            // one. The synthetic request's `messageId` is the
-            // DS receipt id from the outbound ContactRequest;
-            // `intro` is null.
-            val syntheticRequest = IncomingContactRequest(
-                messageId = sendResult.messageId,
-                fromPubkey = inviterSigPubkey,
-                fromAccountId = inviterAccountId,
-                fromPseudonym = ByteArray(32),
-                validAfterMs = nowMs,
-                intro = null,
-                createdAt = sendResult.createdAt,
+    /** The link's ledger consume for this account (ADR-0079 section 5). */
+    private suspend fun consumeInviteUse(
+        invite: OpenedInvite,
+        accountId: ByteArray,
+    ): me.lakko.app.discovery.ConsumeInviteResult =
+        authenticatedDiscoveryClient().use { discovery ->
+            discovery.consumeInvite(invite.blobId, invite.capabilityBytes, accountId)
+        }
+
+    /**
+     * The request carrying the link answer (ADR-0079 section 2): written to
+     * the owner's closed mailbox under the link's grant (ADR-0060 section 6),
+     * whose mailbox binding is verified against the key the request is sealed
+     * to (ADR-0078). The inviter's device takes it by itself.
+     */
+    private suspend fun sendLinkAnswer(invite: OpenedInvite, secrets: me.lakko.app.auth.IdentitySecrets) {
+        val linkReach = try {
+            verifiedGrantDest(invite.linkGrant, invite.ownerSignaturePubkey, mailboxCrypto) { seed ->
+                me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(seed))
+            }
+        } catch (_: Throwable) {
+            null
+        }
+        useClientWith(secrets) { client, sender ->
+            client.sendContactRequestToBundle(
+                senderSigningSeed = sender.signingSeed,
+                senderAccountId = secrets.accountId,
+                senderSignaturePubkey = sender.signaturePubkey,
+                recipientAccountId = invite.ownerAccountId,
+                recipientSignaturePubkey = invite.ownerSignaturePubkey,
+                recipientX25519Pubkey = invite.ownerX25519Pubkey,
+                introMessage = ByteArray(0),
+                senderProfile = ownProfileForWire(secrets.accountId),
+                replyGrant = reach()?.mintReply(invite.ownerSignaturePubkey),
+                reach = linkReach,
+                // ADR-0079 section 2 — the link answer.
+                linkAnswer = uniffi.lakko_ffi_uniffi.FfiLinkAnswer(invite.linkId, invite.linkSecret),
             )
-            bound.ensureCurrent()
-            bindAccount(secrets.accountId)
-            val accepted = AcceptedContact(request = syntheticRequest, groupIdHex = groupIdHex)
-            mutableState.update { state ->
-                state.copy(
-                    accepted = state.accepted + accepted,
-                    // The inviter is a contact now; a request of theirs that
-                    // was still pending leaves "Requests" (one row per person).
-                    pending = withoutAcceptedSenders(state.pending, listOf(accepted)),
+        }
+    }
+
+    /** Replace the bound account's pending contacts and store them. */
+    private fun updateInvited(accountB64: String, change: (List<PendingContact>) -> List<PendingContact>) {
+        synchronized(invitedLock) {
+            if (boundAccountB64 != accountB64) return
+            val next = change(mutableInvited.value)
+            mutableInvited.value = next
+            pendingContactsStore?.save(accountB64, next)
+        }
+    }
+
+    /** The pending contact [accountIdHex], while one is held. */
+    public fun pendingContact(accountIdHex: String): PendingContact? =
+        mutableInvited.value.firstOrNull { it.accountIdHex == accountIdHex }
+
+    /** Keep one message written to a pending contact, in the held-send queue
+     *  under its queue key. `false` when there is no such contact or it could
+     *  not be kept (the caller keeps the words). */
+    public fun queuePendingInvitedMessage(accountIdHex: String, text: String): Boolean {
+        if (boundAccountB64 == null) return false
+        val contact = pendingContact(accountIdHex) ?: return false
+        return chatRepo?.queuePendingInvitedMessage(contact.queueKey, text) ?: false
+    }
+
+    /** What was written to the pending contact [accountIdHex], in order. */
+    public fun pendingInvitedMessages(accountIdHex: String): List<me.lakko.app.chat.PersistedHeldSend> {
+        val contact = pendingContact(accountIdHex) ?: return emptyList()
+        return chatRepo?.pendingInvitedMessages(contact.queueKey).orEmpty()
+    }
+
+    /** B deletes a pending contact (UX section 7 item 4): the record goes,
+     *  and so do the messages kept for it in the held-send queue. `false`
+     *  when no such contact is held. */
+    public fun removePendingContact(accountIdHex: String): Boolean {
+        val accountB64 = boundAccountB64 ?: return false
+        val contact = pendingContact(accountIdHex) ?: return false
+        chatRepo?.clearPendingInvitedMessages(contact.queueKey)
+        updateInvited(accountB64) { list -> list.filterNot { it.accountIdHex == accountIdHex } }
+        return true
+    }
+
+    /**
+     * ADR-0079 section 5 — the pending contacts whose one-to-one now exists
+     * on this device: their messages move from the contact's held-send slot
+     * into the queue of the one-to-one, in order, which sends them (a failed
+     * send keeps the rest for the next attempt), and the record goes. Run
+     * after every poll; the same hand-over as web and iOS.
+     */
+    public fun handOverJoinedPendingContacts() {
+        val chat = chatRepo ?: return
+        val accountB64 = boundAccountB64 ?: return
+        if (mutableInvited.value.isEmpty()) return
+        for (groupIdHex in chat.heldGroupIds()) {
+            val people = chat.oneToOnePersonKeys(groupIdHex) ?: continue
+            val contact = PendingContacts.forConversation(mutableInvited.value, people) ?: continue
+            if (!chat.handOverPendingInvitedMessages(contact.queueKey, groupIdHex)) continue
+            updateInvited(accountB64) { list -> list.filterNot { it.accountIdHex == contact.accountIdHex } }
+            mutableHandedOver.value = mutableHandedOver.value + (contact.accountIdHex to groupIdHex)
+        }
+    }
+
+    // ---- ADR-0079: the inviter's device (A) ---------------------------------
+
+    /**
+     * ADR-0079 section 3 (reworked 2026-10-17) - a fetched request carrying
+     * a link answer is kept undecided (sealed on the device, not shown) and
+     * decided after the batch by [decideLinkRequests]. Returns the requests
+     * that answer no link, which go on as before.
+     */
+    private fun triageLinkAnswers(requests: List<IncomingContactRequest>): List<IncomingContactRequest> {
+        if (requests.none { it.linkAnswer != null }) return requests
+        val accountB64 = boundAccountB64 ?: return requests.filter { it.linkAnswer == null }
+        val inbox = linkRequestInbox(accountB64)
+        val out = ArrayList<IncomingContactRequest>(requests.size)
+        for (req in requests) {
+            val answer = req.linkAnswer
+            if (answer == null) {
+                out += req
+                continue
+            }
+            // ADR-0060 section 6 - the requester's reply key opens their
+            // mailbox for the winner's Welcome and ack: kept by the reach
+            // manager now, so the stored row carries nothing secret but the
+            // link answer, which is sealed.
+            req.replyGrant?.let { grant ->
+                if (grant.`class` == uniffi.lakko_ffi_uniffi.FfiReachClass.REPLY) {
+                    reach()?.keepHeld(req.fromPubkey, grant, scopeHex = "")
+                }
+            }
+            inbox.add(UndecidedLinkRequest(req.copy(linkAnswer = null, replyGrant = null), answer.linkId, answer.linkSecret))
+        }
+        return out
+    }
+
+    /**
+     * ADR-0079 (reworked 2026-10-17) - decide every undecided request that
+     * answers one of the account's invite links ([LinkClaims.step]): no
+     * timer; a request waits, kept and unshown, until the synced state is
+     * loaded, and only the device whose claim is first in the DeviceGroup
+     * journal builds the one-to-one. One pass at a time.
+     */
+    public suspend fun decideLinkRequests() {
+        if (!linkDecisionMutex.tryLock()) {
+            // A pass is running; it re-reads the store and the record at
+            // every row, so this trigger's change is seen by it or the next.
+            linkPassAgain = true
+            return
+        }
+        try {
+            do {
+                linkPassAgain = false
+                decideLinkRequestsOnce()
+            } while (linkPassAgain)
+        } finally {
+            linkDecisionMutex.unlock()
+        }
+    }
+
+    @Volatile
+    private var linkPassAgain: Boolean = false
+
+    private suspend fun decideLinkRequestsOnce() {
+        val accountB64 = boundAccountB64 ?: return
+        val claims = linkClaimRecord(accountB64)
+        val inbox = linkRequestInbox(accountB64)
+        // Whether a device in the CURRENT roster claimed the request (a claim
+        // only from a device since removed answers nothing). `false` while
+        // the roster is not known.
+        fun answeredElsewhere(key: String): Boolean {
+            val seen = claims.seen(key)
+            if (seen.isEmpty()) return false
+            val roster = deviceGroupSync?.linkClaimRoster() ?: return false
+            return runCatching {
+                uniffi.lakko_ffi_uniffi.linkClaimAnsweredElsewhere(ffiClaims(seen), roster.second)
+            }.getOrDefault(false)
+        }
+        for (row in inbox.rows()) {
+            if (boundAccountB64 != accountB64) return
+            val req = row.request
+            val key = LinkClaims.requestKeyHex(row.linkId, req.fromPubkey)
+            // ADR-0079 amendment of 2026-10-19 — the moment the request was
+            // written decides the link's expiry: the time the DS stamped on
+            // the row, kept with the request across a restart. A stamp that
+            // does not read counts as written after any expiry (fail-closed).
+            val pressedAtMs = req.createdAtMs?.toULong() ?: ULong.MAX_VALUE
+            val verdict = deviceGroupSync?.linkAnswerVerdictAt(
+                row.linkId, row.linkSecret, req.fromPubkey, pressedAtMs,
+            )?.let {
+                when (it) {
+                    uniffi.lakko_ffi_uniffi.LinkAnswerVerdict.ACCEPT -> LinkClaims.Verdict.ACCEPT
+                    uniffi.lakko_ffi_uniffi.LinkAnswerVerdict.ANSWERED -> LinkClaims.Verdict.ANSWERED
+                    uniffi.lakko_ffi_uniffi.LinkAnswerVerdict.DEAD -> LinkClaims.Verdict.DEAD
+                    uniffi.lakko_ffi_uniffi.LinkAnswerVerdict.UNKNOWN -> LinkClaims.Verdict.UNKNOWN
+                }
+            }
+            // The live one-to-one this device holds with the requester, if
+            // any: a requester who has one is put back on the contact list
+            // with it rather than given a second conversation (amended
+            // 2026-10-24).
+            val liveGroupIdHex = chatRepo?.liveOneToOneWith(req.fromPubkey)
+            var step = LinkClaims.step(
+                claims.own(key),
+                answeredElsewhere(key),
+                verdict,
+                claims.note(key) != null,
+                liveOneToOne = liveGroupIdHex != null,
+            )
+            when (step) {
+                LinkClaims.Step.WAIT -> continue
+                LinkClaims.Step.RESTORE -> {
+                    if (liveGroupIdHex == null) continue
+                    // A person removed and invited again: back on the list
+                    // with the conversation they already have. Nothing is
+                    // founded or sent; a live link records its use, as the
+                    // requester's consume did.
+                    try {
+                        restoreRemovedContact(
+                            signatureKey = req.fromPubkey,
+                            accountId = req.fromAccountId,
+                            groupIdHex = liveGroupIdHex,
+                            nowMs = System.currentTimeMillis().toULong(),
+                            createdAt = java.time.Instant.now().toString(),
+                        )
+                        if (verdict == LinkClaims.Verdict.ACCEPT) {
+                            deviceGroupSync?.recordLinkUse(row.linkId, req.fromPubkey)
+                        }
+                    } catch (e: Throwable) {
+                        me.lakko.app.rethrowIfCancelled(e)
+                        Log.w(TAG, "ADR-0079: link request not restored this pass (${e.javaClass.simpleName})")
+                        continue
+                    }
+                    if (boundAccountB64 != accountB64) return
+                    claims.forgetOwn(key)
+                    inbox.remove(req.messageId)
+                    continue
+                }
+                LinkClaims.Step.DROP -> {
+                    claims.forgetOwn(key)
+                    inbox.remove(req.messageId)
+                    continue
+                }
+                LinkClaims.Step.REFUSE -> {
+                    // The link does not count: no card. The requester is
+                    // answered with a refusal and the request goes; a failed
+                    // write keeps it for the next pass.
+                    if (!refuseLinkRequest(req, row.linkId)) continue
+                    if (boundAccountB64 != accountB64) return
+                    claims.forgetOwn(key)
+                    inbox.remove(req.messageId)
+                    continue
+                }
+                else -> Unit
+            }
+            val sync = deviceGroupSync ?: continue
+            try {
+                if (step == LinkClaims.Step.POST_CLAIM) {
+                    // The sealed claim is recorded before the publish:
+                    // whether or not the publish answers, the receive loop
+                    // recognises its row by those bytes and judges it at its
+                    // position (it counts only when sealed at the journal's
+                    // epoch there; a straddled claim is dropped and claimed
+                    // again on the next pass).
+                    sync.postLinkClaim(
+                        row.linkId,
+                        req.fromPubkey,
+                        beforePublish = { claims.addOwnWire(key, it) },
+                    )
+                    step = LinkClaims.Step.DECIDE
+                }
+                if (step == LinkClaims.Step.DECIDE || step == LinkClaims.Step.RECHECK) {
+                    // Every row up to (and past) this device's claims is
+                    // applied once a poll that started after them read the
+                    // journal to its head. A wait that times out (60 s) keeps
+                    // the request undecided for the next pass. A re-check
+                    // reads no journal: every claim of this device is known
+                    // and only the roster can change.
+                    if (step == LinkClaims.Step.DECIDE &&
+                        (!sync.awaitJournalReadPastNow() || boundAccountB64 != accountB64)
+                    ) {
+                        continue
+                    }
+                    val roster = sync.linkClaimRoster() ?: continue
+                    // A sealed claim no row carried did not land.
+                    claims.dropUnlanded(key)
+                    val decide = LinkClaims.claimsToDecide(
+                        claims.own(key),
+                        claims.seen(key),
+                        LinkClaims.hex(roster.first),
+                    )
+                    when (
+                        val outcome = uniffi.lakko_ffi_uniffi.linkClaimOutcome(
+                            roster.first,
+                            ffiClaims(decide),
+                            roster.second,
+                        )
+                    ) {
+                        is uniffi.lakko_ffi_uniffi.FfiLinkClaimOutcome.Lost -> {
+                            // Another device's claim is first: it answers.
+                            // Kept, unshown, until the register says it was
+                            // answered; if that device is removed first, a
+                            // re-check hands it on.
+                            claims.setSettled(key)
+                            continue
+                        }
+                        is uniffi.lakko_ffi_uniffi.FfiLinkClaimOutcome.NoWinner -> {
+                            // No claim from the roster landed: post again
+                            // next pass.
+                            claims.forgetOwn(key)
+                            continue
+                        }
+                        is uniffi.lakko_ffi_uniffi.FfiLinkClaimOutcome.Won -> {
+                            claims.setWon(key, outcome.messageId.toLong())
+                            step = LinkClaims.Step.BUILD
+                        }
+                    }
+                }
+                if (step == LinkClaims.Step.REFUSE) {
+                    // Won, but the link was revoked before this device
+                    // answered: the revocation wins (ADR-0079 amendment of
+                    // 2026-10-19).
+                    if (refuseLinkRequest(req, row.linkId) && boundAccountB64 == accountB64) {
+                        claims.forgetOwn(key)
+                        inbox.remove(req.messageId)
+                    }
+                    continue
+                }
+                if (step == LinkClaims.Step.BUILD) {
+                    val answer = uniffi.lakko_ffi_uniffi.FfiLinkAnswer(row.linkId, row.linkSecret)
+                    if (acceptThroughLink(req, answer, key, claims) && boundAccountB64 == accountB64) {
+                        inbox.remove(req.messageId)
+                        claims.forgetOwn(key)
+                    }
+                }
+            } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e)
+                // A publish or a write that failed: the request stays
+                // undecided and the next pass picks it up where its record
+                // says.
+                Log.w(TAG, "ADR-0079: link request not decided this pass (${e.javaClass.simpleName})")
+            }
+        }
+    }
+
+    /**
+     * ADR-0079 amendment of 2026-10-19 — refuse a request whose invite link
+     * no longer counts: a signed refusal to the requester's mailbox through
+     * the reply grant the request carried (the ack's path). `true` when it
+     * was written; `false` keeps the request for the next pass.
+     */
+    private suspend fun refuseLinkRequest(request: IncomingContactRequest, linkId: ByteArray): Boolean {
+        val secrets = authRepo.identitySecrets.value ?: return false
+        return try {
+            useClientWith(secrets) { client, sender ->
+                me.lakko.app.reach.writeRecheckingAddress(
+                    write = {
+                        val candidates = reach()
+                            ?.reachAuthCandidates(request.fromPubkey, me.lakko.app.reach.WritePurpose.REPLY)
+                            .orEmpty()
+                        val send: suspend (MailboxDest?) -> Unit = { dest ->
+                            client.sendLinkRefusal(
+                                inviterSigningSeed = sender.signingSeed,
+                                linkId = linkId,
+                                originalRequest = request,
+                                reach = dest ?: reach()?.mailboxPkFor(request.fromPubkey)?.let { MailboxDest(it, null) },
+                            )
+                        }
+                        when (
+                            val outcome = me.lakko.app.reach.firstAcceptedWrite(
+                                candidates,
+                                { dest: MailboxDest -> send(dest) },
+                                ::isMailboxRefusal,
+                            )
+                        ) {
+                            is me.lakko.app.reach.SignedWriteOutcome.Written -> Unit
+                            is me.lakko.app.reach.SignedWriteOutcome.Exhausted ->
+                                outcome.lastRefusal?.let { throw it } ?: send(null)
+                        }
+                    },
+                    isRefusal = ::isMailboxRefusal,
+                    recheck = { recheckAddress(request.fromPubkey, request.fromAccountId) },
                 )
             }
-            persistAccepted()
-            persistInboxPending()
-            AcceptInviteResult.Accepted(
-                recipientAccountId = inviterAccountId,
-                inviterFingerprint = capability.ownerFingerprint(),
-                groupIdHex = groupIdHex,
-            )
+            true
+        } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
+            Log.w(TAG, "ADR-0079: link refusal not sent this pass (${e.javaClass.simpleName})")
+            false
+        }
+    }
+
+    /**
+     * ADR-0079 amendment of 2026-10-19 — the inviter's app refused the
+     * request this account sent through their link: the pending contact it
+     * names and the messages held for it go, silently. Only a refusal signed
+     * by the key the link named, over that link and this account
+     * ([ownAccountKey]), removes anything. `true` when one was removed.
+     */
+    internal fun applyLinkRefusal(refusal: ByteArray, ownAccountKey: ByteArray): Boolean {
+        val refused = PendingContacts.refusedBy(mutableInvited.value, refusal, ownAccountKey) { w, k, l, o ->
+            uniffi.lakko_ffi_uniffi.verifyLinkRefusal(w, k, l, o)
+        } ?: return false
+        removePendingContact(refused.accountIdHex)
+        runCatching { java.util.Base64.getDecoder().decode(refused.signaturePubkeyB64) }.getOrNull()?.let { key ->
+            reach()?.retireRepliesTo(key)
+        }
+        return true
+    }
+
+    /** The claim decision's inputs in the binding's shape; an author whose
+     *  hex does not decode is left out. */
+    private fun ffiClaims(claims: List<LinkClaims.Observed>): List<uniffi.lakko_ffi_uniffi.FfiObservedLinkClaim> =
+        claims.mapNotNull { claim ->
+            val author = LinkClaims.bytes(claim.author) ?: return@mapNotNull null
+            if (claim.id <= 0) return@mapNotNull null
+            uniffi.lakko_ffi_uniffi.FfiObservedLinkClaim(claim.id.toULong(), author)
+        }
+
+    /**
+     * The winning device's accept of a request sent through one of this
+     * account's live invite links (ADR-0079 section 3, order of 2026-10-17,
+     * [LinkClaims.runBuild]): its own founding carried on; else a
+     * link-founded note from another device answered by writing the note's
+     * Welcome to the requester (never founding); else found in ONE commit
+     * with every other device of this account, record the founding, publish
+     * the note, and only then write the Welcome to this account's own mailbox
+     * and then the requester's. `false` when it did not complete; every
+     * record stays, and the next pass takes it up where it stopped.
+     */
+    private suspend fun acceptThroughLink(
+        request: IncomingContactRequest,
+        answer: uniffi.lakko_ffi_uniffi.FfiLinkAnswer,
+        key: String,
+        claims: LinkClaimRecord,
+    ): Boolean {
+        val chat = chatRepo ?: return false
+        val sync = deviceGroupSync ?: return false
+        val fromAccountId = request.fromAccountId ?: return false
+        // ADR-0060 §6 — the requester's reply key opens their mailbox for the
+        // Welcome and the ack; kept before anything is written there.
+        request.replyGrant?.let { grant ->
+            if (grant.`class` == uniffi.lakko_ffi_uniffi.FfiReachClass.REPLY) {
+                reach()?.keepHeld(request.fromPubkey, grant, scopeHex = "")
+            }
+        }
+        val deps = object : LinkClaims.BuildDeps {
+            override fun founded(): LinkClaims.Founded? = claims.own(key)?.founded
+
+            override fun note(): LinkClaims.HeldNote? = claims.note(key)
+
+            override suspend fun prepare(): LinkClaims.Founded =
+                chat.prepareLinkOneToOne(fromAccountId, request.fromPubkey)
+
+            override fun record(founded: LinkClaims.Founded): Boolean = claims.setFounded(key, founded)
+
+            override suspend fun postNote(founded: LinkClaims.Founded): Boolean {
+                // Published once (a sealed note already recorded is not
+                // published again), then judged at its row: it counts only
+                // when sealed at the journal's epoch there.
+                val own = claims.own(key)
+                if (own?.noteConfirmed == true) return true
+                if (own?.noteWire == null) {
+                    val groupId = LinkClaims.bytes(founded.groupIdHex) ?: error("the founding is malformed")
+                    sync.postLinkFounded(
+                        answer.linkId,
+                        request.fromPubkey,
+                        groupId,
+                        java.util.Base64.getDecoder().decode(founded.welcomeB64),
+                        beforePublish = { claims.setNoteWire(key, it) },
+                    )
+                }
+                if (!sync.awaitJournalReadPastNow()) return false
+                if (claims.own(key)?.noteConfirmed == true) return true
+                // Read past it and it did not count (straddled by a commit)
+                // or no row carried it: posted again at the next pass.
+                claims.dropUnlandedNote(key)
+                return false
+            }
+
+            override suspend fun hold(founded: LinkClaims.Founded): Boolean =
+                chat.holdLinkOneToOne(founded.groupIdHex)
+
+            override suspend fun deliver(founded: LinkClaims.Founded) {
+                chat.deliverLinkWelcome(founded, fromAccountId)
+            }
+
+            override suspend fun forward(note: LinkClaims.HeldNote): String? =
+                chat.forwardLinkWelcome(note, request.fromPubkey, fromAccountId)
+
+            override suspend fun finish(groupIdHex: String?) {
+                var added = false
+                mutableState.update { state ->
+                    added = false
+                    if (state.accepted.any { it.request.fromPubkey.contentEquals(request.fromPubkey) }) return@update state
+                    added = true
+                    val accepted = AcceptedContact(request = request.copy(linkAnswer = null), groupIdHex = groupIdHex)
+                    state.copy(
+                        accepted = state.accepted + accepted,
+                        pending = withoutAcceptedSenders(state.pending, listOf(accepted)),
+                    )
+                }
+                if (added) {
+                    persistAccepted()
+                    persistInboxPending()
+                }
+                try {
+                    sendContactAck(request)
+                } catch (e: Throwable) {
+                    me.lakko.app.rethrowIfCancelled(e)
+                    // Best effort, as on a manual accept.
+                }
+                sync.recordLinkUse(answer.linkId, request.fromPubkey)
+            }
+        }
+        return try {
+            LinkClaims.runBuild(deps)
+        } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
+            Log.w(TAG, "ADR-0079 invite-link accept did not complete; retried at the next pass")
+            false
+        }
+    }
+
+    /**
+     * ADR-0079 section 4 — after every poll: retry the ledger-row deletions
+     * this device owes (it revoked the link and the ledger was unreachable,
+     * or the app stopped in between), and drop this device's local traces of
+     * the links another device of the account revoked. The revoking device
+     * deletes the row itself, so this sends the ledger nothing for those; the
+     * one exception is a synced record with no revocation seed (written
+     * before the 2026-10-17 rework), whose row this device deletes with the
+     * seed of its own record. See [LinkRowSweep].
+     */
+    public suspend fun revokeLinksRevokedElsewhere() {
+        val accountB64 = boundAccountB64 ?: return
+        val revoked = deviceGroupSync?.linkRecords?.value.orEmpty()
+            .filter { it.revoked && it.kind == uniffi.lakko_ffi_uniffi.LinkRecordKind.CONTACT && it.ledgerId.isNotEmpty() }
+            .map { LinkRowSweep.RevokedLink(it.ledgerId.copyOf(), it.revocationSeed.copyOf()) }
+        if (revoked.isEmpty() && linkRowDeleter.owed.slugs(accountB64).isEmpty()) return
+        val report = LinkRowSweep.run(
+            accountIdB64 = accountB64,
+            revoked = revoked,
+            ownSeed = { slug -> ownLinkStore.get(accountB64, OwnLink.KIND_CONTACT, slug)?.seed() },
+            deleter = linkRowDeleter,
+            delete = ::deleteLinkLedgerRow,
+            forget = { blobId -> forgetLinkTraces(accountB64, blobId) },
+        )
+        for (link in revoked) link.recordSeed.fill(0)
+        if (report.unreachable > 0) {
+            Log.w(TAG, "invite links: ${report.unreachable} ledger row deletion(s) still owed")
+        }
+    }
+
+    /** The ledger call of a contact link's row deletion. */
+    private suspend fun deleteLinkLedgerRow(
+        blobId: ByteArray,
+        seed: ByteArray,
+    ): me.lakko.app.discovery.RevokeInviteResult =
+        authenticatedDiscoveryClient().use { discovery -> discovery.revokeInvite(blobId, seed) }
+
+    /** Drop this device's local traces of a contact link whose ledger row is
+     *  dealt with: its own record (seed), the link's reach key, its secret
+     *  and its session row. Idempotent; touches nothing that is not there. */
+    private suspend fun forgetLinkTraces(accountB64: String, blobId: ByteArray) {
+        val slug = base64UrlEncodeNoPad(blobId)
+        if (ownLinkStore.get(accountB64, OwnLink.KIND_CONTACT, slug) != null) {
+            ownLinkStore.remove(accountB64, OwnLink.KIND_CONTACT, slug)
+        }
+        // ADR-0060 §6 — the link's key comes off the mailbox (no-op when this
+        // device never registered it).
+        reach()?.retireLinkByBlob(blobId)
+        // UX 5.3 — a revoked link's secret leaves with it.
+        if (inviteSecretStore.get(accountB64, slug) != null) inviteSecretStore.remove(accountB64, slug)
+        val blobIdList = blobId.toList()
+        if (mutableState.value.outstandingInvites.any { it.blobId?.toList() == blobIdList }) {
+            mutableState.update { state ->
+                state.copy(outstandingInvites = state.outstandingInvites.filterNot { it.blobId?.toList() == blobIdList })
+            }
         }
     }
 
@@ -2107,12 +2878,12 @@ public class ContactsRepository(
      * owner shares via copy-to-clipboard or the Android share
      * sheet.
      *
-     * 1.15e10 ships with **fixed defaults**: 7-day expiry,
-     * single-use (`max_uses = 0`), non-bootstrap-referral
-     * (this flow is for connecting existing users, not new
-     * signups). A custom-config dialog (user-typed label /
-     * expiry / max_uses) layers on as 1.15e10b when the UX
-     * pushes back.
+     * The defaults are 7-day expiry and single-use (`max_uses = 0`);
+     * the Invite links sheet's form passes the owner's choice of label,
+     * expiry and uses. [expiryMillisFromNow] `null` means the link never
+     * expires: the wire expiry is then the `NEVER_EXPIRES` sentinel `0`,
+     * in the composed capability and in the ledger upload alike. Always
+     * non-bootstrap-referral (this flow connects existing users).
      *
      * The new invite is appended to [ContactsState.outstandingInvites]
      * so the UI can render a list of the owner's outstanding
@@ -2124,7 +2895,7 @@ public class ContactsRepository(
      */
     public suspend fun generateInviteLink(
         label: String = "",
-        expiryMillisFromNow: Long = DEFAULT_INVITE_EXPIRY_MS,
+        expiryMillisFromNow: Long? = DEFAULT_INVITE_EXPIRY_MS,
         maxUses: UInt = SINGLE_USE,
         bootstrapReferral: Boolean = false,
     ): GeneratedInvite {
@@ -2134,7 +2905,10 @@ public class ContactsRepository(
                     "no identity secrets — please re-enter your password",
                 ),
             )
-        val expiryMs = (System.currentTimeMillis() + expiryMillisFromNow).toULong()
+        // `0` is the NEVER_EXPIRES sentinel (a never-expiring link).
+        val expiryMs = (
+            if (expiryMillisFromNow == null) 0L else System.currentTimeMillis() + expiryMillisFromNow
+            ).toULong()
 
         val bound = sessionBinding.capture()
         return me.lakko.app.auth.SessionSecretWipe.identity(secrets.accountIdentitySeed).use { identity ->
@@ -2159,22 +2933,29 @@ public class ContactsRepository(
                     label = label,
                     linkId = linkId,
                     linkGrant = linkGrant,
+                    // ADR-0079 section 1 — the page the invited person opens
+                    // names this account, signed and sealed in the capability.
+                    inviterDisplayName = ownProfileForWire(secrets.accountId)?.displayName,
+                    inviterUsername = ownProfileForWire(secrets.accountId)?.username,
                 )
             } catch (e: Throwable) {
                 throw ContactsError.wrap(e)
             }
             // Sealed links (2026-09-28): the ledger stores only the sealed
-            // capability; the secret rides in the fragment. Only a transport
-            // failure falls back to the inline form; a refusal is thrown.
+            // capability; the secret rides in the fragment. Any failed upload,
+            // a network one included, is thrown and mints no link (the inline
+            // form was removed on 2026-10-19).
+            // ADR-0078 section 10: the ledger row carries a key minted for
+            // this link alone, never the account key; the seed stays on this
+            // device with what the list shows.
+            val (revocationSeed, revocationPubkey) = OwnLinks.freshRevocationKey()
             val upload = me.lakko.app.discovery.SealedInviteUpload(
                 sealed = mint.sealed,
-                issuerPubkey = mint.issuerPubkey,
+                revocationPubkey = revocationPubkey,
                 expiryMs = expiryMs.toLong(),
                 maxUses = maxUses.toLong(),
-                label = label,
-                bootstrapReferral = bootstrapReferral,
             )
-            val blobId: ByteArray? = try {
+            val blobId: ByteArray = try {
                 authenticatedDiscoveryClient().use { discovery ->
                     discovery.uploadInvite(upload)
                 }
@@ -2185,39 +2966,84 @@ public class ContactsRepository(
                     }
                     throw e
                 }
-                if (!me.lakko.app.discovery.isInviteUploadTransportFailure(e)) {
-                    // ADR-0060 §6 — a refused upload shares no link, so its
-                    // key comes off the mailbox again.
-                    manager.retireLink(linkId)
-                    throw ContactsError.wrap(e)
-                }
-                // An inline link keeps its key: it is shared, and it is retired
-                // at expiry like any other.
-                android.util.Log.w("ContactsRepository", "invite upload unreachable; sharing the inline link")
-                null
+                // ADR-0060 §6 — a failed upload shares no link, so its key
+                // comes off the mailbox again.
+                manager.retireLink(linkId)
+                throw ContactsError.wrap(e)
             }
             // The link exists on the server; the reach keys, the secret store
             // and the list below are the minting account's.
             bound.ensureCurrent()
-            if (blobId != null) manager.noteLinkBlob(linkId, blobId)
+            manager.noteLinkBlob(linkId, blobId)
 
-            val slug = base64UrlEncodeNoPad(blobId ?: mint.sealed)
+            val slug = base64UrlEncodeNoPad(blobId)
             val url = me.lakko.app.discovery.composeSealedInviteUrl(
                 origin = me.lakko.app.config.ApiEndpoints.webOrigin,
                 prefix = "/i/",
                 blobId = blobId,
-                sealed = mint.sealed,
                 linkSecret = mint.linkSecret,
             )
-            // UX 5.3 — keep the secret of a pointer link (the only kind the
-            // server lists) so this device can copy and share it later, after
-            // a restart included. An inline link has no ledger row.
-            if (blobId != null) {
+            // UX 5.3 — keep the secret of the link so this device can copy
+            // and share it later, after a restart included.
+            run {
                 inviteSecretStore.put(
                     base64Encode(secrets.accountId),
                     slug,
                     base64UrlEncodeNoPad(mint.linkSecret),
                 )
+                // This device's record is the only list of the account's
+                // links and the only key that revokes this one.
+                ownLinkStore.put(
+                    base64Encode(secrets.accountId),
+                    OwnLinks.record(
+                        kind = OwnLink.KIND_CONTACT,
+                        blobId = blobId,
+                        seed = revocationSeed,
+                        label = label,
+                        expiryMs = expiryMs.toLong(),
+                        maxUses = maxUses.toLong(),
+                        bootstrapReferral = bootstrapReferral,
+                    ),
+                )
+            }
+            // ADR-0079 (reworked 2026-10-17) — the ledger row's revocation
+            // seed rides the synced record, so a revoke on any device of the
+            // account deletes the row.
+            val recordSeed = revocationSeed.copyOf()
+            revocationSeed.fill(0)
+            // ADR-0079 section 4 — the link's record goes to the synced
+            // register, so every device of the account accepts a request
+            // through it, lists it and can revoke it.
+            val recorded = deviceGroupSync?.setLinkRecord(
+                uniffi.lakko_ffi_uniffi.LinkRecord(
+                    hlc = 0uL,
+                    linkId = linkId,
+                    linkSecret = mint.linkSecret,
+                    kind = uniffi.lakko_ffi_uniffi.LinkRecordKind.CONTACT,
+                    ledgerId = blobId,
+                    revocationSeed = recordSeed,
+                    expiryMs = expiryMs,
+                    maxUses = maxUses,
+                    uses = 0u,
+                    revoked = false,
+                    mintedAtMs = System.currentTimeMillis().toULong(),
+                    label = label,
+                    answered = emptyList(),
+                    shared = false,
+                    editable = false,
+                ),
+            ) ?: false
+            if (!recorded) {
+                // A link this device would not remember after a restart is not
+                // handed out: every request through it would wait for ever.
+                try {
+                    revokeInviteLink(blobId)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Throwable) {
+                    // The row stays on the server unanswered: nobody holds its secret.
+                }
+                throw ContactsError.wrap(IllegalStateException("invite link not recorded"))
             }
             val invite = GeneratedInvite(
                 blobId = blobId,
@@ -2237,15 +3063,26 @@ public class ContactsRepository(
 
 
     /**
-     * Revoke an outstanding invite link via the discovery
-     * service's owner-signed `DELETE` endpoint + drop the row
-     * from [ContactsState.outstandingInvites].
+     * Revoke an outstanding invite link: marked revoked in the synced
+     * register, its ledger row deleted with `DELETE /discovery/invite/{id}`
+     * (signed by the link's own revocation seed, ADR-0078 section 10), and
+     * this device's traces of it dropped.
      *
-     * Returns the underlying [me.lakko.app.discovery.RevokeInviteResult]
-     * so the UI can branch on `Revoked` vs `NotFoundOrNotOwner`.
-     * The row is dropped from local state on `Revoked` **only**;
-     * `NotFoundOrNotOwner` keeps it so the user can retry (the
-     * 404-folding-of-bad-signature path may be transient).
+     * ADR-0079 section 4 — the ledger holds one row per link and only the
+     * device that revokes deletes it, once ([LinkRowRevoke]): the deletion is
+     * marked owed BEFORE the register changes (cleared again if that fails),
+     * a call while the same deletion runs joins it, and an unreachable ledger
+     * leaves it owed for [revokeLinksRevokedElsewhere] to retry after every
+     * poll. The seed comes from the register's record (any device holds it)
+     * or, for a record written before the 2026-10-17 rework, from this
+     * device's own record.
+     *
+     * Returns the ledger's answer; `Revoked` too when another call on this
+     * device already got it. Both `Revoked` and `NotFoundOrNotOwner` (no row:
+     * gone, expired, deleted earlier) drop the local traces. With no seed at
+     * all the link is only revoked in the register and the answer is
+     * `NotFoundOrNotOwner`. An unreachable ledger throws [ContactsError] (the
+     * row stays listed until the retry gets an answer).
      */
     public suspend fun revokeInviteLink(
         blobId: ByteArray,
@@ -2256,45 +3093,74 @@ public class ContactsRepository(
                     "no identity secrets — please re-enter your password",
                 ),
             )
-        return me.lakko.app.auth.SessionSecretWipe.identity(secrets.accountIdentitySeed).use { identity ->
-            val signingSeed = identity.ed25519Seed()
-            try {
-                val result = authenticatedDiscoveryClient().use { discovery ->
-                    discovery.revokeInvite(blobId, signingSeed)
-                }
-                if (result is me.lakko.app.discovery.RevokeInviteResult.Revoked) {
-                    // ADR-0060 §6 — the link's key comes off the mailbox.
-                    reach()?.retireLinkByBlob(blobId)
-                    // UX 5.3 — a revoked link's secret leaves with it.
-                    inviteSecretStore.remove(base64Encode(secrets.accountId), base64UrlEncodeNoPad(blobId))
-                    val blobIdHex = blobId.toList()
-                    mutableState.update { state ->
-                        state.copy(
-                            outstandingInvites = state.outstandingInvites
-                                .filterNot { it.blobId?.toList() == blobIdHex },
-                        )
-                    }
-                }
-                result
-            } catch (e: Throwable) {
-                throw ContactsError.wrap(e)
-            } finally {
-                signingSeed.fill(0)
-            }
+        val accountB64 = base64Encode(secrets.accountId)
+        val ownSlug = base64UrlEncodeNoPad(blobId)
+        val sync = deviceGroupSync
+        val record = sync?.linkRecords?.value?.firstOrNull {
+            it.kind == uniffi.lakko_ffi_uniffi.LinkRecordKind.CONTACT && it.ledgerId.contentEquals(blobId)
+        }
+        val recordSeed = record?.revocationSeed?.takeIf { it.size == 32 }?.copyOf()
+        val ownSeed = ownLinkStore.get(accountB64, OwnLink.KIND_CONTACT, ownSlug)?.seed()
+        val outcome = try {
+            LinkRowRevoke.run(
+                accountIdB64 = accountB64,
+                blobId = blobId,
+                recordSeed = recordSeed,
+                ownSeed = ownSeed,
+                // ADR-0079 section 4 — marked revoked in the synced register:
+                // no device of the account takes a request through the link
+                // from now on, whatever the ledger answers.
+                revokeRegister = if (record != null && sync != null) {
+                    { sync.revokeLinkRecord(record.linkId) }
+                } else {
+                    null
+                },
+                deleter = linkRowDeleter,
+                delete = ::deleteLinkLedgerRow,
+                forget = { id -> forgetLinkTraces(accountB64, id) },
+            )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            throw ContactsError.wrap(e)
+        } finally {
+            recordSeed?.fill(0)
+            ownSeed?.fill(0)
+        }
+        return when (outcome) {
+            is LinkRowDeleter.Outcome.Deleted -> outcome.result
+            LinkRowDeleter.Outcome.AlreadyDone -> me.lakko.app.discovery.RevokeInviteResult.Revoked
+            LinkRowDeleter.Outcome.NoKey -> me.lakko.app.discovery.RevokeInviteResult.NotFoundOrNotOwner
+            LinkRowDeleter.Outcome.Unreachable ->
+                throw ContactsError.wrap(IllegalStateException("invite ledger unreachable; the deletion is retried"))
         }
     }
 
     /**
-     * Owner-signed list of every live invite this account owns
-     * across all devices (Phase 1.18d2b-list). Distinct from
-     * [ContactsState.outstandingInvites] which only tracks
-     * invites generated in the current session — the server-side
-     * list is authoritative across the user's full device fleet.
+     * The account's synced link-record register (ADR-0079 section 4), every
+     * device's links with `shared` / `editable`; empty while the device-group
+     * sync is not wired. The Invite links sheet joins its rows with it by
+     * ledger id.
+     */
+    public fun inviteLinkRecords(): kotlinx.coroutines.flow.StateFlow<List<uniffi.lakko_ffi_uniffi.LinkRecord>> =
+        deviceGroupSync?.linkRecords ?: kotlinx.coroutines.flow.MutableStateFlow(emptyList())
+
+    /**
+     * Copy (ADR-0079 amendment 2026-10-26): mark the link [linkId] copied in
+     * the synced state and send its record to the account's other devices,
+     * before the text reaches the clipboard. `false` when nothing changed
+     * (already copied) or the register is not open.
+     */
+    public suspend fun markInviteLinkShared(linkId: ByteArray): Boolean =
+        deviceGroupSync?.markLinkShared(linkId) ?: false
+
+    /**
+     * The live `/i/` links this device minted and keeps a record of
+     * (ADR-0078 section 10). No ledger row names its owner, so there is no
+     * server list: a link minted on another device is listed there.
      *
-     * Throws [ContactsError] when the session has no identity
-     * secrets (caller should prompt the user to re-enter their
-     * password) or when the discovery client surfaces a transport
-     * failure.
+     * Throws [ContactsError] when the session has no identity secrets
+     * (caller should prompt the user to re-enter their password).
      */
     public suspend fun listActiveInvites(): me.lakko.app.discovery.ListInvitesResult {
         val secrets = authRepo.identitySecrets.value
@@ -2303,17 +3169,56 @@ public class ContactsRepository(
                     "no identity secrets — please re-enter your password",
                 ),
             )
-        return me.lakko.app.auth.SessionSecretWipe.identity(secrets.accountIdentitySeed).use { identity ->
-            val signingSeed = identity.ed25519Seed()
-            try {
-                authenticatedDiscoveryClient().use { discovery ->
-                    discovery.listInvitesByOwner(secrets.accountId, signingSeed)
+        val nowMs = System.currentTimeMillis()
+        val accountB64 = base64Encode(secrets.accountId)
+        // ADR-0079 section 4 — the synced register lists every device's links
+        // with their use counts. The link's secret is in the record, so Copy
+        // works on every device.
+        val sync = deviceGroupSync
+        if (sync != null && sync.ready.value) {
+            val rows = LinkRecords.listedContactLinks(sync.linkRecords.value, nowMs.toULong()).map { record ->
+                val slug = base64UrlEncodeNoPad(record.ledgerId)
+                if (inviteSecretStore.all(accountB64)[slug] == null) {
+                    inviteSecretStore.put(accountB64, slug, base64UrlEncodeNoPad(record.linkSecret))
                 }
-            } catch (e: Throwable) {
-                throw ContactsError.wrap(e)
-            } finally {
-                signingSeed.fill(0)
+                me.lakko.app.discovery.ActiveInvite(
+                    blobIdSlug = slug,
+                    expiryMs = record.expiryMs.toLong(),
+                    maxUses = record.maxUses.toLong(),
+                    usedCount = record.uses.toLong(),
+                    label = record.label,
+                    bootstrapReferral = false,
+                    createdAtMs = record.mintedAtMs.toLong(),
+                )
             }
+            return me.lakko.app.discovery.ListInvitesResult.List(rows)
+        }
+        val rows = ownLinkStore.all(accountB64)
+            .filter { it.kind == OwnLink.KIND_CONTACT && !it.isExpired(nowMs) }
+            .map { link ->
+                me.lakko.app.discovery.ActiveInvite(
+                    blobIdSlug = link.slug,
+                    expiryMs = link.expiryMs,
+                    maxUses = link.maxUses,
+                    usedCount = 0,
+                    label = link.label,
+                    bootstrapReferral = link.bootstrapReferral,
+                    createdAtMs = link.mintedAtMs,
+                )
+            }
+        return me.lakko.app.discovery.ListInvitesResult.List(rows)
+    }
+
+    /**
+     * Revoke every live link this device keeps a record of, each with its own
+     * revocation seed (ADR-0078 section 10). Account deletion runs this
+     * first, while the session still works. Best effort; returns how many
+     * could not be reached.
+     */
+    public suspend fun revokeAllOwnLinks(): Int {
+        val secrets = authRepo.identitySecrets.value ?: return 0
+        return authenticatedDiscoveryClient().use { discovery ->
+            OwnLinks.revokeAll(base64Encode(secrets.accountId), discovery, ownLinkStore)
         }
     }
 
@@ -2344,11 +3249,14 @@ public class ContactsRepository(
         synchronized(bindLock) {
             sessionBinding.advance()
             boundAccountB64 = null
+            removedContactKeys = emptySet()
             // Wipe any decrypted intro plaintext on the way out.
             // Best-effort: the `String` contents may still live in
             // heap if some collector cached them, but our reference
             // drops here.
             mutableState.value = ContactsState()
+            mutableInvited.value = emptyList()
+            mutableHandedOver.value = emptyMap()
         }
         // The name directory stops carrying this account's renames, and the
         // names it learned stop resolving.
@@ -2552,100 +3460,136 @@ public data class ContactsState(
     val lastError: InboxError? = null,
 )
 
-/**
- * Discriminated outcome of [ContactsRepository.acceptInviteLink].
- *
- * Each variant maps to a distinct user-visible state on the
- * [InviteLandingScreen] (1.15e11b):
- *
- *   * [Accepted] — every step succeeded; the inviter has a
- *     fresh ContactRequest in their stranger inbox, the
- *     MLS group is up (when `groupIdHex` is non-null —
- *     `ChatRepository` was wired + `startGroupWith` worked).
- *   * [AlreadyAccepted] — the server's per-joiner dedup tag
- *     already had a row for `(blob_id, joiner_account_id)`.
- *     The user landed on this URL before; the UI surfaces a
- *     "you've already accepted this invite" hint + an "Open
- *     chat" affordance pointing at the prior thread.
- *   * [Expired] — the capability's `expiry_ms` is in the past
- *     (local clock check); no server round-trip happened, no
- *     state mutated.
- *   * [Exhausted] — the server's `max_uses` ceiling was hit
- *     by other joiners before our consume could land
- *     (410 Gone).
- *   * [NotFound] — server returned 404 (revoked / expired /
- *     never-issued; the server folds these into one status to
- *     deny status-code probing).
- *   * [MalformedSlug] — the URL slug is not the 8-character
- *     base64url form of a 6-byte blob_id.
- *   * [RateLimited] — the discovery service answered `429` on
- *     fetch or consume. The link may be fine; try again later.
- *   * [RequiresReauth] — [AuthRepository.identitySecrets] is
- *     `null`. The UI surfaces a "please re-enter your
- *     password" panel + a Login deep-link.
- *   * [Failed] — any other underlying failure (transport,
- *     OPAQUE / OPRF wire-format mismatch, no consume token,
- *     MLS group creation throwing). Carries the inner error
- *     message for diagnostics.
- */
-public sealed interface AcceptInviteResult {
-    /** The link's fragment is missing or malformed, or the link does not
-     *  open under it (sealed links, 2026-09-28). */
-    public data object Damaged : AcceptInviteResult
+/** What opening a link with no session gave the signed-out invite page
+ *  (UX section 3, "Signed out", amended 2026-10-26). */
+public sealed interface InvitePreviewResult {
+    public data class Preview(
+        val displayName: String?,
+        val username: String?,
+        val label: String,
+        val ownerAccountId: ByteArray,
+    ) : InvitePreviewResult {
+        /** The name the link states ([PendingContacts.statedName]). */
+        val statedName: String? get() = PendingContacts.statedName(displayName, username)
 
-    public data class Accepted(
-        val recipientAccountId: ByteArray,
-        /** 71-char Signal-style safety number derived from
-         *  the inviter's Ed25519 pubkey. UI surfaces this on
-         *  the success screen so the user can verify out-of-
-         *  band whom they just connected to — defence-in-
-         *  depth against link-substitution attacks
-         *  (ROADMAP 3c3 / calls.md C-28). */
-        val inviterFingerprint: String,
-        /** Non-null when the chat surface was wired AND the
-         *  MLS handshake succeeded; the UI surfaces an "Open
-         *  chat" button pointing at the new thread. */
-        val groupIdHex: String?,
-    ) : AcceptInviteResult {
         override fun equals(other: Any?): Boolean =
-            other is Accepted &&
-                recipientAccountId.contentEquals(other.recipientAccountId) &&
-                inviterFingerprint == other.inviterFingerprint &&
-                groupIdHex == other.groupIdHex
-        override fun hashCode(): Int {
-            var h = recipientAccountId.contentHashCode()
-            h = h * 31 + inviterFingerprint.hashCode()
-            h = h * 31 + (groupIdHex?.hashCode() ?: 0)
-            return h
-        }
+            other is Preview && displayName == other.displayName && username == other.username &&
+                label == other.label && ownerAccountId.contentEquals(other.ownerAccountId)
+
+        override fun hashCode(): Int = ownerAccountId.contentHashCode()
     }
 
-    public data object AlreadyAccepted : AcceptInviteResult
+    /** Revoked, expired, used up, unknown or damaged: one state. */
+    public data object Dead : InvitePreviewResult
+    public data object RateLimited : InvitePreviewResult
+    public data object Failed : InvitePreviewResult
+}
 
-    /** ADR-0073 UX 16.6 — the link's owner is already a contact: nothing was
-     *  sent or spent; the caller opens the contact [routeKey] names. */
-    public data class ExistingContact(val routeKey: String) : AcceptInviteResult
-    public data object Expired : AcceptInviteResult
-    public data object Exhausted : AcceptInviteResult
-    public data object NotFound : AcceptInviteResult
-    public data object MalformedSlug : AcceptInviteResult
-    public data object RateLimited : AcceptInviteResult
+/** What opening an `/i/` link gave the invite page (ADR-0079). */
+public sealed interface InviteOpenResult {
+    public data class Opened(val invite: OpenedInvite) : InviteOpenResult
 
-    /** ADR-0054 - today's allowance of invite-consume tokens is used up. */
-    public data object AllowanceUsed : AcceptInviteResult
-    public data object RequiresReauth : AcceptInviteResult
+    /** Revoked, expired, used up, unknown or damaged: one state on the page. */
+    public data object Dead : InviteOpenResult
 
-    public data class Failed(val message: String) : AcceptInviteResult
+    /** The link is this account's own. */
+    public data object Own : InviteOpenResult
+
+    /** The inviter is already an established contact: the page offers Open
+     *  chat (the one-to-one when this device holds it, else the contact
+     *  [routeKey] names). */
+    public data class KnownContact(
+        val routeKey: String,
+        val groupIdHex: String?,
+        val statedName: String?,
+        /** The opened link, whose answer Open chat still delivers (amended
+         *  2026-10-24); `null` only where no link was opened. */
+        val invite: OpenedInvite? = null,
+    ) : InviteOpenResult
+
+    /** The visitor already pressed Add on one of the inviter's links and the
+     *  answer has not arrived (amended 2026-10-24): "already in your
+     *  contacts", and Open chat opens the waiting chat and sends nothing.
+     *  [invite] is kept so the page can ask again when the lists change. */
+    public data class PendingInviter(
+        val accountIdHex: String,
+        val statedName: String?,
+        val invite: OpenedInvite? = null,
+    ) : InviteOpenResult
+
+    public data object RateLimited : InviteOpenResult
+    public data object RequiresReauth : InviteOpenResult
+    public data class Failed(val message: String) : InviteOpenResult
+}
+
+/** What **Add** did. */
+public sealed interface InviteAddResult {
+    /** The inviter is a pending contact now; the page closes into the chat. */
+    public data class Added(val contact: PendingContact) : InviteAddResult
+
+    /** A removed inviter is back on the list with the live one-to-one
+     *  [groupIdHex] (amended 2026-10-24); the page closes into that chat. */
+    public data class Restored(val groupIdHex: String) : InviteAddResult
+
+    /** Used up or gone since the page opened. */
+    public data object Dead : InviteAddResult
+    public data object RateLimited : InviteAddResult
+    public data object RequiresReauth : InviteAddResult
+
+    /** A network or server failure: the page stays, Add comes back. */
+    public data class Failed(val message: String) : InviteAddResult
+}
+
+/** What **Open chat** on the page of a known contact did (amended 2026-10-24). */
+public sealed interface KnownContactAnswerResult {
+    /** The request carrying the link answer is written; the chat opens. */
+    public data object Sent : KnownContactAnswerResult
+
+    /** The link no longer works: nothing was sent; the chat opens anyway. */
+    public data object Dead : KnownContactAnswerResult
+    public data object RateLimited : KnownContactAnswerResult
+    public data object RequiresReauth : KnownContactAnswerResult
+
+    /** A network or server failure: the page stays, Open chat comes back. */
+    public data class Failed(val message: String) : KnownContactAnswerResult
+}
+
+/** An opened `/i/` link: what the page shows and what **Add** needs. */
+public class OpenedInvite(
+    /** The ledger id. */
+    public val blobId: ByteArray,
+    public val capabilityBytes: ByteArray,
+    public val ownerAccountId: ByteArray,
+    public val ownerSignaturePubkey: ByteArray,
+    public val ownerX25519Pubkey: ByteArray,
+    public val linkId: ByteArray,
+    /** SECRET: the link answer's secret. */
+    public val linkSecret: ByteArray,
+    /** SECRET: the link's reach grant, used for this one write. */
+    public val linkGrant: uniffi.lakko_ffi_uniffi.FfiReachGrant,
+    public val displayName: String?,
+    public val username: String?,
+    public val label: String,
+) {
+    /** The name the link states: the display name, else `@username`, else
+     *  `null` (the catalog's "this person"). */
+    public val statedName: String? get() = PendingContacts.statedName(displayName, username)
+
+    override fun equals(other: Any?): Boolean =
+        other is OpenedInvite && linkId.contentEquals(other.linkId) &&
+            ownerAccountId.contentEquals(other.ownerAccountId)
+
+    override fun hashCode(): Int = linkId.contentHashCode()
+
+    override fun toString(): String = "OpenedInvite(<redacted>)"
 }
 
 /** An invite link the owner has just generated this session. */
 public data class GeneratedInvite(
     /** Raw 6-byte server-assigned ledger id (the same value
-     *  `revokeInviteLink` takes), or `null` for an inline link (the upload
-     *  failed in transport; there is no ledger row to revoke). */
-    val blobId: ByteArray?,
-    /** The slug portion of [url]: base64url of [blobId], or of the sealed
-     *  bytes for an inline link. */
+     *  `revokeInviteLink` takes). */
+    val blobId: ByteArray,
+    /** The slug portion of [url]: base64url of [blobId]. */
     val blobIdSlug: String,
     /** `https://lakko.me/i/<slug>#<secret>` — the URL the owner shares. */
     val url: String,
@@ -2687,22 +3631,6 @@ public data class GeneratedInvite(
 /** Default invite expiry — 7 days from generation. Mirrors the
  *  web side's `7 * 86_400_000` constant. */
 private const val DEFAULT_INVITE_EXPIRY_MS: Long = 7L * 24 * 60 * 60 * 1000
-
-/** The sealed bytes of an inline `/i/` slug (base64url of the sealed link),
- *  or `null` when it does not decode or is too short to be one. */
-internal fun inlineSealedInviteOrNull(slug: String): ByteArray? {
-    val bytes = try {
-        me.lakko.app.auth.base64UrlDecodeNoPad(slug)
-    } catch (_: IllegalArgumentException) {
-        return null
-    }
-    return bytes.takeIf { it.size >= INLINE_SEALED_INVITE_MIN_LEN }
-}
-
-/** Floor on an inline sealed `/i/` slug: far above the 6-byte pointer and
- *  below any real sealed contact capability (a loose discriminator, like the
- *  `/g/` and `/c/` inline floors). */
-private const val INLINE_SEALED_INVITE_MIN_LEN: Int = 100
 
 /** Server-side sentinel for `max_uses = single-use`. */
 private val SINGLE_USE: UInt = 0u
@@ -2751,6 +3679,9 @@ public data class SentContactRequest(
     /** When this device sent it (unix ms). Not part of the entry's
      *  identity: the Delivery Service row id is. */
     val sentAtMs: Long = System.currentTimeMillis(),
+    /** ADR-0084 — the recipient's signature key (standard base64), so the
+     *  Sent row shows their photo when this device holds one. */
+    val recipientKeyB64: String? = null,
 ) {
     override fun equals(other: Any?): Boolean =
         other is SentContactRequest &&
@@ -2790,8 +3721,8 @@ internal fun isMailboxRefusal(cause: Throwable): Boolean = when (cause) {
 
 /**
  * ADR-0074 section 3.5a rule 5 - the ledger ids (base64url slugs) the
- * rotating device tries to revoke: what the directory lists for the account,
- * then what this device recorded for links it minted, each once.
+ * rotating device tries to revoke: what this device recorded for links it
+ * minted, each once. ADR-0078 section 10: there is no owner list to add the
+ * other devices' links from.
  */
-internal fun spentLinkSlugs(listed: List<String>, recorded: List<String>): List<String> =
-    (listed + recorded).distinct()
+internal fun spentLinkSlugs(recorded: List<String>): List<String> = recorded.distinct()

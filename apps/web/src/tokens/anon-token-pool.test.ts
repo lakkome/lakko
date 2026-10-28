@@ -11,10 +11,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   AnonTokenQuotaExhaustedError,
+  ANON_TOKEN_CONTEXTS,
   AnonTokensDisabledError,
   AnonTokenUnavailableError,
-  LOW_WATER,
-  REFILL_BATCH,
+  POOL_TARGET,
+  REFILL_INTERVAL_MAX_MS,
+  REFILL_INTERVAL_MIN_MS,
   anonTokenQuotaExhausted,
   anonymousFetchInit,
   isAnonTokenNetworkFailure,
@@ -27,42 +29,70 @@ async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function issuances(issuer: ReturnType<typeof fakeTokenPool>["issuer"]) {
-  return issuer.filter((r) => r.url === "/api/auth/auth/tokens");
+function issuances(issuer: ReturnType<typeof fakeTokenPool>["issuer"], context?: string) {
+  return issuer.filter(
+    (r) =>
+      r.url === "/api/auth/auth/tokens" &&
+      (context === undefined || (r.body as { context?: string }).context === context),
+  );
 }
 
-describe("refill and take", () => {
-  it("an empty pool waits for a refill drawn WITH the session, then hands out a token", async () => {
+describe("refill on a schedule, take without drawing (ADR-0078 section 8)", () => {
+  it("the session's first refill draws a day of use WITH the session; a take waits for it", async () => {
     const { pool, issuer } = fakeTokenPool();
     const token = await pool.take("discovery-lookup");
     expect(token.headerValue).toBe("tok-1");
-    const [first] = issuances(issuer);
+    const [first] = issuances(issuer, "discovery-lookup");
     expect(first?.method).toBe("POST");
     expect(first?.authorization).toBe("Bearer v1.QUNDT1VOVA.0.tag");
     const body = first?.body as { context: string; epoch: number; blinded_elements: string[] };
-    expect(body.context).toBe("discovery-lookup");
-    expect(body.blinded_elements).toHaveLength(REFILL_BATCH["discovery-lookup"]);
+    expect(body.blinded_elements).toHaveLength(POOL_TARGET["discovery-lookup"]);
     // The epoch is the local day number (1_700_000_000 s / 86_400 s).
     expect(body.epoch).toBe(19675);
-    expect(pool.size("discovery-lookup")).toBe(REFILL_BATCH["discovery-lookup"] - 1);
+    expect(pool.size("discovery-lookup")).toBe(POOL_TARGET["discovery-lookup"] - 1);
   });
 
-  it("refills in the background once a context drops below the low-water mark", async () => {
-    const { pool, issuer } = fakeTokenPool();
+  it("the token pool refills on a timer, not on spend", async () => {
+    const { pool, issuer, timers } = fakeTokenPool();
     await pool.take("ds-knock");
-    expect(issuances(issuer)).toHaveLength(1);
-    // Take down to LOW_WATER - 1 held: the next take starts a refill.
-    while (pool.size("ds-knock") >= LOW_WATER["ds-knock"]) await pool.take("ds-knock");
     await settle();
-    expect(issuances(issuer)).toHaveLength(2);
-    expect(pool.size("ds-knock")).toBeGreaterThanOrEqual(REFILL_BATCH["ds-knock"]);
+    expect(issuances(issuer, "ds-knock")).toHaveLength(1);
+    // Every context is re-armed at a random time inside the interval.
+    expect(timers.armed).toHaveLength(ANON_TOKEN_CONTEXTS.length);
+    for (const ms of timers.armed) {
+      expect(ms).toBeGreaterThanOrEqual(REFILL_INTERVAL_MIN_MS);
+      expect(ms).toBeLessThanOrEqual(REFILL_INTERVAL_MAX_MS);
+    }
+    // Spending the bucket empty draws nothing ...
+    while (pool.size("ds-knock") > 0) await pool.take("ds-knock");
+    await settle();
+    expect(issuances(issuer, "ds-knock")).toHaveLength(1);
+    // ... and an empty bucket fails rather than drawing at the moment of use.
+    await expect(pool.take("ds-knock")).rejects.toBeInstanceOf(AnonTokenUnavailableError);
+    expect(issuances(issuer, "ds-knock")).toHaveLength(1);
+    // The next scheduled refill tops it up to its target in one issuance.
+    timers.fireScheduled();
+    await settle();
+    expect(issuances(issuer, "ds-knock")).toHaveLength(2);
+    expect(pool.size("ds-knock")).toBe(POOL_TARGET["ds-knock"]);
+  });
+
+  it("a scheduled refill of a full bucket draws nothing", async () => {
+    const { pool, issuer, timers } = fakeTokenPool();
+    await pool.ready();
+    await settle();
+    const before = issuances(issuer).length;
+    timers.fireScheduled();
+    await settle();
+    expect(issuances(issuer)).toHaveLength(before);
   });
 
   it("contexts are separate buckets", async () => {
     const { pool } = fakeTokenPool();
     await pool.take("push-register");
-    expect(pool.size("push-register")).toBe(REFILL_BATCH["push-register"] - 1);
-    expect(pool.size("invite-consume")).toBe(0);
+    await settle();
+    expect(pool.size("push-register")).toBe(POOL_TARGET["push-register"] - 1);
+    expect(pool.size("invite-consume")).toBe(POOL_TARGET["invite-consume"]);
   });
 
   it("without a session there is nothing to draw with: fails without a request", async () => {
@@ -77,8 +107,9 @@ describe("the issuance is verified against the key route's key", () => {
   it("fetches the key anonymously and finalizes under IT, not the response's public_key", async () => {
     const { pool, issuer, wasm } = fakeTokenPool({ responseKey: "a-key-from-the-response" });
     await pool.take("invite-consume");
-    expect(wasm.finalizeKeys).toEqual([FAKE_ISSUER_KEY]);
-    const keyFetch = issuer.find((r) => r.url.includes("/auth/tokens/key/"));
+    expect(wasm.finalizeKeys.length).toBeGreaterThan(0);
+    expect(wasm.finalizeKeys.every((k) => k === FAKE_ISSUER_KEY)).toBe(true);
+    const keyFetch = issuer.find((r) => r.url.includes("/auth/tokens/key/invite-consume/"));
     expect(keyFetch?.url).toBe("/api/auth/auth/tokens/key/invite-consume/19675");
     expect(keyFetch?.authorization).toBeUndefined();
     expect(keyFetch?.credentials).toBe("omit");
@@ -96,17 +127,20 @@ describe("the issuance is verified against the key route's key", () => {
     const err = await pool.take("discovery-lookup").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AnonTokenUnavailableError);
     expect(String((err as Error).message)).toMatch(/batch discarded/);
-    expect(wasm.finalizeKeys).toEqual(["the-published-key"]);
+    expect(wasm.finalizeKeys.every((k) => k === "the-published-key")).toBe(true);
     expect(pool.size("discovery-lookup")).toBe(0);
   });
 
   it("caches the key for its epoch", async () => {
-    const { pool, issuer } = fakeTokenPool();
+    const { pool, issuer, timers } = fakeTokenPool();
     await pool.take("discovery-register");
-    while (pool.size("discovery-register") >= LOW_WATER["discovery-register"]) await pool.take("discovery-register");
+    while (pool.size("discovery-register") > 0) await pool.take("discovery-register");
+    timers.fireScheduled();
     await settle();
-    expect(issuer.filter((r) => r.url.includes("/auth/tokens/key/"))).toHaveLength(1);
-    expect(issuances(issuer)).toHaveLength(2);
+    expect(
+      issuer.filter((r) => r.url.includes("/auth/tokens/key/discovery-register/")),
+    ).toHaveLength(1);
+    expect(issuances(issuer, "discovery-register")).toHaveLength(2);
   });
 });
 
@@ -118,6 +152,7 @@ describe("issuer refusals", () => {
           status: 429,
           json: { error: "anon-token-quota-exhausted", remaining: 0, retry_after_secs: 3600 },
           retryAfter: "3600",
+          context: "discovery-lookup",
         },
       ],
     });
@@ -129,12 +164,14 @@ describe("issuer refusals", () => {
     await expect(pool.take("discovery-lookup")).rejects.toBeInstanceOf(
       AnonTokenQuotaExhaustedError,
     );
-    expect(issuances(issuer)).toHaveLength(1);
+    expect(issuances(issuer, "discovery-lookup")).toHaveLength(1);
   });
 
   it("503 anon-tokens-disabled is the generic network failure", async () => {
     const { pool } = fakeTokenPool({
-      issueScript: [{ status: 503, json: { error: "anon-tokens-disabled" } }],
+      issueScript: [
+        { status: 503, json: { error: "anon-tokens-disabled" }, context: "push-register" },
+      ],
     });
     const err = await pool.take("push-register").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AnonTokensDisabledError);
@@ -143,27 +180,43 @@ describe("issuer refusals", () => {
 
   it("400 epoch-not-issuable rebuilds the batch for the server's epoch, once", async () => {
     const { pool, issuer } = fakeTokenPool({
-      issueScript: [{ status: 400, json: { error: "epoch-not-issuable", current_epoch: 19676 } }],
+      issueScript: [
+        {
+          status: 400,
+          json: { error: "epoch-not-issuable", current_epoch: 19676 },
+          context: "ds-knock",
+        },
+      ],
     });
     const token = await pool.take("ds-knock");
     expect(token.epoch).toBe(19676n);
-    const bodies = issuances(issuer).map((r) => (r.body as { epoch: number }).epoch);
+    const bodies = issuances(issuer, "ds-knock").map((r) => (r.body as { epoch: number }).epoch);
     expect(bodies).toEqual([19675, 19676]);
   });
 
   it("a second epoch disagreement gives up rather than looping", async () => {
     const { pool, issuer } = fakeTokenPool({
       issueScript: [
-        { status: 400, json: { error: "epoch-not-issuable", current_epoch: 19676 } },
-        { status: 400, json: { error: "epoch-not-issuable", current_epoch: 19677 } },
+        {
+          status: 400,
+          json: { error: "epoch-not-issuable", current_epoch: 19676 },
+          context: "ds-knock",
+        },
+        {
+          status: 400,
+          json: { error: "epoch-not-issuable", current_epoch: 19677 },
+          context: "ds-knock",
+        },
       ],
     });
     await expect(pool.take("ds-knock")).rejects.toBeInstanceOf(AnonTokenUnavailableError);
-    expect(issuances(issuer)).toHaveLength(2);
+    expect(issuances(issuer, "ds-knock")).toHaveLength(2);
   });
 
   it("a 401 from the issuer is not a sign-out: it is only 'no token'", async () => {
-    const { pool } = fakeTokenPool({ issueScript: [{ status: 401, json: {} }] });
+    const { pool } = fakeTokenPool({
+      issueScript: [{ status: 401, json: {}, context: "ds-knock" }],
+    });
     await expect(pool.take("ds-knock")).rejects.toBeInstanceOf(AnonTokenUnavailableError);
   });
 });
@@ -237,7 +290,7 @@ describe("letting go of the account on logout and account switch", () => {
     const { pool } = fakeTokenPool();
     await pool.take("push-register");
     pool.setSessionToken(null);
-    expect(pool.size("push-register")).toBe(REFILL_BATCH["push-register"] - 1);
+    expect(pool.size("push-register")).toBe(POOL_TARGET["push-register"] - 1);
     const held = await pool.take("push-register");
     expect(held.headerValue).toBe("tok-2");
     pool.unbindIfNoSession();
@@ -251,7 +304,7 @@ describe("letting go of the account on logout and account switch", () => {
     pool.setSessionToken("v1.QUNDT1VOVA.0.tag");
     await pool.take("discovery-lookup");
     pool.unbindIfNoSession();
-    expect(pool.size("discovery-lookup")).toBe(REFILL_BATCH["discovery-lookup"] - 1);
+    expect(pool.size("discovery-lookup")).toBe(POOL_TARGET["discovery-lookup"] - 1);
   });
 
   it("another account's session drops the held tokens from memory", async () => {
@@ -265,7 +318,7 @@ describe("letting go of the account on logout and account switch", () => {
     const { pool } = fakeTokenPool();
     await pool.take("discovery-lookup");
     pool.setSessionToken("v1.QUNDT1VOVA.999.other");
-    expect(pool.size("discovery-lookup")).toBe(REFILL_BATCH["discovery-lookup"] - 1);
+    expect(pool.size("discovery-lookup")).toBe(POOL_TARGET["discovery-lookup"] - 1);
   });
 
   it("a refill that lands after an unbind is thrown away", async () => {

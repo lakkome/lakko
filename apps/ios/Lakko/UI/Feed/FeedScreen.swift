@@ -48,6 +48,7 @@ struct FeedScreen: View {
 
     @State private var expanded: Set<String> = []
     @State private var showingHidden = false
+    @State private var moreMenuOpen = false
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
     private static let topId = "feed-top"
@@ -64,17 +65,20 @@ struct FeedScreen: View {
         .navigationTitle(l10n.t("feed.title"))
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button(l10n.t("feed.new")) { beginNew() }
-                    Button(l10n.t("feed.hidden.title")) { showingHidden = true }
-                    Button(l10n.t("feed.import.title")) {
-                        model.importing = FeedImportRequest(bytes: nil, refused: false)
-                    }
-                } label: {
+                Button { moreMenuOpen = true } label: {
                     Image(systemName: "ellipsis.circle")
                 }
                 .accessibilityLabel(l10n.t("feed.menu.a11y"))
             }
+        }
+        .lakkoActionSheet(isPresented: $moreMenuOpen) {
+            [
+                .action(l10n.t("feed.new")) { beginNew() },
+                .action(l10n.t("feed.hidden.title")) { showingHidden = true },
+                .action(l10n.t("feed.import.title")) {
+                    model.importing = FeedImportRequest(bytes: nil, refused: false)
+                },
+            ]
         }
         .navigationDestination(item: $model.editing) { editing in
             if let initial = model.editorInitial(editing) {
@@ -396,38 +400,25 @@ struct FeedScreen: View {
 
     /// The item menu (UX spec section 5). A reply row inside an expanded item
     /// shows its parent's menu.
-    @ViewBuilder
-    private func menu(_ ref: FeedCandidateRef) -> some View {
-        Button {
-            open(ref)
-        } label: {
-            Label(l10n.t("common.open"), systemImage: "arrow.up.right")
-        }
+    private func menuItems(_ ref: FeedCandidateRef) -> [LakkoMenuItem] {
+        var items: [LakkoMenuItem] = [
+            .action(l10n.t("common.open"), systemImage: "arrow.up.right") { open(ref) },
+        ]
         if FeedForward.canReply(ref) {
-            Button {
+            items.append(.action(l10n.t("chat.message.reply"), systemImage: "arrowshape.turn.up.left") {
                 onReplyGroup(ref.source.idHex, ref.message.messageId)
-            } label: {
-                Label(l10n.t("chat.message.reply"), systemImage: "arrowshape.turn.up.left")
-            }
+            })
         }
-        Button {
-            model.copyText(ref)
-        } label: {
-            Label(l10n.t("common.copy"), systemImage: "doc.on.doc")
-        }
-        .disabled(!FeedForward.canCopy(ref.message))
-        Button {
+        items.append(.action(
+            l10n.t("common.copy"), systemImage: "doc.on.doc", enabled: FeedForward.canCopy(ref.message)
+        ) { model.copyText(ref) })
+        items.append(.action(l10n.t("chat.message.forward"), systemImage: "arrowshape.turn.up.right") {
             model.forwarding = ref
-        } label: {
-            Label(l10n.t("chat.message.forward"), systemImage: "arrowshape.turn.up.right")
-        }
-        Divider()
-        Button {
+        })
+        items.append(.action(l10n.t("feed.action.hide"), systemImage: "eye.slash") {
             model.hide(ref.source.key)
-        } label: {
-            Label(l10n.t("feed.action.hide"), systemImage: "eye.slash")
-        }
-        .accessibilityHint(l10n.t("feed.action.hide_hint"))
+        })
+        return items
     }
 
     private func open(_ ref: FeedCandidateRef) {
@@ -461,9 +452,14 @@ struct FeedScreen: View {
                     }
                     // A channel speaks as itself: its name is already the source.
                     if ref.source.kind == .group {
-                        Text(model.author(ref))
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(Color.lakkoTextMuted)
+                        HStack(spacing: 6) {
+                            InitialsAvatar(
+                                name: model.author(ref), identity: ref.message.authorKeyB64, size: 18,
+                                photo: model.authorPhoto(ref))
+                            Text(model.author(ref))
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(Color.lakkoTextMuted)
+                        }
                     }
                     if let forwarded = ref.message.forwardAuthor {
                         Text(l10n.t("chat.forward.from", texts: ["name": forwarded]))
@@ -509,10 +505,11 @@ struct FeedScreen: View {
         .padding(12)
         .background(RoundedRectangle(cornerRadius: LakkoRadius.card).fill(Color.lakkoSurface))
         .overlay(RoundedRectangle(cornerRadius: LakkoRadius.card).strokeBorder(Color.lakkoBorder))
-        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: LakkoRadius.card))
+        .contentShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
         // One menu for the whole card, the expanded replies included: a long
-        // press on a reply opens its parent's menu.
-        .contextMenu { menu(ref) }
+        // press on a reply opens its parent's menu. Lakko's own menu, never
+        // the system context menu.
+        .lakkoLongPressMenu { menuItems(ref) }
         .modifier(SeenWatcher(
             enabled: model.wantsSeen(ref),
             viewportHeight: viewportHeight,
@@ -547,9 +544,14 @@ struct FeedScreen: View {
                         open(reply)
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(model.author(reply))
-                                .font(.caption.weight(.medium))
-                                .foregroundStyle(Color.lakkoTextMuted)
+                            HStack(spacing: 6) {
+                                InitialsAvatar(
+                                    name: model.author(reply), identity: reply.message.authorKeyB64, size: 18,
+                                    photo: model.authorPhoto(reply))
+                                Text(model.author(reply))
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(Color.lakkoTextMuted)
+                            }
                             Text(FeedCopy.body(reply.message))
                                 .font(.subheadline)
                                 .foregroundStyle(Color.lakkoText)

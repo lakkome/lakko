@@ -140,4 +140,37 @@ class UsernameVerifierTest {
         directory.attachUsernameResolver { UsernameResolution.Found(keyB64) }
         assertEquals("@alice", directory.resolve(keyB64).primary)
     }
+
+    @Test
+    fun `the retry waits start at seconds and grow to five minutes`() {
+        assertEquals(15_000L, usernameRetryDelayMs(1))
+        assertEquals(30_000L, usernameRetryDelayMs(2))
+        assertEquals(300_000L, usernameRetryDelayMs(50))
+    }
+
+    @Test
+    fun `a check that could not complete shows no line and is tried again by itself`() = runTest {
+        val keyB64 = Base64.getEncoder().encodeToString(ByteArray(32) { 7 })
+        val directory = ProfileDirectory(
+            persistence = InMemoryProfilePersistence(),
+            scope = backgroundScope,
+            isNewer = { a, b -> a > b },
+            passesRule = passesRule,
+        )
+        val calls = AtomicInteger(0)
+        directory.attachUsernameResolver {
+            if (calls.getAndIncrement() == 0) UsernameResolution.Unavailable(RuntimeException("429"))
+            else UsernameResolution.Found(keyB64)
+        }
+        directory.onProfileReceived(keyB64, PeerProfile(null, "alice", 1uL))
+        testScheduler.runCurrent()
+        assertEquals(1, calls.get())
+        assertEquals(false, directory.resolve(keyB64).usernameNotVerified)
+        assertEquals("Member", directory.resolve(keyB64).primary)
+
+        testScheduler.advanceTimeBy(usernameRetryDelayMs(1) + 1)
+        testScheduler.runCurrent()
+        assertEquals(2, calls.get())
+        assertEquals("@alice", directory.resolve(keyB64).primary)
+    }
 }

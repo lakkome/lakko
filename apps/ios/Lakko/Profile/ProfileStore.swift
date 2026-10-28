@@ -19,11 +19,9 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
     /// Sender-clock UNIX milliseconds at which the profile was set.
     public let updatedAtMs: UInt64
     /// The sender's 16-byte account id (profile envelope v2), or `nil` when
-    /// the envelope carried none. What lets a group-call tile be matched to
-    /// this person: the SFU's per-call `peer_tag` (ADR-0021) is derived over
-    /// the account id, never over the signature key. Like every other field it
-    /// is a claim; the sender can only mis-state its own tag, which then
-    /// matches nobody on the call.
+    /// the envelope carried none. Like every other field it is a claim; what
+    /// binds it is a username certificate (ADR-0060 section 5), which names an
+    /// account id.
     public let accountId: Data?
     /// ADR-0060 section 5 — the discovery-signed certificate of `username`
     /// (profile envelope v3), or `nil`. The username is shown only once it
@@ -34,9 +32,13 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
     /// are handed to ``ReachCenter`` at receipt and NEVER persisted with the
     /// profile (``CodingKeys`` leaves them out).
     public let grants: [FfiReachGrant]
+    /// ADR-0084 — the profile photo the person set, or `nil` for none. A
+    /// claim like every other field, bound to the signature key the receiver
+    /// supplies; its blob key is SECRET and kept app-private with the profile.
+    public let avatar: ProfileAvatar?
 
     enum CodingKeys: String, CodingKey {
-        case displayName, username, updatedAtMs, accountId, usernameCertificate
+        case displayName, username, updatedAtMs, accountId, usernameCertificate, avatar
     }
 
     public init(
@@ -45,8 +47,10 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
         updatedAtMs: UInt64,
         accountId: Data? = nil,
         usernameCertificate: Data? = nil,
-        grants: [FfiReachGrant] = []
+        grants: [FfiReachGrant] = [],
+        avatar: ProfileAvatar? = nil
     ) {
+        self.avatar = avatar
         self.displayName = displayName
         self.username = username
         self.updatedAtMs = updatedAtMs
@@ -63,7 +67,8 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
             username: try c.decodeIfPresent(String.self, forKey: .username),
             updatedAtMs: try c.decode(UInt64.self, forKey: .updatedAtMs),
             accountId: try c.decodeIfPresent(Data.self, forKey: .accountId),
-            usernameCertificate: try c.decodeIfPresent(Data.self, forKey: .usernameCertificate))
+            usernameCertificate: try c.decodeIfPresent(Data.self, forKey: .usernameCertificate),
+            avatar: try c.decodeIfPresent(ProfileAvatar.self, forKey: .avatar))
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -73,13 +78,14 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
         try c.encode(updatedAtMs, forKey: .updatedAtMs)
         try c.encodeIfPresent(accountId, forKey: .accountId)
         try c.encodeIfPresent(usernameCertificate, forKey: .usernameCertificate)
+        try c.encodeIfPresent(avatar, forKey: .avatar)
     }
 
     /// The same claim without its grants — what the profile store keeps.
     public var withoutGrants: ProfileClaim {
         ProfileClaim(
             displayName: displayName, username: username, updatedAtMs: updatedAtMs,
-            accountId: accountId, usernameCertificate: usernameCertificate)
+            accountId: accountId, usernameCertificate: usernameCertificate, avatar: avatar)
     }
 }
 
@@ -199,7 +205,8 @@ final class ReceivedProfileStore {
                 displayName: stored.displayName,
                 username: stored.username,
                 updatedAtMs: stored.updatedAtMs,
-                accountId: learned
+                accountId: learned,
+                avatar: stored.avatar
             )
             if let data = try? JSONEncoder().encode(profiles) {
                 persistence.save(data, accountIdB64: accountIdB64)
@@ -216,7 +223,8 @@ final class ReceivedProfileStore {
                 displayName: claim.displayName,
                 username: claim.username,
                 updatedAtMs: claim.updatedAtMs,
-                accountId: known
+                accountId: known,
+                avatar: claim.avatar
             )
         }
         profiles[key] = next
@@ -235,10 +243,9 @@ final class ReceivedProfileStore {
     }
 
     /// Every stored profile that names an account id, as
-    /// `(signature key, account id)` — the input a group-call roster needs to
-    /// re-derive each person's per-call `peer_tag`. Rows stored before the
-    /// envelope carried an id (or from a sender that sent none) are simply
-    /// absent here; they still resolve a name everywhere else.
+    /// `(signature key, account id)`. Rows stored before the envelope carried
+    /// an id (or from a sender that sent none) are simply absent here; they
+    /// still resolve a name everywhere else.
     func profilesWithAccountId() -> [(signatureKeyB64: String, accountId: Data)] {
         profiles.compactMap { key, claim in
             claim.accountId.map { (signatureKeyB64: key, accountId: $0) }
@@ -268,10 +275,13 @@ public struct OwnProfile: Codable, Equatable, Sendable {
     public let displayName: String?
     /// When it was last set, in UNIX milliseconds. `0` for a profile never set.
     public let updatedAtMs: UInt64
+    /// ADR-0084 — the published profile photo, or `nil` for none.
+    public let avatar: ProfileAvatar?
 
-    public init(displayName: String?, updatedAtMs: UInt64) {
+    public init(displayName: String?, updatedAtMs: UInt64, avatar: ProfileAvatar? = nil) {
         self.displayName = displayName
         self.updatedAtMs = updatedAtMs
+        self.avatar = avatar
     }
 }
 
@@ -307,10 +317,12 @@ struct OwnProfileStore {
     /// (``AccountStoreGate``); a caller that goes on to publish checks the
     /// gate itself first (``ProfileDirectory/setOwnDisplayName(_:accountIdB64:)``).
     @discardableResult
-    func save(displayName: String?, accountIdB64: String, nowMs: UInt64) -> OwnProfile {
+    func save(
+        displayName: String?, avatar: ProfileAvatar? = nil, accountIdB64: String, nowMs: UInt64
+    ) -> OwnProfile {
         let previous = load(accountIdB64: accountIdB64)?.updatedAtMs ?? 0
         let stamp = max(nowMs, previous &+ 1)
-        let profile = OwnProfile(displayName: displayName, updatedAtMs: stamp)
+        let profile = OwnProfile(displayName: displayName, updatedAtMs: stamp, avatar: avatar)
         if let data = try? JSONEncoder().encode(profile),
            let gate = AccountStoreGate.enter(accountIdB64) {
             defer { gate.leave() }

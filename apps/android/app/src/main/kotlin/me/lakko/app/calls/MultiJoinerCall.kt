@@ -29,7 +29,6 @@ import uniffi.lakko_ffi_uniffi.decodeProfileEnvelope
 import uniffi.lakko_ffi_uniffi.dispatchIncomingEnvelope
 import uniffi.lakko_ffi_uniffi.keyPackageSignatureKey
 import uniffi.lakko_ffi_uniffi.parseCallSignaling
-import uniffi.lakko_ffi_uniffi.sfuPeerTag
 import uniffi.lakko_ffi_uniffi.wrapCallKeyPackage
 import uniffi.lakko_ffi_uniffi.wrapCallWelcome
 
@@ -91,8 +90,8 @@ class MultiJoinerCall private constructor(
     private val opts: Options,
     private val role: Role,
     jwt: String,
+    turn: TurnCredential?,
     private val ownerKeyHex: String,
-    ownerPeerTag: String?,
     initialSeed: ByteArray?,
     initialLeaf: Int?,
 ) {
@@ -107,8 +106,10 @@ class MultiJoinerCall private constructor(
         val identity: Identity,
         /** 16-byte `call_id` from the capability. */
         val callId: ByteArray,
-        /** Owner's 16-byte `account_id` from the capability (for the owner's
-         *  per-call peer_tag -> presence match). */
+        /** Owner's 16-byte `account_id` from the capability. A profile the
+         *  owner seals into the call keeps its account id (and with it a
+         *  username certificate) only when it claims this one
+         *  ([boundProfileClaim]). */
         val ownerAccountId: ByteArray,
         /** Owner's 32-byte Ed25519 signature key from the capability
          *  (identifies the owner's MLS leaf + is the election's `is_owner`
@@ -116,24 +117,21 @@ class MultiJoinerCall private constructor(
         val ownerSignatureKey: ByteArray,
         /** SFU WebSocket origin ([SfuConfig.baseUrl]). */
         val sfuBaseUrl: String,
-        /** Live session token — mints the call-admission JWT. */
-        val sessionToken: String,
         val audio: Boolean,
         val video: Boolean,
         /** The shared call-UI state the `CallScreen` renders. */
         val ui: CallUiState,
         /** Coroutine scope the session callbacks + admission timer ride. */
         val scope: CoroutineScope,
-        /** Names the remote tiles (`CallTileName.kt`): a person this device
-         *  already knows (ADR-0021 peer_tag lookup) before they announce
-         *  themselves, then what each member announces inside the call. */
-        val names: GroupCallNameResolver,
+        /** Names the remote tiles (`CallTileName.kt`, `CallPeerNames.kt`):
+         *  the person a peer's verified announcement names (ADR-0078 section
+         *  2), then what that member announces inside the call. */
+        val names: CallPeerNames,
         /** A member announced its profile inside the call. `personKeyB64` is
          *  the MLS-authenticated sender, resolved to the account key at
-         *  receipt (C-68), and the account id the profile claims is the one
-         *  the SFU admitted the relaying peer as ([profileClaimMatchesPeer]).
-         *  The host files it in the profile store, which is what verifies a
-         *  claimed username. */
+         *  receipt (C-68). The profile keeps its claimed account id (and
+         *  username certificate) only when bound ([boundProfileClaim]). The
+         *  host files it in the profile store. */
         val onMemberProfile: (personKeyB64: MemberIdentity, profile: FfiProfile) -> Unit = { _, _ -> },
         /** The name on the local tile (`docs/ux/calls.md` section 4.4). */
         /** Empty when this device has no own name: the tile draws `call.participant.you`. */
@@ -166,7 +164,7 @@ class MultiJoinerCall private constructor(
 
     private val ui: CallUiState = opts.ui
     private val presence: CallPresence =
-        CallPresence(hexKey(opts.identity.signaturePublicKey()), ownerKeyHex, ownerPeerTag)
+        CallPresence(hexKey(opts.identity.signaturePublicKey()), ownerKeyHex)
     private val session: SfuCallSession
 
     /** The call MLS group (owner: founded; joiner: after the Welcome). */
@@ -248,16 +246,23 @@ class MultiJoinerCall private constructor(
                 // Welcome, the owner for the SFU roster, which decides whether
                 // it founds the group or comes back into one a successor holds.
                 deferPublish = true,
+                // ADR-0078 section 2: who each peer is comes from its own
+                // sealed, signed announcement, verified against the call
+                // group's roster (none before this client holds the group).
+                peerAnnouncer = CallPeerAnnouncer.forGroup(opts.identity, opts.callId) { group },
             ),
             scope = opts.scope,
             callbacks = SfuCallSession.Callbacks(
                 onStateChange = { s -> onSessionState(s) },
                 onWelcome = { self, roster -> onSfuWelcome(self, roster) },
-                onPeerJoined = { peerId, pseudo, tag -> onSfuPeerJoined(peerId, pseudo, tag) },
+                onPeerJoined = { peerId -> onSfuPeerJoined(peerId) },
+                onPeerIdentified = { peerId, identity -> onPeerIdentified(peerId, identity) },
                 onPeerLeft = { peerId -> onSfuPeerLeft(peerId) },
                 onRemoteVideoTrack = { track, streamId -> onRemoteVideoTrack(track, streamId) },
                 // What the SFU says it gives of each person (`VideoGiven.kt`).
                 onVideoGiven = { given -> applyVideoGiven(opts.ui, given) },
+                // The call's current screen share (ADR-0083), as SfuCallUi.
+                onScreenShare = { share -> opts.ui.setScreenShare(share) },
                 onRemoteMediaState = { peerId, cameraOn ->
                     // camera-off-cleanup — a remote peer signalled its camera
                     // on/off over the opaque SFU relay (SfuCallSession
@@ -278,12 +283,10 @@ class MultiJoinerCall private constructor(
             ),
         )
         // A joiner behind a symmetric NAT has no server-reflexive candidate
-        // and reaches the room only through the relay. Fail-soft: no
-        // credential leaves the call on STUN.
-        if (opts.sessionToken.isNotEmpty()) {
-            session.setTurnClient(
-                TurnCredentialClient().apply { setSessionToken(opts.sessionToken) })
-        }
+        // and reaches the room only through the relay. The credential came
+        // with the call token (ADR-0078 section 2). Fail-soft: none leaves the
+        // call on STUN.
+        session.setTurnClient(TurnCredentialClient.preMinted(turn))
     }
 
     companion object {
@@ -316,8 +319,7 @@ class MultiJoinerCall private constructor(
         /** Owner: found the call MLS group, derive the seed, connect +
          *  publish, and start admitting joiners. */
         suspend fun host(opts: Options): MultiJoinerCall {
-            val callIdHex = hexKey(opts.callId)
-            val jwt = mintJwt(opts, callIdHex)
+            val minted = mintJwt(opts)
             val ownerKeyHex = hexKey(opts.ownerSignatureKey)
 
             // The SFU roster decides (see `onSfuWelcome`): an empty room means
@@ -325,14 +327,14 @@ class MultiJoinerCall private constructor(
             // with people in it means the owner is coming BACK to a call a
             // successor kept alive, so it asks to be admitted like anyone else
             // and the election hands it the committer duty once it is in.
-            // Owner-presence rides `self` (ownerPeerTag = null on the owner).
+            // Owner presence rides `self` on the owner's client.
             val call = MultiJoinerCall(
                 applicationContext = opts.applicationContext,
                 opts = opts,
                 role = Role.OWNER,
-                jwt = jwt,
+                jwt = minted.jwt,
+                turn = minted.turn,
                 ownerKeyHex = ownerKeyHex,
-                ownerPeerTag = null,
                 initialSeed = null,
                 initialLeaf = null,
             )
@@ -343,20 +345,18 @@ class MultiJoinerCall private constructor(
         /** Joiner: mint a fresh KeyPackage, connect signaling-only, relay the
          *  KP, and wait for the committer's Welcome. */
         suspend fun join(opts: Options): MultiJoinerCall {
-            val callIdHex = hexKey(opts.callId)
-            val jwt = mintJwt(opts, callIdHex)
+            val minted = mintJwt(opts)
             val ownerKeyHex = hexKey(opts.ownerSignatureKey)
-            // The owner's per-call peer_tag lets a joiner detect owner
-            // presence on the SFU roster (ADR-0021 + ADR-0032 election).
-            val ownerPeerTag = sfuPeerTag(callIdHex, hexKey(opts.ownerAccountId))
-
+            // Owner presence is learnt once this client holds the group: the
+            // owner's sealed announcement verifies against the capability's
+            // owner key (ADR-0078 section 2).
             val call = MultiJoinerCall(
                 applicationContext = opts.applicationContext,
                 opts = opts,
                 role = Role.JOINER,
-                jwt = jwt,
+                jwt = minted.jwt,
+                turn = minted.turn,
                 ownerKeyHex = ownerKeyHex,
-                ownerPeerTag = ownerPeerTag,
                 initialSeed = null,
                 initialLeaf = null,
             )
@@ -374,15 +374,11 @@ class MultiJoinerCall private constructor(
             return call
         }
 
-        private suspend fun mintJwt(opts: Options, callIdHex: String): String {
-            val client = CallJwtClient()
-            return try {
-                client.setSessionToken(opts.sessionToken)
-                client.mint(callId = callIdHex).jwt
-            } finally {
-                client.close()
-            }
-        }
+        /** The call token and the TURN credential beside it, paid for by
+         *  one anonymous `call-join` token for the room of the link's call id
+         *  (ADR-0078 section 2). */
+        private suspend fun mintJwt(opts: Options): MintCallJwtResult =
+            CallJwtClient().use { it.mint(opts.callId) }
 
         /** Safety number is display-only — a derivation failure must never
          *  abort. */
@@ -592,10 +588,10 @@ class MultiJoinerCall private constructor(
     }
 
     private fun onSfuWelcome(selfPeerId: String, roster: List<SfuPeerSnapshot>) {
-        presence.setRoster(roster.map { it.peerId to it.peerTag })
+        presence.setRoster(roster.map { it.peerId })
         val remotes = roster
             .filter { it.peerId != selfPeerId }
-            .map { remoteParticipant(nameOf(it.peerId, it.accountPseudonym, it.peerTag), it.peerId) }
+            .map { remoteParticipant(opts.names.name(it.peerId), it.peerId) }
         ui.setParticipants(listOf(localParticipant()) + remotes)
         if (role == Role.OWNER && group == null && !joined) {
             if (remotes.isEmpty()) foundGroup() else beginOwnerRejoinProbe()
@@ -605,12 +601,21 @@ class MultiJoinerCall private constructor(
         if (pendingKeyPackage != null) startRebroadcast()
     }
 
-    private fun onSfuPeerJoined(peerId: String, accountPseudonym: String, peerTag: String) {
-        presence.addPeer(peerId, peerTag)
-        ui.participantJoined(remoteParticipant(nameOf(peerId, accountPseudonym, peerTag), peerId))
+    private fun onSfuPeerJoined(peerId: String) {
+        presence.addPeer(peerId)
+        ui.participantJoined(remoteParticipant(opts.names.name(peerId), peerId))
         // A newly-present peer may be a freshly-elected committer (owner
         // reclaim / a successor); re-broadcast so it sees a pending join.
         broadcastKeyPackage()
+    }
+
+    /** ADR-0078 section 2: a peer's sealed announcement verified against a
+     *  leaf of the call group. Bind the peer to that member (presence, the
+     *  committer election, a departure's removal) and to that person (the
+     *  tile's name). */
+    private fun onPeerIdentified(peerId: String, identity: VerifiedPeerIdentity) {
+        presence.bindPeerToMember(peerId, identity.memberKeyHex)
+        if (opts.names.peerIdentified(peerId, identity.personKeyB64, identity.memberKeyHex)) refreshNames()
     }
 
     private fun onSfuPeerLeft(peerId: String) {
@@ -724,6 +729,14 @@ class MultiJoinerCall private constructor(
             // in the account's own DeviceGroup. A relay payload changes no
             // keys; dropped, and never rendered.
             FfiIncomingEnvelopeKind.KEY_ROTATION -> Unit
+            // ADR-0080 - a device card means something ONLY in the account's
+            // own DeviceGroup. A relay payload names no device; dropped.
+            FfiIncomingEnvelopeKind.DEVICE_CARD -> Unit
+            // ADR-0079 (reworked 2026-10-17) - a link-request claim means
+            // something ONLY in the account's own DeviceGroup; dropped.
+            FfiIncomingEnvelopeKind.LINK_CLAIM -> Unit
+            // ADR-0079 (order of 2026-10-17) - a link-founded note, the same.
+            FfiIncomingEnvelopeKind.LINK_FOUNDED -> Unit
         }
     }
 
@@ -837,11 +850,8 @@ class MultiJoinerCall private constructor(
         replayEarlyRelays()
         val seed = deriveSeed(joinedGroup)
         safetyNumber = safeSafetyNumber(seed)
-        // The committer (happy path: the owner) admitted us; bind its peer for
-        // presence when we can identify it as the owner.
-        if (presence.ownerPresent()) {
-            presence.bindPeerToMember(from, ownerKeyHex)
-        }
+        // Who the committer's peer is (and the owner's) comes from their
+        // sealed announcements, which this client can open from now on.
         opts.onJoined()
         broadcastOwnProfile()
         // Publish media ONLY now — after joining + deriving the seed
@@ -884,15 +894,14 @@ class MultiJoinerCall private constructor(
         }
         when (processed) {
             is ProcessedMessage.Application -> {
-                // The MLS-authenticated sender leaf names the member behind
-                // this SFU peer: bind them, so a later departure of that peer
-                // can be answered with the removal of the right leaf whoever
-                // is committer.
+                // Who the relaying peer is comes from its verified
+                // announcement (ADR-0078 section 2), not from the sender of a
+                // message it relayed: anyone can relay a sealed message it
+                // received.
                 val senderLeaf = processed.senderLeaf?.toInt()
                 val senderLeafKeyHex = senderLeaf?.let { leaf ->
                     groupMembers().firstOrNull { it.leafIndex == leaf }?.signatureKeyHex
                 }
-                if (senderLeafKeyHex != null) presence.bindPeerToMember(from, senderLeafKeyHex)
                 // The sender is resolved to the PERSON here, as the chat
                 // receive path does: this is the one moment the roster is the
                 // epoch the message was sealed at (ADR-0050, C-68).
@@ -901,7 +910,7 @@ class MultiJoinerCall private constructor(
                 // key the SIGNED capability names, matched the way the join
                 // check does.
                 val fromOwner = linkCallSenderIsOwner(senderLeafKeyHex, ownerKeyHex)
-                onMemberApplication(from, senderKey, fromOwner, processed.data)
+                onMemberApplication(from, senderKey, senderLeafKeyHex, fromOwner, processed.data)
             }
             is ProcessedMessage.Commit -> {
                 // Replayed before the Welcome's own announcement and seed
@@ -928,6 +937,7 @@ class MultiJoinerCall private constructor(
     private fun onMemberApplication(
         from: String,
         senderKey: MemberIdentity?,
+        senderLeafKeyHex: String?,
         fromOwner: Boolean,
         plaintext: ByteArray,
     ) {
@@ -948,14 +958,17 @@ class MultiJoinerCall private constructor(
         } catch (e: Throwable) {
             return
         }
-        val file = opts.names.memberAnnounced(
+        // The announced name names `from` only when `from` announced the leaf
+        // that sealed this profile; a relayed copy names nobody.
+        opts.names.memberAnnounced(
             peerId = from,
-            senderKeyB64 = senderKey,
+            senderLeafKeyHex = senderLeafKeyHex,
             displayName = profile.displayName,
             username = profile.username,
-            claimedAccountIdHex = accountIdHexOrNull(profile.accountId),
         )
-        if (file && senderKey != null) opts.onMemberProfile(senderKey, profile)
+        if (senderKey != null) {
+            opts.onMemberProfile(senderKey, boundProfileClaim(profile, fromOwner, opts.ownerAccountId))
+        }
         refreshNames()
     }
 
@@ -1068,11 +1081,6 @@ class MultiJoinerCall private constructor(
     // -----------------------------------------------------------------
     // UI-participant helpers (ported from SfuCallUi)
     // -----------------------------------------------------------------
-
-    /** The name on a remote tile (`CallTileName.kt`), empty while the peer is
-     *  unnamed. Never the SFU pseudonym, which is a piece of the account id. */
-    private fun nameOf(peerId: String, pseudonym: String, peerTag: String): String =
-        opts.names.resolve(peerId, pseudonym, peerTag)
 
     private fun localParticipant(): CallUiState.Participant =
         CallUiState.Participant(

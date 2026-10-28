@@ -103,8 +103,9 @@ fn video_needed_flags(json: &str) -> Result<Vec<u8>, String> {
 /// and at most `MAX_PUBLISH_BUDGET_KBPS` (20000). The client sets each as
 /// that sender's maximum bitrate (`maxBitrate` is in bits per second:
 /// multiply by 1000). The light sender and audio are not in the frame and
-/// are not limited by it. Throws when the JSON is not a valid
-/// `publish-budget` frame.
+/// are not limited by it. While the publisher sends a screen (ADR-0083)
+/// the array has a third element, the screen sender's ceiling. Throws when
+/// the JSON is not a valid `publish-budget` frame.
 #[wasm_bindgen(js_name = "parseSfuPublishBudget")]
 pub fn parse_sfu_publish_budget(json: &str) -> Result<Vec<u32>, JsError> {
     publish_budget_ceilings(json).map_err(|e| JsError::new(&e))
@@ -117,7 +118,11 @@ fn publish_budget_ceilings(json: &str) -> Result<Vec<u32>, String> {
         ServerFrame::PublishBudget {
             main_kbps,
             middle_kbps,
-        } => Ok(vec![main_kbps, middle_kbps]),
+            screen_kbps,
+        } => Ok(screen_kbps.map_or_else(
+            || vec![main_kbps, middle_kbps],
+            |screen| vec![main_kbps, middle_kbps, screen],
+        )),
         other => Err(format!(
             "expected a publish-budget frame, got {}",
             other.kind_str()
@@ -149,19 +154,6 @@ fn video_given_pairs(json: &str) -> Result<Vec<String>, String> {
             other.kind_str()
         )),
     }
-}
-
-/// Re-derive the per-call peer tag (ADR-0021) for a `(call_id,
-/// account_id)` pair — the same canonical derivation the SFU applies.
-///
-/// The web computes this over each of its contacts' account ids and
-/// matches it against a roster entry's `peer_tag` (read off the frame
-/// JSON) to resolve the entry to a display name. One-way (reveals
-/// nothing about the account id) and per-call (keyed on `call_id`).
-#[wasm_bindgen(js_name = "sfuPeerTag")]
-#[must_use]
-pub fn sfu_peer_tag(call_id: &str, account_id: &str) -> String {
-    lakko_sfu_proto::peer_tag(call_id, account_id)
 }
 
 /// Compose a `SignalRelay` to a single peer. `payload` is the raw
@@ -221,6 +213,29 @@ pub fn compose_sfu_sdp_offer_with_middle(
         sdp: sdp.to_string(),
         light_mids,
         middle_mids,
+        screen_mids: Vec::new(),
+    })
+    .map_err(to_err)
+}
+
+/// Compose a client -> SFU SDP offer that also names its screen-share
+/// lines (ADR-0083). `screen_mids` (`string[]`) are the `mid`s of the
+/// share's picture and, when it has one, its sound; the SFU forwards them
+/// under the stream id `<peer>~screen`. The bounds are those of
+/// `light_mids`; outside them this throws. With an empty `screen_mids` the
+/// frame is exactly `composeSfuSdpOfferWithMiddle`'s.
+#[wasm_bindgen(js_name = "composeSfuSdpOfferWithScreen")]
+pub fn compose_sfu_sdp_offer_with_screen(
+    sdp: &str,
+    light_mids: Vec<String>,
+    middle_mids: Vec<String>,
+    screen_mids: Vec<String>,
+) -> Result<String, JsError> {
+    encode_client_frame(&ClientFrame::SdpOffer {
+        sdp: sdp.to_string(),
+        light_mids,
+        middle_mids,
+        screen_mids,
     })
     .map_err(to_err)
 }
@@ -305,7 +320,7 @@ mod tests {
 
     #[test]
     fn validate_recognises_welcome() {
-        let json = r#"{"kind":"welcome","peer_id":"p1","call_id":"c1","roster":[],"server_ts":1}"#;
+        let json = r#"{"kind":"welcome","peer_id":"p1","room":"r1","roster":[],"server_ts":1}"#;
         assert_eq!(validate_sfu_server_frame(json).expect("ok"), "welcome");
     }
 
@@ -396,10 +411,12 @@ mod tests {
                 sdp,
                 light_mids,
                 middle_mids,
+                screen_mids,
             } => {
                 assert_eq!(sdp, "v=0\r\n");
                 assert_eq!(light_mids, vec!["2".to_owned()]);
                 assert!(middle_mids.is_empty());
+                assert!(screen_mids.is_empty());
             },
             _ => panic!("expected SdpOffer"),
         }

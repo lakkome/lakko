@@ -7,13 +7,14 @@
 //! Mirror of `crates/lakko-ffi-uniffi/src/key_reset.rs` for the web client.
 //! **Verify only**: `services/auth` signs the attestation inside
 //! `POST /account/keys/reset/finish`, and a client verifies the one it is
-//! handed before carrying it to discovery (the identity upload) and to the
-//! Delivery Service (the DeviceGroup journal reset).
+//! handed before carrying it to discovery (the identity upload). Since
+//! ADR-0078 phase 6 it names no DeviceGroup journal and the Delivery Service
+//! never sees it.
 //!
-//! The client supplies its own 16-byte account id; the two per-account values
-//! the attestation names, `account_ref` and the DeviceGroup journal id, are
-//! derived here so no client re-implements either hash; both derivations are
-//! also exposed (`keyResetAccountRef`, `deviceGroupJournalId`).
+//! The client supplies its own 16-byte account id; the per-account value the
+//! attestation names, `account_ref`, is derived here so no client
+//! re-implements the hash; the derivation is also exposed
+//! (`keyResetAccountRef`).
 //!
 //! **Error posture (the backup-head convention).** Every refusal throws a
 //! `JsError` whose message starts with a stable code: `stale: ...` when the
@@ -91,7 +92,6 @@ fn verify_inner(
         attestation,
         &verifying,
         &lakko_attest::key_reset_account_ref(&account),
-        &lakko_attest::device_group_journal_id(&account),
         &pubkey,
     )
     .map_err(map_err)
@@ -112,7 +112,6 @@ fn verify_fresh_inner(
         attestation,
         &verifying,
         &lakko_attest::key_reset_account_ref(&account),
-        &lakko_attest::device_group_journal_id(&account),
         &pubkey,
         now_millis,
         max_age_millis,
@@ -121,11 +120,11 @@ fn verify_fresh_inner(
 }
 
 /// Verify a key-reset attestation's signature and its binding to
-/// `expectedAccountId` (through the derived `account_ref` and DeviceGroup
-/// journal id) and to `expectedPubkey`, with **no** freshness check (ADR-0073
+/// `expectedAccountId` (through the derived `account_ref`) and to
+/// `expectedPubkey`, with **no** freshness check (ADR-0073
 /// section 2.2). Returns the authenticated generation and mint time.
 ///
-/// `attestation` is the raw 177-byte blob (`key_reset_attest_b64` decoded);
+/// `attestation` is the raw 145-byte blob (`key_reset_attest_b64` decoded);
 /// `attestVerifyingKey` the 32-byte client-pinned auth attest key.
 ///
 /// Throws an `invalid: ...` `JsError` on a bad verifying key, a wrong-length
@@ -187,17 +186,6 @@ pub fn key_reset_account_ref(account_id: &[u8]) -> Result<Vec<u8>, JsError> {
         .try_into()
         .map_err(|_| JsError::new(&coded(INVALID, "account_id must be 16 bytes")))?;
     Ok(lakko_attest::key_reset_account_ref(&account).to_vec())
-}
-
-/// `BLAKE3("lakko-device-group/v1" || accountId)`: the account's DeviceGroup
-/// journal id, byte-identical to `DeviceGroup.groupIdFor`. Returns the
-/// 32-byte id; throws `invalid: ...` when `accountId` is not 16 bytes.
-#[wasm_bindgen(js_name = deviceGroupJournalId)]
-pub fn device_group_journal_id(account_id: &[u8]) -> Result<Vec<u8>, JsError> {
-    let account: [u8; 16] = account_id
-        .try_into()
-        .map_err(|_| JsError::new(&coded(INVALID, "account_id must be 16 bytes")))?;
-    Ok(lakko_attest::device_group_journal_id(&account).to_vec())
 }
 
 #[cfg(test)]
@@ -271,14 +259,8 @@ mod tests {
     }
 
     #[test]
-    fn derivations_match_the_crate() {
-        assert_eq!(
-            lakko_attest::device_group_journal_id(&ACCOUNT).to_vec(),
-            lakko_mls::DeviceGroup::group_id_for(&ACCOUNT)
-        );
-        assert_ne!(
-            lakko_attest::key_reset_account_ref(&ACCOUNT),
-            lakko_attest::device_group_journal_id(&ACCOUNT)
-        );
+    fn the_account_ref_is_one_way() {
+        let r = lakko_attest::key_reset_account_ref(&ACCOUNT);
+        assert_ne!(&r[..16], &ACCOUNT[..]);
     }
 }

@@ -6,12 +6,10 @@
  *
  * Two surfaces:
  *
- *   * URL plumbing — `composeInviteUrl(...)` + `parseInviteSlug(...)`.
- *     The capability bytes are base64url-no-pad encoded into the URL
- *     itself (the V1 inline form — see ROADMAP 1.18a for the
- *     trade-off). The short-pointer + server-blob form landed in
- *     1.18d1b (`composePointerInviteUrl` below + `DiscoveryClient`
- *     upload/fetch); inline is now the back-compat fallback.
+ *   * URL plumbing — `composePointerInviteUrl(...)` +
+ *     `parseInviteSlug(...)`. The link is the short ledger pointer
+ *     (`DiscoveryClient` upload/fetch); the inline form that carried
+ *     the capability in the URL was removed on 2026-10-19.
  *   * Form-side enums — `ExpiryPreset` and `MaxUsesPreset` —
  *     translate UI dropdown choices into the wire-level
  *     `InviteCapability.compose` arguments. Putting them here
@@ -41,81 +39,24 @@ export const INVITE_URL_PREFIX = "/i/";
  *  must also bump this one. */
 export const INVITE_LABEL_MAX_LEN = 64;
 
-/** Lower bound on the inline-bytes form. The 1.18a wire format
- *  is `1 + 32 + 16 + 32 + 8 + 4 + 1 + 2 + label(0..64) + 64 =
- *  160..224 bytes`; an empty label (the smallest legal payload)
- *  is 160 bytes. Far above the 6-byte ledger id (ADR-0028
- *  short-link amendment), so a slug-byte-length test cleanly
- *  discriminates inline vs pointer URLs. */
-export const INVITE_INLINE_MIN_LEN = 160;
-
-/** Auto-pick the URL form by argument shape — pointer
- *  (`blob_id`, 6 bytes) when the caller has uploaded the
- *  capability and wants the short form, inline-bytes (≥160
- *  bytes) when the caller is staying server-free.
- *
- *  Both produce a `https://<origin>/i/<base64url>` shape; the
- *  joiner side discriminates via `parseInviteSlug` on the byte
- *  length — see `INVITE_INLINE_MIN_LEN` for the gap that makes
- *  this safe.
- *
- *  Phase 1.18d1b: prefers the pointer form (shorter URLs, server-
- *  side max-uses enforcement in 1.18d2). Inline is the back-compat
- *  fallback for when `/discovery/invite` is unreachable (e.g. the
- *  censored-region path). */
-export function composeInviteUrl(
-  bytes: Uint8Array,
-  origin: string = publicOrigin(),
-): string {
-  return `${origin}${INVITE_URL_PREFIX}${base64UrlEncodeNoPad(bytes)}`;
-}
-
-/** Builder for the **pointer** URL form — the short
- *  `https://<host>/i/<blob_id_b64url>` shape backed by
- *  `/discovery/invite/<blob_id>` lookup. Equivalent to
- *  `composeInviteUrl` (just a thin name wrapper) but reads
- *  better at the call site. */
+/** Builder for the URL — the short `https://<host>/i/<blob_id_b64url>`
+ *  pointer backed by the `/discovery/invite/<blob_id>` lookup. */
 export function composePointerInviteUrl(
   blobId: Uint8Array,
   widths: InviteLinkWidths,
-  origin?: string,
+  origin: string = publicOrigin(),
 ): string {
   requireBlobId(blobId, widths);
-  return composeInviteUrl(blobId, origin);
+  return `${origin}${INVITE_URL_PREFIX}${base64UrlEncodeNoPad(blobId)}`;
 }
 
-/** Builder for the **inline-bytes** URL form — the long shape
- *  that carries the capability inside the URL itself, no server
- *  round-trip on open. 1.18c default; 1.18d1b's back-compat. */
-export function composeInlineInviteUrl(
-  capabilityBytes: Uint8Array,
-  origin?: string,
-): string {
-  if (capabilityBytes.length < INVITE_INLINE_MIN_LEN) {
-    throw new Error(
-      `capabilityBytes must be ≥ ${INVITE_INLINE_MIN_LEN} bytes, got ${capabilityBytes.length}`,
-    );
-  }
-  return composeInviteUrl(capabilityBytes, origin);
-}
-
-/** Discriminated parse of a URL slug. Returns the wire-form +
- *  the decoded bytes so the caller can dispatch:
- *
- *    * `kind: "pointer"` — fetch from
- *      `DiscoveryClient.fetchInvite(blobId)` → run
- *      `decodeAndVerify` on the returned bytes.
- *    * `kind: "inline"` — run `decodeAndVerify` directly on the
- *      bytes, no server round-trip.
- *
- *  The dispatch rule (`invite-link.ts`): 8 characters decoding
- *  to 6 bytes ⇒ pointer, ≥ 160 bytes ⇒ inline (1.18a wire-format
- *  minimum). Anything else, the pre-amendment 43-character id
- *  included, is refused. */
+/** Parse a URL slug into its ledger id (`invite-link.ts`: 8 characters
+ *  decoding to 6 bytes). Anything else, the pre-amendment 43-character id
+ *  and an inline sealed blob included, is refused. */
 export type ParsedInvite = ClassifiedInviteSlug;
 
 export function parseInviteSlug(slug: string, widths: InviteLinkWidths): ParsedInvite {
-  return classifyInviteSlug(slug, widths, INVITE_INLINE_MIN_LEN, "invite");
+  return classifyInviteSlug(slug, widths, "invite");
 }
 
 /** Discrete UI choices the "Generate invite link" form exposes
@@ -139,6 +80,100 @@ export function expiryPresetToMs(preset: ExpiryPreset, nowMs: number): bigint {
     case "never":
       return 0n;
   }
+}
+
+/** The unit of a custom expiry period. */
+export type ExpiryUnit = "hours" | "days";
+
+/** The longest custom period a link may be given: 365 days. Chosen, not
+ *  measured; the same bound on iOS and Android. */
+export const CUSTOM_EXPIRY_MAX_MS = 365 * 86_400_000;
+
+/** The wire expiry for a custom period of `amount` `unit`s from `nowMs`, or
+ *  `null` when the text is not a whole number or the period is outside
+ *  1 hour .. 365 days. */
+export function customExpiryMs(amount: string, unit: ExpiryUnit, nowMs: number): bigint | null {
+  const n = parseWholeNumber(amount);
+  if (n === null) return null;
+  const ms = n * (unit === "hours" ? 3_600_000 : 86_400_000);
+  if (ms < 3_600_000 || ms > CUSTOM_EXPIRY_MAX_MS) return null;
+  return BigInt(nowMs + ms);
+}
+
+/** The largest custom number of people a link may admit. Chosen, not
+ *  measured; the same bound on iOS and Android. */
+export const CUSTOM_MAX_USES = 10_000;
+
+/** The wire `max_uses` for a custom number of people, or `null` when the text
+ *  is not a whole number in 1 .. {@link CUSTOM_MAX_USES}. One person is the
+ *  single-use sentinel `0`, as the preset writes it. */
+export function customMaxUses(count: string): number | null {
+  const n = parseWholeNumber(count);
+  if (n === null || n < 1 || n > CUSTOM_MAX_USES) return null;
+  return n === 1 ? 0 : n;
+}
+
+/** The default terms of a link made by Create link (2026-10-26): no label,
+ *  seven days, one person. */
+export const DEFAULT_LINK_EXPIRY: ExpiryPreset = "7d";
+export const DEFAULT_LINK_USES: MaxUsesPreset = "single";
+
+/** The terms form of a link, as its fields hold them. */
+export interface LinkTermsForm {
+  readonly label: string;
+  readonly expiry: ExpiryPreset | "custom";
+  readonly customExpiryAmount: string;
+  readonly customExpiryUnit: ExpiryUnit;
+  readonly maxUses: MaxUsesPreset | "custom";
+  readonly customUses: string;
+}
+
+/** The terms form prefilled from a link (UX section 9): the period it was
+ *  given at minting (a preset when it is one within a minute, else custom in
+ *  days when whole, else hours) and its use limit. Pure. */
+export function termsFormOf(link: {
+  readonly label: string;
+  readonly expiryMs: number;
+  readonly mintedAtMs: number;
+  readonly maxUses: number;
+}): LinkTermsForm {
+  const base = { label: link.label, customExpiryAmount: "", customExpiryUnit: "days" as ExpiryUnit };
+  let expiry: Pick<LinkTermsForm, "expiry" | "customExpiryAmount" | "customExpiryUnit">;
+  if (link.expiryMs === 0) {
+    expiry = { ...base, expiry: "never" };
+  } else {
+    const period = Math.max(0, link.expiryMs - link.mintedAtMs);
+    const near = (days: number): boolean => Math.abs(period - days * 86_400_000) <= 60_000;
+    if (near(1)) expiry = { ...base, expiry: "1d" };
+    else if (near(7)) expiry = { ...base, expiry: "7d" };
+    else if (near(30)) expiry = { ...base, expiry: "30d" };
+    else {
+      const days = Math.round(period / 86_400_000);
+      const wholeDays = days >= 1 && Math.abs(period - days * 86_400_000) <= 60_000;
+      expiry = wholeDays
+        ? { expiry: "custom", customExpiryAmount: String(days), customExpiryUnit: "days" }
+        : {
+            expiry: "custom",
+            customExpiryAmount: String(Math.max(1, Math.round(period / 3_600_000))),
+            customExpiryUnit: "hours",
+          };
+    }
+  }
+  const uses: Pick<LinkTermsForm, "maxUses" | "customUses"> =
+    link.maxUses === 0 || link.maxUses === 1
+      ? { maxUses: "single", customUses: "" }
+      : link.maxUses === 10
+        ? { maxUses: "ten", customUses: "" }
+        : link.maxUses === 0xff_ff_ff_ff
+          ? { maxUses: "unlimited", customUses: "" }
+          : { maxUses: "custom", customUses: String(link.maxUses) };
+  return { label: link.label, ...expiry, ...uses };
+}
+
+function parseWholeNumber(text: string): number | null {
+  const trimmed = text.trim();
+  if (!/^\d{1,9}$/.test(trimmed)) return null;
+  return Number(trimmed);
 }
 
 /** Discrete UI choices for `max_uses`. */

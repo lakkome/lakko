@@ -19,7 +19,7 @@
 //! cargo run --quiet --release -p lakko-call-jwt \
 //!   --example mint_test_jwt -- \
 //!   --call-id deadbeef0000000000000000000000aa \
-//!   --account cafef00d0000000000000000000000bb \
+//!   --peer-id cafef00d0000000000000000000000bb \
 //!   --role participant \
 //!   --ttl-secs 600
 //! # → eyJhbGciOiJFZERTQSIsImtpZCI6Ii4uLiJ9.<...>.<...>
@@ -30,10 +30,11 @@
 //! ships.
 //!
 //! Every flag has a sensible default for ad-hoc smoke runs
-//! (16-byte ASCII call_id + account, role=participant,
-//! ttl=600 s). The CI workflow passes them explicitly so the
-//! `call_id` matches the value the Welcome-frame assertion
-//! pins.
+//! (a fixed call id + peer id, role=participant, ttl=600 s). The
+//! token carries the room derived from the call id
+//! (`lakko_sfu_proto::room_hex`, ADR-0078 section 2), never the call
+//! id itself and no account; the CI workflow passes the call id so the
+//! room matches the value the Welcome-frame assertion pins.
 //!
 //! The seed is `0x42` repeated 32 times — same fixture
 //! `gen_test_jwks` + `services/sfu/tests/e2e_dockerized.rs`
@@ -52,7 +53,7 @@ use lakko_call_jwt::{
 #[allow(clippy::too_many_lines)]
 fn main() -> ExitCode {
     let mut call_id = "deadbeef0000000000000000000000aa".to_owned();
-    let mut account = "cafef00d0000000000000000000000bb".to_owned();
+    let mut peer_id = "cafef00d0000000000000000000000bb".to_owned();
     let mut role = CallRole::Participant;
     let mut ttl_secs: u64 = JWT_TTL_SECS;
 
@@ -60,7 +61,7 @@ fn main() -> ExitCode {
     // `clap` into the dev-time fixture binary. Recognises:
     //
     //   --call-id <hex>      | -c <hex>
-    //   --account <hex>      | -a <hex>
+    //   --peer-id <hex>      | -p <hex>
     //   --role participant|publisher|subscriber
     //   --ttl-secs <u64>     | -t <u64>
     //   --help               | -h
@@ -72,8 +73,8 @@ fn main() -> ExitCode {
         match key {
             "--help" | "-h" => {
                 eprintln!(
-                    "usage: mint_test_jwt [--call-id <hex>] [--account <hex>] \
-                     [--role participant|owner] [--ttl-secs <u64>]"
+                    "usage: mint_test_jwt [--call-id <hex>] [--peer-id <hex>] \
+                     [--role participant|publisher|subscriber] [--ttl-secs <u64>]"
                 );
                 return ExitCode::SUCCESS;
             },
@@ -86,13 +87,13 @@ fn main() -> ExitCode {
                 eprintln!("--call-id needs a value");
                 return ExitCode::from(2);
             },
-            "--account" | "-a" => {
+            "--peer-id" | "-p" => {
                 if let Some(v) = next() {
-                    account = v;
+                    peer_id = v;
                     i += 2;
                     continue;
                 }
-                eprintln!("--account needs a value");
+                eprintln!("--peer-id needs a value");
                 return ExitCode::from(2);
             },
             "--role" => {
@@ -137,6 +138,11 @@ fn main() -> ExitCode {
         }
     }
 
+    let Some(call_id_bytes) = decode_call_id(&call_id) else {
+        eprintln!("--call-id must be 32 hex characters");
+        return ExitCode::from(2);
+    };
+    let room = lakko_sfu_proto::room_hex(&call_id_bytes);
     let signing = CallSigningKey::from_seed(&[0x42_u8; 32]);
     let Ok(since_epoch) = SystemTime::now().duration_since(UNIX_EPOCH) else {
         eprintln!("system clock is before the unix epoch — refusing to mint");
@@ -146,8 +152,8 @@ fn main() -> ExitCode {
     let claims = CallJwtClaims {
         iss: JWT_ISSUER.into(),
         aud: JWT_AUDIENCE.into(),
-        sub: account,
-        call_id,
+        room,
+        peer_id,
         role,
         iat: now,
         exp: now + ttl_secs,
@@ -165,4 +171,16 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         },
     }
+}
+
+/// The 16 raw bytes of a 32-hex-character call id.
+fn decode_call_id(hex: &str) -> Option<[u8; 16]> {
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
 }

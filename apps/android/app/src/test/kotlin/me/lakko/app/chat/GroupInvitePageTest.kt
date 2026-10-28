@@ -55,14 +55,17 @@ class GroupInvitePageTest {
         assertEquals("https://lakko.me/g/".length + 8 + 1 + 16, url.length)
     }
 
+    /** The inline form is gone (2026-10-19): a `/g/` link carrying the
+     *  sealed blob in its path is refused as malformed, so it opens as a
+     *  dead link, its secret notwithstanding. */
     @Test
-    fun `the inline link carries the secret as its fragment too`() {
+    fun `an inline link is refused as malformed`() {
         val wire = ByteArray(160) { (it + 1).toByte() }
-        val url = appendGroupInviteLinkKey(composeInlineGroupInviteUrl(wire, origin), key, L)
-        assertEquals("$origin/g/${base64UrlEncodeNoPad(wire)}#$keyText", url)
-        // The slug still discriminates as inline once the fragment is stripped.
+        val url = appendGroupInviteLinkKey("$origin/g/${base64UrlEncodeNoPad(wire)}", key, L)
         val slug = groupInviteSlugOf(url)
-        assertEquals(ParsedGroupInvite.Inline(wire), parseGroupInviteSlug(slug!!, L))
+        assertThrows(GroupInviteUrlException.SlugWrongLength::class.java) {
+            parseGroupInviteSlug(slug!!, L)
+        }
     }
 
     @Test
@@ -144,7 +147,7 @@ class GroupInvitePageTest {
     }
 
     @Test
-    fun `open failures classify as damaged, rate limited or invalid`() {
+    fun `open failures classify as damaged, rate limited, failed to fetch or invalid`() {
         assertEquals(
             GroupInviteOpenFailure.Damaged,
             groupInviteOpenFailure(GroupInviteLinkDamaged()),
@@ -159,11 +162,33 @@ class GroupInvitePageTest {
             GroupInviteOpenFailure.Invalid,
             groupInviteOpenFailure(ChatError("group invite not found or expired", IllegalStateException("404"))),
         )
+        // A failure to ask the ledger says nothing about the link: offered
+        // again, a 429 inside it still a rate limit.
+        assertEquals(
+            GroupInviteOpenFailure.OpenFailed,
+            groupInviteOpenFailure(
+                ChatError("group invite fetch failed", InviteLinkUnreachable(DiscoveryHttpError(500, "/x", ""))),
+            ),
+        )
+        assertEquals(
+            GroupInviteOpenFailure.OpenFailed,
+            groupInviteOpenFailure(
+                ChatError("group invite fetch failed", InviteLinkUnreachable(java.io.IOException("reset"))),
+            ),
+        )
+        assertEquals(
+            GroupInviteOpenFailure.RateLimited,
+            groupInviteOpenFailure(
+                ChatError(
+                    "group invite fetch failed",
+                    InviteLinkUnreachable(DiscoveryHttpError(429, "/discovery/group-invite/x (GET)", "")),
+                ),
+            ),
+        )
+        // Anything after the ledger answered is the link's own problem.
         assertEquals(
             GroupInviteOpenFailure.Invalid,
-            groupInviteOpenFailure(
-                ChatError("group invite fetch failed", DiscoveryHttpError(500, "/x", "")),
-            ),
+            groupInviteOpenFailure(ChatError("group invite link is malformed", IllegalArgumentException("slug"))),
         )
     }
 
@@ -199,9 +224,10 @@ class GroupInvitePageTest {
     }
 
     @Test
-    fun `a 100-byte slug is inline`() {
-        val wire = ByteArray(GROUP_INVITE_INLINE_MIN_LEN) { 4 }
-        assertEquals(ParsedGroupInvite.Inline(wire), parseGroupInviteSlug(base64UrlEncodeNoPad(wire), L))
+    fun `a 100-byte slug is refused, it is not a ledger id`() {
+        assertThrows(GroupInviteUrlException.SlugWrongLength::class.java) {
+            parseGroupInviteSlug(base64UrlEncodeNoPad(ByteArray(100) { 4 }), L)
+        }
     }
 
     // ---- 4. the revoke slug ---------------------------------------------

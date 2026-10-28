@@ -22,7 +22,7 @@
  * | resolved key != sender key                | `mismatch` | yes    | after `MISMATCH_RECHECK_MS` |
  * | username not registered / no bundle       | `mismatch` | yes    | after `MISMATCH_RECHECK_MS` |
  * | claim fails the username rule             | `mismatch` | yes    | no lookup is ever sent |
- * | lookup threw (network, proof-of-work)     | `error`    | yes    | after `ERROR_RETRY_MS` |
+ * | lookup threw (network, a 429, tokens)     | `error`    | yes    | after `errorRetryDelayMs` (in memory) |
  *
  * The cache key is `(signature key, username)`, so a CHANGED claim is a
  * different key and verifies afresh, and a verified old claim says nothing
@@ -47,8 +47,35 @@ import type { StoredVerification } from "./profile-store";
 
 /** Re-check a cached mismatch after this long. */
 export const MISMATCH_RECHECK_MS = 24 * 60 * 60 * 1000;
-/** Retry a failed lookup after this long. */
+/** The longest wait before a failed lookup is tried again. */
 export const ERROR_RETRY_MS = 5 * 60 * 1000;
+
+/** The waits before a failed lookup is tried again: seconds at first, so a
+ *  rate limit or a dropped connection clears quickly, growing to
+ *  {@link ERROR_RETRY_MS}. Chosen, not measured. */
+const ERROR_RETRY_STEPS_MS = [15_000, 30_000, 60_000, 120_000, ERROR_RETRY_MS] as const;
+
+/** The wait before retry number `failures` (1 for the first failure), never
+ *  shorter than what a 429 asked for (`retryAfterMs`), never longer than
+ *  {@link ERROR_RETRY_MS} unless the server asked for more. */
+export function errorRetryDelayMs(failures: number, retryAfterMs: number | null): number {
+  const index = Math.min(Math.max(failures, 1), ERROR_RETRY_STEPS_MS.length) - 1;
+  const step = ERROR_RETRY_STEPS_MS[index] ?? ERROR_RETRY_MS;
+  return retryAfterMs !== null && retryAfterMs > step ? retryAfterMs : step;
+}
+
+/** The `retryAfterSecs` a refused request carried, anywhere in the error's
+ *  chain, as milliseconds; `null` without one. */
+function retryAfterMsOf(err: unknown): number | null {
+  let current: unknown = err;
+  for (let depth = 0; depth < 8 && typeof current === "object" && current !== null; depth += 1) {
+    const secs = (current as { retryAfterSecs?: unknown }).retryAfterSecs;
+    if (typeof secs === "number" && Number.isFinite(secs) && secs > 0) return secs * 1000;
+    const record = current as { cause?: unknown; variant?: { cause?: unknown } };
+    current = record.cause ?? record.variant?.cause;
+  }
+  return null;
+}
 
 /** What discovery says a username resolves to. */
 export type UsernameResolution =
@@ -72,6 +99,9 @@ export interface UsernameVerifierDeps {
   now(): number;
   /** Decode a base64 key to bytes. */
   decodeKey(keyB64: string): Uint8Array;
+  /** Run `retry` after `delayMs` (a failed lookup trying again). Absent in
+   *  tests that drive the clock themselves. */
+  scheduleRetry?(retry: () => Promise<VerificationState>, delayMs: number): void;
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -98,13 +128,17 @@ export function cachedIsFresh(v: StoredVerification, now: number): boolean {
     case "mismatch":
       return now - v.checkedAtMs < MISMATCH_RECHECK_MS;
     case "error":
-      return now - v.checkedAtMs < ERROR_RETRY_MS;
+      // When a failed lookup is retried is held in memory by the verifier;
+      // a persisted error is stale on its own.
+      return false;
   }
 }
 
 export class UsernameVerifier {
   private readonly inflight = new Map<string, Promise<VerificationState>>();
   private queue: Promise<unknown> = Promise.resolve();
+  /** Failed lookups in a row per claim, and when the next try is due. */
+  private readonly failures = new Map<string, { count: number; retryAtMs: number }>();
   /** How many lookups this verifier has sent — for tests and diagnostics. */
   lookups = 0;
 
@@ -129,11 +163,15 @@ export class UsernameVerifier {
    * verdict. Returns the resulting state. Never throws.
    */
   ensure(keyB64: string, username: string): Promise<VerificationState> {
+    const flightKey = `${keyB64}|${username}`;
     const cached = this.deps.cached(keyB64, username);
     if (cached !== undefined && cachedIsFresh(cached, this.deps.now())) {
       return Promise.resolve(cached.state);
     }
-    const flightKey = `${keyB64}|${username}`;
+    const failed = this.failures.get(flightKey);
+    if (cached?.state === "error" && failed !== undefined && this.deps.now() < failed.retryAtMs) {
+      return Promise.resolve("error");
+    }
     const existing = this.inflight.get(flightKey);
     if (existing !== undefined) return existing;
 
@@ -164,10 +202,15 @@ export class UsernameVerifier {
       try {
         this.lookups += 1;
         resolution = await this.deps.resolve(canonical, keyB64);
-      } catch {
+      } catch (err) {
         this.deps.record(keyB64, username, { state: "error", checkedAtMs: this.deps.now() });
+        const count = (this.failures.get(flightKey)?.count ?? 0) + 1;
+        const delay = errorRetryDelayMs(count, retryAfterMsOf(err));
+        this.failures.set(flightKey, { count, retryAtMs: this.deps.now() + delay });
+        this.deps.scheduleRetry?.(() => this.ensure(keyB64, username), delay);
         return "error";
       }
+      this.failures.delete(flightKey);
       const verdict = verdictFor(senderKey, resolution);
       this.deps.record(keyB64, username, { state: verdict, checkedAtMs: this.deps.now() });
       return verdict;

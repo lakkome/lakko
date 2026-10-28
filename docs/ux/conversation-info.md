@@ -90,7 +90,20 @@ open from its header; it is not a state with a screen.
   ([`design-system.md`](design-system.md)).
 - Remove contact, with a confirmation. Local: it takes the person out of
   this device's list, tells them nothing, and leaves the conversation where
-  it is - leaving a conversation is the conversation's own action.
+  it is - leaving a conversation is the conversation's own action. The
+  removal stays (amended 2026-10-24): the rule that makes a one-to-one peer a
+  contact skips a removed person, so the remaining conversation never brings
+  them back; adding them again (Accept, an invite link, starting a chat from
+  their profile) does.
+- **Add to contacts**, on the card of a person the viewer removed (amended
+  2026-10-24). The conversation's header still opens their card; it shows
+  Message, Call or Delete this chat, and the safety number as before, and
+  `Add to contacts` in place of Rename and Remove contact, which need a contact
+  row to act on. Local and instant: it puts the person back on this device's
+  list with the conversation they have, and sends nothing. The person is not
+  listed in Contacts until then. The shared rule takes `is_contact` again
+  for this one case (`false` only for a removed person whose one-to-one
+  remains).
 
 Never: a group name, an invite link, roles, ownership, or `Leave group`.
 

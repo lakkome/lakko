@@ -24,8 +24,8 @@ import {
   isClockSkewed,
   knockToJoin,
   parseHttpDate,
-  registerBeforePublish,
-  type EpochRegistrar,
+  commitWithNextEpoch,
+  type EpochCommitter,
   type KnockPorts,
 } from "./access";
 import { fakeRegistrarAuthority, fakeRootAuthority, fakeSigner } from "./access-test-doubles";
@@ -194,42 +194,47 @@ describe("contract point 5 — the clock", () => {
   });
 });
 
-function recordingRegistrar(fail = false): EpochRegistrar & {
-  readonly calls: Array<{ epoch: bigint; revoke: number }>;
+function recordingCommitter(fail = false): EpochCommitter & {
+  readonly calls: Array<{ epoch: bigint; revoke: number; row: string; proofEpoch: bigint }>;
 } {
-  const calls: Array<{ epoch: bigint; revoke: number }> = [];
+  const calls: Array<{ epoch: bigint; revoke: number; row: string; proofEpoch: bigint }> = [];
   return {
     calls,
-    registerGroupEpoch: vi.fn(async (_g: Uint8Array, epoch: bigint, _k: Uint8Array, revoke?: readonly Uint8Array[]) => {
-      calls.push({ epoch, revoke: revoke?.length ?? 0 });
+    commitGroupEpoch: vi.fn(async (_g, epoch, _k, revoke, row, proof) => {
+      calls.push({ epoch, revoke: revoke.length, row: new TextDecoder().decode(row), proofEpoch: proof.epoch });
       if (fail) throw new Error("401 proof required");
+      return { id: 9, createdAt: "t", resent: false };
     }),
   };
 }
 
-describe("contract point 3 — register before publish (ADR-0057: signed by the authority)", () => {
-  it("registers N+1's key; the key of the epoch left proves nothing", async () => {
-    const r = recordingRegistrar();
-    await registerBeforePublish(r, new Uint8Array([1]), fakeSigner(6n));
-    expect(r.calls).toEqual([{ epoch: 6n, revoke: 0 }]);
+describe("ADR-0081 — register with the commit (ADR-0057: signed by the authority)", () => {
+  it("registers N+1's key with the row, proven under N's key", async () => {
+    const r = recordingCommitter();
+    const answer = await commitWithNextEpoch(r, new Uint8Array([1]), fakeSigner(6n), fakeSigner(5n), new TextEncoder().encode("row"));
+    expect(r.calls).toEqual([{ epoch: 6n, revoke: 0, row: "row", proofEpoch: 5n }]);
+    expect(answer.id).toBe(9);
   });
 
   it("carries the revocation list", async () => {
-    const r = recordingRegistrar();
-    await registerBeforePublish(r, new Uint8Array([1]), fakeSigner(6n), [new Uint8Array(32)]);
-    expect(r.calls).toEqual([{ epoch: 6n, revoke: 1 }]);
+    const r = recordingCommitter();
+    await commitWithNextEpoch(r, new Uint8Array([1]), fakeSigner(6n), fakeSigner(5n), new Uint8Array([1]), [new Uint8Array(32)]);
+    expect(r.calls.map((c) => c.revoke)).toEqual([1]);
   });
 
   it("a refusal propagates, so the caller aborts", async () => {
-    const r = recordingRegistrar(true);
-    await expect(registerBeforePublish(r, new Uint8Array([1]), fakeSigner(6n))).rejects.toThrow(
-      /proof required/,
-    );
+    const r = recordingCommitter(true);
+    await expect(
+      commitWithNextEpoch(r, new Uint8Array([1]), fakeSigner(6n), fakeSigner(5n), new Uint8Array([1])),
+    ).rejects.toThrow(/proof required/);
   });
 
-  it("an underivable next key aborts without a request", async () => {
-    const r = recordingRegistrar();
-    await expect(registerBeforePublish(r, new Uint8Array([1]), null)).rejects.toThrow(
+  it("an underivable key aborts without a request", async () => {
+    const r = recordingCommitter();
+    await expect(commitWithNextEpoch(r, new Uint8Array([1]), null, fakeSigner(5n), new Uint8Array([1]))).rejects.toThrow(
+      /could not be derived/,
+    );
+    await expect(commitWithNextEpoch(r, new Uint8Array([1]), fakeSigner(6n), null, new Uint8Array([1]))).rejects.toThrow(
       /could not be derived/,
     );
     expect(r.calls).toEqual([]);

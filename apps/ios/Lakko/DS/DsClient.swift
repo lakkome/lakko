@@ -505,6 +505,41 @@ public final class DsClient {
         }
     }
 
+    /// ADR-0081 decision 1 — `POST /ds/group/{hex}/commit`: the root's or a
+    /// registrar's `RegisterEpoch` statement for the next epoch together with
+    /// the commit row, in one request proven by `proof` (the key of the epoch
+    /// the commit leaves) over the exact body. `201` is a new row, `200` the
+    /// identical re-send of one that landed (its original id). Any refusal
+    /// throws ``DsStatementError`` (`409`: another commit owns the epoch); a
+    /// request that did not reach the DS throws
+    /// ``DsClientError/network(endpoint:underlying:)``.
+    public func postCommit(_ request: DsStatementRequest, proof: DsRequestSigner) async throws -> DsCommitAnswer {
+        guard request.path.hasPrefix("/ds/group/"), request.path.hasSuffix("/commit") else {
+            throw DsClientError.argument("a commit path must name a group journal's commit route")
+        }
+        let (data, http) = try await send(
+            method: "POST",
+            endpoint: request.path,
+            body: Data(request.bodyJson.utf8),
+            contentType: "application/json",
+            auth: DsAuth(signer: proof),
+            acceptAnyStatus: true
+        )
+        guard http.statusCode == 200 || http.statusCode == 201 else {
+            throw DsStatementError.from(
+                status: http.statusCode,
+                body: Self.truncate(String(data: data, encoding: .utf8) ?? "<binary>"))
+        }
+        let parsed: PublishWireResponse
+        do {
+            parsed = try decoder.decode(PublishWireResponse.self, from: data)
+        } catch {
+            throw DsClientError.http(
+                status: http.statusCode, endpoint: request.path, body: "decode failed: \(error)")
+        }
+        return DsCommitAnswer(id: parsed.id, createdAt: parsed.createdAt, resent: http.statusCode == 200)
+    }
+
     /// `PUT /ds/mailbox/{address_hex}/access` — claim a mailbox under the
     /// mailbox key it is named after (ADR-0078). `bodyJson` is the mailbox
     /// signer's `mailboxClaimBodyJson()` (`{"mailbox_pk_b64"}`). Unsigned:
@@ -977,7 +1012,7 @@ public struct FetchResult: Equatable {
     /// The newest epoch registered on the DS for this journal. Present only
     /// on a signed read of a CLAIMED group journal; `nil` for an unclaimed
     /// journal and for mailboxes. The DeviceGroup sync runtime compares it
-    /// with its own epoch to notice a forked DeviceGroup (``DeviceGroupFork``).
+    /// with its own epoch to notice it is behind (``DeviceGroupRejoin``).
     public let latestEpoch: UInt64?
 
     public init(messages: [MailboxMessage], hasMore: Bool, latestEpoch: UInt64? = nil) {
@@ -1020,3 +1055,5 @@ extension DsClientError: LocalizedError {
 }
 
 extension DsClient: DsStatementSending {}
+
+extension DsClient: DsCommitSending {}

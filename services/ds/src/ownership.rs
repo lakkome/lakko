@@ -15,12 +15,11 @@
 //! | Route (`PUT /ds/group/{hex}/...`) | Signer | Effect |
 //! |---|---|---|
 //! | `claim` | anyone, first time | the signer becomes the root, one epoch |
-//! | `reset` | the root; or ANY signer carrying a key-reset attestation (`key_reset_attest_b64`, ADR-0073) AND the attested identity key's endorsement of that signer (`root_endorsement_b64`, ADR-0074 D11; `src/key_reset.rs`) | replaces the chain (and the registrar set when sent); attested: replaces the root too, drops the push binding, records the generation |
-//! | `access` | root or registrar | appends or replaces an epoch, revokes lower ranks |
+//! | `reset` | the root | replaces the chain (and the registrar set when sent) |
+//! | `access` | root or registrar | replaces an epoch, revokes lower ranks; an append is refused `400 append-needs-commit` (ADR-0081: a new epoch arrives with its commit, `src/commit.rs`) |
 //! | `registrars` | the root | adds, re-ranks, removes registrars |
 //! | `registrars-set` | the root | replaces the whole registrar set |
 //! | `root` | the root | names a new root (naming itself: a `204` no-op, the "am I still the root?" probe) |
-//! | `push-binding` | root or admin | binds the journal to one `push_gid` |
 //!
 //! **Order of checks.** Shape first (`400`: a body that does not decode, a
 //! statement of another kind or about another journal, an epoch above
@@ -32,8 +31,8 @@
 //! rank does not reach, `409` when the statement conflicts with the state).
 //! A refusal after the nonce commits, so the nonce stays spent.
 //!
-//! **The epoch rule** (`access`), with `latest` the newest registered epoch
-//! and ranks member 1, admin 2, root 3 (a claim or reset registers as the
+//! **The epoch rule** (`access` for a Replace, `POST .../commit` for an
+//! Append), with `latest` the newest registered epoch and ranks member 1, admin 2, root 3 (a claim or reset registers as the
 //! root). A statement says which of two things it does (the 2026-09-28
 //! security pass: without it, a lagging root device's ordinary registration
 //! truncated epochs other devices had legitimately advanced):
@@ -69,86 +68,44 @@
 //! key that is a registrar must hold a strictly lower rank than the signer,
 //! or the whole statement is refused (`403`) and nothing is written.
 //!
-//! **Push binding.** The DS stores `keyed-BLAKE3(pepper, push_gid)` per
-//! journal under a unique key, so one `push_gid` belongs to at most one
-//! journal; a wake whose `push_gid` does not hash to the publishing journal's
-//! binding is dropped ([`wake_is_bound`]). With `LAKKO_DS_BINDING_PEPPER`
-//! unset the binding route answers `503 push-binding-disabled` and every wake
-//! is dropped. Residual, stated: a current member who learns the `push_gid`
-//! before the owner binds it can bind it to a journal of its own first; the
-//! group then re-mints (ADR-0043 rotation) to recover its wakes.
+//! **No push binding (ADR-0078 section 3).** ADR-0057 stored a peppered
+//! binding of each journal to its group's `push_gid` and dropped a wake that
+//! named any other. The pepper sat in the environment file every service
+//! reads, so the table was the push-gw <-> journal join at rest. It is gone:
+//! a wake is now sealed to push-gw and signed by a key only members of the
+//! group hold, so the DS forwards it unread and push-gw checks the signature.
 
 use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Json, Response};
+use axum::response::{IntoResponse, Response};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use lakko_ds_proof::statement::{push_binding_key, KEY_LEN};
+use lakko_ds_proof::statement::KEY_LEN;
 use lakko_ds_proof::{
     Rank, RegisterMode, RegistrarChange, RegistrarEntry, SignedStatement, StatementBody,
     StatementKind, MAX_REGISTRARS, ROOT_RANK_BYTE,
 };
 use serde::Deserialize;
-use sqlx::mysql::{MySqlConnection, MySqlDatabaseError};
+use sqlx::mysql::MySqlConnection;
 
 use crate::access::{
     consume_nonce, db_error, lock_group, now_ms, refused, registration_db_error, HandlerError,
     MAX_ACCESS_EPOCH, MAX_RETAINED_EPOCHS,
 };
 use crate::journal::{self, PSEUDONYM_LEN};
-use crate::key_reset;
 use crate::AppState;
-use lakko_attest::KeyResetAttestation;
 
-/// MariaDB's duplicate-key error number.
-const ER_DUP_ENTRY: u16 = 1062;
-
-/// The environment variable the push-binding pepper is read from.
-pub(crate) const PEPPER_ENV: &str = "LAKKO_DS_BINDING_PEPPER";
-
-/// Read `LAKKO_DS_BINDING_PEPPER`: 64 hex characters, or unset.
-///
-/// # Errors
-///
-/// A message naming the variable when it is set but is not 64 hex
-/// characters: a malformed pepper refuses startup rather than silently
-/// disabling every wake.
-pub(crate) fn pepper_from_lookup(
-    lookup: impl Fn(&str) -> Option<String>,
-) -> Result<Option<[u8; KEY_LEN]>, String> {
-    let Some(raw) = lookup(PEPPER_ENV).filter(|v| !v.trim().is_empty()) else {
-        return Ok(None);
-    };
-    let mut out = [0u8; KEY_LEN];
-    hex::decode_to_slice(raw.trim(), &mut out)
-        .map_err(|_| format!("{PEPPER_ENV} must be 64 hex characters (32 bytes)"))?;
-    Ok(Some(out))
-}
-
+/// A statement route's body. ADR-0078 phase 6 removed the ADR-0073 attested
+/// arm (`key_reset_attest_b64` / `root_endorsement_b64`): a DeviceGroup id is
+/// derived from the account seed now, so a key reset founds the DeviceGroup
+/// at a fresh journal and nothing is re-rooted. An unknown field is refused
+/// (`400`), so a stale client that still sends one learns it at once.
 #[derive(Deserialize)]
-#[allow(clippy::struct_field_names)] // the names are the wire's
+#[serde(deny_unknown_fields)]
 pub(crate) struct StatementJson {
     /// Standard base64 of the signed statement blob.
     statement_b64: String,
-    /// ADR-0073 section 5, `reset` only: standard base64 of the 177-byte
-    /// key-reset attestation (auth hands it out URL-safe; the client
-    /// re-encodes, as it does for every other base64 field here). On any
-    /// other route the field is refused (`400`).
-    #[serde(default)]
-    key_reset_attest_b64: Option<String>,
-    /// ADR-0074 section 4.6 (decision D11), required with
-    /// `key_reset_attest_b64` and refused without it: standard base64 of the
-    /// 64-byte root endorsement, the attested identity key signing the key
-    /// that becomes this journal's root (`src/key_reset.rs`).
-    #[serde(default)]
-    root_endorsement_b64: Option<String>,
-}
-
-/// The attestation fields of a statement body, as they arrived.
-struct AttestFields {
-    key_reset_attest_b64: String,
-    root_endorsement_b64: Option<String>,
 }
 
 fn bad_request(msg: &str) -> HandlerError {
@@ -163,28 +120,31 @@ fn conflict(msg: &str) -> HandlerError {
     (StatusCode::CONFLICT, msg.to_string())
 }
 
+/// The error code of the refusal of a plain append (ADR-0081, open question 1).
+pub(crate) const APPEND_NEEDS_COMMIT: &str = "append-needs-commit";
+
+/// ADR-0081 open question 1 (decided 2026-10-18): a new epoch is registered
+/// only together with the commit row that reaches it (`POST .../commit`), so
+/// an append-mode statement on `PUT .../access` is refused - `400` with
+/// `{"error":"append-needs-commit"}` - for every journal, before its
+/// signature is looked at. It is a request this route no longer takes, not a
+/// judgment about the journal, so the answer is the same whatever the journal
+/// and the signer.
+fn append_needs_commit() -> HandlerError {
+    (
+        StatusCode::BAD_REQUEST,
+        format!("{{\"error\":\"{APPEND_NEEDS_COMMIT}\"}}"),
+    )
+}
+
 /// Parse and shape-check a statement for the route `kind` on `group_id`.
-/// The second value is the attestation the body carries, which only the
-/// `reset` and `root` routes accept.
 fn parse_statement(
     body: &[u8],
     kind: StatementKind,
     group_id: &[u8; PSEUDONYM_LEN],
-) -> Result<(SignedStatement, Option<AttestFields>), HandlerError> {
+) -> Result<SignedStatement, HandlerError> {
     let json: StatementJson = serde_json::from_slice(body)
         .map_err(|_| bad_request("body must be {\"statement_b64\": ...}"))?;
-    if json.key_reset_attest_b64.is_some()
-        && !matches!(kind, StatementKind::Reset | StatementKind::RootTransfer)
-    {
-        return Err(bad_request(
-            "key_reset_attest_b64 belongs to the reset and root routes",
-        ));
-    }
-    if json.root_endorsement_b64.is_some() && json.key_reset_attest_b64.is_none() {
-        return Err(bad_request(
-            "root_endorsement_b64 accompanies key_reset_attest_b64",
-        ));
-    }
     let blob = B64
         .decode(json.statement_b64.as_bytes())
         .map_err(|_| bad_request("statement_b64: bad base64"))?;
@@ -208,11 +168,7 @@ fn parse_statement(
             format!("epoch must be at most {MAX_ACCESS_EPOCH}"),
         ));
     }
-    let attest = json.key_reset_attest_b64.map(|field| AttestFields {
-        key_reset_attest_b64: field,
-        root_endorsement_b64: json.root_endorsement_b64,
-    });
-    Ok((statement, attest))
+    Ok(statement)
 }
 
 /// The route handlers: one statement kind each.
@@ -233,7 +189,6 @@ statement_route!(put_reset, StatementKind::Reset);
 statement_route!(put_register, StatementKind::RegisterEpoch);
 statement_route!(put_registrars, StatementKind::Registrars);
 statement_route!(put_root, StatementKind::RootTransfer);
-statement_route!(put_push_binding, StatementKind::PushBinding);
 statement_route!(put_registrars_set, StatementKind::RegistrarsSet);
 
 async fn handle(
@@ -243,46 +198,16 @@ async fn handle(
     kind: StatementKind,
 ) -> Result<Response, HandlerError> {
     let group_id = journal::decode_pseudonym(group_hex)?;
-    let (statement, attest_fields) = parse_statement(body, kind, &group_id)?;
-    // ADR-0073: the attested arm. Shape and the pinned key first (`400` /
-    // `503`), then the signature and the journal binding, then the root
-    // endorsement (ADR-0074 D11: the attested identity key must name the key
-    // that becomes the root), the last two the uniform `401`; all before the
-    // statement's own signature is checked.
-    let attested = match attest_fields {
-        None => None,
-        Some(fields) => {
-            let Some(attest_key) = state.attest_key.as_ref() else {
-                return Ok(key_reset::disabled());
-            };
-            let attestation =
-                key_reset::verify_for_journal(&fields.key_reset_attest_b64, attest_key, &group_id)?;
-            let becomes_root = match &statement.body {
-                StatementBody::RootTransfer { new_root } => new_root,
-                _ => &statement.signer,
-            };
-            key_reset::verify_endorsement(
-                fields.root_endorsement_b64.as_deref(),
-                &attestation,
-                becomes_root,
-            )?;
-            Some(attestation)
-        },
-    };
-    let pepper = if kind == StatementKind::PushBinding {
-        match state.binding_pepper {
-            Some(p) => Some(p),
-            None => {
-                return Ok((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(serde_json::json!({ "error": "push-binding-disabled" })),
-                )
-                    .into_response());
-            },
+    let statement = parse_statement(body, kind, &group_id)?;
+    if matches!(
+        statement.body,
+        StatementBody::RegisterEpoch {
+            mode: RegisterMode::Append,
+            ..
         }
-    } else {
-        None
-    };
+    ) {
+        return Err(append_needs_commit());
+    }
     statement.verify(now_ms()).map_err(|_| refused())?;
 
     let mut conn = state
@@ -299,14 +224,7 @@ async fn handle(
         .map_err(db_error("begin ownership statement"))?;
     // A DB failure drops `tx` (rollback). A decision commits: a refusal after
     // the nonce was taken keeps it taken.
-    let decision = decide(
-        &mut tx,
-        &group_id,
-        &statement,
-        pepper.as_ref(),
-        attested.as_ref(),
-    )
-    .await?;
+    let decision = decide(&mut tx, &group_id, &statement).await?;
     tx.commit()
         .await
         .map_err(registration_db_error("commit ownership statement"))?;
@@ -314,20 +232,15 @@ async fn handle(
 }
 
 /// Whether a signer of `standing` is heard on a statement of `kind` at
-/// all. A verified key-reset attestation (`attested`, ADR-0073) lets any
-/// signer be heard on a reset; the generation rule then decides. A
-/// registrar sending a registrars set is heard and refused (403): it is
-/// someone to this journal, only not the root.
-const fn is_heard(kind: StatementKind, standing: Standing, attested: bool) -> bool {
+/// all. A registrar sending a registrars set is heard and refused (403): it
+/// is someone to this journal, only not the root.
+pub(crate) const fn is_heard(kind: StatementKind, standing: Standing) -> bool {
     match kind {
         StatementKind::Claim => matches!(standing, Standing::Unclaimed | Standing::Root),
-        StatementKind::Reset => matches!(standing, Standing::Root) || attested,
-        StatementKind::Registrars | StatementKind::RootTransfer => {
+        StatementKind::Reset | StatementKind::Registrars | StatementKind::RootTransfer => {
             matches!(standing, Standing::Root)
         },
-        StatementKind::RegisterEpoch
-        | StatementKind::PushBinding
-        | StatementKind::RegistrarsSet => {
+        StatementKind::RegisterEpoch | StatementKind::RegistrarsSet => {
             matches!(standing, Standing::Root | Standing::Registrar(_))
         },
     }
@@ -335,7 +248,7 @@ const fn is_heard(kind: StatementKind, standing: Standing, attested: bool) -> bo
 
 /// Who the signer is to this journal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Standing {
+pub(crate) enum Standing {
     /// The journal is unclaimed.
     Unclaimed,
     /// The journal's root (rank 3).
@@ -356,41 +269,20 @@ impl Standing {
     }
 }
 
-type Decision = Result<Result<(), HandlerError>, HandlerError>;
+pub(crate) type Decision = Result<Result<(), HandlerError>, HandlerError>;
 
 #[allow(clippy::too_many_lines)] // one arm per statement kind, kept in one place
 async fn decide(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
     statement: &SignedStatement,
-    pepper: Option<&[u8; KEY_LEN]>,
-    attested: Option<&KeyResetAttestation>,
 ) -> Decision {
     lock_group(&mut *conn, group_id).await?;
-    let root = load_root(&mut *conn, group_id).await?;
-    let standing = match root {
-        None => Standing::Unclaimed,
-        Some(r) if r == statement.signer => Standing::Root,
-        Some(_) => match registrar_rank(&mut *conn, group_id, &statement.signer).await? {
-            Some(rank) => Standing::Registrar(rank),
-            None => Standing::Stranger,
-        },
-    };
+    let standing = standing_of(&mut *conn, group_id, &statement.signer).await?;
     // Who may be heard at all, before the nonce is spent: a stranger costs
     // the server no row and learns the uniform 401.
-    if !is_heard(statement.body.kind(), standing, attested.is_some()) {
+    if !is_heard(statement.body.kind(), standing) {
         return Ok(Err(refused()));
-    }
-    // ADR-0073 section 5 step 5: the generation is checked BEFORE the nonce
-    // is spent, so a replayed or overtaken attestation costs the server no
-    // row (the uniform refusal order of ADR-0057 for everything else).
-    if let Some(attestation) = attested {
-        let stored = key_reset::stored_generation(&mut *conn, group_id).await?;
-        if !key_reset::generation_is_newer(attestation.key_generation, stored) {
-            return Ok(Err(conflict(
-                "key-reset attestation is not newer than the journal's generation",
-            )));
-        }
     }
     if !consume_nonce(&mut *conn, group_id, &statement.nonce)
         .await
@@ -407,30 +299,16 @@ async fn decide(
             epoch,
             epoch_key,
             registrars,
-        } => match attested {
-            Some(attestation) => {
-                key_reset::apply_attested_reset(
-                    &mut *conn,
-                    group_id,
-                    signer,
-                    attestation.key_generation,
-                    *epoch,
-                    epoch_key,
-                    registrars.as_deref(),
-                )
-                .await
-            },
-            None => {
-                apply_reset(
-                    &mut *conn,
-                    group_id,
-                    signer,
-                    *epoch,
-                    epoch_key,
-                    registrars.as_deref(),
-                )
-                .await
-            },
+        } => {
+            apply_reset(
+                &mut *conn,
+                group_id,
+                signer,
+                *epoch,
+                epoch_key,
+                registrars.as_deref(),
+            )
+            .await
         },
         StatementBody::RegisterEpoch {
             epoch,
@@ -457,24 +335,7 @@ async fn decide(
             manage_registrars(&mut *conn, group_id, signer, changes).await
         },
         StatementBody::RootTransfer { new_root } => {
-            transfer_root(
-                &mut *conn,
-                group_id,
-                signer,
-                new_root,
-                attested.map(|a| a.key_generation),
-            )
-            .await
-        },
-        StatementBody::PushBinding { push_gid } => {
-            if standing == Standing::Registrar(Rank::Member) {
-                return Ok(Err(forbidden("a push binding needs the root or an admin")));
-            }
-            // `handle` refuses the route before this point when unset.
-            let Some(pepper) = pepper else {
-                return Ok(Err(refused()));
-            };
-            bind_push(&mut *conn, group_id, &push_binding_key(pepper, push_gid)).await
+            transfer_root(&mut *conn, group_id, signer, new_root).await
         },
     }
 }
@@ -483,11 +344,28 @@ async fn decide(
 // State reads
 // ============================================================================
 
+/// Who `signer` is to the journal, read on `conn` (after [`lock_group`]).
+pub(crate) async fn standing_of(
+    conn: &mut MySqlConnection,
+    group_id: &[u8; PSEUDONYM_LEN],
+    signer: &[u8; KEY_LEN],
+) -> Result<Standing, HandlerError> {
+    let root = load_root(&mut *conn, group_id).await?;
+    Ok(match root {
+        None => Standing::Unclaimed,
+        Some(r) if r == *signer => Standing::Root,
+        Some(_) => match registrar_rank(&mut *conn, group_id, signer).await? {
+            Some(rank) => Standing::Registrar(rank),
+            None => Standing::Stranger,
+        },
+    })
+}
+
 fn key_of(bytes: &[u8]) -> Option<[u8; KEY_LEN]> {
     bytes.try_into().ok()
 }
 
-async fn load_root(
+pub(crate) async fn load_root(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
 ) -> Result<Option<[u8; KEY_LEN]>, HandlerError> {
@@ -500,7 +378,7 @@ async fn load_root(
     Ok(row.and_then(|(pk,)| key_of(&pk)))
 }
 
-async fn registrar_rank(
+pub(crate) async fn registrar_rank(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
     key: &[u8; KEY_LEN],
@@ -563,7 +441,7 @@ async fn highest_rank_above(
 }
 
 /// The key and rank registered at `epoch`.
-async fn registration_at(
+pub(crate) async fn registration_at(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
     epoch: u64,
@@ -614,6 +492,7 @@ pub(crate) async fn insert_epoch(
            (group_id, epoch, access_pk, registered_by, registered_rank) VALUES (?, ?, ?, ?, ?) \
          ON DUPLICATE KEY UPDATE access_pk = VALUES(access_pk), \
            registered_by = VALUES(registered_by), registered_rank = VALUES(registered_rank), \
+           commit_row_hash = NULL, commit_message_id = NULL, \
            created_at = CURRENT_TIMESTAMP(3)",
     )
     .bind(&group_id[..])
@@ -726,12 +605,12 @@ async fn apply_reset(
 }
 
 /// One register-epoch statement, as the rules read it.
-struct Registration<'a> {
-    signer: &'a [u8; KEY_LEN],
-    standing: Standing,
-    epoch: u64,
-    epoch_key: &'a [u8; KEY_LEN],
-    mode: RegisterMode,
+pub(crate) struct Registration<'a> {
+    pub(crate) signer: &'a [u8; KEY_LEN],
+    pub(crate) standing: Standing,
+    pub(crate) epoch: u64,
+    pub(crate) epoch_key: &'a [u8; KEY_LEN],
+    pub(crate) mode: RegisterMode,
 }
 
 /// What a registration does to the chain once the rules allow it.
@@ -820,7 +699,7 @@ async fn epoch_rule(
     }
 }
 
-async fn apply_register(
+pub(crate) async fn apply_register(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
     reg: &Registration<'_>,
@@ -954,114 +833,32 @@ async fn manage_registrars(
     Ok(Ok(()))
 }
 
-/// Hand the root over. With `generation` (an attested transfer, ADR-0074
-/// section 4.6: a key ROTATION moving the account's DeviceGroup journal to
-/// the root its new seed derives) the journal's key generation is recorded
-/// too, so the attestation that rode along cannot be presented again, on
-/// this route or on `reset`. The epoch chain, the registrar set and the push
-/// binding are untouched: unlike an attested reset, a transfer cuts nobody
-/// off.
+/// Hand the root over (a key ROTATION, ADR-0074 section 3.5, moves the
+/// account's DeviceGroup journal to the root its new seed derives this way:
+/// the old root signs). The epoch chain and the registrar set are
+/// untouched: a transfer cuts nobody off.
 async fn transfer_root(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
     root: &[u8; KEY_LEN],
     new_root: &[u8; KEY_LEN],
-    generation: Option<u64>,
 ) -> Decision {
-    if new_root == root && generation.is_none() {
+    if new_root == root {
         return Ok(Ok(()));
     }
-    if new_root != root {
-        // The root is not a registrar; a key that was one stops being one.
-        delete_registrar(conn, group_id, new_root).await?;
-    }
+    // The root is not a registrar; a key that was one stops being one.
+    delete_registrar(conn, group_id, new_root).await?;
     sqlx::query(
         "UPDATE ds_group_owner SET root_pk = ?, \
-            key_generation = COALESCE(?, key_generation), \
             updated_at = CURRENT_TIMESTAMP(3) \
          WHERE group_id = ?",
     )
     .bind(&new_root[..])
-    .bind(generation)
     .bind(&group_id[..])
     .execute(&mut *conn)
     .await
     .map_err(registration_db_error("transfer root"))?;
     Ok(Ok(()))
-}
-
-async fn bind_push(
-    conn: &mut MySqlConnection,
-    group_id: &[u8; PSEUDONYM_LEN],
-    binding_key: &[u8; KEY_LEN],
-) -> Decision {
-    let holder: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT group_id FROM ds_push_bindings WHERE binding_key = ?")
-            .bind(&binding_key[..])
-            .fetch_optional(&mut *conn)
-            .await
-            .map_err(registration_db_error("load push binding"))?;
-    match holder {
-        Some((g,)) if g.as_slice() == group_id.as_slice() => return Ok(Ok(())),
-        Some(_) => return Ok(Err(conflict("push_gid is bound to another journal"))),
-        None => {},
-    }
-    // Replace this journal's binding; the previous push_gid is freed.
-    sqlx::query("DELETE FROM ds_push_bindings WHERE group_id = ?")
-        .bind(&group_id[..])
-        .execute(&mut *conn)
-        .await
-        .map_err(registration_db_error("replace push binding"))?;
-    let inserted =
-        sqlx::query("INSERT INTO ds_push_bindings (group_id, binding_key) VALUES (?, ?)")
-            .bind(&group_id[..])
-            .bind(&binding_key[..])
-            .execute(&mut *conn)
-            .await;
-    match inserted {
-        Ok(_) => Ok(Ok(())),
-        Err(e) => {
-            let duplicate = e
-                .as_database_error()
-                .and_then(|d| d.try_downcast_ref::<MySqlDatabaseError>())
-                .is_some_and(|m| m.number() == ER_DUP_ENTRY);
-            if duplicate {
-                // Another journal bound the same push_gid concurrently.
-                Ok(Err(conflict("push_gid is bound to another journal")))
-            } else {
-                Err(registration_db_error("write push binding")(e))
-            }
-        },
-    }
-}
-
-/// Whether a wake naming `push_gid` may go out for a publish to `group_id`:
-/// the journal's binding must be that `push_gid`. `false` when the pepper is
-/// unset (every wake dropped) and on any database error (the publish has
-/// already succeeded; only the wake is lost, and it is logged).
-pub(crate) async fn wake_is_bound(
-    state: &AppState,
-    group_id: &[u8; PSEUDONYM_LEN],
-    push_gid: &[u8; PSEUDONYM_LEN],
-) -> bool {
-    let Some(pepper) = state.binding_pepper.as_ref() else {
-        return false;
-    };
-    let key = push_binding_key(pepper, push_gid);
-    match sqlx::query_as::<_, (i32,)>(
-        "SELECT 1 FROM ds_push_bindings WHERE group_id = ? AND binding_key = ?",
-    )
-    .bind(&group_id[..])
-    .bind(&key[..])
-    .fetch_optional(&state.db)
-    .await
-    {
-        Ok(row) => row.is_some(),
-        Err(e) => {
-            tracing::warn!(error = %e, "push binding lookup failed; wake dropped");
-            false
-        },
-    }
 }
 
 #[cfg(test)]
@@ -1073,19 +870,6 @@ mod tests {
     use lakko_ds_proof::RegisterMode;
     use lakko_ds_proof::SigningKey;
     use sqlx::MySqlPool;
-
-    #[test]
-    fn the_pepper_is_64_hex_or_unset() {
-        let env = |v: Option<String>| move |_: &str| v.clone();
-        assert_eq!(pepper_from_lookup(env(None)), Ok(None));
-        assert_eq!(pepper_from_lookup(env(Some("  ".into()))), Ok(None));
-        assert_eq!(
-            pepper_from_lookup(env(Some("ab".repeat(32)))).unwrap(),
-            Some([0xab; 32])
-        );
-        assert!(pepper_from_lookup(env(Some("abcd".into()))).is_err());
-        assert!(pepper_from_lookup(env(Some("zz".repeat(32)))).is_err());
-    }
 
     fn members_uri(gid: &[u8; PSEUDONYM_LEN]) -> String {
         format!("/ds/group/{}/messages", hex::encode(gid))
@@ -1944,8 +1728,12 @@ mod tests {
         assert_eq!(probe(&new_root, &new_root).await, StatusCode::NO_CONTENT);
     }
 
-    fn wake_value(push_gid: [u8; 32]) -> String {
-        format!("{};message", URL_SAFE_NO_PAD.encode(push_gid))
+    /// A sealed wake as a publisher sends it: 312 base64url characters of a
+    /// version byte and opaque bytes. The DS checks only that shape.
+    fn sealed_wake(fill: u8) -> String {
+        let mut blob = vec![fill; lakko_contacts::push_wake::PUSH_WAKE_LEN];
+        blob[0] = 0x01;
+        URL_SAFE_NO_PAD.encode(blob)
     }
 
     async fn publish_waking(
@@ -1953,7 +1741,7 @@ mod tests {
         gid: &[u8; PSEUDONYM_LEN],
         key: &SigningKey,
         epoch: u64,
-        push_gid: [u8; 32],
+        wake: &str,
     ) -> StatusCode {
         send_with(
             app,
@@ -1963,124 +1751,69 @@ mod tests {
                 body: b"ciphertext".to_vec(),
                 proof: Some((key, epoch)),
             },
-            &[(crate::wake::WAKE_HEADER, &wake_value(push_gid))],
+            &[(crate::wake::WAKE_HEADER, wake)],
         )
         .await
         .0
     }
 
-    async fn bind(
-        app: &axum::Router,
-        gid: &[u8; PSEUDONYM_LEN],
-        signer: &StatementSigner,
-        push_gid: [u8; 32],
-    ) -> StatusCode {
-        send_statement(app, gid, signer, StatementBody::PushBinding { push_gid }).await
-    }
-
-    /// ADR-0057 section 2: a push_gid belongs to at most one journal, bound
-    /// by its root or an admin, and a wake naming any other push_gid is
-    /// dropped while the publish still lands.
+    /// ADR-0078 section 3: a writer of a claimed journal asks for a wake
+    /// with a blob the DS cannot read; the DS forwards it byte for byte and
+    /// binds it to nothing. A malformed blob refuses the publish; the old
+    /// `push_gid;kind` spelling is malformed.
     #[tokio::test]
-    async fn a_journal_wakes_only_its_bound_push_gid() {
+    async fn a_claimed_journal_forwards_a_sealed_wake_unread() {
         let Some((app, _pool, waker)) = app_with_waker().await else {
             return;
         };
         let a = journal(&app, 0x67).await;
-        let b = journal(&app, 0x68).await;
-        let gid_one = fresh_name(0x69);
-        let gid_two = fresh_name(0x69);
+        let wake = sealed_wake(0x5e);
         assert_eq!(
-            bind(&app, &a.gid, &a.member, gid_one).await,
-            StatusCode::FORBIDDEN
-        );
-        assert_eq!(
-            bind(&app, &a.gid, &fresh_signer(0x69), gid_one).await,
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            bind(&app, &a.gid, &a.admin, gid_one).await,
-            StatusCode::NO_CONTENT
-        );
-        assert_eq!(
-            bind(&app, &a.gid, &a.root, gid_one).await,
-            StatusCode::NO_CONTENT
-        );
-        // Another journal cannot take it.
-        assert_eq!(
-            bind(&app, &b.gid, &b.root, gid_one).await,
-            StatusCode::CONFLICT
-        );
-
-        // A's own push_gid wakes; a foreign one is dropped, the publish is not.
-        assert_eq!(
-            publish_waking(&app, &a.gid, &key(1), 1, gid_one).await,
-            StatusCode::CREATED
-        );
-        assert_eq!(
-            publish_waking(&app, &a.gid, &key(1), 1, gid_two).await,
-            StatusCode::CREATED
-        );
-        // B has no binding: nothing it names wakes.
-        assert_eq!(
-            publish_waking(&app, &b.gid, &key(1), 1, gid_one).await,
+            publish_waking(&app, &a.gid, &key(1), 1, &wake).await,
             StatusCode::CREATED
         );
         let fired = waker.fired_targets();
-        assert!(fired.contains(&gid_one));
-        assert!(!fired.contains(&gid_two));
-        assert_eq!(fired.iter().filter(|g| **g == gid_one).count(), 1);
+        assert_eq!(fired.len(), 1);
+        assert_eq!(URL_SAFE_NO_PAD.encode(&fired[0]), wake, "forwarded unread");
 
-        // A rotation re-binds A; the old push_gid is freed for B.
+        let old = format!("{};message", URL_SAFE_NO_PAD.encode([7u8; 32]));
         assert_eq!(
-            bind(&app, &a.gid, &a.admin, gid_two).await,
-            StatusCode::NO_CONTENT
+            publish_waking(&app, &a.gid, &key(1), 1, &old).await,
+            StatusCode::BAD_REQUEST
         );
-        assert_eq!(
-            bind(&app, &b.gid, &b.admin, gid_one).await,
-            StatusCode::NO_CONTENT
-        );
-        assert_eq!(
-            publish_waking(&app, &a.gid, &key(1), 1, gid_one).await,
-            StatusCode::CREATED
-        );
-        let fired = waker.fired_targets();
-        assert_eq!(fired.iter().filter(|g| **g == gid_one).count(), 1);
+        assert_eq!(waker.fired_targets().len(), 1);
     }
 
+    /// ADR-0078 section 3: the DS schema has no push binding - no table, and
+    /// no column anywhere naming a push id or a binding.
     #[tokio::test]
-    async fn without_a_pepper_binding_is_503_and_every_wake_drops() {
-        let Some((app, _pool, waker)) = app_configured(None).await else {
+    async fn the_ds_schema_has_no_push_binding() {
+        let Some((_app, pool)) = app().await else {
             return;
         };
-        let j = journal(&app, 0x6A).await;
-        let push_gid = fresh_name(0x6A);
-        let statement = j
-            .root
-            .sign_at(
-                &j.gid,
-                StatementBody::PushBinding { push_gid },
-                now_ms(),
-                fresh_nonce(),
-            )
-            .unwrap();
-        let (status, body) = send(
-            &app,
-            Req {
-                method: "PUT",
-                uri: &format!("/ds/group/{}/push-binding", hex::encode(j.gid)),
-                body: statement.body_json().into_bytes(),
-                proof: None,
-            },
+        let tables: Vec<(String,)> = sqlx::query_as(
+            "SELECT LOWER(TABLE_NAME) FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = DATABASE()",
         )
-        .await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(error_code(&body), "push-binding-disabled");
-        assert_eq!(
-            publish_waking(&app, &j.gid, &key(1), 1, push_gid).await,
-            StatusCode::CREATED
-        );
-        assert!(waker.fired_targets().is_empty());
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        for (t,) in &tables {
+            assert!(!t.contains("push"), "table {t}");
+        }
+        let columns: Vec<(String, String)> = sqlx::query_as(
+            "SELECT LOWER(TABLE_NAME), LOWER(COLUMN_NAME) FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = DATABASE()",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        for (t, c) in &columns {
+            assert!(
+                !c.contains("push") && !c.contains("binding_key") && !c.contains("pepper"),
+                "{t}.{c}"
+            );
+        }
     }
 
     /// Shape before signature before standing before rule: a malformed body
@@ -2160,27 +1893,34 @@ mod tests {
             put("access", br#"{"statement_b64":"AAAA"}"#.to_vec()).await,
             StatusCode::BAD_REQUEST
         );
-        // A stale statement is a 401.
-        let stale = j
-            .root
-            .sign_at(
-                &j.gid,
-                StatementBody::RegisterEpoch {
-                    epoch: 2,
-                    epoch_key: key(2).verifying_key().to_bytes(),
-                    mode: RegisterMode::Append,
-                    revoke: vec![],
-                },
-                now_ms() - lakko_ds_proof::PROOF_WINDOW_MS - 1_000,
-                fresh_nonce(),
-            )
-            .unwrap();
+        // ADR-0081: an append on `/access` is refused before anything else.
+        assert_eq!(
+            put("access", register_two.body_json().into_bytes()).await,
+            StatusCode::BAD_REQUEST
+        );
+        // A stale statement is a 401 (a replace: the route's own kind).
+        let replace_one = |unix_ms: u64| {
+            j.root
+                .sign_at(
+                    &j.gid,
+                    StatementBody::RegisterEpoch {
+                        epoch: 1,
+                        epoch_key: key(1).verifying_key().to_bytes(),
+                        mode: RegisterMode::Replace,
+                        revoke: vec![],
+                    },
+                    unix_ms,
+                    fresh_nonce(),
+                )
+                .unwrap()
+        };
+        let stale = replace_one(now_ms() - lakko_ds_proof::PROOF_WINDOW_MS - 1_000);
         assert_eq!(
             put("access", stale.body_json().into_bytes()).await,
             StatusCode::UNAUTHORIZED
         );
         // Accepted once, refused on replay.
-        let body = register_two.body_json().into_bytes();
+        let body = replace_one(now_ms()).body_json().into_bytes();
         assert_eq!(put("access", body.clone()).await, StatusCode::NO_CONTENT);
         assert_eq!(put("access", body).await, StatusCode::UNAUTHORIZED);
     }

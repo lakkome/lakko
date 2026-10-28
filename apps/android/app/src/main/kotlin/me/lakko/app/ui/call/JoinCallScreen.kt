@@ -3,6 +3,7 @@
 
 package me.lakko.app.ui.call
 
+import androidx.compose.foundation.layout.width
 import android.content.Context
 import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
@@ -147,6 +148,9 @@ data class JoinCallUiState(
     /** Sealed links (2026-09-28): the fragment is missing or malformed, or
      *  the link does not open under it. Refused with one sentence. */
     val damaged: Boolean = false,
+    /** The ledger could not be asked for the link (the network, a server
+     *  error): the screen offers it again. */
+    val openFailed: Boolean = false,
     val phase: JoinCallPhase = JoinCallPhase.Idle,
     /** Why the last attempt failed (ADR-0061: a catalog message). */
     val error: UiText? = null,
@@ -167,10 +171,16 @@ data class JoinCallUiState(
     val guestDeleted: Boolean = false,
 )
 
-/** ADR-0048 UX §4 — the guest name field's prefill, in the interface
- *  language at the moment the screen opens. */
+/** ADR-0048 UX §4 — the guest name field's prefill: "<adjective> <animal>"
+ *  from the shared rule (`lakko_ui_rules::guest_name`), drawn when the screen
+ *  opens. Where the native library is not loaded (host tests) the catalog's
+ *  plain word stands in. */
 internal val GUEST_NAME_DEFAULT: String
-    get() = UiText("call.guest.default_name").render()
+    get() = try {
+        uniffi.lakko_ffi_uniffi.guestName(kotlin.random.Random.nextLong().toULong())
+    } catch (_: Throwable) {
+        UiText("call.guest.default_name").render()
+    }
 
 
 /** What the landing needs from the auth layer: [AuthRepository] in
@@ -193,6 +203,10 @@ internal sealed interface CallLinkDecode {
 
     /** The ledger answered `429`: not an invalid link. */
     data object RateLimited : CallLinkDecode
+
+    /** The ledger could not be asked (the network, a server error): the link
+     *  may be fine, it is offered again. */
+    data object OpenFailed : CallLinkDecode
 
     /** Sealed links: the fragment is missing or malformed, or the link does
      *  not open under it. */
@@ -321,15 +335,16 @@ class JoinCallViewModel internal constructor(
                     decoded = (outcome as? CallLinkDecode.Opened)?.call,
                     rateLimited = outcome == CallLinkDecode.RateLimited,
                     damaged = outcome == CallLinkDecode.Damaged,
+                    openFailed = outcome == CallLinkDecode.OpenFailed,
                 )
             }
         }
     }
 
-    /** `Try again` after a rate-limited resolve. */
+    /** `Try again` after a rate-limited or failed resolve. */
     fun retryDecode() {
-        if (!local.value.rateLimited) return
-        local.update { it.copy(loading = true, rateLimited = false) }
+        if (!local.value.rateLimited && !local.value.openFailed) return
+        local.update { it.copy(loading = true, rateLimited = false, openFailed = false) }
         runDecode()
     }
 
@@ -563,11 +578,21 @@ internal suspend fun decodeCallLink(
                 val discovery = DiscoveryClient()
                 try {
                     discovery.fetchCallInvite(parsed.blobId) ?: return CallLinkDecode.Invalid
+                } catch (e: Throwable) {
+                    // A failure to ask the ledger says nothing about the link.
+                    me.lakko.app.rethrowIfCancelled(e)
+                    return when {
+                        me.lakko.app.discovery.isDiscoveryRateLimited(e) -> CallLinkDecode.RateLimited
+                        e is DiscoveryHttpError && e.status == 404 -> CallLinkDecode.Invalid
+                        else -> {
+                            Log.w("JoinCall", "the call link could not be fetched", e)
+                            CallLinkDecode.OpenFailed
+                        }
+                    }
                 } finally {
                     discovery.close()
                 }
             }
-            is ParsedCallInvite.Inline -> parsed.capabilityBytes
         }
         me.lakko.app.discovery.openSealedInviteLink(sealedBytes, secret) { bytes, key ->
             CallInviteCapability.openLink(bytes, key)
@@ -767,6 +792,11 @@ fun JoinCallScreen(
                 Text(me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY.text())
                 TextButton(onClick = onExit) { Text(t("common.back")) }
             }
+            ui.openFailed -> {
+                Text(me.lakko.app.chat.INVITE_LINK_OPEN_FAILED_TEXT.text())
+                TextButton(onClick = { viewModel.retryDecode() }) { Text(t("common.try_again")) }
+                TextButton(onClick = onExit) { Text(t("common.back")) }
+            }
             ui.decoded == null || ui.decoded?.valid == false -> {
                 Text(t("call.link.invalid"))
                 TextButton(onClick = onExit) { Text(t("common.back")) }
@@ -790,10 +820,22 @@ fun JoinCallScreen(
                     me.lakko.app.profile.ProfileDirectory.get(appContext).resolve(decoded.ownerSignatureKey)
                 }
                 if (!decoded.isOwner && !host.isPlaceholder) {
-                    Text(
-                        text = t("call.link.host", mapOf("name" to host.primary)),
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+                    // ADR-0084 — the host's photo beside their name.
+                    androidx.compose.foundation.layout.Row(
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    ) {
+                        me.lakko.app.ui.components.LakkoAvatar(
+                            name = host.primary,
+                            seed = host.primary,
+                            size = 32.dp,
+                            personKey = decoded.ownerSignatureKey,
+                        )
+                        androidx.compose.foundation.layout.Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = t("call.link.host", mapOf("name" to host.primary)),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
                 }
                 ui.busyMessage?.let { message ->
                     Text(text = message.text(), color = MaterialTheme.colorScheme.error)

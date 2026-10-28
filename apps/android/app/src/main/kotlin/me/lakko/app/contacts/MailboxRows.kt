@@ -40,6 +40,9 @@ public enum class MailboxRowKind {
 
     /** A Welcome rendezvous (the channel co-publisher join). */
     WELCOME_RENDEZVOUS,
+
+    /** A signed link refusal (ADR-0079 amendment of 2026-10-19). */
+    LINK_REFUSAL,
     ;
 
     /** The core's kind. */
@@ -48,6 +51,7 @@ public enum class MailboxRowKind {
         WELCOME -> FfiMailboxKind.WELCOME
         CONTACT_ACK -> FfiMailboxKind.CONTACT_ACK
         WELCOME_RENDEZVOUS -> FfiMailboxKind.WELCOME_RENDEZVOUS
+        LINK_REFUSAL -> FfiMailboxKind.LINK_REFUSAL
     }
 
     public companion object {
@@ -57,6 +61,7 @@ public enum class MailboxRowKind {
             FfiMailboxKind.WELCOME -> WELCOME
             FfiMailboxKind.CONTACT_ACK -> CONTACT_ACK
             FfiMailboxKind.WELCOME_RENDEZVOUS -> WELCOME_RENDEZVOUS
+            FfiMailboxKind.LINK_REFUSAL -> LINK_REFUSAL
         }
     }
 }

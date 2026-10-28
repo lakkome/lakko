@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Password
 import androidx.compose.material.icons.filled.Folder
@@ -36,7 +37,6 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -48,7 +48,6 @@ import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -70,6 +69,9 @@ import me.lakko.app.ui.chat.AutoplayVideoNotesSetting
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.theme.ThemeMode
 import me.lakko.app.ui.theme.ThemePreference
+import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoDialogAction
+import me.lakko.app.ui.components.LakkoDialogTone
 
 /**
  * The Settings tab — docs/ux/client-redesign.md section 5.5.
@@ -84,6 +86,8 @@ import me.lakko.app.ui.theme.ThemePreference
 @Composable
 public fun SettingsScreen(
     displayName: String?,
+    /** ADR-0084 — the own profile photo for the header, or `null`. */
+    ownAvatar: me.lakko.app.profile.AvatarRefs? = null,
     username: String?,
     onOpenProfile: () -> Unit,
     onOpenPasskeys: () -> Unit,
@@ -141,7 +145,7 @@ public fun SettingsScreen(
                     .clickable(onClick = onOpenProfile)
                     .padding(horizontal = 16.dp, vertical = 16.dp),
             ) {
-                LakkoAvatar(name = headerName, seed = username ?: headerName, size = 56.dp)
+                LakkoAvatar(name = headerName, seed = username ?: headerName, size = 56.dp, avatar = ownAvatar)
                 Spacer(Modifier.width(16.dp))
                 Column {
                     // A name keeps its own direction (FSI); a bare @username is LTR.
@@ -185,6 +189,7 @@ public fun SettingsScreen(
             // is about people, not keys, which is why it is not under Security.
             SectionLabel(t("settings.section.privacy"))
             SettingsRow(t("who_can_find_me.title"), Icons.Filled.Visibility, onOpenWhoCanFindMe)
+            ShowCityRow()
 
             SectionLabel(t("settings.section.security"))
             // A guest account has no password to change.
@@ -287,6 +292,13 @@ public fun SettingsScreen(
                 value = t("settings.about.licence_body", mapOf("licence" to "AGPL-3.0-or-later")),
                 icon = Icons.Filled.Gavel,
             )
+            // ADR-0080 - the city database's attribution (CC BY 4.0).
+            Text(
+                t("settings.about.city_data"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
 
             Spacer(Modifier.height(16.dp))
             HorizontalDivider()
@@ -314,30 +326,21 @@ public fun SettingsScreen(
     }
 
     if (confirmingLogout) {
-        AlertDialog(
+        LakkoDialog(
             onDismissRequest = { confirmingLogout = false },
-            title = { Text(t("settings.account.log_out.title")) },
-            text = { Text(t("settings.account.log_out.body")) },
-            confirmButton = {
-                TextButton(onClick = { confirmingLogout = false; onLogout() }) { Text(t("settings.account.log_out")) }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmingLogout = false }) { Text(t("common.cancel")) }
-            },
+            title = t("settings.account.log_out.title"),
+            body = t("settings.account.log_out.body"),
+            confirm = LakkoDialogAction(t("settings.account.log_out")) { confirmingLogout = false; onLogout() },
         )
     }
     if (confirmingForget) {
-        AlertDialog(
+        LakkoDialog(
             onDismissRequest = { confirmingForget = false },
-            title = { Text(t("settings.account.forget_device.title")) },
-            text = { Text(t("settings.account.forget_device.body_device")) },
-            confirmButton = {
-                TextButton(onClick = { confirmingForget = false; onForgetDevice() }) {
-                    Text(t("settings.account.forget_device.confirm"), color = MaterialTheme.colorScheme.error)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmingForget = false }) { Text(t("common.cancel")) }
+            title = t("settings.account.forget_device.title"),
+            body = t("settings.account.forget_device.body_device"),
+            confirm = LakkoDialogAction(t("settings.account.forget_device.confirm"), LakkoDialogTone.Danger) {
+                confirmingForget = false
+                onForgetDevice()
             },
         )
     }
@@ -379,6 +382,26 @@ private fun TranslationsUpdatedRow() {
         headlineContent = { Text(t("settings.about.translations_updated", mapOf("date" to date))) },
         leadingContent = {
             Icon(Icons.Filled.Info, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        },
+        colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
+    )
+}
+
+@Composable
+private fun ShowCityRow() {
+    // ADR-0080 - "Show my city to my other devices": per device, on by default.
+    val on by me.lakko.app.devices.DeviceCardCenter.showCity.collectAsStateWithLifecycle()
+    ListItem(
+        headlineContent = { Text(t("settings.privacy.show_city")) },
+        supportingContent = { Text(t("settings.privacy.show_city.sub")) },
+        leadingContent = {
+            Icon(Icons.Filled.Place, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        },
+        trailingContent = {
+            androidx.compose.material3.Switch(
+                checked = on,
+                onCheckedChange = { me.lakko.app.devices.DeviceCardCenter.setShowCity(it) },
+            )
         },
         colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
     )

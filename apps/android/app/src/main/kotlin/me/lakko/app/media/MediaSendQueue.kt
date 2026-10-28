@@ -44,6 +44,9 @@ public class MediaSendQueue(
      *  job was armed with (ADR-0052), or `null` for an ordinary send. */
     private val publish: suspend (AttachmentRef, me.lakko.app.chat.ReplyRef?) -> Unit,
     private val onLog: (String) -> Unit = {},
+    /** ADR-0065 section 6 — a take discarded after its file (or poster) was
+     *  uploaded was never sent: its blobs are deleted at once. */
+    private val deleteUnsent: (blobIds: List<ByteArray>) -> Unit = {},
 ) {
     public class Job(
         public val tempId: Long,
@@ -93,12 +96,15 @@ public class MediaSendQueue(
 
     /** Drop a failed row; nothing was sent, so there is nothing to undo. */
     public fun discard(tempId: Long) {
-        jobs.remove(tempId)
+        val job = jobs.remove(tempId)
         mutableRows.update { rows -> rows.filterNot { it.tempId == tempId } }
+        val unsent = listOfNotNull(job?.uploaded?.blobId, job?.thumb?.blobId, job?.uploaded?.thumb?.blobId)
+            .distinctBy { it.contentHashCode() }
+        if (unsent.isNotEmpty()) deleteUnsent(unsent)
     }
 
     private fun run(job: Job) {
-        update(job) { it.copy(progress = 0.02f, failed = false) }
+        update(job) { it.copy(progress = 0.02f, failed = false, limited = false) }
         scope.launch {
             try {
                 if (job.uploaded == null) {
@@ -136,7 +142,8 @@ public class MediaSendQueue(
                 throw e
             } catch (e: Throwable) {
                 onLog("media send failed: ${e.javaClass.simpleName}")
-                update(job) { it.copy(failed = true) }
+                // UX 4.2 — the sending limit is said as such.
+                update(job) { it.copy(failed = true, limited = isUploadLimit(e)) }
             }
         }
     }
@@ -201,4 +208,6 @@ public data class PendingMediaRow(
     val previewBytes: ByteArray?,
     val progress: Float,
     val failed: Boolean,
+    /** UX 4.2 — the failure was the sending limit. */
+    val limited: Boolean = false,
 )

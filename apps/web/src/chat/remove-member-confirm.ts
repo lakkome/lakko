@@ -103,12 +103,12 @@ export interface RemoveMemberConfirmation {
  * a removal happens on a single tap.
  *
  * **The body is dropped on the direct path rather than reworded.** A group
- * with no role table removes by direct commit, which takes effect the moment
- * it lands — so §6's sentence about the member still receiving messages is
- * false there, and a security tool that reassures a user with a false
- * statement about who can still read their messages is worse than one that
- * says less. §6 authorises exactly one body line and it belongs to one path;
- * inventing a second for the other would be copy this design never wrote.
+ * with no role table used to remove by direct commit, which takes effect the
+ * moment it lands — so §6's sentence about the member still receiving
+ * messages would be false there. Since the ADR-0081 amendment of 2026-10-19
+ * that path is deleted (a removal in such a group is refused and no client
+ * reaches one), so the `usesProposalPath: false` arm is kept only as the
+ * fail-safe shape: it says less rather than something false.
  */
 export function removeMemberConfirmation(input: {
   readonly usesProposalPath: boolean;

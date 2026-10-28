@@ -67,9 +67,9 @@ final class RemovedDeviceTests: XCTestCase {
     }
 
     func testForkRepairRunsOnlyOnAGroupKnownToBeActive() {
-        XCTAssertTrue(RemovedDevice.forkRepairAllowed(true))
-        XCTAssertFalse(RemovedDevice.forkRepairAllowed(false))
-        XCTAssertFalse(RemovedDevice.forkRepairAllowed(nil))
+        XCTAssertTrue(RemovedDevice.rejoinAllowed(true))
+        XCTAssertFalse(RemovedDevice.rejoinAllowed(false))
+        XCTAssertFalse(RemovedDevice.rejoinAllowed(nil))
     }
 
     // MARK: - The repository

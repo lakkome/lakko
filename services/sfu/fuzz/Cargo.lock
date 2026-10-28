@@ -1301,6 +1301,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-log-hygiene"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "tracing",
+]
+
+[[package]]
 name = "lakko-sfu-proto"
 version = "0.0.0"
 dependencies = [
@@ -1320,6 +1328,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "lakko-call-jwt",
+ "lakko-log-hygiene",
  "lakko-sfu-proto",
  "metrics",
  "metrics-exporter-prometheus",

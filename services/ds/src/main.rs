@@ -44,7 +44,8 @@
 //!   listener (e.g. `http://127.0.0.1:8092`) and the shared secret it checks
 //!   (base64, >= 16 bytes; the same value as push-gw's
 //!   `LAKKO_PUSH_GW_INTERNAL_SECRET`). ADR-0054: a signed group publish that
-//!   carries `x-lakko-wake` is forwarded there. Both unset: the header is
+//!   carries `x-lakko-wake` is forwarded there; since ADR-0078 the header is
+//!   a wake sealed to push-gw, forwarded unread. Both unset: the header is
 //!   still validated but every wake is dropped (one startup warning). Only
 //!   one set: the service refuses to start.
 //! - `LAKKO_ANON_TOKEN_MASTER_SECRET` — 64 hex characters, the SAME value
@@ -52,21 +53,11 @@
 //!   `anon-tokens-disabled` (loud startup warning). Malformed: startup fails.
 //! - `LAKKO_ANON_TOKEN_WINDOW_SECS` — the token epoch window (default 86400);
 //!   must match auth.
-//! - `LAKKO_DS_WAKE_BURST` / `LAKKO_DS_WAKE_PER_MINUTE` — the wake cap, per
-//!   journal and per woken `push_gid` (defaults 30 and 60; see
-//!   `src/wake.rs` for why). Over the cap the message is still appended, the
-//!   wake is dropped.
-//! - `LAKKO_DS_BINDING_PEPPER` — 64 hex characters, server-only (ADR-0057):
-//!   push bindings are stored as keyed-BLAKE3 of the `push_gid` under it, and
-//!   a wake goes out only for the `push_gid` bound to the publishing journal.
-//!   Unset: `PUT .../push-binding` answers 503 `push-binding-disabled` and
-//!   every wake is dropped (startup warning). Malformed: startup fails.
-//! - `LAKKO_DS_ATTEST_KEY` — base64 of auth's 32-byte Ed25519 attest
-//!   verifying key (ADR-0073): a key-reset attestation carried by
-//!   `PUT .../reset` is verified under it, letting the device that holds an
-//!   account's NEW seed re-root the DeviceGroup journal the old seed owned.
-//!   Unset: that arm answers 503 `key-reset-disabled` (startup warning); the
-//!   plain root reset is unaffected. Malformed: startup fails.
+//! - `LAKKO_DS_WAKE_BURST` / `LAKKO_DS_WAKE_PER_MINUTE` — the wake cap per
+//!   journal (defaults 30 and 60; see `src/wake.rs` for why). Over the cap
+//!   the message is still appended, the wake is dropped. The per-`push_gid`
+//!   cap moved to push-gw with ADR-0078: the DS no longer sees a `push_gid`.
+//!   `LAKKO_DS_BINDING_PEPPER` and the push bindings are gone with it.
 //!
 //! Endpoints:
 //!
@@ -74,7 +65,8 @@
 //! - `GET    /ready`                               — readiness (DB ping), 200 / 503
 //! - `GET    /version`
 //! - `POST   /ds/group/{group_id_hex}/messages`    — publish to group (1 MB cap;
-//!   optional `x-lakko-wake: <push_gid b64url>;<message|call>`, ADR-0054)
+//!   optional `x-lakko-wake: <a wake sealed to push-gw, b64url>`, ADR-0054,
+//!   ADR-0078)
 //! - `GET    /ds/group/{group_id_hex}/messages`    — `?after=<id>&limit=<n>&wait=<secs>`
 //! - `POST   /ds/mailbox/{mailbox_hex}/messages`   — append a sealed, bucket-padded row
 //!   to a personal mailbox (ADR-0078; a claimed, closed mailbox takes a write
@@ -88,13 +80,12 @@
 //!   its own table, so no rendezvous id names a mailbox's rows (ADR-0060)
 //! - `GET    /ds/rendezvous/{id_hex}/messages`     — `?after=<id>&limit=<n>&wait=<secs>`, no proof
 //! - `PUT    /ds/group/{group_id_hex}/claim`       — first claim, by the journal's root (ADR-0057)
-//! - `PUT    /ds/group/{group_id_hex}/reset`       — the root replaces the epoch chain; with
-//!   `key_reset_attest_b64`, any signer re-roots the journal under a verified key-reset
-//!   attestation of a newer generation (ADR-0073)
+//! - `PUT    /ds/group/{group_id_hex}/reset`       — the root replaces the epoch chain
 //! - `PUT    /ds/group/{group_id_hex}/access`      — a registrar registers an epoch's access key
+//! - `POST   /ds/group/{group_id_hex}/commit`      — register the next epoch and append the commit
+//!   row that reaches it, in one transaction (ADR-0081; `src/commit.rs`)
 //! - `PUT    /ds/group/{group_id_hex}/registrars`  — the root manages registrars
 //! - `PUT    /ds/group/{group_id_hex}/root`        — the root names a new root
-//! - `PUT    /ds/group/{group_id_hex}/push-binding` — root or admin binds one `push_gid`
 //! - `PUT    /ds/mailbox/{mailbox_hex}/access`     — claim a mailbox under its mailbox key (ADR-0078)
 //! - `PUT    /ds/mailbox/{mailbox_hex}/reach`      — register / remove reach keys, set open (ADR-0060)
 //! - `GET    /ds/mailbox/{mailbox_hex}/reach`      — the owner reads its reach keys back (ADR-0060)
@@ -107,12 +98,15 @@
 #![forbid(unsafe_code)]
 
 mod access;
+mod commit;
 mod journal;
-mod key_reset;
 mod ownership;
 mod reach;
 #[cfg(test)]
 mod test_support;
+
+#[cfg(test)]
+mod log_capture_tests;
 mod wake;
 
 use std::net::SocketAddr;
@@ -156,15 +150,6 @@ pub(crate) struct AppState {
     /// over this service's spent-set (`anon_token_spent`). Dormant (the knock
     /// answers 503) when `LAKKO_ANON_TOKEN_MASTER_SECRET` is unset.
     pub(crate) anon_tokens: TokenVerifier,
-    /// ADR-0057 - the pepper push bindings are keyed under
-    /// (`LAKKO_DS_BINDING_PEPPER`). `None`: the binding route answers 503
-    /// and every wake is dropped.
-    pub(crate) binding_pepper: Option<[u8; 32]>,
-    /// ADR-0073 - the auth attest VERIFYING key pinned from
-    /// `LAKKO_DS_ATTEST_KEY`, which a key-reset attestation on
-    /// `PUT .../reset` is verified under. `None`: that arm answers 503
-    /// `key-reset-disabled`; the plain root reset is unaffected.
-    pub(crate) attest_key: Option<lakko_ds_proof::VerifyingKey>,
 }
 
 #[tokio::main]
@@ -210,26 +195,6 @@ async fn main() -> Result<()> {
         );
     }
 
-    let binding_pepper = ownership::pepper_from_lookup(|name| std::env::var(name).ok())
-        .map_err(anyhow::Error::msg)
-        .context("push binding pepper")?;
-    if binding_pepper.is_none() {
-        tracing::warn!(
-            "LAKKO_DS_BINDING_PEPPER unset - push bindings are refused (503) and every \
-             x-lakko-wake is dropped; devices are not woken by a publish"
-        );
-    }
-
-    let attest_key = key_reset::attest_key_from_lookup(|name| std::env::var(name).ok())
-        .map_err(anyhow::Error::msg)
-        .context("key-reset attest key")?;
-    if attest_key.is_none() {
-        tracing::warn!(
-            "LAKKO_DS_ATTEST_KEY unset - an attested journal reset (ADR-0073) answers 503 \
-             key-reset-disabled; an account that reset its keys cannot re-root its DeviceGroup"
-        );
-    }
-
     let pool = MySqlPoolOptions::new()
         .max_connections(32)
         .acquire_timeout(Duration::from_secs(5))
@@ -252,8 +217,6 @@ async fn main() -> Result<()> {
         notifiers: journal::Notifiers::default(),
         waker: Arc::new(waker),
         anon_tokens,
-        binding_pepper,
-        attest_key,
     };
 
     let _pruner = journal::spawn_pruner(pool.clone());
@@ -294,6 +257,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route("/ds/group/{group_hex}/claim", put(ownership::put_claim))
         .route("/ds/group/{group_hex}/reset", put(ownership::put_reset))
         .route("/ds/group/{group_hex}/access", put(ownership::put_register))
+        .route("/ds/group/{group_hex}/commit", post(commit::post_commit))
         .route(
             "/ds/group/{group_hex}/registrars",
             put(ownership::put_registrars),
@@ -303,10 +267,6 @@ pub(crate) fn build_app(state: AppState) -> Router {
             put(ownership::put_registrars_set),
         )
         .route("/ds/group/{group_hex}/root", put(ownership::put_root))
-        .route(
-            "/ds/group/{group_hex}/push-binding",
-            put(ownership::put_push_binding),
-        )
         .route(
             "/ds/rendezvous/{rendezvous_hex}/messages",
             post(journal::post_rendezvous).get(journal::get_rendezvous),
@@ -329,15 +289,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
         // The request span names the method and the route template, never
         // the URI: a path carries a mailbox address or a journal id, which a
         // log line must not (ADR-0078).
-        .layer(TraceLayer::new_for_http().make_span_with(
-            |req: &axum::http::Request<axum::body::Body>| {
-                let route = req
-                    .extensions()
-                    .get::<axum::extract::MatchedPath>()
-                    .map_or("unmatched", axum::extract::MatchedPath::as_str);
-                tracing::debug_span!("request", method = %req.method(), route)
-            },
-        ))
+        .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }
 

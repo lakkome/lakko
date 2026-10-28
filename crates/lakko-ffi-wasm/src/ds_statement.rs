@@ -310,34 +310,6 @@ impl DsStatementSigner {
         )
     }
 
-    /// `PUT .../access` in **append** mode: register `epochKey` at `epoch`,
-    /// which must be the journal's next epoch (`409` otherwise; re-sending
-    /// the key already there is a `204`), revoking the flat 32-byte
-    /// `revokeKeys` in the same transaction. A member registrar may append
-    /// only one epoch past the last admin or root registration (`403`).
-    /// Never drops an epoch.
-    ///
-    /// # Errors
-    ///
-    /// On a wrong-length input, an invalid key, a repeated key or more than
-    /// 256 revocations.
-    #[wasm_bindgen(js_name = registerEpoch)]
-    pub fn register_epoch(
-        &self,
-        journal_id: &[u8],
-        epoch: u64,
-        epoch_key: &[u8],
-        revoke_keys: &[u8],
-    ) -> Result<DsStatementRequest, JsError> {
-        self.register(
-            journal_id,
-            epoch,
-            epoch_key,
-            RegisterMode::Append,
-            revoke_keys,
-        )
-    }
-
     /// `PUT .../access` in **replace** mode: write `epochKey` at `epoch` and
     /// drop every epoch above it, when everything above was registered by a
     /// strictly lower rank than this signer's and the registration at
@@ -364,6 +336,50 @@ impl DsStatementSigner {
             RegisterMode::Replace,
             revoke_keys,
         )
+    }
+
+    /// ADR-0081 - `POST .../commit`: register `epochKey` at `epoch` in
+    /// **append** mode (it must be the journal's next epoch; a member
+    /// registrar may append only one epoch past the last admin or root
+    /// registration; the flat 32-byte `revokeKeys` are revoked in the same
+    /// step) and append `row` - the commit, in the journal's
+    /// envelope - in ONE step. The returned request's `path` ends in
+    /// `/commit` and its `bodyJson` is the exact body; the caller sends it as
+    /// a `POST` with the request proof signed over those bytes by the key of
+    /// epoch `epoch - 1` (`DsProofSigner.sign("POST", path, "", body)`).
+    /// Re-sending the same row under the same key answers the original
+    /// message id (`200`); any other commit at a registered epoch is `409`.
+    /// Sign a new request for every attempt: the statement's nonce is spent.
+    ///
+    /// # Errors
+    ///
+    /// On a wrong-length input, an invalid key, a repeated key, more than
+    /// 256 revocations, or an empty row.
+    pub fn commit(
+        &self,
+        journal_id: &[u8],
+        epoch: u64,
+        epoch_key: &[u8],
+        revoke_keys: &[u8],
+        row: &[u8],
+    ) -> Result<DsStatementRequest, JsError> {
+        let journal = journal32(journal_id)?;
+        let epoch_key = key32(epoch_key, "epoch key")?;
+        let revoke = flat_keys(revoke_keys, "revoked keys")?;
+        let statement = self
+            .inner
+            .sign_commit_at(&journal, epoch, epoch_key, revoke, now_ms(), fresh_nonce())
+            .map_err(|e| err(&e.to_string()))?;
+        let body_json =
+            lakko_ds_proof::commit_body_json(&statement, row).map_err(|e| err(&e.to_string()))?;
+        Ok(DsStatementRequest {
+            path: format!(
+                "/ds/group/{}/{}",
+                lower_hex(&journal),
+                lakko_ds_proof::COMMIT_PATH_SEGMENT
+            ),
+            body_json,
+        })
     }
 
     /// `PUT .../registrars-set`: the root replaces the journal's WHOLE
@@ -430,21 +446,6 @@ impl DsStatementSigner {
     ) -> Result<DsStatementRequest, JsError> {
         let new_root = key32(new_root, "new root key")?;
         self.request(journal_id, StatementBody::RootTransfer { new_root })
-    }
-
-    /// `PUT .../push-binding`: bind the journal to one `push_gid`.
-    ///
-    /// # Errors
-    ///
-    /// On a wrong-length input.
-    #[wasm_bindgen(js_name = pushBinding)]
-    pub fn push_binding(
-        &self,
-        journal_id: &[u8],
-        push_gid: &[u8],
-    ) -> Result<DsStatementRequest, JsError> {
-        let push_gid = key32(push_gid, "push_gid")?;
-        self.request(journal_id, StatementBody::PushBinding { push_gid })
     }
 }
 
@@ -646,6 +647,42 @@ mod tests {
     }
 
     #[test]
+    fn a_commit_request_carries_an_append_registration_and_the_row() {
+        use base64::Engine as _;
+        let signer = ds_statement_signer(&[0x24; 32]).unwrap();
+        let journal = [0x47u8; 32];
+        let epoch_key = lakko_ds_proof::SigningKey::from_seed(&[9; 32])
+            .verifying_key()
+            .to_bytes();
+        let req = signer
+            .commit(&journal, 7, &epoch_key, &[0x0B; 32], b"journal row")
+            .unwrap();
+        assert_eq!(req.path(), format!("/ds/group/{}/commit", "47".repeat(32)));
+        let body = req.body_json();
+        let (statement_b64, row_b64) = body
+            .strip_prefix("{\"statement_b64\":\"")
+            .and_then(|rest| rest.strip_suffix("\"}"))
+            .and_then(|rest| rest.split_once("\",\"row_b64\":\""))
+            .unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let statement =
+            lakko_ds_proof::SignedStatement::decode(&b64.decode(statement_b64).unwrap()).unwrap();
+        statement.verify(now_ms()).unwrap();
+        assert_eq!(
+            statement.body,
+            StatementBody::RegisterEpoch {
+                epoch: 7,
+                epoch_key,
+                mode: RegisterMode::Append,
+                revoke: vec![[0x0B; 32]],
+            }
+        );
+        assert_eq!(b64.decode(row_b64).unwrap(), b"journal row");
+        // The empty-row refusal is `lakko_ds_proof::commit_body_json`'s, tested
+        // there: a `JsError` cannot be built off wasm32.
+    }
+
+    #[test]
     fn register_modes_and_the_registrar_set_sign_what_the_ds_routes_take() {
         let signer = ds_statement_signer(&[0x21; 32]).unwrap();
         let journal = [0x46u8; 32];
@@ -654,20 +691,12 @@ mod tests {
             .to_bytes();
         let mut revoke = [0x09u8; 64];
         revoke[32..].fill(0x0A);
-        for (req, mode) in [
-            (
-                signer
-                    .register_epoch(&journal, 6, &epoch_key, &revoke)
-                    .unwrap(),
-                RegisterMode::Append,
-            ),
-            (
-                signer
-                    .replace_epoch(&journal, 6, &epoch_key, &revoke)
-                    .unwrap(),
-                RegisterMode::Replace,
-            ),
-        ] {
+        // ADR-0081 (open question 1, decided 2026-10-18): an Append is sent
+        // only through `commit`; `/access` takes the Replace.
+        {
+            let req = signer
+                .replace_epoch(&journal, 6, &epoch_key, &revoke)
+                .unwrap();
             assert_eq!(req.path(), format!("/ds/group/{}/access", "46".repeat(32)));
             let statement = statement_of(&req);
             statement.verify(now_ms()).unwrap();
@@ -676,7 +705,7 @@ mod tests {
                 StatementBody::RegisterEpoch {
                     epoch: 6,
                     epoch_key,
-                    mode,
+                    mode: RegisterMode::Replace,
                     revoke: vec![[0x09; 32], [0x0A; 32]],
                 }
             );

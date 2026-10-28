@@ -136,7 +136,7 @@ describe("on a browser with createEncodedStreams and no RTCRtpScriptTransform", 
     expect(receiver.taken).toBe(1);
     const messages = ofType("encoded-streams");
     expect(messages).toHaveLength(1);
-    expect(messages[0]!.message.options).toEqual({ operation: "decrypt", id, seed });
+    expect(messages[0]!.message.options).toEqual({ operation: "decrypt", id, seed, redDecodes: false });
     expect(messages[0]!.transfer).toEqual([receiver.streams.readable, receiver.streams.writable]);
   });
 

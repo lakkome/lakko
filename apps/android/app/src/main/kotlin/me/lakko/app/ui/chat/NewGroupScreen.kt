@@ -165,6 +165,7 @@ public fun NewGroupScreen(
                             LakkoAvatar(
                                 name = resolved.primary,
                                 seed = java.util.Base64.getEncoder().encodeToString(contact.request.fromPubkey),
+                                personKey = contact.request.fromPubkey,
                             )
                             Spacer(Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {

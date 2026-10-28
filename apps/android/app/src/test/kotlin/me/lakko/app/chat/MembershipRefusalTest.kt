@@ -12,6 +12,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.FfiRefusalReason
+import uniffi.lakko_ffi_uniffi.RoleTable
 
 /**
  * ADR-0045 UX §6 / §12 item 6 — the typed membership-refusal table.
@@ -73,6 +74,20 @@ class MembershipRefusalTest {
 
     private fun say(reason: FfiRefusalReason): String =
         membershipRefusal(reason, statedRule).message.en
+
+    // ---- ADR-0081 amendment (2026-10-19): no direct-commit path -----------
+
+    /** A membership operation on a group with no role table is refused with
+     *  the core's typed `NoRoleTable` (never committed directly). No client can
+     *  make such a group, so the rule is driven over an injected read. */
+    @Test
+    fun `a group with no role table is refused with the typed NoRoleTable`() {
+        assertFalse(roleTablePresent { null })
+        assertFalse("a torn read refuses too", roleTablePresent { throw IllegalStateException("torn") })
+        assertTrue(roleTablePresent { RoleTable(ByteArray(32) { 1 }, emptyList()) })
+        assertEquals(FfiRefusalReason.NO_ROLE_TABLE, membershipRefusalReason(noRoleTableRefusal("add")))
+        assertEquals(FfiRefusalReason.NO_ROLE_TABLE, membershipRefusalReason(noRoleTableRefusal("remove")))
+    }
 
     // ---- Coverage ---------------------------------------------------------
 

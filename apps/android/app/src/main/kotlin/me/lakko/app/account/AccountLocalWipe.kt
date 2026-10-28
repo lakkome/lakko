@@ -20,7 +20,7 @@ import java.io.File
  * (`lakko-media-prefs`: record mode, autoplay, the GIF note; the recent emoji
  * and tone rows in the same file are per account and go), the KT-log root floor (`lakko-transparency-root`), the
  * notification-permission prompt marker, the anti-censorship and release
- * checker preferences, the push device pseudonym (`lakko-push`, handled by the
+ * checker preferences, the device's push token (`lakko-push`, forgotten by the
  * push unsubscribe) and the Keystore wrap keys shared by every account.
  *
  * Log out does NOT come here: it keeps the account's data for its next
@@ -96,7 +96,14 @@ public object AccountLocalWipe {
         Step("push-routing-secrets") { ctx, acct ->
             me.lakko.app.push.PushRoutingSecretStore.clearForAccount(ctx, acct)
         },
-        Step("push-route-index") { ctx, acct -> me.lakko.app.push.PushRouteStore(ctx).clearForAccount(acct) },
+        Step("push-route-index") { ctx, acct ->
+            // ADR-0078 — the subscription ids name this account's push-gw
+            // rows; hand them to the unsubscribe that runs after the wipe
+            // before the route rows (where they live) go.
+            val routes = me.lakko.app.push.PushRouteStore(ctx)
+            me.lakko.app.push.PendingPushUnsubscribes(ctx).stash(routes.subscriptionIds(acct))
+            routes.clearForAccount(acct)
+        },
 
         // ---- session + identity material ------------------------------------
         Step("session-token") { ctx, acct -> me.lakko.app.auth.SessionTokenStore.deleteSessionToken(ctx, acct) },
@@ -161,6 +168,9 @@ public object AccountLocalWipe {
         Step("new-device-notice") { ctx, acct ->
             me.lakko.app.devices.NewDeviceNoticeStore.onDevice(ctx).deleteAccount(acct)
         },
+        // ADR-0080: the cards of the account's devices, this device's own
+        // card, its city answer and its "Show my city" switch.
+        Step("device-cards") { ctx, acct -> me.lakko.app.devices.DeviceCardCenter.deleteAccountRows(ctx, acct) },
         Step("recovery-phrase") { ctx, acct -> me.lakko.app.backup.PhraseStore.deletePhrase(ctx, acct) },
         // A guest account's phrase is kept under a key of its own
         // (`auth/GuestAccount.kt`), so it has a step of its own.
@@ -279,9 +289,25 @@ public object AccountLocalWipe {
         Step("sent-contact-requests") { ctx, acct ->
             me.lakko.app.contacts.SentRequestsFiles.deleteAccount(ctx, acct)
         },
+        // ADR-0079 - the people added through their invite link and what was
+        // written to them (sealed, named by the account id in hex).
+        Step("pending-contacts") { ctx, acct ->
+            me.lakko.app.contacts.PendingContactsFiles.deleteAccount(ctx, acct)
+        },
+        // ADR-0079 (reworked 2026-10-17) - the link requests not decided yet
+        // (sealed, they carry link secrets) and the claims of link requests.
+        Step("link-requests") { ctx, acct ->
+            me.lakko.app.contacts.LinkRequestInboxFiles.deleteAccount(ctx, acct)
+        },
+        Step("link-claims") { ctx, acct -> me.lakko.app.contacts.LinkClaimRecord.clear(ctx, acct) },
         Step("identity-pins") { ctx, acct -> me.lakko.app.contacts.PeerPinStore.deleteForOwner(ctx, acct) },
         Step("invite-link-secrets") { ctx, acct ->
             me.lakko.app.contacts.EncryptedInviteLinkSecretStore(ctx).clearForAccount(acct)
+            // ADR-0078 section 10: this device's records of the links it
+            // minted, with their revocation seeds.
+            me.lakko.app.contacts.EncryptedOwnLinkStore(ctx).clearForAccount(acct)
+            // ADR-0079 section 4: the ledger-row deletions this device owes.
+            me.lakko.app.contacts.SharedPrefsOwedLinkRowDeletionStore.clear(ctx, acct)
         },
 
         // ---- feed + Discover (ADR-0063, ADR-0059) ---------------------------
@@ -304,6 +330,10 @@ public object AccountLocalWipe {
         },
         Step("channel-publisher-snapshot") { ctx, acct ->
             me.lakko.app.channels.ChannelPublisherIdentity.deleteOnDeviceSnapshot(ctx, acct)
+        },
+        // G-50 — the recorded PublisherGroup commits of the account.
+        Step("channel-publisher-commits") { ctx, acct ->
+            me.lakko.app.channels.PublisherCommitStore.deleteAll(ctx, acct)
         },
         Step("channel-log-and-keys") { ctx, acct ->
             val subscriberPrefs = me.lakko.app.channels.ChannelKeyStore.encryptedPrefs(ctx)
@@ -332,6 +362,11 @@ public object AccountLocalWipe {
                 File(ctx.cacheDir, dir).deleteRecursively()
             }
         },
+        // ADR-0084 — the decrypted profile photos (sealed, device-wide, keyed
+        // by blob id) and the profile-video files written for playback.
+        Step("avatar-cache") { ctx, _ -> me.lakko.app.avatar.AvatarImages.clear(ctx) },
+        // ADR-0065 — the blob deletes still owed and the keep stamps.
+        Step("blob-lifetime") { ctx, acct -> me.lakko.app.storage.BlobLifetime.forgetAccount(ctx, acct) },
 
         // ---- the backstop ---------------------------------------------------
         // Walk the whole no-backup directory and delete any file named by the

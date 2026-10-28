@@ -92,10 +92,16 @@ vi.mock("../../wasm", () => ({
       ownUsername(): string | undefined {
         return undefined;
       }
+      // ADR-0079: the link-record register, read on every refresh.
+      allLinkRecords(): unknown[] {
+        return [];
+      }
     },
+    LinkRecordKind: { Contact: 1, Call: 2 },
   }),
 }));
 vi.mock("../lifecycle", () => ({
+  deviceGroupIdOf: async () => new TextEncoder().encode("device-group"),
   ensureDeviceGroup: (_bytes: Uint8Array, account: string) =>
     new Promise((resolve) => {
       h.ensures.push({ account, resolve });
@@ -103,11 +109,24 @@ vi.mock("../lifecycle", () => ({
   persistDeviceGroupSnapshot: async (identity: FakeHandle, account: string) => {
     h.persisted.push({ owner: identity.owner, account });
   },
-  persistDeviceGroupSnapshotWithCursor: async () => undefined,
+  persistDeviceGroupSnapshotWithCursor: async () => 1,
+  deviceGroupLineageSeed: async () => null,
+  DeviceGroupNotJoinedError: class extends Error {
+    readonly reason = "rejoin";
+  },
 }));
 vi.mock("../device-group-snapshot-store", () => ({
   deleteDeviceGroupSnapshot: async () => undefined,
+  dropDeviceGroupStateForRejoin: async () => undefined,
   getDeviceGroupJournalCursor: async () => 0,
+  getDeviceGroupPending: async () => null,
+  putDeviceGroupPending: async () => undefined,
+  deleteDeviceGroupPending: async () => undefined,
+}));
+// ADR-0081 - the DeviceGroup commit outbox and the rejoin: nothing owed here.
+vi.mock("../device-group-commit-runtime", () => ({
+  commitDeviceGroupChange: async () => null,
+  resendOwedDeviceGroupCommitFor: async () => null,
 }));
 vi.mock("./synced-projection", () => ({
   buildFolderChangeSet: vi.fn(),
@@ -136,6 +155,8 @@ vi.mock("../../reach/service-envelope-intake", () => ({ receiveServiceEnvelope: 
 vi.mock("../../reach/service-envelope-outbox", () => ({
   flushServiceEnvelopes: async () => undefined,
   registerServiceEnvelopeSender: () => () => undefined,
+  setServiceEnvelopeComposer: () => undefined,
+  markServiceEnvelopeDirty: () => undefined,
 }));
 vi.mock("../../chat/folders/folder-model", () => ({
   bytesToHex: () => "",

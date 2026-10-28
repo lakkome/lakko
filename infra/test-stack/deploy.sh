@@ -100,7 +100,7 @@ if [[ $SKIP_BACKEND != 1 ]]; then
   done
   if [[ -s /tmp/lakko-attest-jwks.json ]]; then
     attest_key="$(python3 -c 'import json,base64,sys; x=json.load(open("/tmp/lakko-attest-jwks.json"))["keys"][0]["x"]; print(base64.b64encode(base64.urlsafe_b64decode(x+"="*(-len(x)%4))).decode())')"
-    for var in LAKKO_DISCOVERY_ATTEST_KEY LAKKO_DS_ATTEST_KEY; do
+    for var in LAKKO_DISCOVERY_ATTEST_KEY; do
       if ! grep -q "^$var=" /etc/lakko-test/lakko.env; then
         echo "$var=$attest_key" >> /etc/lakko-test/lakko.env
         echo "[deploy-test] $var written from the auth JWKS"
@@ -108,7 +108,7 @@ if [[ $SKIP_BACKEND != 1 ]]; then
     done
     rm -f /tmp/lakko-attest-jwks.json
   else
-    echo "[deploy-test] WARN could not read the auth JWKS; key-reset attestations stay disabled on discovery and the DS"
+    echo "[deploy-test] WARN could not read the auth JWKS; key-reset attestations stay disabled on discovery"
   fi
   systemctl restart lakko-test.target
 fi

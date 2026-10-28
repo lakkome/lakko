@@ -56,3 +56,22 @@ path = "fuzz_targets/media_frame_open.rs"
 test = false
 doc = false
 bench = false
+
+# The sealed `signal-relay` payload of an SFU call and the peer announcement
+# inside it (ADR-0078 section 2). Relay bytes arrive from the SFU, which any
+# participant can fill; the open and the announcement decode run before any
+# signature is checked.
+
+[[bin]]
+name = "relay_open"
+path = "fuzz_targets/relay_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "screen_share_decode"
+path = "fuzz_targets/screen_share_decode.rs"
+test = false
+doc = false
+bench = false

@@ -10,15 +10,16 @@
  * result so the `/c/<slug>` landing page can render the
  * right outcome copy without re-implementing the dispatch:
  *
- *   1. `parseCallInviteSlug(slug)` → pointer | inline | error
- *   2. (pointer branch) `DiscoveryClient.fetchCallInvite(blobId)`
+ *   1. `parseCallInviteSlug(slug)` → ledger id | error (an inline
+ *      sealed blob, the removed form, is malformed)
+ *   2. `DiscoveryClient.fetchCallInvite(blobId)`
  *      → bytes | null (404 → `notFound`)
  *   3. `CallInviteCapability.openLink(sealed, secret)` — opens
  *      the sealed blob with the fragment's secret and verifies
  *      the capability inside (a missing / malformed fragment, a
  *      substituted or tampered blob → `damaged`)
  *   4. `capability.isValidNow(nowMs)` — expiry filter
- *   5. (pointer branch) `DiscoveryClient.consumeCallInvite(
+ *   5. `DiscoveryClient.consumeCallInvite(
  *      blobId, capabilityBytes, joinerAccountId)` — atomic
  *      counter bump + per-joiner dedup tag
  *   6. `acceptCallInvite(capability, joinerIdentity)` —
@@ -48,7 +49,7 @@ import {
   isInviteLinkDamaged,
   openInviteLinkFromUrl,
 } from "../contacts/invite-link";
-import { CALL_INVITE_INLINE_MIN_LEN, parseCallInviteSlug } from "./invite";
+import { parseCallInviteSlug } from "./invite";
 
 // Re-exported by `loadWasm()` — the wasm module surfaces
 // `CallInviteCapability` + `acceptCallInvite` + (joiner-side)
@@ -68,9 +69,7 @@ export interface JoinerIdentityHandle {
  *  [`acceptCallInviteFromSlug`]. */
 export interface AcceptCallInviteOptions {
   /** The `<slug>` segment from a `/c/<slug>` URL — base64url-
-   *  no-pad of either a 6-byte ledger id (pointer form) or
-   *  ≥ 400 bytes of inline capability (censored-region
-   *  fallback). */
+   *  no-pad of the 6-byte ledger id. */
   readonly slug: string;
   /** The URL fragment (`location.hash`): the link secret the capability is
    *  sealed under (sealed-link amendment, 2026-09-28). Missing or malformed
@@ -163,18 +162,13 @@ export type AcceptCallInviteResult =
  * over [`AcceptCallInviteResult`] variants — every observable
  * outcome is a non-thrown value the UI dispatches on.
  *
- * The only thrown exception path is a `DiscoveryNetworkError`
- * (no network / TLS failure / etc.) — the acceptor folds
- * `DiscoveryHttpError` into discriminated variants but lets
- * lower-level transport failures bubble up so the UI can
- * surface "you're offline" copy.
- *
- * Inline-capability slugs (censored-region fallback) skip
- * the `fetch` + `consume` steps entirely — `consume` on an
- * inline capability has no server-side row to bump. The
- * acceptor surfaces this asymmetry as `accepted` with
- * `capabilityBytes` populated; the `welcomeForOwner` still
- * needs ferrying via whatever transport the user has.
+ * The only thrown exception path is a failure to reach the
+ * ledger (`InviteLinkUnreachableError`, the `DiscoveryNetworkError`
+ * or non-404 `DiscoveryHttpError` inside it as the cause) — the
+ * acceptor folds a 404 and a 429 into discriminated variants but
+ * lets transport failures bubble up so the UI can surface
+ * "you're offline" copy.
+
  */
 export async function acceptCallInviteFromSlug(
   opts: AcceptCallInviteOptions,
@@ -203,13 +197,12 @@ export async function acceptCallInviteFromSlug(
     isValidNow(nowMs: bigint): boolean;
     verifiedLinkGrantMailboxPk(): Uint8Array;
   };
-  let blobId: Uint8Array | null;
+  let blobId: Uint8Array;
   try {
     const opened = await openInviteLinkFromUrl({
       slug: opts.slug,
       hash: opts.hash,
       widths,
-      inlineMinLen: CALL_INVITE_INLINE_MIN_LEN,
       what: "call-invite",
       fetchPointer: (id) => opts.discoveryClient.fetchCallInvite(id),
       open: (sealed, secret) => wasm.CallInviteCapability.openLink(sealed, secret),
@@ -242,8 +235,8 @@ export async function acceptCallInviteFromSlug(
     return { kind: "expired" };
   }
 
-  // ---- 5. Pointer branch: consume (counter bump + dedup) --
-  if (blobId !== null) {
+  // ---- 5. Consume (counter bump + dedup) -----------------
+  {
     let consumeResult: Awaited<
       ReturnType<DiscoveryClient["consumeCallInvite"]>
     >;

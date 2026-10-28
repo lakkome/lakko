@@ -212,6 +212,10 @@ pub enum SavedMessageValue {
         /// Blob ids (32 bytes each) of the message's files and thumbnails.
         /// At most 128, none repeated.
         blob_ids: Vec<Vec<u8>>,
+        /// The message's own time in UNIX millis as the saving device showed
+        /// it; `0` = unknown. Display only.
+        #[uniffi(default = 0)]
+        sent_at_ms: u64,
     },
     /// The message was removed from saved (the tombstone).
     Removed,
@@ -250,6 +254,11 @@ pub struct SavedMessageView {
     pub attachment_kind: String,
     /// Blob ids (32 bytes each) of the message's files and thumbnails.
     pub blob_ids: Vec<Vec<u8>>,
+    /// The message's own time in UNIX millis as the saving device showed
+    /// it, so the row can show the message date before this device holds
+    /// the message; `0` = unknown.
+    #[uniffi(default = 0)]
+    pub sent_at_ms: u64,
 }
 
 fn synced_err(e: core::BoundsError) -> FfiError {
@@ -268,6 +277,7 @@ impl SavedMessageRegister {
                 excerpt,
                 attachment_kind,
                 blob_ids,
+                sent_at_ms,
             } => {
                 if blob_ids.len() > core::SAVED_BLOB_IDS_MAX {
                     return Err(synced_err(core::BoundsError::TooManyBlobIds));
@@ -278,6 +288,7 @@ impl SavedMessageRegister {
                         author,
                         excerpt,
                         attachment_kind,
+                        sent_at_ms,
                     },
                     blob_ids: blob_ids
                         .iter()
@@ -315,6 +326,7 @@ impl SavedMessageRegister {
                     excerpt: snapshot.excerpt,
                     attachment_kind: snapshot.attachment_kind,
                     blob_ids: blob_ids.iter().map(|b| b.to_vec()).collect(),
+                    sent_at_ms: snapshot.sent_at_ms,
                 },
             },
         }
@@ -597,6 +609,160 @@ fn own_username_register(s: Stamped<core::OwnUsernameEntry>) -> OwnUsernameRegis
         hlc: s.hlc,
         username: Some(s.value.username).filter(|u| !u.is_empty()),
     }
+}
+
+/// Which ledger an invite link lives in (ADR-0079).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum LinkRecordKind {
+    /// A contact invite link (`/i/`).
+    Contact,
+    /// A call invite link (`/c/`).
+    Call,
+}
+
+impl From<LinkRecordKind> for core::LinkRecordKind {
+    fn from(k: LinkRecordKind) -> Self {
+        match k {
+            LinkRecordKind::Contact => Self::Contact,
+            LinkRecordKind::Call => Self::Call,
+        }
+    }
+}
+
+impl From<core::LinkRecordKind> for LinkRecordKind {
+    fn from(k: core::LinkRecordKind) -> Self {
+        match k {
+            core::LinkRecordKind::Contact => Self::Contact,
+            core::LinkRecordKind::Call => Self::Call,
+        }
+    }
+}
+
+/// What to do with a contact request that carries a link answer
+/// (ADR-0079 section 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum LinkAnswerVerdict {
+    /// A live contact link of this account, secret matching: accept the
+    /// request without showing a card, then [`SyncedState::record_link_use`].
+    Accept,
+    /// The requester was already accepted through this link: show nothing.
+    Answered,
+    /// The link does not count for the request (wrong secret, revoked now,
+    /// expired before the request was written, used up): drop the request
+    /// silently and answer the requester with a link refusal (ADR-0079,
+    /// 2026-10-19).
+    Dead,
+    /// This device holds no record of the link: keep the request undecided
+    /// and unshown, ask again when the synced state changes. Never a refusal.
+    Unknown,
+}
+
+impl From<core::LinkAnswerVerdict> for LinkAnswerVerdict {
+    fn from(v: core::LinkAnswerVerdict) -> Self {
+        match v {
+            core::LinkAnswerVerdict::Accept => Self::Accept,
+            core::LinkAnswerVerdict::Answered => Self::Answered,
+            core::LinkAnswerVerdict::Dead => Self::Dead,
+            core::LinkAnswerVerdict::Unknown => Self::Unknown,
+        }
+    }
+}
+
+/// One of the account's invite links (ADR-0079 section 4). `link_secret`
+/// and `revocation_seed` are SECRET: store them only inside the synced
+/// state, never log them.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct LinkRecord {
+    /// HLC stamp the register was written at (ignored on write).
+    pub hlc: u64,
+    /// The link's 16-byte id.
+    pub link_id: Vec<u8>,
+    /// The link's 12-byte secret (the URL fragment).
+    pub link_secret: Vec<u8>,
+    /// Which ledger.
+    pub kind: LinkRecordKind,
+    /// The 6-byte ledger id (every link has a ledger row; the inline form was
+    /// removed on 2026-10-19).
+    pub ledger_id: Vec<u8>,
+    /// The 32-byte seed that deletes the ledger row (ADR-0078 section 10).
+    /// Any device of the account
+    /// that revokes the link deletes the row with it.
+    pub revocation_seed: Vec<u8>,
+    /// UNIX millis after which the link no longer works; 0 = never.
+    pub expiry_ms: u64,
+    /// The use limit as the capability carries it (0 = single use,
+    /// `0xFFFFFFFF` = no limit).
+    pub max_uses: u32,
+    /// Requests accepted through the link so far.
+    pub uses: u32,
+    /// Revoked (final).
+    pub revoked: bool,
+    /// UNIX millis at which the link was minted.
+    pub minted_at_ms: u64,
+    /// The owner's label, or empty.
+    pub label: String,
+    /// Account keys (32 bytes each) of the requesters accepted through it.
+    pub answered: Vec<Vec<u8>>,
+    /// Copied on one of the account's devices (final, 2026-10-26). Set it
+    /// with [`SyncedState::mark_link_shared`], not on write.
+    #[uniffi(default = false)]
+    pub shared: bool,
+    /// The link's terms may still be changed: not revoked, never copied,
+    /// never answered. Computed by the core on read; ignored on write.
+    #[uniffi(default = false)]
+    pub editable: bool,
+}
+
+fn link_record(s: Stamped<core::LinkRecordEntry>) -> LinkRecord {
+    let editable = s.value.editable();
+    LinkRecord {
+        hlc: s.hlc,
+        link_id: s.value.link_id.to_vec(),
+        link_secret: s.value.link_secret.to_vec(),
+        kind: s.value.kind.into(),
+        ledger_id: s.value.ledger_id,
+        revocation_seed: s.value.revocation_seed,
+        expiry_ms: s.value.expiry_ms,
+        max_uses: s.value.max_uses,
+        uses: s.value.uses,
+        revoked: s.value.revoked,
+        minted_at_ms: s.value.minted_at_ms,
+        editable,
+        shared: s.value.shared,
+        label: s.value.label,
+        answered: s.value.answered.iter().map(|k| k.to_vec()).collect(),
+    }
+}
+
+fn fixed<const N: usize>(bytes: &[u8], what: &str) -> Result<[u8; N], FfiError> {
+    <[u8; N]>::try_from(bytes)
+        .map_err(|_| FfiError::SyncedState(format!("bounds: {what} must be {N} bytes")))
+}
+
+fn link_record_entry(r: LinkRecord) -> Result<core::LinkRecordEntry, FfiError> {
+    Ok(core::LinkRecordEntry {
+        link_id: fixed(&r.link_id, "link id")?,
+        link_secret: fixed(&r.link_secret, "link secret")?,
+        kind: r.kind.into(),
+        ledger_id: r.ledger_id,
+        revocation_seed: r.revocation_seed,
+        expiry_ms: r.expiry_ms,
+        max_uses: r.max_uses,
+        uses: r.uses,
+        revoked: r.revoked,
+        shared: r.shared,
+        minted_at_ms: r.minted_at_ms,
+        label: r.label,
+        answered: r
+            .answered
+            .iter()
+            .map(|k| fixed(k, "requester key"))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn link_record_refusal(e: core::LinkRecordEnvelopeError) -> FfiError {
+    FfiError::SyncedState(format!("{}: {e}", e.code()))
 }
 
 fn own_username_refusal(e: core::OwnUsernameEnvelopeError) -> FfiError {
@@ -1096,6 +1262,149 @@ impl SyncedState {
             .map_err(own_username_refusal)
     }
 
+    /// Write one of the account's invite links (ADR-0079 section 4), stamped
+    /// `hlc`: at mint, and for any change. `true` when written; then send
+    /// [`Self::link_record_envelope_for`] in a DeviceGroup service envelope.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"bounds: ..."` for a field out of bounds.
+    pub fn set_link_record(&self, hlc: u64, record: LinkRecord) -> Result<bool, FfiError> {
+        let entry = link_record_entry(record)?;
+        self.with(|s| s.set_link_record(hlc, entry))?
+            .map_err(|e| FfiError::SyncedState(format!("bounds: {e}")))
+    }
+
+    /// The record held for a link id, or `None`.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`]; [`FfiError::SyncedState`] for an id that
+    /// is not 16 bytes.
+    pub fn link_record(&self, link_id: Vec<u8>) -> Result<Option<LinkRecord>, FfiError> {
+        let id = fixed::<16>(&link_id, "link id")?;
+        self.with(|s| s.link_record(&id).map(link_record))
+    }
+
+    /// Every link record (revoked ones included), ascending by link id.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn all_link_records(&self) -> Result<Vec<LinkRecord>, FfiError> {
+        self.with(|s| s.all_link_records().into_iter().map(link_record).collect())
+    }
+
+    /// Mark a link revoked (final). `true` when the register changed: send
+    /// [`Self::link_record_envelope_for`].
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for an id that is not 16 bytes.
+    pub fn revoke_link_record(&self, hlc: u64, link_id: Vec<u8>) -> Result<bool, FfiError> {
+        let id = fixed::<16>(&link_id, "link id")?;
+        self.with(|s| s.revoke_link_record(hlc, &id))?
+            .map_err(|e| FfiError::SyncedState(format!("bounds: {e}")))
+    }
+
+    /// Mark a link copied (2026-10-26): it is no longer editable, on this
+    /// device and, once [`Self::link_record_envelope_for`] is sent, on every
+    /// device of the account. `true` when the register changed (send it).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for an id of the wrong length.
+    pub fn mark_link_shared(&self, hlc: u64, link_id: Vec<u8>) -> Result<bool, FfiError> {
+        let id = fixed::<16>(&link_id, "link id")?;
+        self.with(|s| s.mark_link_shared(hlc, &id))?
+            .map_err(|e| FfiError::SyncedState(format!("bounds: {e}")))
+    }
+
+    /// Count one request accepted through a link from `requester_key` (the
+    /// request's 32-byte `from_pubkey`). `true` when the register changed:
+    /// send [`Self::link_record_envelope_for`].
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for an id or key of the wrong length.
+    pub fn record_link_use(
+        &self,
+        hlc: u64,
+        link_id: Vec<u8>,
+        requester_key: Vec<u8>,
+    ) -> Result<bool, FfiError> {
+        let id = fixed::<16>(&link_id, "link id")?;
+        let key = fixed::<32>(&requester_key, "requester key")?;
+        self.with(|s| s.record_link_use(hlc, &id, &key))?
+            .map_err(|e| FfiError::SyncedState(format!("bounds: {e}")))
+    }
+
+    /// The one rule for a contact request carrying a link answer (ADR-0079
+    /// section 3 as amended 2026-10-19): compare the answer with the held
+    /// record (the secret in constant time). `pressed_at_ms` is the time the
+    /// Delivery Service stamped on the request row: the link's expiry is
+    /// judged at that moment, its revocation and use count now. An answer of
+    /// the wrong width is `Dead`.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn link_answer_verdict(
+        &self,
+        link_id: Vec<u8>,
+        link_secret: Vec<u8>,
+        requester_key: Vec<u8>,
+        pressed_at_ms: u64,
+    ) -> Result<LinkAnswerVerdict, FfiError> {
+        let (Ok(id), Ok(secret), Ok(key)) = (
+            <[u8; 16]>::try_from(link_id.as_slice()),
+            <[u8; 12]>::try_from(link_secret.as_slice()),
+            <[u8; 32]>::try_from(requester_key.as_slice()),
+        ) else {
+            return Ok(LinkAnswerVerdict::Dead);
+        };
+        self.with(|s| {
+            s.link_answer_verdict(&id, &secret, &key, pressed_at_ms)
+                .into()
+        })
+    }
+
+    /// The service envelope carrying one held link record with its original
+    /// stamp, or `None`.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for an id that is not 16 bytes.
+    pub fn link_record_envelope_for(&self, link_id: Vec<u8>) -> Result<Option<Vec<u8>>, FfiError> {
+        let id = fixed::<16>(&link_id, "link id")?;
+        self.with(|s| s.link_record_envelope_for(&id))
+    }
+
+    /// Every held link record with its original stamp, as service envelopes:
+    /// the catch-up re-send beside [`Self::snapshot_parts`] (link records are
+    /// NOT in the snapshot parts).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn link_record_envelopes(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        self.with(|s| s.link_record_envelopes())
+    }
+
+    /// Decode a link-record envelope (route on [`is_link_record_envelope`])
+    /// and fold every register in. Fail closed. Returns whether anything
+    /// changed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"` with code
+    /// `wrongDomain` / `unknownVersion` / `truncated` / `trailing` / `count`
+    /// / `notCanonical` / `entry`.
+    pub fn apply_link_record_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_link_record_envelope(&envelope))?
+            .map_err(link_record_refusal)
+    }
+
     /// The account's saved messages, most recently saved first (ADR-0065
     /// section 4). Removed ones are not listed.
     ///
@@ -1115,6 +1424,7 @@ impl SyncedState {
                     excerpt: v.snapshot.excerpt,
                     attachment_kind: v.snapshot.attachment_kind,
                     blob_ids: v.blob_ids.iter().map(|b| b.to_vec()).collect(),
+                    sent_at_ms: v.snapshot.sent_at_ms,
                 })
                 .collect()
         })
@@ -1240,6 +1550,24 @@ pub fn is_own_username_envelope(bytes: Vec<u8>) -> bool {
     core::is_own_username_envelope(&bytes)
 }
 
+/// `true` when `bytes` open with the link-record envelope domain
+/// (`lakko/sync/link-record/v1`, ADR-0079): the routing question for a
+/// DeviceGroup service envelope, asked before the `lakko-contacts`
+/// dispatcher.
+#[uniffi::export]
+#[must_use]
+pub fn is_link_record_envelope(bytes: Vec<u8>) -> bool {
+    core::is_link_record_envelope(&bytes)
+}
+
+/// Longest link-record envelope [`SyncedState::link_record_envelopes`]
+/// produces; below `deviceGroupServiceEnvelopeMaxLen()`.
+#[uniffi::export]
+#[must_use]
+pub fn link_record_envelope_max_len() -> u32 {
+    u32::try_from(core::LINK_RECORD_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
+}
+
 /// Longest own-username envelope [`SyncedState::own_username_envelope`]
 /// produces (65); below `deviceGroupServiceEnvelopeMaxLen()`.
 #[uniffi::export]
@@ -1272,7 +1600,9 @@ pub fn mint_folder_id() -> Vec<u8> {
 /// text may be passed as `excerpt`; a blob id named twice is kept once.
 /// `attachment_kind` is a short token (empty when the message has no
 /// attachment) and `blob_ids` the 32-byte ids of the message's files and
-/// thumbnails.
+/// thumbnails. `sent_at_ms` is the message's own time in UNIX millis as
+/// this device shows it (`0` when unknown), kept so any device can show the
+/// message date on the Saved screen before it holds the message.
 ///
 /// # Errors
 ///
@@ -1286,6 +1616,7 @@ pub fn compose_saved_message(
     conversation: FolderConversationRef,
     message_id: u64,
     saved_at_ms: u64,
+    sent_at_ms: u64,
     author: String,
     excerpt: String,
     attachment_kind: String,
@@ -1299,6 +1630,7 @@ pub fn compose_saved_message(
             author,
             excerpt,
             attachment_kind,
+            sent_at_ms,
         },
         &blob_ids,
     )
@@ -1450,6 +1782,86 @@ mod tests {
         const { assert!(core::LINEAGE_ENVELOPE_MAX_LEN <= lakko_mls::MAX_SERVICE_ENVELOPE_LEN) };
         assert!(lineage_envelope_max_len() <= crate::device_group_service_envelope_max_len());
         assert_eq!(lineage_group_id_max_len(), 64);
+    }
+
+    #[test]
+    fn link_records_are_set_used_revoked_carried_and_persisted() {
+        const { assert!(core::LINK_RECORD_ENVELOPE_MAX_LEN <= lakko_mls::MAX_SERVICE_ENVELOPE_LEN) };
+        let a = SyncedState::new();
+        let record = LinkRecord {
+            hlc: 0,
+            link_id: vec![1; 16],
+            link_secret: vec![2; 12],
+            kind: LinkRecordKind::Contact,
+            ledger_id: vec![3; 6],
+            revocation_seed: vec![4; 32],
+            expiry_ms: 0,
+            max_uses: 0,
+            uses: 0,
+            revoked: false,
+            minted_at_ms: 9,
+            label: "home".into(),
+            answered: vec![],
+            shared: false,
+            editable: false,
+        };
+        assert!(a.set_link_record(5, record.clone()).unwrap());
+        assert!(a.all_link_records().unwrap()[0].editable);
+        let bob = vec![0xB0; 32];
+        assert_eq!(
+            a.link_answer_verdict(vec![1; 16], vec![2; 12], bob.clone(), 0)
+                .unwrap(),
+            LinkAnswerVerdict::Accept
+        );
+        assert_eq!(
+            a.link_answer_verdict(vec![1; 16], vec![2; 11], bob.clone(), 0)
+                .unwrap(),
+            LinkAnswerVerdict::Dead
+        );
+        assert!(a.record_link_use(6, vec![1; 16], bob.clone()).unwrap());
+        assert_eq!(
+            a.link_answer_verdict(vec![1; 16], vec![2; 12], bob, 0)
+                .unwrap(),
+            LinkAnswerVerdict::Answered
+        );
+        assert_eq!(
+            a.link_answer_verdict(vec![1; 16], vec![2; 12], vec![0xB1; 32], 0)
+                .unwrap(),
+            LinkAnswerVerdict::Dead
+        );
+        let b = SyncedState::new();
+        for e in a.link_record_envelopes().unwrap() {
+            assert!(is_link_record_envelope(e.clone()));
+            assert!(b.apply_link_record_envelope(e).unwrap());
+        }
+        assert_eq!(b.all_link_records().unwrap(), a.all_link_records().unwrap());
+        assert!(b.revoke_link_record(7, vec![1; 16]).unwrap());
+        let env = b.link_record_envelope_for(vec![1; 16]).unwrap().unwrap();
+        assert!(a.apply_link_record_envelope(env).unwrap());
+        let revoked = a.link_record(vec![1; 16]).unwrap().unwrap();
+        assert!(revoked.revoked);
+        // The seed that deletes the ledger row reached the other device and
+        // survived its revocation.
+        assert_eq!(revoked.revocation_seed, vec![4; 32]);
+        let restored = SyncedState::from_bytes(a.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            restored.all_link_records().unwrap(),
+            a.all_link_records().unwrap()
+        );
+        assert!(matches!(
+            a.set_link_record(
+                1,
+                LinkRecord {
+                    link_id: vec![1; 15],
+                    ..record
+                }
+            ),
+            Err(FfiError::SyncedState(_))
+        ));
+        assert!(matches!(
+            a.apply_link_record_envelope(b"lakko/sync/link-record/v1\0".to_vec()),
+            Err(FfiError::SyncedState(_))
+        ));
     }
 
     #[test]
@@ -1781,6 +2193,7 @@ mod tests {
                 chat(),
                 message_id,
                 saved_at_ms,
+                1_000 + message_id,
                 "Ada".into(),
                 format!("message {message_id}"),
                 if blobs.is_empty() { "" } else { "photo" }.into(),
@@ -1819,6 +2232,7 @@ mod tests {
         assert_eq!(list[1].author, "Ada");
         assert_eq!(list[1].excerpt, "message 7");
         assert_eq!(list[1].attachment_kind, "photo");
+        assert_eq!(list[1].sent_at_ms, 1_007);
         assert_eq!(list[1].conversation, chat());
         assert_eq!(list[1].blob_ids, vec![vec![1u8; 32], vec![2; 32]]);
         // Each blob id once, across messages.
@@ -1914,6 +2328,7 @@ mod tests {
                             excerpt: "hello".into(),
                             attachment_kind: "voice".into(),
                             blob_ids: vec![vec![4; 32]],
+                            sent_at_ms: 90,
                         },
                         pb::SavedMessage {
                             hlc: 51,
@@ -1943,6 +2358,7 @@ mod tests {
                 chat(),
                 7,
                 100,
+                90,
                 "Ada".into(),
                 "hello".into(),
                 "voice".into(),
@@ -1998,6 +2414,7 @@ mod tests {
             chat(),
             7,
             5,
+            0,
             long.clone(),
             long.clone(),
             "file".into(),
@@ -2034,6 +2451,7 @@ mod tests {
             chat(),
             7,
             5,
+            0,
             String::new(),
             String::new(),
             String::new(),
@@ -2044,6 +2462,7 @@ mod tests {
             chat(),
             7,
             5,
+            0,
             String::new(),
             String::new(),
             "k".repeat(33),
@@ -2054,6 +2473,7 @@ mod tests {
             chat(),
             7,
             5,
+            0,
             String::new(),
             String::new(),
             String::new(),
@@ -2068,6 +2488,7 @@ mod tests {
             no_chat.clone(),
             7,
             5,
+            0,
             String::new(),
             String::new(),
             String::new(),
@@ -2095,6 +2516,7 @@ mod tests {
             excerpt,
             attachment_kind: String::new(),
             blob_ids,
+            sent_at_ms: 0,
         };
         assert!(matches!(
             by_hand(present("e".repeat(513), vec![])),

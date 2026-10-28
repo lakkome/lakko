@@ -94,11 +94,11 @@
 //! [ADR-0073] section 2.2): auth's signed statement that an account moved to
 //! key generation `g` and presented a given identity key as that generation's.
 //! Discovery requires it before it accepts an unproven change of the
-//! published key, and the Delivery Service before it lets a stranger re-root
-//! the account's DeviceGroup journal. It names the account by a one-way
-//! `account_ref` (never the account id, since the DS verifies it) and carries
-//! its own domain separator, so all six kinds stay non-interchangeable under
-//! the shared auth attest key; its 177-byte length is shared with none.
+//! published key. It names the account by a one-way `account_ref` and
+//! carries its own domain separator, so all six kinds stay
+//! non-interchangeable under the shared auth attest key; its 145-byte length
+//! is shared with none of them. Since ADR-0078 phase 6 it names no DeviceGroup
+//! journal and the Delivery Service never sees it.
 //!
 //! [ADR-0073]: ../../../docs/adr/0073-account-key-reset.md
 //!
@@ -136,10 +136,8 @@ pub use genesis::{
     GENESIS_ATTESTATION_LEN,
 };
 pub use key_reset::{
-    device_group_journal_id, key_reset_account_ref, sign_root_endorsement,
-    verify_key_reset_binding, verify_key_reset_fresh, verify_root_endorsement, KeyResetAttestError,
-    KeyResetAttestation, RootEndorsementError, KEY_RESET_ATTESTATION_LEN, ROOT_ENDORSEMENT_DOMAIN,
-    ROOT_ENDORSEMENT_LEN,
+    key_reset_account_ref, verify_key_reset_binding, verify_key_reset_fresh, KeyResetAttestError,
+    KeyResetAttestation, KEY_RESET_ATTESTATION_LEN,
 };
 pub use release_manifest::{
     release_status, release_status_for, verify_release_manifest, ReleaseManifest,
@@ -463,8 +461,8 @@ pub mod fuzz_api {
 
     /// Try to [`KeyResetAttestation::open`] the bytes against a FIXED verifying
     /// key. The bytes are attacker-controlled — a key-reset attestation is a
-    /// request body field on discovery's identity upload and the DS's journal
-    /// reset, and a client reads one back from its own persisted
+    /// request body field on discovery's identity upload, and a client reads
+    /// one back from its own persisted
     /// `publish-owed` state (ADR-0073), reaching this bounded parser before
     /// any state is consulted — and the parser must stay panic-free on any
     /// input. The fuzzer cannot forge a valid signature against the fixed key,

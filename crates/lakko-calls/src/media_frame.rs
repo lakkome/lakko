@@ -9,7 +9,7 @@
 //!   clear_prefix || ciphertext_and_tag || sframe_header || trailer
 //!   0..=16 B        >= 16 B               1..=17 B         3 B
 //!
-//!   trailer = clear_prefix_len (1) || sframe_header_len (1) || version (1) = 0x01
+//!   trailer = content << 5 | clear_prefix_len (1) || sframe_header_len (1) || version (1) = 0x01
 //! ```
 //!
 //! - `clear_prefix` is the first bytes of the encoded frame exactly as the
@@ -23,7 +23,12 @@
 //! - `sframe_header` is the RFC 9605 section 4.3 header ([`SframeHeader`]),
 //!   byte for byte the codec of [`crate::header`].
 //! - `trailer` is fixed-size and lets a receiver split the frame without
-//!   knowing the codec.
+//!   knowing the codec. Its first byte carries the clear prefix length in
+//!   its low five bits and, in its high three, what the sealed frame holds
+//!   ([`MediaContent`]): the codec's frame as encoded, or an RFC 2198 RED
+//!   container of Opus frames. The second is how a receiver whose browser
+//!   cannot decode RED learns it must take the primary frame out itself
+//!   ([`red_primary`]); the SFU cannot, as the container is sealed whole.
 //!
 //! The AEAD additional data is `sframe_header || clear_prefix || trailer`, so
 //! every byte that is not ciphertext is authenticated: an SFU cannot change a
@@ -41,9 +46,16 @@ use crate::header::{HeaderError, SframeHeader, MAX_HEADER_LEN};
 /// Version byte of the trailer, the last byte of every sealed media frame.
 pub const MEDIA_FRAME_VERSION: u8 = 0x01;
 
-/// Length of the fixed trailer: clear-prefix length, SFrame header length,
-/// version.
+/// Length of the fixed trailer: content and clear-prefix length, SFrame
+/// header length, version.
 pub const MEDIA_FRAME_TRAILER_LEN: usize = 3;
+
+/// The low bits of the trailer's first byte that hold the clear prefix
+/// length; the three above them hold the [`MediaContent`].
+const CLEAR_LEN_MASK: u8 = 0x1f;
+
+/// How far the [`MediaContent`] is shifted in the trailer's first byte.
+const CONTENT_SHIFT: u32 = 5;
 
 /// The most bytes a sealed media frame may leave in the clear. VP8 needs 10;
 /// the bound is a power of two above that, chosen and not measured. A sender
@@ -104,6 +116,10 @@ pub enum MediaFrameError {
     #[error("sframe header length {0} is outside 1..=17")]
     BadHeaderLength(usize),
 
+    /// The trailer names a [`MediaContent`] this build does not know.
+    #[error("media frame content {0} is not supported")]
+    UnknownContent(u8),
+
     /// The bytes at the header position do not decode as an SFrame header.
     #[error("sframe header: {0}")]
     Header(#[from] HeaderError),
@@ -137,6 +153,36 @@ pub struct MediaFrameParts<'a> {
     pub trailer: &'a [u8],
     /// The decoded SFrame header (KID and counter).
     pub header: SframeHeader,
+    /// What the sealed frame holds, as the trailer says. Authenticated once
+    /// the frame opens (the trailer is additional data).
+    pub content: MediaContent,
+}
+
+/// What a sealed media frame holds. The values are frozen: they travel in
+/// the high three bits of the trailer's first byte.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum MediaContent {
+    /// The codec's own frame, as the encoder produced it.
+    Codec = 0,
+    /// An RFC 2198 RED container of Opus frames: earlier frames repeated
+    /// before the current one, so a receiver can fill a lost packet. A
+    /// receiver that negotiated RED hands it on whole; one that did not
+    /// decodes the primary frame alone ([`red_primary`]).
+    RedOpus = 1,
+}
+
+impl MediaContent {
+    /// The content for a value read off the wire, or `None` for one this
+    /// build does not know.
+    #[must_use]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Codec),
+            1 => Some(Self::RedOpus),
+            _ => None,
+        }
+    }
 }
 
 impl<'a> MediaFrameParts<'a> {
@@ -161,13 +207,17 @@ impl<'a> MediaFrameParts<'a> {
         let trailer = wire
             .get(trailer_start..)
             .ok_or_else(|| too_short(MIN_MEDIA_FRAME_LEN))?;
-        let (clear_len, header_len, version) = match *trailer {
-            [c, h, v] => (usize::from(c), usize::from(h), v),
+        let (first, header_len, version) = match *trailer {
+            [c, h, v] => (c, usize::from(h), v),
             _ => return Err(too_short(MIN_MEDIA_FRAME_LEN)),
         };
         if version != MEDIA_FRAME_VERSION {
             return Err(MediaFrameError::UnknownVersion(version));
         }
+        let content_value = first >> CONTENT_SHIFT;
+        let content = MediaContent::from_u8(content_value)
+            .ok_or(MediaFrameError::UnknownContent(content_value))?;
+        let clear_len = usize::from(first & CLEAR_LEN_MASK);
         if clear_len > MAX_CLEAR_PREFIX_LEN {
             return Err(MediaFrameError::ClearPrefixTooLong {
                 len: clear_len,
@@ -203,6 +253,7 @@ impl<'a> MediaFrameParts<'a> {
             header_bytes,
             trailer,
             header,
+            content,
         })
     }
 
@@ -231,8 +282,8 @@ pub fn media_frame_aad(header_bytes: &[u8], clear_prefix: &[u8], trailer: &[u8])
     aad
 }
 
-/// Build the trailer for a frame with `clear_len` clear bytes and an SFrame
-/// header of `header_len` bytes.
+/// Build the trailer for a frame holding `content`, with `clear_len` clear
+/// bytes and an SFrame header of `header_len` bytes.
 ///
 /// # Errors
 ///
@@ -242,6 +293,7 @@ pub fn media_frame_aad(header_bytes: &[u8], clear_prefix: &[u8], trailer: &[u8])
 pub fn media_frame_trailer(
     clear_len: usize,
     header_len: usize,
+    content: MediaContent,
 ) -> Result<[u8; MEDIA_FRAME_TRAILER_LEN], MediaFrameError> {
     if clear_len > MAX_CLEAR_PREFIX_LEN {
         return Err(MediaFrameError::ClearPrefixTooLong {
@@ -258,7 +310,13 @@ pub fn media_frame_trailer(
     })?;
     let header =
         u8::try_from(header_len).map_err(|_| MediaFrameError::BadHeaderLength(header_len))?;
-    Ok([clear, header, MEDIA_FRAME_VERSION])
+    // `clear` is at most 16, below the mask; the content's three bits sit
+    // above it.
+    Ok([
+        (content as u8) << CONTENT_SHIFT | clear,
+        header,
+        MEDIA_FRAME_VERSION,
+    ])
 }
 
 /// The codec of a frame, as far as the clear prefix depends on it.
@@ -277,20 +335,36 @@ pub enum MediaCodec {
     Vp8 = 1,
     /// Opus audio. Nothing is left in the clear.
     Opus = 2,
+    /// An RFC 2198 RED container of Opus frames (`audio/red`), as a browser's
+    /// encoder hands it on when RED was negotiated. Nothing is left in the
+    /// clear, and the trailer says [`MediaContent::RedOpus`].
+    RedOpus = 3,
 }
 
 impl MediaCodec {
     /// Map a negotiated RTP codec MIME type (`"video/VP8"`, `"audio/opus"`,
-    /// compared without regard to case) to a [`MediaCodec`]. Anything else,
-    /// including RED and RTX wrappers, is [`MediaCodec::Other`].
+    /// `"audio/red"`, compared without regard to case) to a [`MediaCodec`].
+    /// Anything else, video RED and RTX wrappers included, is
+    /// [`MediaCodec::Other`].
     #[must_use]
     pub fn from_mime(mime: &str) -> Self {
         if mime.eq_ignore_ascii_case("video/vp8") {
             Self::Vp8
         } else if mime.eq_ignore_ascii_case("audio/opus") {
             Self::Opus
+        } else if mime.eq_ignore_ascii_case("audio/red") {
+            Self::RedOpus
         } else {
             Self::Other
+        }
+    }
+
+    /// What a frame of this codec holds once sealed.
+    #[must_use]
+    pub const fn content(self) -> MediaContent {
+        match self {
+            Self::RedOpus => MediaContent::RedOpus,
+            Self::Other | Self::Vp8 | Self::Opus => MediaContent::Codec,
         }
     }
 
@@ -301,6 +375,7 @@ impl MediaCodec {
         match value {
             1 => Self::Vp8,
             2 => Self::Opus,
+            3 => Self::RedOpus,
             _ => Self::Other,
         }
     }
@@ -334,9 +409,40 @@ pub fn clear_prefix_len(codec: MediaCodec, frame: &[u8]) -> usize {
             Some(false) => VP8_DELTA_FRAME_CLEAR_LEN,
             None => 0,
         },
-        MediaCodec::Opus | MediaCodec::Other => 0,
+        MediaCodec::Opus | MediaCodec::RedOpus | MediaCodec::Other => 0,
     };
     wanted.min(frame.len())
+}
+
+/// Length of an RFC 2198 header that describes a redundant block: F bit and
+/// payload type, timestamp offset, block length.
+const RED_BLOCK_HEADER_LEN: usize = 4;
+
+/// The primary (current) frame of an RFC 2198 RED container: the last block,
+/// after the headers and the redundant blocks they describe.
+///
+/// Each header but the last is 4 bytes (`F=1 | PT(7)`, a 14-bit timestamp
+/// offset, a 10-bit block length); the last is 1 byte (`F=0 | PT(7)`). The
+/// blocks follow in header order and the primary is the rest. `None` when the
+/// bytes are not a container: a header runs past the end, or the redundant
+/// blocks claim more than is there. Never reads out of bounds, never panics;
+/// the result borrows from the input.
+#[must_use]
+pub fn red_primary(container: &[u8]) -> Option<&[u8]> {
+    let mut at = 0usize;
+    let mut redundant = 0usize;
+    loop {
+        let first = *container.get(at)?;
+        if first & 0x80 == 0 {
+            at += 1;
+            break;
+        }
+        let header = container.get(at..at + RED_BLOCK_HEADER_LEN)?;
+        let len_hi = usize::from(header[2] & 0x03);
+        redundant += (len_hi << 8) | usize::from(header[3]);
+        at += RED_BLOCK_HEADER_LEN;
+    }
+    container.get(at.checked_add(redundant)?..)
 }
 
 #[cfg(test)]
@@ -411,9 +517,15 @@ mod tests {
         assert_eq!(MediaCodec::from_mime("audio/opus"), MediaCodec::Opus);
         assert_eq!(MediaCodec::from_mime("video/H264"), MediaCodec::Other);
         assert_eq!(MediaCodec::from_mime("video/VP9"), MediaCodec::Other);
-        assert_eq!(MediaCodec::from_mime("audio/red"), MediaCodec::Other);
+        assert_eq!(MediaCodec::from_mime("audio/red"), MediaCodec::RedOpus);
+        assert_eq!(MediaCodec::from_mime("video/red"), MediaCodec::Other);
         assert_eq!(MediaCodec::from_mime(""), MediaCodec::Other);
-        for codec in [MediaCodec::Other, MediaCodec::Vp8, MediaCodec::Opus] {
+        for codec in [
+            MediaCodec::Other,
+            MediaCodec::Vp8,
+            MediaCodec::Opus,
+            MediaCodec::RedOpus,
+        ] {
             assert_eq!(MediaCodec::from_u8(codec as u8), codec);
         }
         assert_eq!(MediaCodec::from_u8(200), MediaCodec::Other);
@@ -663,7 +775,7 @@ mod tests {
             ctr: 7,
         }
         .encode();
-        let trailer = media_frame_trailer(0, header.len()).unwrap();
+        let trailer = media_frame_trailer(0, header.len(), MediaContent::Codec).unwrap();
         let aad = media_frame_aad(&header, &[], &trailer);
         assert_eq!(aad.len(), header.len() + MEDIA_FRAME_TRAILER_LEN);
         assert_ne!(aad, header);
@@ -786,10 +898,11 @@ mod tests {
 
     #[test]
     fn trailer_builder_refuses_what_split_refuses() {
-        assert!(media_frame_trailer(MAX_CLEAR_PREFIX_LEN, MAX_HEADER_LEN).is_ok());
-        assert!(media_frame_trailer(MAX_CLEAR_PREFIX_LEN + 1, 1).is_err());
-        assert!(media_frame_trailer(0, 0).is_err());
-        assert!(media_frame_trailer(0, MAX_HEADER_LEN + 1).is_err());
+        let codec = MediaContent::Codec;
+        assert!(media_frame_trailer(MAX_CLEAR_PREFIX_LEN, MAX_HEADER_LEN, codec).is_ok());
+        assert!(media_frame_trailer(MAX_CLEAR_PREFIX_LEN + 1, 1, codec).is_err());
+        assert!(media_frame_trailer(0, 0, codec).is_err());
+        assert!(media_frame_trailer(0, MAX_HEADER_LEN + 1, codec).is_err());
     }
 
     #[test]
@@ -922,6 +1035,146 @@ mod tests {
             prop_assert_eq!(&wire[..kept], &frame[..kept]);
             let ring = CallKeyRing::from_seed(SEED);
             prop_assert_eq!(ring.try_open_media_frame_with_overlap(&wire).unwrap(), frame);
+        }
+    }
+
+    // ---- RED containers (audio redundancy, RFC 2198) -----------------------
+
+    /// Two containers as Chrome's encoder handed them to an encoded
+    /// transform with `audio/red` negotiated (measured 2026-10-26): the first
+    /// frame of a stream, a primary alone behind a one-byte header (`6f`:
+    /// F=0, PT 111), and a later one with one redundant block (`ef 0f 00 74`:
+    /// F=1, PT 111, offset 960, 116 bytes) before it.
+    fn red_first() -> Vec<u8> {
+        let mut c = vec![0x6f];
+        c.extend_from_slice(b"opus primary one");
+        c
+    }
+
+    fn red_with_one_redundant_block() -> Vec<u8> {
+        let redundant = b"opus earlier";
+        let mut c = vec![
+            0xef,
+            0x0f,
+            0x00,
+            u8::try_from(redundant.len()).unwrap(),
+            0x6f,
+        ];
+        c.extend_from_slice(redundant);
+        c.extend_from_slice(b"opus primary two");
+        c
+    }
+
+    #[test]
+    fn red_primary_is_the_last_block() {
+        assert_eq!(red_primary(&red_first()), Some(&b"opus primary one"[..]));
+        assert_eq!(
+            red_primary(&red_with_one_redundant_block()),
+            Some(&b"opus primary two"[..])
+        );
+        // Two redundant blocks, lengths read across the 10-bit field.
+        let mut c = vec![0xef, 0x1e, 0x01, 0x02, 0xef, 0x0f, 0x00, 0x03, 0x6f];
+        c.extend(std::iter::repeat_n(0xaa, 0x102));
+        c.extend_from_slice(&[1, 2, 3]);
+        c.extend_from_slice(b"now");
+        assert_eq!(red_primary(&c), Some(&b"now"[..]));
+    }
+
+    #[test]
+    fn red_primary_refuses_what_is_not_a_container() {
+        assert_eq!(red_primary(&[]), None);
+        // A redundant header cut short.
+        assert_eq!(red_primary(&[0xef, 0x0f, 0x00]), None);
+        // Redundant blocks claiming more than is there.
+        assert_eq!(red_primary(&[0xef, 0x0f, 0x00, 0x09, 0x6f, 1, 2]), None);
+        // Headers only, no final header.
+        assert_eq!(red_primary(&[0xef, 0x0f, 0x00, 0x00]), None);
+        // An empty primary is a container, with an empty primary.
+        assert_eq!(red_primary(&[0x6f]), Some(&[][..]));
+    }
+
+    #[test]
+    fn a_red_frame_says_so_in_its_trailer_and_opens_whole() {
+        let container = red_with_one_redundant_block();
+        let wire = seal(MediaCodec::RedOpus, &container);
+        let parts = MediaFrameParts::split(&wire).unwrap();
+        assert_eq!(parts.content, MediaContent::RedOpus);
+        assert!(
+            parts.clear_prefix.is_empty(),
+            "nothing of RED is left in the clear"
+        );
+        let opened = receiver(LEAF, CAMERA).open_media_frame(&wire).unwrap();
+        assert_eq!(opened, container);
+        assert_eq!(red_primary(&opened), Some(&b"opus primary two"[..]));
+        // Every other codec seals as the codec's own frame.
+        for codec in [MediaCodec::Opus, MediaCodec::Vp8, MediaCodec::Other] {
+            let wire = seal(codec, &vp8_key_frame());
+            assert_eq!(
+                MediaFrameParts::split(&wire).unwrap().content,
+                MediaContent::Codec
+            );
+        }
+    }
+
+    #[test]
+    fn the_content_is_authenticated() {
+        // Flip a RED frame to plain and a plain frame to RED: neither opens,
+        // so an SFU cannot make a receiver misread what a frame holds.
+        let red = seal(MediaCodec::RedOpus, &red_first());
+        let plain = seal(MediaCodec::Opus, &red_first());
+        for (wire, flip) in [(red, 0x20u8), (plain, 0x20u8)] {
+            let mut tampered = wire.clone();
+            let at = tampered.len() - MEDIA_FRAME_TRAILER_LEN;
+            tampered[at] ^= flip;
+            assert!(
+                MediaFrameParts::split(&tampered).is_ok(),
+                "still a well-formed frame"
+            );
+            assert!(receiver(LEAF, CAMERA).open_media_frame(&tampered).is_err());
+        }
+    }
+
+    #[test]
+    fn an_unknown_content_is_refused() {
+        let mut wire = seal(MediaCodec::Opus, &red_first());
+        let at = wire.len() - MEDIA_FRAME_TRAILER_LEN;
+        for content in 2u8..=7 {
+            wire[at] = content << 5;
+            assert_eq!(
+                MediaFrameParts::split(&wire),
+                Err(MediaFrameError::UnknownContent(content))
+            );
+        }
+    }
+
+    proptest! {
+        /// Any bytes: the RED reader never panics, and what it returns is
+        /// the end of its input.
+        #[test]
+        fn red_primary_is_total_and_a_suffix(bytes in proptest::collection::vec(any::<u8>(), 0..2100)) {
+            if let Some(primary) = red_primary(&bytes) {
+                prop_assert!(bytes.ends_with(primary));
+            }
+        }
+
+        /// Any redundant blocks and any primary, framed as RFC 2198: the
+        /// primary comes back exactly.
+        #[test]
+        fn red_primary_recovers_the_primary(
+            blocks in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..200), 0..4),
+            primary in proptest::collection::vec(any::<u8>(), 0..300),
+        ) {
+            let mut c = Vec::new();
+            for b in &blocks {
+                let len = u16::try_from(b.len()).unwrap();
+                c.extend_from_slice(&[0xef, 0x0f, u8::try_from(len >> 8).unwrap() & 0x03, u8::try_from(len & 0xff).unwrap()]);
+            }
+            c.push(0x6f);
+            for b in &blocks {
+                c.extend_from_slice(b);
+            }
+            c.extend_from_slice(&primary);
+            prop_assert_eq!(red_primary(&c), Some(primary.as_slice()));
         }
     }
 }

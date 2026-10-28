@@ -30,11 +30,12 @@ public enum ConversationInfoDestination: Equatable {
     /// A conversation between two people opens the other person.
     ///
     /// - Parameter contactMessageId: the accepted contact behind them, keyed
-    ///   on the request's mailbox id — the same key the contacts list uses.
-    ///   `nil` when no record can be resolved - a roster that cannot be read
-    ///   - in which case the header opens nothing. Every one-to-one peer is
-    ///   a contact by construction (section 2.1), so this is not a "not a
-    ///   contact" state; there is no screen for it.
+    ///   on the request's mailbox id — the same key the contacts list uses —
+    ///   or, for a person the viewer removed whose conversation remains, the
+    ///   synthetic id the card reads them back under (section 2.1, amended
+    ///   2026-10-24: that card offers `Add to contacts`). `nil` when the
+    ///   other person cannot be read - a roster that cannot be read - in
+    ///   which case the header opens nothing.
     case person(contactMessageId: Int64?)
     /// A group opens the group.
     case group

@@ -288,10 +288,20 @@ internal class VideoWantsSender(
         if (timer != null) return
         val last = lastSentAt
         val wait = if (last == null) 0L else (last + minIntervalMs - timers.nowMs()).coerceAtLeast(0L)
-        timer = timers.schedule(wait) {
+        // A timer may run its work before `schedule` returns: the call's
+        // timers launch on the main thread's immediate dispatcher, where a
+        // zero delay does not suspend. Kept as pending only if it has not run
+        // yet; otherwise the finished handle stayed in [timer] and every later
+        // change was dropped (seen on an emulator 2026-10-23: one `light`
+        // frame in a call, then nothing, so a tile that wanted the middle
+        // picture never got it).
+        var ran = false
+        val handle = timers.schedule(wait) {
+            ran = true
             timer = null
             flush()
         }
+        if (!ran) timer = handle
     }
 
     private fun flush() {

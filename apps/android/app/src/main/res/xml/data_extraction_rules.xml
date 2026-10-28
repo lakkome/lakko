@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later
+  SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+  Android 12+: nothing of Lakko goes to a cloud backup or to a device-to-device
+  transfer. The stores are sealed under this device's hardware key, so a copy
+  opens nowhere else, and a restored copy would put a stale MLS state and
+  journal cursor on a new device. A new device comes in through the account
+  (another device, a passkey, the phrase or the recovery email), never through
+  a platform backup. allowBackup="false" in the manifest covers Android 8 to 11.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </device-transfer>
+</data-extraction-rules>

@@ -1130,6 +1130,86 @@
       "text": "Исходящий",
       "status": "machine"
     },
+    "call.screen_share.bar_status": {
+      "text": "Показ экрана",
+      "status": "machine"
+    },
+    "call.screen_share.button": {
+      "text": "Показать экран",
+      "status": "machine"
+    },
+    "call.screen_share.button_stop": {
+      "text": "Остановить показ",
+      "status": "machine"
+    },
+    "call.screen_share.not_sealed": {
+      "text": "Сейчас не удаётся безопасно показать экран. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "call.screen_share.own_strip": {
+      "text": "Вы показываете свой экран",
+      "status": "machine"
+    },
+    "call.screen_share.own_strip_sound": {
+      "text": "Вы показываете свой экран со звуком",
+      "status": "machine"
+    },
+    "call.screen_share.own_tile": {
+      "text": "Вы показываете свой экран",
+      "status": "machine"
+    },
+    "call.screen_share.pinned_chip": {
+      "text": "{name} показывает экран",
+      "status": "machine"
+    },
+    "call.screen_share.refused": {
+      "text": "Не удалось показать экран. Разрешите показ экрана для этого сайта в настройках браузера.",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos": {
+      "text": "Не удалось показать экран. Разрешите браузеру запись экрана в Системных настройках.",
+      "status": "machine"
+    },
+    "call.screen_share.started": {
+      "text": "{name} начинает показ экрана",
+      "status": "machine"
+    },
+    "call.screen_share.stop": {
+      "text": "Остановить",
+      "status": "machine"
+    },
+    "call.screen_share.stopped": {
+      "text": "{name} завершает показ экрана",
+      "status": "machine"
+    },
+    "call.screen_share.superseded": {
+      "text": "{name} теперь показывает экран, поэтому ваш показ остановлен.",
+      "status": "machine"
+    },
+    "call.screen_share.tile": {
+      "text": "Экран: {name}",
+      "status": "machine"
+    },
+    "call.screen_share.view": {
+      "text": "Смотреть",
+      "status": "machine"
+    },
+    "call.screen_share.waiting": {
+      "text": "Ждём экран: {name}",
+      "status": "machine"
+    },
+    "call.screen_share.zoom_in": {
+      "text": "Увеличить",
+      "status": "machine"
+    },
+    "call.screen_share.zoom_out": {
+      "text": "Уменьшить",
+      "status": "machine"
+    },
+    "call.screen_share.zoom_reset": {
+      "text": "Показать целиком",
+      "status": "machine"
+    },
     "call.self.camera_a11y": {
       "text": "Ваша камера",
       "status": "machine"
@@ -1806,10 +1886,6 @@
       "text": "Не удалось скачать вложение. Попробуйте ещё раз.",
       "status": "machine"
     },
-    "chat.attachment.error.gone": {
-      "text": "Вложения больше нет на сервере.",
-      "status": "machine"
-    },
     "chat.attachment.error.open_photo": {
       "text": "Не удалось открыть это фото. Попробуйте ещё раз.",
       "status": "machine"
@@ -1838,12 +1914,28 @@
       "text": "Не удалось загрузить «{name}». Попробуйте ещё раз.",
       "status": "machine"
     },
+    "chat.attachment.gone.body": {
+      "text": "Файлы, которые никто не открывал год, удаляются. Сохраните или закрепите сообщение, чтобы сохранить его файлы.",
+      "status": "machine"
+    },
+    "chat.attachment.gone.title": {
+      "text": "Этот файл больше недоступен.",
+      "status": "machine"
+    },
     "chat.attachment.hide": {
       "text": "Скрыть",
       "status": "machine"
     },
     "chat.attachment.image_alt": {
       "text": "вложенное изображение",
+      "status": "machine"
+    },
+    "chat.attachment.limit.open": {
+      "text": "Открыто слишком много файлов. Попробуйте позже.",
+      "status": "machine"
+    },
+    "chat.attachment.limit.send": {
+      "text": "Вы достигли лимита на отправку файлов. Попробуйте позже.",
       "status": "machine"
     },
     "chat.attachment.open": {
@@ -2174,6 +2266,10 @@
       "text": "Не удалось отозвать ссылку-приглашение. Попробуйте ещё раз.",
       "status": "machine"
     },
+    "chat.error.save": {
+      "text": "Не удалось сохранить сообщение. Попробуйте ещё раз.",
+      "status": "machine"
+    },
     "chat.error.transfer": {
       "text": "Не удалось передать права владельца. Попробуйте ещё раз.",
       "status": "machine"
@@ -2312,10 +2408,6 @@
     },
     "chat.info.group": {
       "text": "О группе",
-      "status": "machine"
-    },
-    "chat.invite_link.cleared": {
-      "text": "Ссылка убрана (у встроенной ссылки нечего отзывать).",
       "status": "machine"
     },
     "chat.invite_link.copy": {
@@ -2698,6 +2790,14 @@
       "text": "Ответить",
       "status": "machine"
     },
+    "chat.message.save": {
+      "text": "Сохранить",
+      "status": "machine"
+    },
+    "chat.message.saved_mark": {
+      "text": "Сохранено",
+      "status": "machine"
+    },
     "chat.message.select": {
       "text": "Выбрать",
       "status": "machine"
@@ -2712,6 +2812,10 @@
     },
     "chat.message.unpin": {
       "text": "Открепить",
+      "status": "machine"
+    },
+    "chat.message.unsave": {
+      "text": "Убрать из сохранённых",
       "status": "machine"
     },
     "chat.message.unsupported": {
@@ -2732,6 +2836,18 @@
     },
     "chat.peer.fallback_name": {
       "text": "Собеседник",
+      "status": "machine"
+    },
+    "chat.pending.call_disabled": {
+      "text": "Будет доступно, когда {name} подключится.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} ещё не ответил. Можно попросить новую ссылку.",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} получит ваши сообщения, когда приложение снова будет в сети.",
       "status": "machine"
     },
     "chat.photo.load_failed": {
@@ -3122,6 +3238,10 @@
       "text": "Переслано {done} из {total}.",
       "status": "machine"
     },
+    "chat.select.save": {
+      "text": "Сохранить",
+      "status": "machine"
+    },
     "chat.select.state_not_selected": {
       "text": "Не выбрано",
       "status": "machine"
@@ -3440,14 +3560,6 @@
     },
     "chats.empty.title": {
       "text": "Разговоров пока нет",
-      "status": "machine"
-    },
-    "chats.lookup.action": {
-      "text": "Найти {name}",
-      "status": "machine"
-    },
-    "chats.lookup.nothing": {
-      "text": "По запросу {name} ничего не найдено.",
       "status": "machine"
     },
     "chats.lookup.unreachable": {
@@ -3854,40 +3966,20 @@
       "text": "Этот запрос пришёл из старой версии Lakko. Попросите человека обновить приложение и отправить запрос снова.",
       "status": "machine"
     },
-    "contacts.add.by_username": {
-      "text": "Добавить по имени пользователя",
-      "status": "machine"
-    },
-    "contacts.add.intro_label": {
-      "text": "Сообщение (необязательно)",
-      "status": "machine"
-    },
-    "contacts.add.intro_placeholder": {
-      "text": "Привет, это Алиса с конференции.",
-      "status": "machine"
-    },
-    "contacts.add.send": {
-      "text": "Отправить",
-      "status": "machine"
-    },
     "contacts.add.share_invite": {
       "text": "Поделиться ссылкой-приглашением",
       "status": "machine"
     },
-    "contacts.add.subtitle": {
-      "text": "Запросы защищены сквозным шифрованием. Серверы Lakko не могут их прочитать.",
+    "contacts.add_back.action": {
+      "text": "Добавить",
       "status": "machine"
     },
-    "contacts.add.title": {
-      "text": "Добавить контакт",
+    "contacts.add_back.control": {
+      "text": "Добавить в контакты",
       "status": "machine"
     },
-    "contacts.add.username_label": {
-      "text": "Имя пользователя",
-      "status": "machine"
-    },
-    "contacts.add.username_placeholder": {
-      "text": "@alice",
+    "contacts.add_back.sub": {
+      "text": "Возвращает {name} в список контактов этого аккаунта.",
       "status": "machine"
     },
     "contacts.detail.actions": {
@@ -3958,12 +4050,8 @@
       "text": "Добавить",
       "status": "machine"
     },
-    "contacts.list.empty.action": {
-      "text": "Добавить контакт",
-      "status": "machine"
-    },
     "contacts.list.empty.body": {
-      "text": "Добавьте кого-нибудь по имени пользователя или поделитесь ссылкой-приглашением.",
+      "text": "Найдите человека по имени или имени пользователя в поле поиска выше или поделитесь ссылкой-приглашением.",
       "status": "machine"
     },
     "contacts.list.empty.title": {
@@ -4110,8 +4198,12 @@
       "text": "Сверить код безопасности",
       "status": "machine"
     },
-    "contacts.send.done": {
-      "text": "Запрос отправлен: {name}. Он будет в разделе «Отправленные», пока его не примут.",
+    "contacts.scan_qr": {
+      "text": "Сканировать QR-код",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "Это не ссылка Lakko. Попробуйте другой код.",
       "status": "machine"
     },
     "desktop.quit_call.confirm": {
@@ -5938,6 +6030,74 @@
       "text": "Эта ссылка больше не действует. Попросите человека прислать новую.",
       "status": "machine"
     },
+    "invite.contact.page.about": {
+      "text": "Lakko — мессенджер, в котором каждый чат и звонок защищены сквозным шифрованием.",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "Добавить",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "Не удалось добавить {name}. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} уже есть в ваших контактах",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "Не удалось связаться с {name}. Проверьте подключение и попробуйте снова.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Создать аккаунт",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Попросите отправителя прислать новую.",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Ссылка-приглашение больше не работает",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "Готово",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "У меня уже есть аккаунт",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "Не сейчас",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "Открыть чат",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "Отправьте её человеку, которого хотите добавить.",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "Это ваша собственная ссылка-приглашение",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} приглашает вас в Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "Добавить {name} в контакты?",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "этого человека",
+      "status": "machine"
+    },
     "invite.contact.page_title": {
       "text": "Приглашение",
       "status": "machine"
@@ -6090,8 +6250,44 @@
       "text": "Создана {date}",
       "status": "machine"
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "Срок",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "Число людей",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "Удалить ссылку",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Тот, у кого она уже есть, больше не сможет ею воспользоваться.",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "Удалить эту ссылку?",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "Ссылка удалена.",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "Любой, кто откроет одну из ваших ссылок, может отправить вам запрос в контакты, пока ссылка не истечёт или не будет исчерпана.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "Изменить ссылку",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "При сохранении появится новая ссылка. Старая перестанет работать.",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "Условия ссылки",
       "status": "machine"
     },
     "invite.links.empty": {
@@ -6100,6 +6296,22 @@
     },
     "invite.links.error.copy": {
       "text": "Не удалось скопировать ссылку.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "Укажите срок от 1 часа до 365 дней.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "Укажите число людей от 1 до {max}.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "Не удалось удалить ссылку. Проверьте подключение и попробуйте снова.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "Не удалось сохранить ссылку. Проверьте подключение и попробуйте снова.",
       "status": "machine"
     },
     "invite.links.error.load": {
@@ -6138,20 +6350,16 @@
       "text": "Истекает через {count} мин",
       "status": "machine"
     },
+    "invite.links.expires_option_custom": {
+      "text": "Свой",
+      "status": "machine"
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, one {Через # день} few {Через # дня} many {Через # дней} other {Через # дня}}",
       "status": "machine"
     },
     "invite.links.expires_option_never": {
       "text": "Никогда",
-      "status": "machine"
-    },
-    "invite.links.for_new_user": {
-      "text": "Для новичка в Lakko",
-      "status": "machine"
-    },
-    "invite.links.inline_note": {
-      "text": "Lakko не удалось сократить эту ссылку, поэтому она длинная. Она работает так же, но её нельзя отозвать.",
       "status": "machine"
     },
     "invite.links.label_field": {
@@ -6182,8 +6390,8 @@
       "text": "Новая",
       "status": "machine"
     },
-    "invite.links.referral_option": {
-      "text": "Для того, у кого ещё нет аккаунта Lakko",
+    "invite.links.qr_hint": {
+      "text": "Кто отсканирует этот код, сможет отправить вам запрос в контакты.",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -6192,6 +6400,18 @@
     },
     "invite.links.revoking": {
       "text": "Отзыв ссылки...",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "Показать QR-код",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "Дни",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "Часы",
       "status": "machine"
     },
     "invite.links.unlimited_uses": {
@@ -6208,6 +6428,10 @@
     },
     "invite.links.uses_left": {
       "text": "{count, plural, one {Осталось # использование} few {Осталось # использования} many {Осталось # использований} other {Осталось # использования}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "Свой",
       "status": "machine"
     },
     "invite.links.uses_option_one": {
@@ -6428,6 +6652,126 @@
     },
     "notification.message.new": {
       "text": "Новое сообщение",
+      "status": "machine"
+    },
+    "profile.avatar.change": {
+      "text": "Изменить фото",
+      "status": "machine"
+    },
+    "profile.avatar.menu.camera": {
+      "text": "Камера",
+      "status": "machine"
+    },
+    "profile.avatar.menu.library": {
+      "text": "Фото или видео",
+      "status": "machine"
+    },
+    "profile.avatar.menu.remove": {
+      "text": "Удалить фото",
+      "status": "machine"
+    },
+    "profile.camera.close": {
+      "text": "Закрыть",
+      "status": "machine"
+    },
+    "profile.camera.denied": {
+      "text": "Lakko не может использовать камеру. Разрешите доступ в настройках.",
+      "status": "machine"
+    },
+    "profile.camera.photo": {
+      "text": "Фото",
+      "status": "machine"
+    },
+    "profile.camera.shutter": {
+      "text": "Снять",
+      "status": "machine"
+    },
+    "profile.camera.switch": {
+      "text": "Сменить камеру",
+      "status": "machine"
+    },
+    "profile.camera.video": {
+      "text": "Видео",
+      "status": "machine"
+    },
+    "profile.crop.cancel": {
+      "text": "Отмена",
+      "status": "machine"
+    },
+    "profile.crop.start": {
+      "text": "Начало",
+      "status": "machine"
+    },
+    "profile.crop.title": {
+      "text": "Выберите область",
+      "status": "machine"
+    },
+    "profile.crop.use": {
+      "text": "Готово",
+      "status": "machine"
+    },
+    "profile.crop.zoom": {
+      "text": "Масштаб",
+      "status": "machine"
+    },
+    "profile.name.add": {
+      "text": "Добавьте имя",
+      "status": "machine"
+    },
+    "profile.name.change": {
+      "text": "Изменить имя",
+      "status": "machine"
+    },
+    "profile.save.done": {
+      "text": "Сохранено. Ваши контакты увидят изменения.",
+      "status": "machine"
+    },
+    "profile.save.error.generic": {
+      "text": "Не удалось сохранить. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "profile.save.error.upload": {
+      "text": "Не удалось загрузить фото. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "profile.save.saving": {
+      "text": "Сохранение…",
+      "status": "machine"
+    },
+    "profile.unsaved.body": {
+      "text": "Если не сохранить, изменения профиля будут потеряны.",
+      "status": "machine"
+    },
+    "profile.unsaved.cancel": {
+      "text": "Отмена",
+      "status": "machine"
+    },
+    "profile.unsaved.discard": {
+      "text": "Не сохранять",
+      "status": "machine"
+    },
+    "profile.unsaved.save": {
+      "text": "Сохранить",
+      "status": "machine"
+    },
+    "profile.unsaved.title": {
+      "text": "Сохранить изменения?",
+      "status": "machine"
+    },
+    "profile.username.change": {
+      "text": "Изменить имя пользователя",
+      "status": "machine"
+    },
+    "profile.username.none": {
+      "text": "Нет имени пользователя",
+      "status": "machine"
+    },
+    "profile.username.taken": {
+      "text": "{username} уже занято. Выберите другое имя пользователя.",
+      "status": "machine"
+    },
+    "profile.video.unusable": {
+      "text": "Это видео нельзя использовать для профиля. Попробуйте короткое MP4 или фото.",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7338,12 +7682,40 @@
       "text": "Восстановите ключи аккаунта",
       "status": "machine"
     },
-    "search.people.add_contact": {
-      "text": "Добавить в контакты",
+    "saved.empty": {
+      "text": "Здесь появятся сохранённые сообщения.",
       "status": "machine"
     },
-    "search.people.add_contact_title": {
-      "text": "Добавить: {name}",
+    "saved.kind.file": {
+      "text": "Файл: {name}",
+      "status": "machine"
+    },
+    "saved.kind.gif": {
+      "text": "GIF",
+      "status": "machine"
+    },
+    "saved.kind.photo": {
+      "text": "Фото",
+      "status": "machine"
+    },
+    "saved.kind.video": {
+      "text": "Видео",
+      "status": "machine"
+    },
+    "saved.kind.video_note": {
+      "text": "Видеосообщение",
+      "status": "machine"
+    },
+    "saved.kind.voice": {
+      "text": "Голосовое сообщение",
+      "status": "machine"
+    },
+    "saved.title": {
+      "text": "Сохранённые",
+      "status": "machine"
+    },
+    "search.people.add_contact": {
+      "text": "Добавить в контакты",
       "status": "machine"
     },
     "search.people.channel_result": {
@@ -7366,16 +7738,8 @@
       "text": "Не удалось отправить запрос. Возможно, этот человек изменил, кто может его найти.",
       "status": "machine"
     },
-    "search.people.search": {
-      "text": "Найти людей",
-      "status": "machine"
-    },
     "search.people.searching_a11y": {
       "text": "Идёт поиск",
-      "status": "machine"
-    },
-    "search.people.send_request": {
-      "text": "Отправить запрос",
       "status": "machine"
     },
     "settings.about.lede_web": {
@@ -7702,14 +8066,6 @@
       "text": "Новое",
       "status": "machine"
     },
-    "settings.devices.remove.body": {
-      "text": "Оно уже вышло из аккаунта. При следующем подключении с него будет удалено всё, что хранил этот аккаунт: чаты, контакты, ключи и фраза восстановления.",
-      "status": "machine"
-    },
-    "settings.devices.remove.confirm": {
-      "text": "Удалить устройство",
-      "status": "machine"
-    },
     "settings.devices.remove.confirm_named": {
       "text": "Удалить: {device}",
       "status": "machine"
@@ -7720,10 +8076,6 @@
     },
     "settings.devices.remove.reason_unused": {
       "text": "Я им больше не пользуюсь",
-      "status": "machine"
-    },
-    "settings.devices.remove.title": {
-      "text": "Удалить: {device}?",
       "status": "machine"
     },
     "settings.devices.remove.working": {
@@ -8022,36 +8374,8 @@
       "text": "Пароль",
       "status": "machine"
     },
-    "settings.profile.error.generic": {
-      "text": "Не удалось сохранить имя. Попробуйте ещё раз.",
-      "status": "machine"
-    },
-    "settings.profile.lede": {
-      "text": "Как вас видят ваши контакты.",
-      "status": "machine"
-    },
-    "settings.profile.name.hint": {
-      "text": "Его видят ваши собеседники. Не обязательно уникальное, не более {count, plural, one {# символа} few {# символов} many {# символов} other {# символа}}.",
-      "status": "machine"
-    },
     "settings.profile.name.label": {
       "text": "Ваше имя",
-      "status": "machine"
-    },
-    "settings.profile.preview.label": {
-      "text": "Как вас видят другие",
-      "status": "machine"
-    },
-    "settings.profile.preview.no_name": {
-      "text": "Пока вы не укажете имя, другие видят отпечаток вашего ключа.",
-      "status": "machine"
-    },
-    "settings.profile.saved": {
-      "text": "Ваше имя обновится у ваших контактов.",
-      "status": "machine"
-    },
-    "settings.profile.username.none": {
-      "text": "Нет",
       "status": "machine"
     },
     "settings.recovery.devices.title": {
@@ -8302,28 +8626,8 @@
       "text": "Имя пользователя: {message}",
       "status": "machine"
     },
-    "username.change.body": {
-      "text": "Вас больше не смогут найти по имени {old}. В течение 30 дней его никто другой не сможет занять.",
-      "status": "machine"
-    },
-    "username.change.next_change": {
-      "text": "После этого сменить имя снова можно будет через 30 дней.",
-      "status": "machine"
-    },
-    "username.change.other_devices": {
-      "text": "Другие ваши устройства узнают новое имя, когда выйдут в сеть.",
-      "status": "machine"
-    },
-    "username.change.save": {
-      "text": "Сменить",
-      "status": "machine"
-    },
     "username.change.title": {
       "text": "Сменить имя пользователя",
-      "status": "machine"
-    },
-    "username.change.too_soon": {
-      "text": "Сменить имя пользователя снова можно будет {date}.",
       "status": "machine"
     },
     "username.claim.body": {

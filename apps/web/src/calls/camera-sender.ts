@@ -98,19 +98,23 @@ export function addCameraSender(
 }
 
 /**
- * Add the camera to `pc` as the main sender when it is turned on mid-call.
- * `addTrack`, not a new transceiver: mid-call it may reuse a video
- * transceiver the SFU already negotiated. `addTrack` takes no encodings, so
- * the layers and the frame-rate preference are asked for afterwards.
+ * Add the camera to `pc` as the main sender when it is turned on mid-call:
+ * on a transceiver of its own, exactly as at the start of a call
+ * ({@link addCameraSender}). Never `addTrack`: mid-call that hands the camera
+ * the first video transceiver whose sender never sent, which is one the SFU
+ * opened to bring this device another person's camera, and the SFU does not
+ * take what arrives on its own downstream line as this person's main
+ * picture. Seen on a local stack 2026-10-23: a web camera turned on after an
+ * Android one reached the others only as its light and middle copies, and an
+ * Android or iOS tile, which asks for a picture once the person's main track
+ * is there, waited for ever.
  */
 export function addCameraSenderMidCall(
   pc: RTCPeerConnection,
   track: MediaStreamTrack,
   stream: MediaStream,
 ): RTCRtpSender {
-  const sender = pc.addTrack(track, stream);
-  void requestCameraLayers(sender);
-  return sender;
+  return addCameraSender(pc, track, stream);
 }
 
 /** The light sender's picture is the camera's scaled down by this, each side. */
@@ -358,7 +362,7 @@ export function addGroupCallSender(
  * Ask an already-added camera sender for temporal layers and for the
  * frame-rate preference. Used where the
  * sender came from `addTrack`, which takes no encodings (the fallback of
- * {@link addCameraSender}, and {@link addCameraSenderMidCall}). Best effort: a
+ * {@link addCameraSender}). Best effort: a
  * browser that refuses keeps one layer, and the media counters log which
  * mode the sender actually uses.
  */

@@ -31,20 +31,20 @@ import me.lakko.app.ds.DsClient
  *
  * Two callbacks of interest:
  *
- *   * [onNewToken] — the FCM token rotated. Re-register with
- *     `push-gw` so the new token replaces the prior row.
- *     Idempotent server-side via the UPSERT in
- *     `services/push-gw/src/registry.rs`. Only while an account is
- *     signed in ([shouldRegisterOnNewToken]): a signed-out device
- *     registers nothing and mints no pseudonym.
+ *   * [onNewToken] — the FCM token rotated. It is stored
+ *     ([PushDeviceTokens]); while an account is signed in, every sealed
+ *     subscription of that account is sent again carrying it
+ *     (ADR-0078: push-gw holds the token only inside those rows). A
+ *     signed-out device only stores it.
  *
  *   * [onMessageReceived] — a wake arrived. The body shape is
  *     defined by
- *     `services/push-gw/src/providers/fcm.rs::WakeBody`:
- *     `{ v: "1", d: <device_hex>, g: <group_hex>?, p: <pointer>? }`
- *     FIRST the wake gate (ADR-0042, amended 2026-09-30,
+ *     `services/push-gw/src/providers/fcm.rs::WakeData`:
+ *     `{ s: <subscription_hex>, g: <group_hex>?, p: <pointer>?, k: "c"? }`
+ *     FIRST the wake gate (ADR-0042, amended 2026-09-30, with ADR-0078,
  *     [wakeAccountFor]): the wake is handled only when a
- *     [PushWakeBinding] exists and `d` is the bound pseudonym; anything
+ *     [PushWakeBinding] exists, `s` is well formed and the bound
+ *     account's route row for `g` holds that subscription id; anything
  *     else posts NO notification. The account it is then handled as is
  *     the bound one, for the decrypt, the mute flag, the caller name and
  *     the tap deep link alike.
@@ -87,29 +87,30 @@ public class LakkoMessagingService : FirebaseMessagingService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    override fun onCreate() {
+        // A push can start this service in a process where no sign-in ran,
+        // so the default Firebase app the SDK delivers through may not exist.
+        PushSubscriber.ensureFirebase(applicationContext)
+        super.onCreate()
+    }
+
     override fun onNewToken(token: String) {
         scope.launch {
             try {
-                // Only the pseudonym registered for the signed-in account is
-                // re-registered; with no binding (signed out) nothing is sent
-                // and no pseudonym is minted.
+                // ADR-0078 — the token is device state, stored here; every
+                // subscription of the signed-in account carries it sealed, so
+                // a CHANGED token while signed in sends them all again. With
+                // no binding (signed out) nothing is sent.
+                val changed = PushDeviceTokens(applicationContext).setFcm(token)
                 val binding = PushWakeBindingStore(applicationContext).load()
-                val pseudonym = DevicePushId.peek(applicationContext)
-                val storedHex = pseudonym?.let { PushClient.pseudonymHex(it) }
-                if (pseudonym == null || !shouldRegisterOnNewToken(binding, storedHex)) {
-                    Log.i(TAG, "FCM token rotated while signed out; not registering")
+                if (!changed || binding == null) {
+                    Log.i(TAG, "FCM token stored; no subscription to re-send")
                     return@launch
                 }
-                Log.i(TAG, "FCM token rotated; re-registering with push-gw")
-                PushClient().use { client ->
-                    client.register(
-                        devicePseudonym = pseudonym,
-                        provider = PushClient.Provider.FCM,
-                        tokenBytes = token.toByteArray(Charsets.UTF_8),
-                    )
-                }
+                Log.i(TAG, "FCM token rotated; re-sending the sealed subscriptions")
+                PushSubscriptions.resubscribeAll(applicationContext, binding.accountIdB64)
             } catch (cause: Throwable) {
-                Log.w(TAG, "onNewToken re-register failed", cause)
+                Log.w(TAG, "onNewToken re-send failed", cause)
             }
         }
     }
@@ -119,18 +120,29 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         // the interface language for the notification words (ADR-0061).
         me.lakko.app.l10n.Localization.init(applicationContext)
         val wake = parseWakeBody(message.data)
-        // ADR-0042, amended 2026-09-30 — the wake gate. A wake with no
-        // binding (no account signed in) or whose `d` is not the bound
-        // pseudonym belongs to no session this device holds: post nothing.
+        // ADR-0042, amended 2026-09-30, with ADR-0078 — the wake gate. A wake
+        // with no binding (no account signed in), no well-formed `s`, or an
+        // `s` the bound account does not hold for the wake's `g` belongs to
+        // no session this device holds: post nothing.
         val binding = try {
             PushWakeBindingStore(applicationContext).load()
         } catch (cause: Throwable) {
             Log.w(TAG, "push wake binding unreadable; dropping wake", cause)
             null
         }
-        val accountIdB64 = wakeAccountFor(wake?.deviceHex, binding)
+        val accountIdB64 = wakeAccountFor(wake?.subscriptionHex, binding)
         if (wake == null || accountIdB64 == null) {
             Log.i(TAG, "wake dropped: not addressed to the signed-in account")
+            return
+        }
+        val held = wake.groupHex == null || try {
+            PushRouteStore(applicationContext).lookup(accountIdB64, wake.groupHex, wake.subscriptionHex) != null
+        } catch (cause: Throwable) {
+            Log.w(TAG, "push route lookup failed; dropping wake", cause)
+            false
+        }
+        if (!held) {
+            Log.i(TAG, "wake dropped: not a subscription the signed-in account holds")
             return
         }
         // ADR-0073 R.5 — a wake for the old segment of a moved one-to-one posts
@@ -233,6 +245,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
                                 groupHex = wake.groupHex,
                                 pointer = wake.pointer,
                                 accountIdB64 = accountIdB64,
+                                subscriptionIdHex = wake.subscriptionHex,
                             ),
                             deps,
                             nowMs = System.currentTimeMillis(),
@@ -321,7 +334,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             // matches the AndroidManifest `android:icon` fallback
             // from 1.15c. When the app ships a real icon pack
             // (post-MVP), swap this to `R.mipmap.ic_launcher`.
-            .setSmallIcon(android.R.drawable.sym_def_app_icon)
+            .setSmallIcon(me.lakko.app.R.drawable.ic_stat_lakko)
             // Real decrypted preview when the background decrypt
             // yielded one; the generic fallback otherwise.
             .setContentTitle(preview?.title ?: "Lakko")
@@ -372,16 +385,17 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         // the `notification` payload, which Google's
         // server-side renderer would auto-display and bypass
         // our `onMessageReceived`). Keys are stringified per
-        // the FCM data-payload contract: `v`, `d`, `g`, `p`.
-        if (data["v"] != "1") return null
-        val device = data["d"] ?: return null
+        // the FCM data-payload contract: `s`, `g`, `p`, `k`. (A `v` key was
+        // required here before ADR-0078 although the FCM provider never sent
+        // one, so no FCM wake parsed; the check is gone.)
+        val subscription = data["s"] ?: return null
         val group = data["g"]
         val pointer = data["p"]?.toLongOrNull()
-        return WakeBody(deviceHex = device, groupHex = group, pointer = pointer)
+        return WakeBody(subscriptionHex = subscription, groupHex = group, pointer = pointer)
     }
 
     private data class WakeBody(
-        val deviceHex: String,
+        val subscriptionHex: String,
         val groupHex: String?,
         val pointer: Long?,
     )

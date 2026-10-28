@@ -21,10 +21,11 @@ import type { LayerDisplayCounters, TileFrameCounts } from "./layer-display";
 
 /**
  * Which of a remote camera's tracks a video receiver carries: the `main` one,
- * the `middle` one or the `light` companion (`light-stream.ts`). `-` when the
- * browser's report does not say which track the receiver belongs to.
+ * the `middle` one or the `light` companion (`light-stream.ts`), or a shared
+ * `screen` (ADR-0083). `-` when the browser's report does not say which track
+ * the receiver belongs to.
  */
-export type ReceiverLayer = "main" | "middle" | "light" | "-";
+export type ReceiverLayer = "main" | "middle" | "light" | "screen" | "-";
 
 /** One remote stream's cumulative receiver counters. */
 export interface InboundCounters {
@@ -51,6 +52,9 @@ export interface InboundCounters {
   readonly jitterBufferMinimumDelay: number;
   readonly concealedSamples: number;
   readonly totalSamplesReceived: number;
+  /** The codec the receiver decodes, e.g. `VP8`; absent or `null` when the
+   *  report does not say. */
+  readonly codec?: string | null;
 }
 
 /**
@@ -82,6 +86,20 @@ export interface MediaReading {
   /** Every camera sender that reports: the main one first, then the middle
    *  one, then the light one. */
   readonly outboundVideoSenders: readonly OutboundVideo[];
+  /** This device's screen-share picture sender (ADR-0083), or `null` when
+   *  it shares nothing. Never one of the camera senders. */
+  readonly outboundScreen?: OutboundScreen | null;
+}
+
+/** What this device's screen-share picture sender reports. */
+export interface OutboundScreen {
+  readonly codec: string | null;
+  readonly qualityLimitationReason: string | null;
+  readonly frameWidth: number | null;
+  readonly frameHeight: number | null;
+  readonly framesPerSecond: number | null;
+  readonly framesEncoded: number;
+  readonly bytesSent: number;
 }
 
 /** The parts of an `RTCStatsReport` entry this module reads. */
@@ -112,7 +130,10 @@ function strOrNull(entry: StatsEntry, key: string): string | null {
  * `outbound-rtp` entry whose id is among them is the `light` sender, any
  * other the `main` one. `middleTrackIds` and `middleOutboundIds` are the same
  * two sets for the middle track and the middle sender (ADR-0070 step 5); an
- * id in both a light and a middle set is read as light.
+ * id in both a light and a middle set is read as light. `screenTrackIds` and
+ * `screenOutboundIds` are the same two sets for a shared screen (ADR-0083):
+ * such a receiver is `screen`, and such a sender is reported apart from the
+ * camera senders.
  */
 export function readMedia(
   entries: Iterable<StatsEntry>,
@@ -120,10 +141,15 @@ export function readMedia(
   lightOutboundIds: ReadonlySet<string> = new Set(),
   middleTrackIds: ReadonlySet<string> = new Set(),
   middleOutboundIds: ReadonlySet<string> = new Set(),
+  screenTrackIds: ReadonlySet<string> = new Set(),
+  screenOutboundIds: ReadonlySet<string> = new Set(),
 ): MediaReading {
   const inbound = new Map<string, InboundCounters>();
   const bySender: Record<CameraSenderName, OutboundVideo[]> = { main: [], middle: [], light: [] };
-  for (const e of entries) {
+  let outboundScreen: OutboundScreen | null = null;
+  const all = [...entries];
+  const codecs = codecNames(all);
+  for (const e of all) {
     const type = e["type"];
     const kind = e["kind"];
     if (kind !== "audio" && kind !== "video") continue;
@@ -138,11 +164,13 @@ export function readMedia(
             ? null
             : trackId === null
               ? "-"
-              : lightTrackIds.has(trackId)
-                ? "light"
-                : middleTrackIds.has(trackId)
-                  ? "middle"
-                  : "main",
+              : screenTrackIds.has(trackId)
+                ? "screen"
+                : lightTrackIds.has(trackId)
+                  ? "light"
+                  : middleTrackIds.has(trackId)
+                    ? "middle"
+                    : "main",
         packetsReceived: num(e, "packetsReceived"),
         packetsLost: num(e, "packetsLost"),
         nackCount: num(e, "nackCount"),
@@ -157,10 +185,23 @@ export function readMedia(
         jitterBufferMinimumDelay: num(e, "jitterBufferMinimumDelay"),
         concealedSamples: num(e, "concealedSamples"),
         totalSamplesReceived: num(e, "totalSamplesReceived"),
+        codec: codecOf(e, codecs),
       });
     } else if (type === "outbound-rtp" && kind === "video") {
-      // Three camera senders at most, one entry each.
       const id = e["id"];
+      if (typeof id === "string" && screenOutboundIds.has(id)) {
+        outboundScreen = {
+          codec: codecOf(e, codecs),
+          qualityLimitationReason: strOrNull(e, "qualityLimitationReason"),
+          frameWidth: numOrNull(e, "frameWidth"),
+          frameHeight: numOrNull(e, "frameHeight"),
+          framesPerSecond: numOrNull(e, "framesPerSecond"),
+          framesEncoded: num(e, "framesEncoded"),
+          bytesSent: num(e, "bytesSent"),
+        };
+        continue;
+      }
+      // Three camera senders at most, one entry each.
       const sender: CameraSenderName =
         typeof id !== "string"
           ? "main"
@@ -184,7 +225,35 @@ export function readMedia(
     inbound,
     outboundVideo: bySender.main[0] ?? null,
     outboundVideoSenders: [...bySender.main, ...bySender.middle, ...bySender.light],
+    outboundScreen,
   };
+}
+
+/** The `codec` entries of a report: stats id -> codec name (`VP8`). */
+function codecNames(entries: readonly StatsEntry[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const e of entries) {
+    const id = e["id"];
+    const mime = e["mimeType"];
+    if (e["type"] === "codec" && typeof id === "string" && typeof mime === "string") {
+      out.set(id, mime.replace(/^(audio|video)\//i, ""));
+    }
+  }
+  return out;
+}
+
+function codecOf(e: StatsEntry, codecs: ReadonlyMap<string, string>): string | null {
+  const id = e["codecId"];
+  return typeof id === "string" ? (codecs.get(id) ?? null) : null;
+}
+
+/** This device's screen sender, as one line (ASCII, no names). */
+export function describeScreenSender(label: string, s: OutboundScreen): string {
+  const size = s.frameWidth !== null && s.frameHeight !== null ? `${s.frameWidth}x${s.frameHeight}` : "-";
+  return (
+    `${label} screen send codec=${s.codec ?? "-"} size=${size} fps=${fixed(s.framesPerSecond, 0)}` +
+    ` encoded=${s.framesEncoded} bytes=${s.bytesSent} limit=${s.qualityLimitationReason ?? "-"}`
+  );
 }
 
 /** How one stream changed between two readings. */
@@ -213,6 +282,8 @@ export interface StreamDelta {
   /** Share of received audio samples that were concealed, 0..1; `null` for
    *  video or when no samples arrived. */
   readonly concealedShare: number | null;
+  /** The codec decoded, where the report says. */
+  readonly codec?: string | null;
 }
 
 /**
@@ -225,7 +296,7 @@ export function deltaOf(before: MediaReading | null, now: MediaReading): Map<str
   for (const [id, cur] of now.inbound) {
     const prev = before?.inbound.get(id);
     const base = prev !== undefined && prev.packetsReceived <= cur.packetsReceived ? prev : null;
-    const d = (key: keyof Omit<InboundCounters, "kind" | "layer">): number =>
+    const d = (key: keyof Omit<InboundCounters, "kind" | "layer" | "codec">): number =>
       Math.max(0, cur[key] - (base === null ? 0 : base[key]));
     const emitted = d("jitterBufferEmittedCount");
     const samples = d("totalSamplesReceived");
@@ -244,6 +315,7 @@ export function deltaOf(before: MediaReading | null, now: MediaReading): Map<str
       jitterTargetMs: perEmitted(d("jitterBufferTargetDelay"), emitted),
       jitterNetworkMs: perEmitted(d("jitterBufferMinimumDelay"), emitted),
       concealedShare: cur.kind === "audio" && samples > 0 ? d("concealedSamples") / samples : null,
+      codec: cur.codec ?? null,
     });
   }
   return out;
@@ -273,11 +345,41 @@ export function describeDeltas(label: string, deltas: ReadonlyMap<string, Stream
     lines.push(
       d.kind === "video"
         ? `${common} pli=${d.keyframeRequests} freezes=${d.freezes} freeze_s=${fixed(d.freezeSeconds, 2)}` +
-            ` decoded=${d.framesDecoded} dropped=${d.framesDropped} layer=${d.layer ?? "-"}`
+            ` decoded=${d.framesDecoded} dropped=${d.framesDropped} layer=${d.layer ?? "-"}` +
+            (d.codec !== undefined && d.codec !== null ? ` codec=${d.codec}` : "")
         : `${common} concealed=${fixed(d.concealedShare === null ? null : d.concealedShare * 100, 1)}%`,
     );
   }
   return lines;
+}
+
+/**
+ * The receivers' counters of a one-to-one call, as lines: one per remote
+ * stream per interval, and once more as a total when the call ends. The group
+ * call writes the same lines inline, beside its sender and tile lines; a
+ * one-to-one call has no layers, so its video receiver reads as `main` (`-`
+ * where the report does not name the receiver's track).
+ */
+export class InboundCounterLog {
+  private last: MediaReading | null = null;
+
+  /** The change since the previous reading (from zero on the first), read
+   *  from one statistics report's entries. */
+  interval(entries: Iterable<StatsEntry>): string[] {
+    const reading = readMedia(entries);
+    const lines = describeDeltas("call media interval", deltaOf(this.last, reading));
+    this.last = reading;
+    return lines;
+  }
+
+  /** The whole call, from the last reading; empty when nothing was read.
+   *  Forgets the readings, so a second call returns nothing. */
+  total(): string[] {
+    const last = this.last;
+    this.last = null;
+    // Counted from zero: the counters are cumulative from the stream's start.
+    return last === null ? [] : describeDeltas("call media total", deltaOf(null, last));
+  }
 }
 
 /** The picture of a peer this device asks the SFU for: the name it has in
@@ -480,6 +582,7 @@ export function readSender(
   entries: Iterable<StatsEntry>,
   lightOutboundIds: ReadonlySet<string> = new Set(),
   middleOutboundIds: ReadonlySet<string> = new Set(),
+  screenOutboundIds: ReadonlySet<string> = new Set(),
 ): SenderReading | null {
   const outs: StatsEntry[] = [];
   const remotes: StatsEntry[] = [];
@@ -499,7 +602,8 @@ export function readSender(
     }
   }
   const isCopy = (e: StatsEntry): boolean =>
-    typeof e["id"] === "string" && (lightOutboundIds.has(e["id"]) || middleOutboundIds.has(e["id"]));
+    typeof e["id"] === "string" &&
+    (lightOutboundIds.has(e["id"]) || middleOutboundIds.has(e["id"]) || screenOutboundIds.has(e["id"]));
   const first = outs.find((e) => !isCopy(e)) ?? outs[0];
   if (first === undefined) return null;
   const sum = (key: string): number => outs.reduce((acc, e) => acc + num(e, key), 0);

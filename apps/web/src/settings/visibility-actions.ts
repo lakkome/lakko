@@ -13,6 +13,7 @@
  */
 import type { ScopeId, VisibilitySetting } from "../../wasm/lakko_ffi_wasm";
 import { updateVisibility, visibilitySetting } from "../reach/visibility-store";
+import { reachSession } from "../reach/reach-service";
 import { loadWasm, type Wasm } from "../wasm";
 import {
   FORM_ALL,
@@ -35,7 +36,18 @@ async function apply(
   transition: (wasm: Wasm, current: VisibilitySetting) => VisibilitySetting,
 ): Promise<VisibilitySetting | null> {
   const wasm = await loadWasm();
-  return updateVisibility((s) => transition(wasm, s));
+  const updated = await updateVisibility((s) => transition(wasm, s));
+  // ADR-0078 section 9, decision 4: a change of the setting rotates the
+  // account's one `group` and `channel` key, so a group or channel it no
+  // longer allows stops holding a working key; the profile with the new
+  // grants then goes to every group. Only the device the change is made on
+  // rotates; the others adopt its counters.
+  if (updated !== null) {
+    await reachSession()
+      ?.rotateOnSettingChange()
+      .catch(() => undefined);
+  }
+  return updated;
 }
 
 export function chooseMode(mode: ModeName): Promise<VisibilitySetting | null> {

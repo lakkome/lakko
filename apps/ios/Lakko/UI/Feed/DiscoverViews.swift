@@ -221,13 +221,16 @@ struct DiscoverCardView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: LakkoRadius.card).fill(Color.lakkoSurface))
         .overlay(RoundedRectangle(cornerRadius: LakkoRadius.card).strokeBorder(Color.lakkoBorder))
-        .contextMenu {
-            if model.relation(card.channelIdHex) == .none {
-                Button(l10n.t("discover.card.not_interested")) { model.notInterested(card.channelIdHex) }
-                if let topic = card.topic {
-                    Button(l10n.t("discover.card.hide_topic")) { model.hideTopic(topic) }
-                }
+        // Lakko's own long-press menu, never the system context menu.
+        .lakkoLongPressMenu {
+            guard model.relation(card.channelIdHex) == .none else { return [] }
+            var items: [LakkoMenuItem] = [
+                .action(l10n.t("discover.card.not_interested")) { model.notInterested(card.channelIdHex) },
+            ]
+            if let topic = card.topic {
+                items.append(.action(l10n.t("discover.card.hide_topic")) { model.hideTopic(topic) })
             }
+            return items
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(l10n.t("discover.card.a11y", texts: ["name": card.name]))
@@ -270,11 +273,11 @@ private struct PickTopicsCard: View {
                 .foregroundStyle(Color.lakkoTextMuted)
                 .fixedSize(horizontal: false, vertical: true)
             FlowChips(items: model.topics.map { (Int($0.id), DiscoverTopics.name(Int($0.id))) }, chosen: $chosen)
-            Picker(l10n.t("discover.language"), selection: $language) {
-                ForEach(DiscoverLanguages.options(language), id: \.self) { code in
-                    Text(DiscoverLanguages.label(code)).tag(code)
-                }
-            }
+            LakkoPicker(
+                l10n.t("discover.language"), selection: $language,
+                options: DiscoverLanguages.options(language).map {
+                    LakkoPickerOption(value: $0, label: DiscoverLanguages.label($0))
+                })
             HStack {
                 Spacer()
                 Button(l10n.t(first ? "common.not_now" : "common.cancel")) {

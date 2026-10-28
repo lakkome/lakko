@@ -5,6 +5,14 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0033: Call-admission anti-spam throttle for guest-account link joins
 
+- **Superseded by [ADR-0078](0078-servers-cannot-link-accounts.md) section 2
+  (built 2026-10-16):** `POST /call/jwt` takes no session, so auth no longer
+  sees the account at admission. Migration `0035` drops
+  `call_admission_events` and `throttled_calls` and `throttle.rs` is deleted;
+  the fresh-account signal moved to `call-join` token issuance (a smaller
+  daily quota for an account younger than a day) and admissions are capped
+  per room. The end-call response to a burst of new accounts is gone (cost
+  accepted in ADR-0078). The record below describes the throttle as it was.
 - **Status:** Accepted (Variant A — owner-suspension deferred behind a
   hard-to-forge signal; end-call + throttle is the automatic response).
   **Implemented** — this ADR carried no implementation record until the

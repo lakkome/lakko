@@ -43,6 +43,7 @@
  */
 
 import type { VerificationState } from "./resolver";
+import { avatarFromWasm, type AvatarData, type WasmProfileAvatarLike } from "./avatar-model";
 
 /** One stored profile. */
 export interface StoredProfile {
@@ -54,13 +55,17 @@ export interface StoredProfile {
   readonly updatedAtMs: bigint;
   /** The CLAIMED 16-byte auth account id as 32 lower-case hex characters
    *  (the `AcceptedContact.accountIdHex` shape), or `null` when the envelope
-   *  carried none (ADR-0048 v2). What the call roster derives the ADR-0021
-   *  peer tag from; never an identity on its own — the signature key is. */
+   *  carried none (ADR-0048 v2). Never an identity on its own — the
+   *  signature key is. (A call roster no longer reads it: since ADR-0078
+   *  section 2 a peer is named by its own signed announcement.) */
   readonly accountIdHex: string | null;
   /** ADR-0060 — the username certificate the profile carried (standard
    *  base64), what `verifyUsernameBinding` checks the claimed username
    *  against; absent or `null` when none. Public (discovery signed it). */
   readonly usernameCertificateB64?: string | null;
+  /** ADR-0084 — the profile photo references, absent or `null` for none.
+   *  Carries blob keys (SECRET); persisted only in the encrypted row. */
+  readonly avatar?: AvatarData | null;
 }
 
 /** A decoded profile as the core hands it over (the wasm `Profile` getters). */
@@ -72,22 +77,46 @@ export interface IncomingProfile {
   readonly accountId?: Uint8Array | undefined | null;
   /** ADR-0060 — the username certificate, or absent. */
   readonly usernameCertificate?: Uint8Array | undefined | null;
+  /** ADR-0084 — the photo, already copied out of the wasm handles
+   *  (`AvatarData`), or the wasm `ProfileAvatar` itself, or absent. */
+  readonly avatar?: AvatarData | WasmProfileAvatarLike | undefined | null;
+}
+
+function isAvatarData(a: unknown): a is AvatarData {
+  return typeof a === "object" && a !== null && typeof (a as { still?: { blobIdB64?: unknown } }).still?.blobIdB64 === "string";
+}
+
+/** The photo of an incoming profile as plain data. */
+export function incomingAvatar(p: IncomingProfile): AvatarData | null {
+  const a = p.avatar;
+  if (a === undefined || a === null) return null;
+  return isAvatarData(a) ? a : avatarFromWasm(a);
 }
 
 /** Length of an auth account id, in bytes. */
 export const ACCOUNT_ID_BYTES = 16;
 
-/** A not-newer re-send that carries an account id the held row lacks: the
- *  held row with that id filled in, when the two are the same profile (same
- *  stamp); `null` when nothing is to be learned. */
+/** A not-newer re-send that carries an account id or a username
+ *  certificate the held row lacks: the held row with those filled in, when
+ *  the two are the same profile (same stamp); `null` when nothing is to be
+ *  learned. */
 export function mergeAccountId(
   held: StoredProfile | undefined,
   incoming: StoredProfile,
 ): StoredProfile | null {
   if (held === undefined) return null;
-  if (held.accountIdHex !== null || incoming.accountIdHex === null) return null;
   if (held.updatedAtMs !== incoming.updatedAtMs) return null;
-  return { ...held, accountIdHex: incoming.accountIdHex };
+  const learnId = held.accountIdHex === null && incoming.accountIdHex !== null;
+  const heldCert = held.usernameCertificateB64 ?? null;
+  const incomingCert = incoming.usernameCertificateB64 ?? null;
+  // Only for the username the held row claims: a certificate binds one name.
+  const learnCert = heldCert === null && incomingCert !== null && incoming.username === held.username;
+  if (!learnId && !learnCert) return null;
+  return {
+    ...held,
+    accountIdHex: learnId ? incoming.accountIdHex : held.accountIdHex,
+    usernameCertificateB64: learnCert ? incomingCert : heldCert,
+  };
 }
 
 /** 32 lower-case hex characters — the only shape `accountIdHex` ever holds. */
@@ -160,7 +189,14 @@ function toStored(p: IncomingProfile): StoredProfile {
       p.usernameCertificate === undefined || p.usernameCertificate === null
         ? null
         : bytesToB64(p.usernameCertificate),
+    ...avatarField(incomingAvatar(p)),
   };
+}
+
+/** The `avatar` field of a stored profile: absent for no photo, so a row
+ *  without one has the shape it always had. */
+export function avatarField(a: AvatarData | null): { readonly avatar?: AvatarData } {
+  return a === null ? {} : { avatar: a };
 }
 
 function bytesToB64(bytes: Uint8Array): string {
@@ -247,15 +283,38 @@ export class ProfileStore {
       // never name a person whose profile predates the field.
       const learned = mergeAccountId(held, incoming);
       if (learned === null) return false;
+      this.forgetVerificationIfCertificateChanged(senderKeyB64, held, learned);
       this.profiles.set(senderKeyB64, learned);
       this.notify();
       this.persist(accountId);
       return true;
     }
+    this.forgetVerificationIfCertificateChanged(senderKeyB64, held, incoming);
     this.profiles.set(senderKeyB64, incoming);
     this.notify();
     this.persist(accountId);
     return true;
+  }
+
+  /** A verdict reached on a row without the certificate (or with another one)
+   *  says nothing about the row that has it: drop it, so the claim is checked
+   *  again. A profile that arrived without a certificate was cached as a
+   *  mismatch for a day, and its certificate, arriving later, never cleared
+   *  it. */
+  private forgetVerificationIfCertificateChanged(
+    senderKeyB64: string,
+    held: StoredProfile | undefined,
+    next: StoredProfile,
+  ): void {
+    const before = held?.usernameCertificateB64 ?? null;
+    const after = next.usernameCertificateB64 ?? null;
+    if (before === after || next.username === null) return;
+    this.verifications.delete(verificationKey(senderKeyB64, next.username));
+  }
+
+  /** The photo held for a key, or `null`. */
+  avatarOf(keyB64: string): AvatarData | null {
+    return this.profiles.get(keyB64)?.avatar ?? null;
   }
 
   /** The profile held for a key, or `undefined`. */

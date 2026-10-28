@@ -65,7 +65,7 @@ use lakko_contacts::incoming_envelope::{
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
     decode_and_verify as rust_invite_decode, open_link as rust_invite_open_link,
-    seal_link as rust_invite_seal_link, sign_owner_list as rust_sign_owner_list,
+    revocation_public_key as rust_revocation_public_key, seal_link as rust_invite_seal_link,
     sign_revocation as rust_sign_revocation, BLOB_ID_B64URL_LEN, BLOB_ID_LEN,
 };
 use lakko_contacts::link_seal::{
@@ -172,8 +172,8 @@ fn invite_link_error(e: ContactError) -> JsValue {
 }
 
 /// What every invite compose returns (`/i/`, `/c/`, `/g/`): the sealed blob
-/// to upload (or base64url-encode into the inline `/<k>/<sealed>#<secret>`
-/// link), the fresh 12-byte link secret for the URL fragment only, and the
+/// to upload to the ledger (no inline form since 2026-10-19), the fresh
+/// 12-byte link secret for the URL fragment only, and the
 /// issuer's 32-byte Ed25519 key the upload carries in clear for the revoke.
 #[wasm_bindgen(js_name = InviteLinkMint)]
 pub struct WasmInviteLinkMint {
@@ -291,6 +291,7 @@ fn prepare_profile(
     account_id: Option<Vec<u8>>,
     username_certificate: Option<Vec<u8>>,
     grants: Option<Vec<ReachGrant>>,
+    avatar: Option<ProfileAvatar>,
 ) -> Result<RustProfile, JsValue> {
     let account_id = match account_id {
         None => None,
@@ -324,7 +325,155 @@ fn prepare_profile(
             .iter()
             .map(|g| g.rust().clone())
             .collect(),
+        avatar: avatar.map(|a| a.inner),
     })
+}
+
+/// A reference to one encrypted avatar blob (ADR-0084): what
+/// `encryptAttachment` returned for it, plus its plaintext size and side.
+#[wasm_bindgen]
+#[derive(Clone, PartialEq, Eq)]
+pub struct AvatarRef {
+    inner: lakko_contacts::profile::AvatarRef,
+}
+
+impl core::fmt::Debug for AvatarRef {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+
+fn avatar_array<const N: usize>(field: &str, bytes: &[u8]) -> Result<[u8; N], JsValue> {
+    <[u8; N]>::try_from(bytes).map_err(|_| {
+        JsValue::from_str(&format!(
+            "profile avatar {field} must be {N} bytes, got {}",
+            bytes.len()
+        ))
+    })
+}
+
+#[wasm_bindgen]
+impl AvatarRef {
+    /// Build a reference: 32-byte blob id, 32-byte key (SECRET), 12-byte
+    /// nonce, plaintext size, and the side in pixels (the media is square).
+    ///
+    /// # Errors
+    ///
+    /// Throws when a byte field has the wrong length.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        blob_id: &[u8],
+        key: &[u8],
+        nonce: &[u8],
+        size: u32,
+        side_px: u16,
+    ) -> Result<AvatarRef, JsValue> {
+        Ok(Self {
+            inner: lakko_contacts::profile::AvatarRef {
+                blob_id: avatar_array::<32>("blob id", blob_id)?,
+                key: avatar_array::<32>("key", key)?,
+                nonce: avatar_array::<12>("nonce", nonce)?,
+                size,
+                width: side_px,
+                height: side_px,
+            },
+        })
+    }
+
+    /// The 32-byte storage address (`SHA-256` of the ciphertext).
+    #[wasm_bindgen(getter, js_name = blobId)]
+    pub fn blob_id(&self) -> Vec<u8> {
+        self.inner.blob_id.to_vec()
+    }
+
+    /// The 32-byte key. SECRET.
+    #[wasm_bindgen(getter)]
+    pub fn key(&self) -> Vec<u8> {
+        self.inner.key.to_vec()
+    }
+
+    /// The 12-byte nonce.
+    #[wasm_bindgen(getter)]
+    pub fn nonce(&self) -> Vec<u8> {
+        self.inner.nonce.to_vec()
+    }
+
+    /// Plaintext size in bytes.
+    #[wasm_bindgen(getter)]
+    pub fn size(&self) -> u32 {
+        self.inner.size
+    }
+
+    /// Side in pixels.
+    #[wasm_bindgen(getter)]
+    pub fn side(&self) -> u16 {
+        self.inner.width
+    }
+}
+
+/// The profile photo (ADR-0084): a square JPEG still and optionally a square
+/// MP4 video without sound whose first frame the still is.
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileAvatar {
+    inner: lakko_contacts::profile::Avatar,
+}
+
+#[wasm_bindgen]
+impl ProfileAvatar {
+    /// A photo (`video` and `videoDurationMs` undefined) or a profile video
+    /// (both given).
+    ///
+    /// # Errors
+    ///
+    /// Throws when exactly one of `video` / `videoDurationMs` is given.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        still: AvatarRef,
+        video: Option<AvatarRef>,
+        video_duration_ms: Option<u16>,
+    ) -> Result<ProfileAvatar, JsValue> {
+        let video = match (video, video_duration_ms) {
+            (None, None) => None,
+            (Some(v), Some(duration_ms)) => Some(lakko_contacts::profile::AvatarVideo {
+                reference: v.inner,
+                duration_ms,
+            }),
+            _ => {
+                return Err(JsValue::from_str(
+                    "profile avatar video and its duration go together",
+                ))
+            },
+        };
+        Ok(Self {
+            inner: lakko_contacts::profile::Avatar {
+                still: still.inner,
+                video,
+            },
+        })
+    }
+
+    /// The still.
+    #[wasm_bindgen(getter)]
+    pub fn still(&self) -> AvatarRef {
+        AvatarRef {
+            inner: self.inner.still.clone(),
+        }
+    }
+
+    /// The video, or `undefined` for a photo.
+    #[wasm_bindgen(getter)]
+    pub fn video(&self) -> Option<AvatarRef> {
+        self.inner.video.as_ref().map(|v| AvatarRef {
+            inner: v.reference.clone(),
+        })
+    }
+
+    /// The video's length in milliseconds, or `undefined` for a photo.
+    #[wasm_bindgen(getter, js_name = videoDurationMs)]
+    pub fn video_duration_ms(&self) -> Option<u16> {
+        self.inner.video.as_ref().map(|v| v.duration_ms)
+    }
 }
 
 // ============================================================================
@@ -497,11 +646,17 @@ impl ContactRequest {
     /// `wrapCallKeyPackage` / `wrapCallWelcome` intro) carries it too. The
     /// `ReachGrant` handle is consumed: read `verifyingKey()` first.
     ///
+    /// `linkAnswerId` and `linkAnswerSecret` (ADR-0079 §2) name the `/i/`
+    /// link the request is sent from: the capability's `linkId` (16 bytes)
+    /// and the link secret from the URL fragment (12 bytes). Pass two EMPTY
+    /// arrays for a request that does not come from an `/i/` link.
+    ///
     /// # Errors
     ///
-    /// Throws on any input-shape or AEAD failure, or a reply grant of any
-    /// class but `Reply`; throws an `Error` with a `profileError` code when
-    /// `profileEnvelope` is non-empty and invalid.
+    /// Throws on any input-shape or AEAD failure, a reply grant of any
+    /// class but `Reply`, or a link answer of the wrong width; throws an
+    /// `Error` with a `profileError` code when `profileEnvelope` is
+    /// non-empty and invalid.
     #[wasm_bindgen]
     #[allow(clippy::too_many_arguments)]
     pub fn compose(
@@ -513,8 +668,20 @@ impl ContactRequest {
         privacy_pass_token: &[u8],
         profile_envelope: &[u8],
         reply_grant: Option<ReachGrant>,
+        link_answer_id: &[u8],
+        link_answer_secret: &[u8],
         intro_message: &[u8],
     ) -> Result<Vec<u8>, JsValue> {
+        let link_answer = if link_answer_id.is_empty() && link_answer_secret.is_empty() {
+            None
+        } else {
+            Some(lakko_contacts::LinkAnswer {
+                link_id: <[u8; 16]>::try_from(link_answer_id)
+                    .map_err(|_| JsError::new("linkAnswerId must be 16 bytes"))?,
+                link_secret: <[u8; 12]>::try_from(link_answer_secret)
+                    .map_err(|_| JsError::new("linkAnswerSecret must be 12 bytes"))?,
+            })
+        };
         let profile = if profile_envelope.is_empty() {
             None
         } else {
@@ -558,6 +725,7 @@ impl ContactRequest {
             privacy_pass_token,
             profile.as_ref(),
             reply_grant.as_ref().map(ReachGrant::rust),
+            link_answer.as_ref(),
             intro_message,
         )
         .map_err(contact_err)?)
@@ -636,6 +804,7 @@ impl ContactRequest {
         Ok(OpenedContactRequest {
             profile: opened.profile.map(WasmProfile::from),
             reply_grant: opened.reply_grant.map(ReachGrant::from_rust),
+            link_answer: opened.link_answer,
             intro_message: opened.intro,
         })
     }
@@ -646,6 +815,7 @@ impl ContactRequest {
 pub struct OpenedContactRequest {
     profile: Option<WasmProfile>,
     reply_grant: Option<ReachGrant>,
+    link_answer: Option<lakko_contacts::LinkAnswer>,
     intro_message: Vec<u8>,
 }
 
@@ -666,6 +836,20 @@ impl OpenedContactRequest {
     #[wasm_bindgen(getter, js_name = replyGrant)]
     pub fn reply_grant(&self) -> Option<ReachGrant> {
         self.reply_grant.clone()
+    }
+
+    /// The 16-byte id of the `/i/` link the request answers (ADR-0079 §2),
+    /// or `undefined`. Ask `SyncedState.linkAnswerVerdict` with it, the
+    /// secret and the request's `fromPubkey`.
+    #[wasm_bindgen(getter, js_name = linkAnswerId)]
+    pub fn link_answer_id(&self) -> Option<Vec<u8>> {
+        self.link_answer.as_ref().map(|a| a.link_id.to_vec())
+    }
+
+    /// The 12-byte secret of that link, or `undefined`. SECRET: never log.
+    #[wasm_bindgen(getter, js_name = linkAnswerSecret)]
+    pub fn link_answer_secret(&self) -> Option<Vec<u8>> {
+        self.link_answer.as_ref().map(|a| a.link_secret.to_vec())
     }
 
     /// The intro message bytes, possibly empty. May itself be a call
@@ -696,6 +880,7 @@ pub struct WasmProfile {
     account_id: Option<Vec<u8>>,
     username_certificate: Option<Vec<u8>>,
     grants: Vec<ReachGrant>,
+    avatar: Option<ProfileAvatar>,
 }
 
 impl From<RustProfile> for WasmProfile {
@@ -707,6 +892,7 @@ impl From<RustProfile> for WasmProfile {
             account_id: p.account_id.map(|id| id.to_vec()),
             username_certificate: p.username_certificate,
             grants: p.grants.into_iter().map(ReachGrant::from_rust).collect(),
+            avatar: p.avatar.map(|inner| ProfileAvatar { inner }),
         }
     }
 }
@@ -754,6 +940,12 @@ impl WasmProfile {
     pub fn grants(&self) -> Vec<ReachGrant> {
         self.grants.clone()
     }
+
+    /// The profile photo (ADR-0084), or `undefined`. Its keys are SECRET.
+    #[wasm_bindgen(getter)]
+    pub fn avatar(&self) -> Option<ProfileAvatar> {
+        self.avatar.clone()
+    }
 }
 
 /// Compose a profile envelope (ADR-0048) — the inner plaintext to publish as
@@ -775,6 +967,10 @@ impl WasmProfile {
 /// means none. A group's profile carries `Group` (only where the setting
 /// allows that group) + `Member`; a one-to-one conversation's profile
 /// carries `Contact` + `Member`; a channel card carries `Channel`.
+///
+/// `avatar` (ADR-0084) is optional: `undefined` means no photo. Its bounds
+/// throw `"avatar.notSquare"`, `"avatar.dimensions"`, `"avatar.size"`,
+/// `"avatar.duration"`.
 #[wasm_bindgen(js_name = composeProfileEnvelope)]
 pub fn compose_profile_envelope(
     display_name: Option<String>,
@@ -783,6 +979,7 @@ pub fn compose_profile_envelope(
     account_id: Option<Vec<u8>>,
     username_certificate: Option<Vec<u8>>,
     grants: Option<Vec<ReachGrant>>,
+    avatar: Option<ProfileAvatar>,
 ) -> Result<Vec<u8>, JsValue> {
     let profile = prepare_profile(
         display_name,
@@ -791,6 +988,7 @@ pub fn compose_profile_envelope(
         account_id,
         username_certificate,
         grants,
+        avatar,
     )?;
     rust_compose_profile(&profile).map_err(profile_error_value)
 }
@@ -1477,10 +1675,16 @@ impl InviteCapability {
     /// register its public key with the Delivery Service BEFORE sharing the
     /// link, and remove it when the link is revoked or expires.
     ///
+    /// `inviterDisplayName` and `inviterUsername` (ADR-0079 §1) name the owner
+    /// on the invite page: the owner's display name (trimmed; blank or
+    /// `undefined` = none) and username (normalised; blank or `undefined` =
+    /// none), sealed with the rest of the capability.
+    ///
     /// # Errors
     ///
-    /// `JsError` on any input-shape failure, or a grant of any class but
-    /// `Link`.
+    /// Throws on any input-shape failure, or a grant of any class but
+    /// `Link`; an `Error` with a `profileError` code for a preview that
+    /// breaks the ADR-0048 rules.
     #[wasm_bindgen]
     #[allow(clippy::too_many_arguments)]
     pub fn compose(
@@ -1493,38 +1697,55 @@ impl InviteCapability {
         label: &str,
         link_id: &[u8],
         link_grant: &ReachGrant,
-    ) -> Result<WasmInviteLinkMint, JsError> {
+        inviter_display_name: Option<String>,
+        inviter_username: Option<String>,
+    ) -> Result<WasmInviteLinkMint, JsValue> {
         let link_id = link_id16(link_id)?;
+        let preview = lakko_contacts::InvitePreview {
+            display_name: match inviter_display_name {
+                Some(name) => rust_normalize_display_name(&name)
+                    .map_err(|e| profile_error_value(ProfileError::DisplayName(e)))?
+                    .unwrap_or_default(),
+                None => String::new(),
+            },
+            username: match inviter_username.as_deref().map(str::trim) {
+                None | Some("") => String::new(),
+                Some(raw) => lakko_discovery_client::validate_username(raw)
+                    .map_err(|e| profile_error_value(ProfileError::Username(e)))?,
+            },
+        };
         if owner_signing_seed.len() != 32 {
-            return Err(JsError::new("ownerSigningSeed must be 32 bytes"));
+            return Err(JsValue::from(JsError::new(
+                "ownerSigningSeed must be 32 bytes",
+            )));
         }
         let mut seed = [0u8; 32];
         seed.copy_from_slice(owner_signing_seed);
         let signing = SigningKey::from_seed(&seed);
 
         if owner_account_id.len() != lakko_contacts::ACCOUNT_ID_LEN {
-            return Err(JsError::new(&format!(
+            return Err(JsValue::from(JsError::new(&format!(
                 "ownerAccountId must be {} bytes",
                 lakko_contacts::ACCOUNT_ID_LEN,
-            )));
+            ))));
         }
         let mut acct = [0u8; lakko_contacts::ACCOUNT_ID_LEN];
         acct.copy_from_slice(owner_account_id);
 
         if owner_x25519_pubkey.len() != PUBLIC_KEY_LEN {
-            return Err(JsError::new(&format!(
+            return Err(JsValue::from(JsError::new(&format!(
                 "ownerX25519Pubkey must be {PUBLIC_KEY_LEN} bytes",
-            )));
+            ))));
         }
         let mut x_arr = [0u8; PUBLIC_KEY_LEN];
         x_arr.copy_from_slice(owner_x25519_pubkey);
         let x25519_pub = X25519PublicKey::from_bytes(&x_arr).map_err(crypto_err)?;
 
         if label.len() > MAX_LABEL_LEN {
-            return Err(JsError::new(&format!(
+            return Err(JsValue::from(JsError::new(&format!(
                 "label is {} bytes, max is {MAX_LABEL_LEN}",
                 label.len(),
-            )));
+            ))));
         }
 
         let wire = rust_invite_compose(
@@ -1537,13 +1758,14 @@ impl InviteCapability {
             label,
             &link_id,
             link_grant.rust(),
+            &preview,
         )
         .map_err(contact_err)?;
-        seal_mint(
+        Ok(seal_mint(
             &signing,
             |secret| rust_invite_seal_link(secret, &wire),
             rust_generate_link_secret(),
-        )
+        )?)
     }
 
     /// Decode PLAINTEXT capability wire bytes and verify the Ed25519
@@ -1559,8 +1781,8 @@ impl InviteCapability {
         })
     }
 
-    /// Joiner-side: open an `/i/` link's sealed blob (fetched by id, or the
-    /// inline path segment) with the 12-byte secret from the URL fragment and
+    /// Joiner-side: open an `/i/` link's sealed blob (fetched from the
+    /// ledger by id) with the 12-byte secret from the URL fragment and
     /// verify the capability inside. Does NOT check expiry.
     ///
     /// # Errors
@@ -1627,6 +1849,21 @@ impl InviteCapability {
     #[wasm_bindgen(getter)]
     pub fn label(&self) -> String {
         self.inner.label.clone()
+    }
+
+    /// The owner's display name as the link states it (ADR-0079 §1), or
+    /// `undefined`. The owner's own claim: shown on the invite page, never
+    /// used for identity.
+    #[wasm_bindgen(getter, js_name = inviterDisplayName)]
+    pub fn inviter_display_name(&self) -> Option<String> {
+        Some(self.inner.preview.display_name.clone()).filter(|n| !n.is_empty())
+    }
+
+    /// The owner's username as the link states it (ADR-0079 §1), canonical,
+    /// or `undefined`.
+    #[wasm_bindgen(getter, js_name = inviterUsername)]
+    pub fn inviter_username(&self) -> Option<String> {
+        Some(self.inner.preview.username.clone()).filter(|u| !u.is_empty())
     }
 
     /// The link's 16-byte reach scope id (ADR-0060 §6).
@@ -1751,50 +1988,21 @@ pub fn sign_call_invite_revocation(
     Ok(rust_call_sign_revocation(&signing, &blob_id_arr, signed_at_ms).to_vec())
 }
 
-/// Sign an owner-list query for the
-/// `POST /discovery/invite/by-owner` endpoint (Phase
-/// 1.18d2b-list).
-///
-/// The web client calls this just before posting the list
-/// request so the body's `signature` field carries proof that
-/// the caller is the holder of the identity Ed25519 key bound
-/// to `account_id` via the KT log. Canonical bytes layout:
-/// see [`lakko_contacts::invite::owner_list_canonical_bytes`].
-///
-/// Distinct domain separator from
-/// [`signInviteRevocation`] ensures a captured revoke signature
-/// cannot be replayed as an owner-list authentication (and vice
-/// versa).
-///
-/// Returns the 64-byte raw Ed25519 signature. Caller
-/// base64-encodes for the JSON body.
+/// The Ed25519 public key of a per-link revocation seed (ADR-0078
+/// section 10): what an invite upload (`/i/`, `/c/`, `/g/`) stores in the
+/// ledger in place of an owner or issuer. The client draws 32 random bytes
+/// for each link it mints, keeps them beside the link secret, uploads this
+/// key, and later signs a revocation with the seed.
 ///
 /// # Errors
 ///
-/// `JsError` on any input-shape failure (32-byte signing seed,
-/// 16-byte account_id required).
-#[wasm_bindgen(js_name = signOwnerListQuery)]
-pub fn sign_owner_list_query(
-    signing_seed: &[u8],
-    owner_account_id: &[u8],
-    signed_at_ms: u64,
-) -> Result<Vec<u8>, JsError> {
-    if signing_seed.len() != 32 {
-        return Err(JsError::new("signingSeed must be 32 bytes"));
-    }
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(signing_seed);
-    let signing = SigningKey::from_seed(&seed);
-
-    if owner_account_id.len() != ACCOUNT_ID_LEN {
-        return Err(JsError::new(&format!(
-            "ownerAccountId must be {ACCOUNT_ID_LEN} bytes",
-        )));
-    }
-    let mut acct_arr = [0u8; ACCOUNT_ID_LEN];
-    acct_arr.copy_from_slice(owner_account_id);
-
-    Ok(rust_sign_owner_list(&signing, &acct_arr, signed_at_ms).to_vec())
+/// `JsError` when `seed` is not 32 bytes.
+#[wasm_bindgen(js_name = linkRevocationPublicKey)]
+pub fn link_revocation_public_key(seed: &[u8]) -> Result<Vec<u8>, JsError> {
+    let seed: [u8; 32] = seed
+        .try_into()
+        .map_err(|_| JsError::new("seed must be 32 bytes"))?;
+    Ok(rust_revocation_public_key(&seed).to_vec())
 }
 
 /// Compute the per-joiner consume-dedup tag for an invite-link
@@ -1837,7 +2045,7 @@ pub fn compute_joiner_invite_tag(
 /// Compose + sign a call-invite capability (Phase 3c3) and seal it for a
 /// `/c/` link under a fresh link secret (the 2026-09-28 security pass).
 /// Returns an `InviteLinkMint`; the link is `/c/<id>#<secret>` after the
-/// upload, or `/c/<base64url sealed>#<secret>` inline.
+/// upload.
 ///
 /// Same shape as `composeInviteCapability` but for a
 /// link-based group-call invite. The owner embeds a
@@ -2305,6 +2513,22 @@ pub enum WasmIncomingEnvelopeKind {
     /// adopt it only once the server-side change is visible. It carries the
     /// new account's entropy: never log it.
     KeyRotation = 18,
+    /// What another device of this account says about itself (ADR-0080).
+    /// The decoded card rides the `deviceCard` getter; `payload` is empty.
+    /// Never render it. Meaningful ONLY in the account's own DeviceGroup:
+    /// store it under the sender's leaf signature key resolved at receipt,
+    /// keep it only when `deviceCardIsNewer`, drop it when the leaf leaves.
+    DeviceCard = 19,
+    /// Another device of this account claims a contact request sent through
+    /// one of the account's invite links (ADR-0079, reworked 2026-10-17).
+    /// The decoded claim rides the `linkClaim` getter; `payload` is empty.
+    /// Never render it. Meaningful ONLY in the account's own DeviceGroup.
+    LinkClaim = 20,
+    /// The device that won an invite-link request names the one-to-one it
+    /// founded, with the founding Welcome (ADR-0079, ordering of 2026-10-17).
+    /// The decoded note rides the `linkFounded` getter; `payload` is empty.
+    /// Never render it. Meaningful ONLY in the account's own DeviceGroup.
+    LinkFounded = 21,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -2328,6 +2552,9 @@ pub struct WasmIncomingEnvelope {
     committer_delegation: Option<CommitterDelegationEnvelope>,
     group_closed: Option<WasmGroupClosed>,
     key_rotation: Option<crate::key_rotation::WasmKeyRotation>,
+    device_card: Option<crate::device_card::WasmDeviceCard>,
+    link_claim: Option<crate::link_claim::WasmLinkClaim>,
+    link_founded: Option<crate::link_founded::WasmLinkFounded>,
 }
 
 impl WasmIncomingEnvelope {
@@ -2350,6 +2577,9 @@ impl WasmIncomingEnvelope {
             shared_channels: None,
             group_closed: None,
             key_rotation: None,
+            device_card: None,
+            link_claim: None,
+            link_founded: None,
         }
     }
 }
@@ -2472,6 +2702,27 @@ impl WasmIncomingEnvelope {
     pub fn key_rotation(&self) -> Option<crate::key_rotation::WasmKeyRotation> {
         self.key_rotation.clone()
     }
+
+    /// Set only for `DeviceCard` (ADR-0080): the decoded card. `undefined`
+    /// for every other kind.
+    #[wasm_bindgen(getter, js_name = deviceCard)]
+    pub fn device_card(&self) -> Option<crate::device_card::WasmDeviceCard> {
+        self.device_card.clone()
+    }
+
+    /// Set only for `LinkClaim` (ADR-0079): the decoded claim. `undefined`
+    /// for every other kind.
+    #[wasm_bindgen(getter, js_name = linkClaim)]
+    pub fn link_claim(&self) -> Option<crate::link_claim::WasmLinkClaim> {
+        self.link_claim
+    }
+
+    /// Set only for `LinkFounded` (ADR-0079): the decoded note. `undefined`
+    /// for every other kind.
+    #[wasm_bindgen(getter, js_name = linkFounded)]
+    pub fn link_founded(&self) -> Option<crate::link_founded::WasmLinkFounded> {
+        self.link_founded.clone()
+    }
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts
@@ -2588,6 +2839,18 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::KeyRotation(rotation) => WasmIncomingEnvelope {
             key_rotation: Some(rotation.into()),
             ..WasmIncomingEnvelope::of(K::KeyRotation)
+        },
+        IncomingEnvelope::DeviceCard(card) => WasmIncomingEnvelope {
+            device_card: Some(card.into()),
+            ..WasmIncomingEnvelope::of(K::DeviceCard)
+        },
+        IncomingEnvelope::LinkFounded(note) => WasmIncomingEnvelope {
+            link_founded: Some(note.into()),
+            ..WasmIncomingEnvelope::of(K::LinkFounded)
+        },
+        IncomingEnvelope::LinkClaim(claim) => WasmIncomingEnvelope {
+            link_claim: Some(claim.into()),
+            ..WasmIncomingEnvelope::of(K::LinkClaim)
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             payload: p.to_vec(),
@@ -3402,6 +3665,7 @@ pub struct WasmGroupInvitePreview {
     group_name: Option<String>,
     inviter_name: Option<String>,
     member_count: u16,
+    channel_id: Option<Vec<u8>>,
 }
 
 #[wasm_bindgen(js_class = GroupInvitePreview)]
@@ -3422,6 +3686,14 @@ impl WasmGroupInvitePreview {
     #[wasm_bindgen(getter, js_name = memberCount)]
     pub fn member_count(&self) -> u16 {
         self.member_count
+    }
+
+    /// ADR-0078 section 6: the 16-byte channel id of a co-publisher link
+    /// (then `groupName` is the channel's name), or `undefined` for a group
+    /// link.
+    #[wasm_bindgen(getter, js_name = channelId)]
+    pub fn channel_id(&self) -> Option<Vec<u8>> {
+        self.channel_id.clone()
     }
 }
 
@@ -3461,6 +3733,55 @@ pub fn compose_group_invite_capability_with_preview(
         inviter_name: rust_normalize_display_name(inviter_name.as_deref().unwrap_or(""))
             .map_err(name_error)?,
         member_count,
+        channel_id: None,
+    };
+    let link_key = rust_generate_link_key();
+    let wire =
+        rust_group_invite_compose_with_preview(&signing, group_id, expiry_ms, &preview, &link_key)
+            .map_err(|e| JsError::new(&format!("{e}")))?;
+    seal_mint(
+        &signing,
+        |secret| rust_group_invite_seal_link(secret, &wire),
+        link_key,
+    )
+}
+
+/// ADR-0028 OQ3 / ADR-0078 section 6 — mint a co-publisher `/g/` link over a
+/// channel's PublisherGroup `groupId`, its sealed preview carrying the
+/// 16-byte `channelId` and the channel's name (optional). Since ADR-0078 the
+/// PublisherGroup id is derived from the owner's seed, so nothing inverts it,
+/// and the plaintext capability must not name the channel. Returns an
+/// `InviteLinkMint`.
+///
+/// # Errors
+///
+/// Throws on a bad seed, group id or channel id, or a name the rule refuses.
+#[wasm_bindgen(js_name = composeCoPublisherInviteCapability)]
+pub fn compose_co_publisher_invite_capability(
+    issuer_signing_seed: &[u8],
+    group_id: &[u8],
+    expiry_ms: u64,
+    channel_id: &[u8],
+    channel_name: Option<String>,
+) -> Result<WasmInviteLinkMint, JsError> {
+    let seed: [u8; 32] = issuer_signing_seed
+        .try_into()
+        .map_err(|_| JsError::new("issuerSigningSeed must be 32 bytes"))?;
+    let signing = SigningKey::from_seed(&seed);
+    if group_id.is_empty() || group_id.len() > MAX_GROUP_ID_LEN {
+        return Err(JsError::new(&format!(
+            "groupId must be 1..={MAX_GROUP_ID_LEN} bytes"
+        )));
+    }
+    let channel: [u8; 16] = channel_id
+        .try_into()
+        .map_err(|_| JsError::new("channelId must be 16 bytes"))?;
+    let preview = RustGroupInvitePreview {
+        group_name: rust_normalize_display_name(channel_name.as_deref().unwrap_or(""))
+            .map_err(|e: DisplayNameError| JsError::new(&format!("{e}")))?,
+        inviter_name: None,
+        member_count: 0,
+        channel_id: Some(channel),
     };
     let link_key = rust_generate_link_key();
     let wire =
@@ -3584,6 +3905,7 @@ impl GroupInviteCapability {
             group_name: p.group_name,
             inviter_name: p.inviter_name,
             member_count: p.member_count,
+            channel_id: p.channel_id.map(|c| c.to_vec()),
         }))
     }
 }
@@ -3781,6 +4103,8 @@ mod tests {
             b"",
             b"",
             Some(test_reply_grant()),
+            &[],
+            &[],
             b"hi bob",
         )
         .unwrap();
@@ -3825,6 +4149,7 @@ mod tests {
             Some(vec![9; 16]),
             None,
             None,
+            None,
         )
         .unwrap();
         let decoded = decode_profile_envelope(&envelope).unwrap();
@@ -3854,6 +4179,8 @@ mod tests {
             b"",
             &envelope,
             None,
+            &[],
+            &[],
             b"hi bob",
         )
         .unwrap();
@@ -3872,8 +4199,8 @@ mod tests {
     fn profile_v3_carries_certificate_and_grants() {
         use crate::scoped_discovery::{derive_reach_grant, ReachClass};
         let grants = vec![
-            derive_reach_grant(&[0x42; 32], ReachClass::Group, &[1; 8], 2).unwrap(),
-            derive_reach_grant(&[0x42; 32], ReachClass::Member, &[1; 8], 1).unwrap(),
+            derive_reach_grant(&[0x42; 32], ReachClass::Group, &[], 2).unwrap(),
+            derive_reach_grant(&[0x42; 32], ReachClass::Member, &[], 1).unwrap(),
         ];
         let envelope = compose_profile_envelope(
             Some("Alice".to_string()),
@@ -3882,8 +4209,23 @@ mod tests {
             None,
             Some(vec![9; 153]),
             Some(grants.clone()),
+            Some(
+                ProfileAvatar::new(
+                    AvatarRef::new(&[1; 32], &[2; 32], &[3; 12], 500, 320).unwrap(),
+                    Some(AvatarRef::new(&[4; 32], &[5; 32], &[6; 12], 9000, 320).unwrap()),
+                    Some(4000),
+                )
+                .unwrap(),
+            ),
         )
         .unwrap();
+        assert_eq!(
+            decode_profile_envelope(&envelope)
+                .unwrap()
+                .avatar()
+                .and_then(|a| a.video_duration_ms()),
+            Some(4000)
+        );
         let decoded = decode_profile_envelope(&envelope).unwrap();
         assert_eq!(decoded.username_certificate(), Some(vec![9; 153]));
         assert_eq!(decoded.grants(), grants);
@@ -3891,8 +4233,8 @@ mod tests {
         assert_eq!(dispatched.profile(), Some(decoded));
         // The ADR-0060 bounds refuse before any bytes exist.
         let mut too_many = grants.clone();
-        too_many.push(derive_reach_grant(&[0x42; 32], ReachClass::Channel, &[1; 8], 1).unwrap());
-        let p = prepare_profile(None, None, 1, None, None, Some(too_many)).unwrap();
+        too_many.push(derive_reach_grant(&[0x42; 32], ReachClass::Channel, &[], 1).unwrap());
+        let p = prepare_profile(None, None, 1, None, None, Some(too_many), None).unwrap();
         assert!(matches!(
             rust_compose_profile(&p),
             Err(ProfileError::TooManyGrants { count: 3 })
@@ -4029,6 +4371,8 @@ mod tests {
             "alice@home",
             &TEST_LINK_ID,
             &test_link_grant(),
+            None,
+            None,
         )
         .unwrap();
 
@@ -4173,6 +4517,8 @@ mod tests {
             "",
             &TEST_LINK_ID,
             &test_link_grant(),
+            None,
+            None,
         )
         .unwrap();
 

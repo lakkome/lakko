@@ -112,16 +112,23 @@ public final class WebRTCPeerConnection: NSObject {
         /// MSID stream group = the source peer id on an SFU-routed call.
         /// Default no-op so the 1×1 direct path is unaffected.
         public let onRemoteReceiver: (RTCRtpReceiver, _ streamId: String?) -> Void
+        /// The id of a remote video track that was removed. Fired just before
+        /// the `onRemoteVideoTrack(nil, nil)` of the same removal, so a caller
+        /// holding more than one remote video track (a camera and a shared
+        /// screen, ADR-0083) can tell which one went. Default no-op.
+        public let onRemoteVideoTrackRemoved: (_ trackId: String) -> Void
         public init(
             onLocalCandidate: @escaping (String, Int32, String) -> Void,
             onConnectionState: @escaping (RTCPeerConnectionState) -> Void,
             onRemoteVideoTrack: @escaping (RTCVideoTrack?, String?) -> Void = { _, _ in },
-            onRemoteReceiver: @escaping (RTCRtpReceiver, String?) -> Void = { _, _ in }
+            onRemoteReceiver: @escaping (RTCRtpReceiver, String?) -> Void = { _, _ in },
+            onRemoteVideoTrackRemoved: @escaping (String) -> Void = { _ in }
         ) {
             self.onLocalCandidate = onLocalCandidate
             self.onConnectionState = onConnectionState
             self.onRemoteVideoTrack = onRemoteVideoTrack
             self.onRemoteReceiver = onRemoteReceiver
+            self.onRemoteVideoTrackRemoved = onRemoteVideoTrackRemoved
         }
     }
 
@@ -191,25 +198,22 @@ public final class WebRTCPeerConnection: NSObject {
     /// `addLocalVideoTrack(_:)` on a video-enabled call.
     internal var localVideoSender: RTCRtpSender?
 
+    /// Logged once per peer connection; see `preferVp8(on:)`.
+    private var vp8Warned = false
+
     // MARK: - Lifecycle
 
     /// Construct a peer connection.
     ///
-    /// `iceServers` defaults to the STUN-only base list
-    /// (`defaultIceServers()`); the per-call TURN row is
-    /// appended by `CallSession.resolveIceServers()` before
-    /// it constructs this peer (G3-1-turn). The caller can
-    /// override for tests or for a region-pinned
-    /// deployment. The default is supplied as a `nil`
-    /// sentinel because Swift refuses to evaluate
-    /// `Self.defaultIceServers()` as a default expression
-    /// — covariant `Self` cannot appear there and the
-    /// static is `@MainActor` while the surrounding init
-    /// is `@MainActor` too but Swift's default-expression
-    /// evaluator runs in a non-isolated context.
-    public init(iceServers: [RTCIceServer]? = nil) {
+    /// `iceServers` is the call's list, built by
+    /// ``IceServers`` (Lakko's own servers only: the minted
+    /// TURN row and STUN on its host, or none) in
+    /// `CallSession` / `SfuCallSession` before they
+    /// construct this peer. It defaults to empty — host
+    /// candidates only, never a public STUN server.
+    public init(iceServers: [RTCIceServer] = []) {
         super.init()
-        let servers = iceServers ?? Self.defaultIceServers()
+        let servers = iceServers
 
         let config = RTCConfiguration()
         config.iceServers = servers
@@ -568,11 +572,11 @@ public final class WebRTCPeerConnection: NSObject {
         }
     }
 
-    /// The video entries of the statistics report (`inbound-rtp`,
-    /// `outbound-rtp` and the `media-source` each sender reads from), with
-    /// their ids, for the group call's media log
+    /// The media entries of the statistics report (`inbound-rtp`,
+    /// `outbound-rtp` and the `media-source` each sender reads from, audio
+    /// and video), with their ids, for the calls' media log
     /// (``CallMediaCounters``). `nil` when there is no peer connection.
-    func sampleVideoStatEntries() async -> [CallMediaStatEntry]? {
+    func sampleMediaStatEntries() async -> [CallMediaStatEntry]? {
         guard let peer = peer else { return nil }
         let report: RTCStatisticsReport = await withCheckedContinuation { cont in
             peer.statistics { cont.resume(returning: $0) }
@@ -582,6 +586,20 @@ public final class WebRTCPeerConnection: NSObject {
                 $0.value.type == "inbound-rtp" || $0.value.type == "outbound-rtp"
                     || $0.value.type == "media-source"
             }
+            .map { CallMediaStatEntry(id: $0.key, type: $0.value.type, values: $0.value.values) }
+    }
+
+    /// The ICE entries of the statistics report (`transport`,
+    /// `candidate-pair`, `local-candidate`, `remote-candidate`), with their
+    /// ids, for the call's path line (``CallPath``). `nil` when there is no
+    /// peer connection.
+    func samplePathStatEntries() async -> [CallMediaStatEntry]? {
+        guard let peer = peer else { return nil }
+        let report: RTCStatisticsReport = await withCheckedContinuation { cont in
+            peer.statistics { cont.resume(returning: $0) }
+        }
+        return report.statistics
+            .filter { CallPath.entryTypes.contains($0.value.type) }
             .map { CallMediaStatEntry(id: $0.key, type: $0.value.type, values: $0.value.values) }
     }
 
@@ -662,7 +680,18 @@ public final class WebRTCPeerConnection: NSObject {
         guard let peer = peer else { return }
         let track = Self.sharedFactory.videoTrack(
             with: source, trackId: CameraSender.trackId(of: .main))
-        let sender = peer.add(track, streamIds: ["lakko-local-stream"])
+        // On a transceiver of its own, never `add(_:streamIds:)`: mid-call
+        // that hands the camera the first video transceiver whose sender
+        // never sent, which is one the SFU opened to bring this device
+        // another person's camera, and the SFU does not take what arrives on
+        // its own downstream line as this person's main picture (the web
+        // client did this until 2026-10-23: its camera turned on after an
+        // Android one reached the others only as the light and middle
+        // copies). Android adds its group camera the same way.
+        let transceiverInit = RTCRtpTransceiverInit()
+        transceiverInit.direction = .sendRecv
+        transceiverInit.streamIds = ["lakko-local-stream"]
+        let sender = peer.addTransceiver(with: track, init: transceiverInit)?.sender
         self.localVideoTrack = track
         self.localVideoSender = sender
         if let sender { configureMainCameraSender(sender) }
@@ -671,8 +700,8 @@ public final class WebRTCPeerConnection: NSObject {
     /// Ask the main camera sender for its temporal layers
     /// (``CameraSender/mainTemporalLayers``) and for the frame-rate
     /// preference, in one set of its parameters, then read the layers back
-    /// and say in one line what the stack kept. `add(_:streamIds:)` takes no
-    /// encodings, so this is the only way to ask. Best effort: a stack that
+    /// and say in one line what the stack kept. The transceiver is added
+    /// without encodings, so this is the only way to ask. Best effort: a stack that
     /// refuses keeps one layer, and the line says so.
     private func configureMainCameraSender(_ sender: RTCRtpSender) {
         let asked = CameraSender.mainTemporalLayers
@@ -1181,6 +1210,52 @@ public final class WebRTCPeerConnection: NSObject {
 
     // MARK: - SDP exchange
 
+    /// Tell every video transceiver to prefer VP8 and its wrapper formats
+    /// (`VideoCodecPreference`). Runs before every local description: before
+    /// `offer(for:)`, and on the answering side after the remote offer is set
+    /// (which is what creates the transceivers for the remote's m-lines) and
+    /// before `answer(for:)`. Setting the same list again is harmless.
+    ///
+    /// Reading the capabilities and the transceivers, and setting the
+    /// preferences, all block on libwebrtc's signaling thread, so they run on
+    /// `libwebrtcQueue` like every other blocking call here.
+    ///
+    /// In this binding `setCodecPreferences:` returns nothing, so a list
+    /// libwebrtc refuses is not seen here; what is seen is a factory that
+    /// offers no VP8 at all, and then every video transceiver is left as it is
+    /// and the count is logged once.
+    ///
+    /// Not covered: a receive-only video transceiver that `offer(for:)` itself
+    /// adds for `OfferToReceiveVideo` when none exists yet, which happens only
+    /// for a video offer from a device with no usable camera (the camera
+    /// track, when there is one, is added before the offer). This device sends
+    /// no video on that line, and the answering side chooses what it sends by
+    /// its own preferences.
+    private func preferVp8(on peer: RTCPeerConnection) async {
+        let factory = Self.sharedFactory
+        let unset: Int = await withCheckedContinuation { cont in
+            Self.libwebrtcQueue.async {
+                let video = peer.transceivers.filter { $0.mediaType == .video }
+                if video.isEmpty { cont.resume(returning: 0); return }
+                let capabilities = factory
+                    .rtpReceiverCapabilities(forKind: kRTCMediaStreamTrackKindVideo).codecs
+                guard let preferences = VideoCodecPreference.vp8Preferences(
+                    capabilities, mimeType: { $0.mimeType })
+                else {
+                    cont.resume(returning: video.count); return
+                }
+                for transceiver in video {
+                    transceiver.setCodecPreferences(preferences)
+                }
+                cont.resume(returning: 0)
+            }
+        }
+        if unset > 0 && !vp8Warned {
+            vp8Warned = true
+            NSLog("WebRTCPeerConnection: %@", VideoCodecPreference.unsetWarning(count: unset))
+        }
+    }
+
     /// Build the SDP offer that goes into
     /// `ClientFrame::SdpOffer`. Sets the local description
     /// internally as a side-effect of `createOffer`.
@@ -1202,6 +1277,7 @@ public final class WebRTCPeerConnection: NSObject {
             ],
             optionalConstraints: nil
         )
+        await preferVp8(on: peer)
         let offer: RTCSessionDescription = try await withCheckedThrowingContinuation { cont in
             Self.libwebrtcQueue.async {
             peer.offer(for: constraints) { sdp, err in
@@ -1245,6 +1321,7 @@ public final class WebRTCPeerConnection: NSObject {
             mandatoryConstraints: nil,
             optionalConstraints: nil
         )
+        await preferVp8(on: peer)
         let offer: RTCSessionDescription = try await withCheckedThrowingContinuation { cont in
             Self.libwebrtcQueue.async {
             peer.offer(for: constraints) { sdp, err in
@@ -1290,6 +1367,9 @@ public final class WebRTCPeerConnection: NSObject {
             }
             }
         }
+        // The remote offer has created this side's transceivers; set the
+        // codec before the answer is built from them.
+        await preferVp8(on: peer)
         let answer: RTCSessionDescription = try await withCheckedThrowingContinuation { cont in
             Self.libwebrtcQueue.async {
             peer.answer(for: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)) { sdp, err in
@@ -1395,31 +1475,6 @@ public final class WebRTCPeerConnection: NSObject {
             }
             }
         }
-    }
-
-    // MARK: - Defaults
-
-    /// STUN-only base ICE-server list. This is the floor every
-    /// call starts from; TURN is layered on top per-call by
-    /// `CallSession.resolveIceServers()`, which appends one
-    /// freshly-minted coturn row via `TurnCredentialClient`
-    /// (G3-1-turn, landed). Keeping the default STUN-only here
-    /// means a call with no `turnClient` injected still attempts
-    /// to connect over STUN (only symmetric-NAT peers fail, as
-    /// `.disconnected`).
-    public static func defaultIceServers() -> [RTCIceServer] {
-        [
-            RTCIceServer(urlStrings: [
-                "stun:stun.l.google.com:19302",
-                "stun:stun1.l.google.com:19302",
-            ]),
-            // TURN rows (Lakko's coturn cluster) are NOT added
-            // here — `CallSession.resolveIceServers()` mints one
-            // at call start via `TurnCredentialClient.fetchOrNil()`
-            // and appends it to this base list. See
-            // `services/auth/src/turn.rs` for the credential REST
-            // shape.
-        ]
     }
 }
 
@@ -1671,10 +1726,12 @@ extension WebRTCPeerConnection: RTCPeerConnectionDelegate {
         _ peerConnection: RTCPeerConnection,
         didRemove rtpReceiver: RTCRtpReceiver
     ) {
-        guard rtpReceiver.track is RTCVideoTrack else {
+        guard let removed = rtpReceiver.track as? RTCVideoTrack else {
             return
         }
+        let trackId = removed.trackId
         Task { @MainActor [weak self] in
+            self?.delegate?.onRemoteVideoTrackRemoved(trackId)
             self?.delegate?.onRemoteVideoTrack(nil, nil)
         }
     }

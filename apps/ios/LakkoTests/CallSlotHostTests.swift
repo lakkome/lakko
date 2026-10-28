@@ -491,6 +491,7 @@ final class GroupCallHostTests: XCTestCase {
         /// What the SFU's state route answers a probe; `nil` = unreachable.
         var sfuState: SfuCallState?
         var probes = 0
+        var probedRoom: String?
         /// Heartbeat sleeps the test has allowed to finish.
         var heartbeatTicks = 0
         /// Heartbeat sleeps started so far.
@@ -575,19 +576,29 @@ final class GroupCallHostTests: XCTestCase {
             sfuBaseUrl: { "wss://sfu.test" },
             microphoneGranted: { true },
             cameraGranted: { _ in true },
-            mintJwt: { _, _ in "jwt" },
+            mintJwt: { _ in
+                MintCallJwtResult(
+                    jwt: "jwt", expiresAtUnixSecs: 0,
+                    claims: ParsedCallJwt(ffi: FfiCallJwtClaims(
+                        iss: "lakko-auth", aud: "lakko-sfu",
+                        room: String(repeating: "0", count: 64),
+                        peerId: String(repeating: "1", count: 32),
+                        role: .participant, iat: 0, exp: 0, kid: "k")),
+                    turn: nil)
+            },
             makeHandle: { _, _, _ in
                 let handle = FakeGroupCallHandle()
                 handle.connectError = h.connectError
                 h.handles.append(handle)
                 return handle
             },
-            conversationTitle: { _ in "Test group" },
+            groupName: { _ in "Test group" },
             safetyNumber: { _ in nil },
             mintCallId: { Data(repeating: 0x0A, count: 16) },
             recordCall: { call in h.rows.append(call) },
             nowMs: { h.nowMs },
-            sfuCallState: { _, _, _ in
+            sfuCallState: { _, room in
+                h.probedRoom = room
                 h.probes += 1
                 return h.sfuState
             },
@@ -607,6 +618,20 @@ final class GroupCallHostTests: XCTestCase {
         await host.probeCallState(groupIdHex: "g", callIdHex: String(repeating: "ab", count: 16))
         XCTAssertEqual(h.probes, 1)
         XCTAssertEqual(kinds(h.published), ["end"])
+    }
+
+    /// ADR-0078 section 2: the probe names the room derived from the call id,
+    /// never the call id itself, and carries no token.
+    func testTheProbeNamesTheRoomNotTheCallId() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        let callIdHex = String(repeating: "ab", count: 16)
+        h.sfuState = .live
+        await host.probeCallState(groupIdHex: "g", callIdHex: callIdHex)
+        let expected = try sfuRoomForCall(callId: Data(repeating: 0xAB, count: 16))
+        XCTAssertEqual(h.probedRoom, expected)
+        XCTAssertEqual(h.probedRoom?.count, 64)
+        XCTAssertNotEqual(h.probedRoom, callIdHex)
     }
 
     /// Any other answer, or none, changes nothing.

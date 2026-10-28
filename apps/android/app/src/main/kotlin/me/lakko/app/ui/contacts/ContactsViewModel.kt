@@ -13,7 +13,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import me.lakko.app.chat.AllowanceKind
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.contacts.ContactsError
 import me.lakko.app.contacts.ContactsRepository
@@ -28,11 +27,11 @@ import me.lakko.app.l10n.UiText
  * Three responsibilities:
  *
  *   1. Surface the [ContactsRepository.state] flow + a small
- *      slice of ephemeral UI state (the search bar's current
- *      input, the intro message draft, busy / error flags
- *      around the send action) as [ContactsUiState].
- *   2. Dispatch UI actions to the repository: send a request,
- *      refresh the inbox, accept / decline a pending row.
+ *      slice of ephemeral UI state (invite links, busy / error
+ *      flags) as [ContactsUiState].
+ *   2. Dispatch UI actions to the repository: refresh the
+ *      inbox, accept / decline a pending row. A contact request
+ *      is sent from the people search (`search/`), not here.
  *   3. Map [ContactsError]'s discriminated variants into
  *      user-facing copy.
  */
@@ -47,9 +46,6 @@ public class ContactsViewModel(
      *  (tests / future contacts-only configs), Accept stays a
      *  pure local marker. */
     private val chatRepo: ChatRepository? = null,
-    /** ADR-0048 §4 — the core's username rule (`validateUsername`). */
-    private val validateUsername: (String) -> String =
-        { uniffi.lakko_ffi_uniffi.validateUsername(it) },
 ) : ViewModel() {
 
     private val mutableUi: MutableStateFlow<UiSlice> = MutableStateFlow(UiSlice())
@@ -62,6 +58,10 @@ public class ContactsViewModel(
      * `mutableUi`).
      */
     public val state: StateFlow<ContactsUiState> = combineState()
+
+    /** ADR-0079 section 4 — the people added through their invite link whose
+     *  app has not answered yet. */
+    public val invited: StateFlow<List<me.lakko.app.contacts.PendingContact>> = repo.invited
 
     private fun combineState(): StateFlow<ContactsUiState> {
         // Compose two flows by hand into a single derived
@@ -126,6 +126,25 @@ public class ContactsViewModel(
         }
     }
 
+    /**
+     * `Add to contacts` on the card of a person the viewer removed
+     * (docs/ux/conversation-info.md section 2.1, amended 2026-10-24): back on
+     * the list with the one-to-one they have. Local; sends nothing.
+     */
+    public fun onAddContactBack(signatureKey: ByteArray, groupIdHex: String) {
+        val accountId = chatRepo?.let { chat ->
+            val keyB64 = java.util.Base64.getEncoder().encodeToString(signatureKey)
+            me.lakko.app.profile.ProfileDirectory.get(chat.context).accountIdsByKey()[keyB64]?.let(::hexToBytes)
+        }
+        repo.restoreRemovedContact(
+            signatureKey = signatureKey,
+            accountId = accountId,
+            groupIdHex = groupIdHex,
+            nowMs = System.currentTimeMillis().toULong(),
+            createdAt = java.time.Instant.now().toString(),
+        )
+    }
+
     private fun hexToBytes(hex: String): ByteArray? {
         if (hex.length % 2 != 0) return null
         return try {
@@ -137,18 +156,13 @@ public class ContactsViewModel(
 
     private fun buildUi(repoState: ContactsState, ui: UiSlice): ContactsUiState =
         ContactsUiState(
-            usernameInput = ui.usernameInput,
-            usernameError = ui.usernameError,
-            introInput = ui.introInput,
-            sending = ui.sending,
-            sendError = ui.sendError,
-            sendSucceeded = ui.sendSucceeded,
             pending = repoState.pending,
             accepted = repoState.accepted,
             sent = repoState.sent,
             outstandingInvites = repoState.outstandingInvites,
             generatingInvite = ui.generatingInvite,
             inviteError = ui.inviteError,
+            inviteNotice = ui.inviteNotice,
             activeInvitesLoaded = ui.activeInvitesLoaded,
             activeInvites = ui.activeInvites,
             activeInviteUrls = ui.activeInviteUrls,
@@ -160,104 +174,6 @@ public class ContactsViewModel(
             requiresReauth = repoState.requiresReauth,
         )
 
-    /** ADR-0048 §4 — the search field applies the username rule as the user
-     *  types and shows the reason. */
-    public fun onUsernameChange(value: String) {
-        val check = me.lakko.app.profile.checkUsername(value, validateUsername)
-        mutableUi.update {
-            it.copy(
-                usernameInput = value,
-                usernameError = me.lakko.app.profile.usernameFieldErrorText(check, value),
-            )
-        }
-    }
-
-    public fun onIntroChange(value: String) {
-        mutableUi.update { it.copy(introInput = value) }
-    }
-
-    /** Send a contact request. Surfaces success by clearing the
-     *  form; failures land in [ContactsUiState.sendError]. */
-    public fun onSendClicked() {
-        val snapshot = mutableUi.value
-        if (snapshot.sending) return
-        if (snapshot.usernameInput.isBlank()) {
-            mutableUi.update { it.copy(sendError = UiText("username.error.empty")) }
-            return
-        }
-        // ADR-0048 §4 — never send a lookup for a name that fails the rule.
-        val username = when (
-            val decision = me.lakko.app.profile.searchDecision(snapshot.usernameInput, validateUsername)
-        ) {
-            is me.lakko.app.profile.SearchDecision.Refuse -> {
-                mutableUi.update { it.copy(sendError = decision.text) }
-                return
-            }
-            is me.lakko.app.profile.SearchDecision.Lookup -> decision.normalized
-        }
-
-        mutableUi.update { it.copy(sending = true, sendError = null) }
-        viewModelScope.launch {
-            try {
-                repo.sendContactRequest(
-                    recipientUsername = username,
-                    introMessage = snapshot.introInput,
-                )
-                // Success — clear the form so the user can
-                // queue another one; the sheet reads the flag to close.
-                mutableUi.update {
-                    it.copy(
-                        sending = false,
-                        sendError = null,
-                        sendSucceeded = true,
-                        usernameInput = "",
-                        introInput = "",
-                    )
-                }
-            } catch (refused: SupersessionRefused) {
-                // KT-log S4 — a fail-closed supersession refusal (an
-                // unproven CHANGED key) is the moment the reset-vs-
-                // compromise distinction matters most. Surface a reset-
-                // AWARE message driven by the best-effort log marker the
-                // client attached (`loggedReset`). The refusal itself is
-                // unchanged — gate 1 threw regardless of the log; this only
-                // colours the prompt.
-                mutableUi.update {
-                    it.copy(
-                        sending = false,
-                        sendError = supersessionRefusedMessage(
-                            refused.loggedReset,
-                            atLabel(username),
-                        ),
-                    )
-                }
-            } catch (err: Throwable) {
-                me.lakko.app.rethrowIfCancelled(err) {
-                    mutableUi.update { it.copy(sending = false) }
-                }
-                // ADR-0054 - the username lookup spends an anonymous token.
-                logFailure("send contact request", err)
-                mutableUi.update {
-                    it.copy(
-                        sending = false,
-                        sendError = contactsErrorText(err, "contacts.error.send", AllowanceKind.LOOKUP),
-                    )
-                }
-            }
-        }
-    }
-
-    /** The add-by-username sheet acknowledged the success (it closed). */
-    public fun consumeSendSuccess() {
-        mutableUi.update { if (it.sendSucceeded) it.copy(sendSucceeded = false) else it }
-    }
-
-    /** The add-by-username sheet was dismissed: drop a stale error so the
-     *  next opening starts clean; the typed values are kept. */
-    public fun onDismissAddSheet() {
-        mutableUi.update { it.copy(sendError = null, sendSucceeded = false) }
-    }
-
     /** Remove an accepted contact from this device (UX 5.3). Local only. */
     public fun onRemoveContactClicked(messageId: Long) {
         repo.removeContact(messageId)
@@ -268,23 +184,20 @@ public class ContactsViewModel(
     }
 
     /**
-     * Generate a fresh single-use 7-day invite link. Surfaces
-     * the resulting [GeneratedInvite] in
-     * [ContactsState.outstandingInvites]; failures land in
-     * [ContactsUiState.inviteError].
-     *
-     * Single-button-fire shape for 1.15e10. The custom-config
-     * dialog (user-typed label / expiry / max_uses) lands in
-     * 1.15e10b when the UX pushes back.
+     * Create link (UX `contact-invite-link.md` section 9): mints a link at
+     * once with [params], the defaults unless given ([INVITE_DEFAULT_PARAMS]:
+     * no label, 7 days, one person). Surfaces the resulting
+     * [GeneratedInvite] in [ContactsState.outstandingInvites]; failures land
+     * in [ContactsUiState.inviteError].
      */
-    public fun onGenerateInviteClicked() {
+    public fun onGenerateInviteClicked(params: InviteCreateParams = INVITE_DEFAULT_PARAMS) {
         val snapshot = mutableUi.value
         if (snapshot.generatingInvite) return
 
-        mutableUi.update { it.copy(generatingInvite = true, inviteError = null) }
+        mutableUi.update { it.copy(generatingInvite = true, inviteError = null, inviteNotice = null) }
         viewModelScope.launch {
             try {
-                repo.generateInviteLink()
+                mint(params)
                 mutableUi.update {
                     it.copy(generatingInvite = false, inviteError = null)
                 }
@@ -300,23 +213,133 @@ public class ContactsViewModel(
         }
     }
 
+    private suspend fun mint(params: InviteCreateParams): GeneratedInvite =
+        repo.generateInviteLink(
+            label = params.label,
+            expiryMillisFromNow = params.expiryMillisFromNow,
+            maxUses = params.maxUses,
+        )
+
+    /** The account's synced link records (ADR-0079 section 4), which say
+     *  whether a row is editable and whether Delete asks first. */
+    public fun inviteLinkRecords(): StateFlow<List<uniffi.lakko_ffi_uniffi.LinkRecord>> = repo.inviteLinkRecords()
+
     /**
-     * Revoke an outstanding invite by [blobId]. On success the
-     * row is dropped from [ContactsState.outstandingInvites]
-     * automatically by [ContactsRepository.revokeInviteLink].
+     * Copy (UX section 9): mark the link copied in the account's synced
+     * state (sent to the other devices like a revoke or a use) FIRST, then
+     * [writeClipboard]. A link whose record is not known, or already marked,
+     * is copied without a write. Showing the QR code does not come here.
      */
-    public fun onRevokeInviteClicked(blobId: ByteArray) {
+    public fun onCopyInviteClicked(slug: String, url: String, writeClipboard: (String) -> Unit) {
+        val sync = inviteLinkSyncBySlug(repo.inviteLinkRecords().value)[slug]
+        if (sync == null || sync.shared) {
+            writeClipboard(url)
+            return
+        }
         viewModelScope.launch {
             try {
-                repo.revokeInviteLink(blobId)
+                repo.markInviteLinkShared(sync.linkId)
             } catch (err: Throwable) {
                 me.lakko.app.rethrowIfCancelled(err)
-                logFailure("revoke invite link", err)
-                mutableUi.update {
-                    it.copy(inviteError = contactsErrorText(err, "chat.error.revoke_link"))
+                // The copy still happens: the person asked for the link. The
+                // record stays editable on the devices until the next write.
+                logFailure("mark invite link copied", err)
+            }
+            writeClipboard(url)
+        }
+    }
+
+    /**
+     * Delete link (the old Revoke, UX section 9): the existing revoke path.
+     * The sheet asks first when [inviteDeleteNeedsConfirmation] says so; this
+     * deletes. On success the row leaves both lists and the sheet says
+     * `invite.links.deleted`; a failure says `invite.links.error.delete`.
+     */
+    public fun onDeleteInviteClicked(slug: String) {
+        if (mutableUi.value.revokingActiveInviteSlug != null) return
+        mutableUi.update {
+            it.copy(revokingActiveInviteSlug = slug, inviteError = null, activeInvitesError = null, inviteNotice = null)
+        }
+        viewModelScope.launch {
+            val ok = try {
+                deleteBySlug(slug)
+                true
+            } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableUi.update { it.copy(revokingActiveInviteSlug = null) }
                 }
+                logFailure("delete invite link", err)
+                false
+            }
+            mutableUi.update {
+                it.copy(
+                    revokingActiveInviteSlug = null,
+                    inviteNotice = if (ok) UiText("invite.links.deleted") else null,
+                    inviteError = if (ok) null else UiText("invite.links.error.delete"),
+                )
             }
         }
+    }
+
+    /**
+     * Save on the edit form (UX section 9): mint a NEW link with [params]
+     * first, then delete the old one [slug] by the Delete path. A failure to
+     * mint leaves the old link and says `invite.links.error.edit`; a failure
+     * to delete the old one (the new one exists) says
+     * `invite.links.error.delete`. [onSaved] runs once the new link exists
+     * (the sheet closes its form).
+     */
+    public fun onEditInviteSaved(slug: String, params: InviteCreateParams, onSaved: () -> Unit = {}) {
+        val snapshot = mutableUi.value
+        if (snapshot.generatingInvite || snapshot.revokingActiveInviteSlug != null) return
+        mutableUi.update {
+            it.copy(generatingInvite = true, revokingActiveInviteSlug = slug, inviteError = null, inviteNotice = null)
+        }
+        viewModelScope.launch {
+            try {
+                mint(params)
+            } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableUi.update { it.copy(generatingInvite = false, revokingActiveInviteSlug = null) }
+                }
+                logFailure("edit invite link: mint", err)
+                mutableUi.update {
+                    it.copy(
+                        generatingInvite = false,
+                        revokingActiveInviteSlug = null,
+                        inviteError = UiText("invite.links.error.edit"),
+                    )
+                }
+                return@launch
+            }
+            onSaved()
+            val deleted = try {
+                deleteBySlug(slug)
+                true
+            } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableUi.update { it.copy(generatingInvite = false, revokingActiveInviteSlug = null) }
+                }
+                logFailure("edit invite link: delete old", err)
+                false
+            }
+            mutableUi.update {
+                it.copy(
+                    generatingInvite = false,
+                    revokingActiveInviteSlug = null,
+                    inviteError = if (deleted) null else UiText("invite.links.error.delete"),
+                )
+            }
+        }
+    }
+
+    /** Revoke the link [slug] through [ContactsRepository.revokeInviteLink]
+     *  (it drops a session row) and drop it from the loaded list. A slug that
+     *  is not base64url throws [IllegalArgumentException]. */
+    private suspend fun deleteBySlug(slug: String) {
+        val blobId = me.lakko.app.auth.base64UrlDecodeNoPad(slug)
+        repo.revokeInviteLink(blobId)
+        mutableUi.update { ui -> ui.copy(activeInvites = ui.activeInvites.filterNot { it.blobIdSlug == slug }) }
     }
 
     /**
@@ -360,60 +383,6 @@ public class ContactsViewModel(
                     it.copy(
                         loadingActiveInvites = false,
                         activeInvitesError = contactsErrorText(err, "invite.links.error.load"),
-                    )
-                }
-            }
-        }
-    }
-
-    /**
-     * Revoke an active invite from the loaded list. Drops the
-     * row locally on success or on a 404 (server-side already
-     * gone — same terminal state).
-     */
-    public fun onRevokeActiveInviteClicked(slug: String) {
-        val snapshot = mutableUi.value
-        if (snapshot.revokingActiveInviteSlug != null) return
-        val row = snapshot.activeInvites.firstOrNull { it.blobIdSlug == slug } ?: return
-        // `base64UrlDecodeNoPad` returns a NON-null ByteArray and THROWS
-        // `IllegalArgumentException` on a character outside the base64url
-        // alphabet — it never returns null, so an elvis here would be dead
-        // code and the raw exception would escape into the click handler.
-        // The slug is server-supplied (it arrives on the active-invites
-        // list), so a malformed one must land in the error state rather
-        // than crash the screen.
-        val blobId = try {
-            me.lakko.app.auth.base64UrlDecodeNoPad(row.blobIdSlug)
-        } catch (e: IllegalArgumentException) {
-            logFailure("revoke invite link: malformed slug", e)
-            mutableUi.update {
-                it.copy(activeInvitesError = UiText("chat.error.revoke_link"))
-            }
-            return
-        }
-        mutableUi.update {
-            it.copy(revokingActiveInviteSlug = slug, activeInvitesError = null)
-        }
-        viewModelScope.launch {
-            try {
-                repo.revokeInviteLink(blobId)
-                mutableUi.update {
-                    it.copy(
-                        revokingActiveInviteSlug = null,
-                        activeInvites = it.activeInvites.filterNot { row ->
-                            row.blobIdSlug == slug
-                        },
-                    )
-                }
-            } catch (err: Throwable) {
-                me.lakko.app.rethrowIfCancelled(err) {
-                    mutableUi.update { it.copy(revokingActiveInviteSlug = null) }
-                }
-                logFailure("revoke invite link", err)
-                mutableUi.update {
-                    it.copy(
-                        revokingActiveInviteSlug = null,
-                        activeInvitesError = contactsErrorText(err, "chat.error.revoke_link"),
                     )
                 }
             }
@@ -534,20 +503,14 @@ public class ContactsViewModel(
         android.util.Log.w("LakkoContacts", "WARN $action failed: ${err.javaClass.simpleName}: ${err.message}")
     }
 
-    /** VM-internal slice carrying ephemeral form + send +
-     *  invite-generation state. Persistent contacts data lives
+    /** VM-internal slice carrying ephemeral invite-generation
+     *  state. Persistent contacts data lives
      *  in the repository. */
     private data class UiSlice(
-        val usernameInput: String = "",
-        val usernameError: me.lakko.app.l10n.UiText? = null,
-        val introInput: String = "",
-        val sending: Boolean = false,
-        val sendError: UiText? = null,
-        /** Set once a request was sent; the sheet closes on it and calls
-         *  [consumeSendSuccess]. */
-        val sendSucceeded: Boolean = false,
         val generatingInvite: Boolean = false,
         val inviteError: UiText? = null,
+        /** A notice on the Invite links sheet (`invite.links.deleted`). */
+        val inviteNotice: UiText? = null,
         /** Phase 1.18d2b-list — server-authoritative active-
          *  invites slice. `activeInvitesLoaded` distinguishes
          *  "user hasn't tapped Refresh yet" from "Refresh ran
@@ -560,31 +523,23 @@ public class ContactsViewModel(
         val activeInviteUrls: Map<String, String> = emptyMap(),
         val loadingActiveInvites: Boolean = false,
         val activeInvitesError: UiText? = null,
-        /** `blobIdSlug` of the row currently being revoked, when
-         *  any. The screen disables the Revoke button on that
-         *  row + shows a spinner. */
+        /** `blobIdSlug` of the row being deleted (or replaced by an
+         *  edit), when any. The screen disables Delete and Edit
+         *  meanwhile. */
         val revokingActiveInviteSlug: String? = null,
     )
 }
 
 /** Combined snapshot the [ContactsScreen] renders. */
 public data class ContactsUiState(
-    val usernameInput: String,
-    /** ADR-0048 §4 — the reason the typed username fails, or `null`
-     *  (ADR-0061: a catalog message the screen renders). */
-    val usernameError: me.lakko.app.l10n.UiText? = null,
-    val introInput: String,
-    val sending: Boolean,
-    /** ADR-0061 — rendered from the failure's kind, never from core prose. */
-    val sendError: UiText?,
-    /** A request was just sent; consumed by the add sheet. */
-    val sendSucceeded: Boolean = false,
     val pending: List<me.lakko.app.contacts.IncomingContactRequest>,
     val accepted: List<me.lakko.app.contacts.AcceptedContact>,
     val sent: List<me.lakko.app.contacts.SentContactRequest>,
     val outstandingInvites: List<GeneratedInvite>,
     val generatingInvite: Boolean,
     val inviteError: UiText?,
+    /** A notice on the Invite links sheet (`invite.links.deleted`). */
+    val inviteNotice: UiText? = null,
     /** Phase 1.18d2b-list. */
     val activeInvitesLoaded: Boolean,
     val activeInvites: List<me.lakko.app.discovery.ActiveInvite>,

@@ -214,7 +214,7 @@ export function callRingNotification(call, strings = NOTIFICATION_STRINGS_EN) {
       requireInteraction: true,
       vibrate: CALL_VIBRATION_PATTERN,
       icon: "/icon-192.png",
-      badge: "/icon-96.png",
+      badge: "/badge-96.png",
       actions: [
         { action: CALL_ACTION_ACCEPT, title: strings.accept },
         { action: CALL_ACTION_DECLINE, title: strings.decline },

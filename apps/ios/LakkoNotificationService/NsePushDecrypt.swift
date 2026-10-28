@@ -77,23 +77,22 @@ private let groupHexLen = 64
 /// all (ADR-0042, amended 2026-09-30); `g` (group hex) + `p` (DS pointer)
 /// drive the preview.
 public struct NsePushWake: Equatable {
-    /// 64 lowercase-hex chars = the 32-byte opaque `push_gid` (post-ADR-0042
-    /// Sprint 3 the notify path sends `g = hex(push_gid)`) or a legacy raw
-    /// group_id (a pre-ADR-0042 subscription), or `nil`. The decrypt core
-    /// reverse-maps a `push_gid` to the real group_id first and falls back
-    /// to the raw-group_id interpretation on a miss.
+    /// 64 lowercase-hex chars = the 32-byte opaque `push_gid`, or `nil`. The
+    /// decrypt core reverse-maps it to the real group_id; a miss is refused
+    /// (the raw-group_id fallback of the pre-ADR-0042 wake is gone).
     public let groupHex: String?
     /// DS message id of the message that triggered the wake, or `nil`.
     public let pointer: Int64?
-    /// Hex of the device pseudonym the wake was sent to (`d`), or `nil`. The
-    /// wake is handled only when it equals the pseudonym bound to the
-    /// signed-in account (``NsePushDecryptDeps/boundAccount(wakeDevicePseudonymHex:)``).
-    public let devicePseudonymHex: String?
+    /// Hex of the push-gw subscription the wake was delivered for (`s`), or
+    /// `nil`. The wake is handled only when the bound account's route row for
+    /// `g` holds that id (ADR-0078 section 3,
+    /// ``NsePushDecryptDeps/lookupRoute(accountIdB64:pushGidHex:subscriptionIdHex:)``).
+    public let subscriptionIdHex: String?
 
-    public init(groupHex: String?, pointer: Int64?, devicePseudonymHex: String? = nil) {
+    public init(groupHex: String?, pointer: Int64?, subscriptionIdHex: String? = nil) {
         self.groupHex = groupHex
         self.pointer = pointer
-        self.devicePseudonymHex = devicePseudonymHex
+        self.subscriptionIdHex = subscriptionIdHex
     }
 }
 
@@ -359,27 +358,21 @@ public protocol NsePushDecryptDeps {
     /// ADR-0042 (amended 2026-09-30) — the ONE account this wake may be
     /// handled for, or `nil` when it may not be handled at all.
     ///
-    /// Non-`nil` only when the app recorded a `(device pseudonym, account)`
-    /// binding at push registration and `wakeDevicePseudonymHex` (the wake's
-    /// `d`) equals the bound pseudonym (``PushAccountBinding``). A device has
-    /// at most one active account and never shows another account's push, so
-    /// every later read — route, known groups, seed, snapshot, cursor, name,
-    /// mute — is for this account and no other. READ-ONLY.
-    func boundAccount(wakeDevicePseudonymHex: String?) -> String?
+    /// Non-`nil` only when the app recorded an account binding at push setup
+    /// and the wake carries a well-formed `s` (``PushAccountBinding``). A
+    /// device has at most one active account and never shows another
+    /// account's push, so every later read — route, seed, snapshot, cursor,
+    /// name, mute — is for this account and no other. READ-ONLY.
+    func boundAccount(wakeSubscriptionIdHex: String?) -> String?
 
-    /// ADR-0042 Sprint 4 — reverse-map an opaque `push_gid` (lowercase hex,
-    /// the post-Sprint-3 wake `g`) to the real `group_id` it routes for
+    /// ADR-0042 Sprint 4 with ADR-0078 — reverse-map an opaque `push_gid`
+    /// (lowercase hex, the wake's `g`) to the real `group_id` it routes for
     /// `accountIdB64`, via the PLAINTEXT App-Group reverse index
-    /// (`PushRoutingStore.lookupRoute`, keyed `(account, push_gid)`). A row
-    /// another account wrote for the same `push_gid` is a miss. `nil` on a
-    /// miss — the caller falls back to the legacy raw-group_id reading of
-    /// `g`, for the same account. READ-ONLY.
-    func lookupRoute(accountIdB64: String, pushGidHex: String) -> String?
-
-    /// Does `accountIdB64` know `groupHex` as one of its groups (the legacy
-    /// raw-group_id wake)? Only the bound account's groups are searched: a
-    /// group another account on this device knows is not a match.
-    func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool
+    /// (`PushRoutingStore.lookupRoute`), and only when the account's
+    /// subscription id for that row equals the wake's `s`. A row another
+    /// account wrote, or a subscription this account does not hold, is a
+    /// miss, and a miss is refused. READ-ONLY.
+    func lookupRoute(accountIdB64: String, pushGidHex: String, subscriptionIdHex: String?) -> String?
 
     /// The 64-byte AccountIdentity (BIP39) seed for `accountIdB64`, or `nil`.
     func loadIdentitySeed(accountIdB64: String) -> Data?
@@ -532,38 +525,32 @@ public func decryptPushOutcome(
     let groupHex = rawGroupHex.lowercased()
     guard groupHex.count == groupHexLen, isLowerHex(groupHex) else { return .none }
 
-    // 2. The wake is handled only for the account the device pseudonym is
-    //    bound to (ADR-0042, amended 2026-09-30): no binding, no `d`, or a
-    //    `d` that differs from the bound pseudonym → the generic line, with
-    //    no store read at all. From here on the bound account is the ONLY
-    //    account this wake is decrypted as.
+    // 2. The wake is handled only for the bound account (ADR-0042, amended
+    //    2026-09-30, with ADR-0078): no binding or no well-formed `s` → the
+    //    generic line, with no store read at all. From here on the bound
+    //    account is the ONLY account this wake is decrypted as.
     guard let boundAccountIdB64 = deps.boundAccount(
-        wakeDevicePseudonymHex: wake?.devicePseudonymHex),
+        wakeSubscriptionIdHex: wake?.subscriptionIdHex),
           !boundAccountIdB64.isEmpty else {
         return .none
     }
 
-    // 3. Resolve the wake's `g` to the real group_id, for the bound account.
-    //    ADR-0042 Sprint 4: the notify path sends `g = hex(push_gid)` — an
-    //    opaque routing id, NOT the DS group_id — so FIRST reverse-map it
-    //    through the App-Group index for (bound account, push_gid); on a hit
-    //    the row's REAL group_id drives everything downstream (snapshot, group
-    //    open, DS fetch, cursor). On a miss — an unknown push_gid, another
-    //    account's row, an unprovisioned suite, or a malformed row — FALL BACK
-    //    to reading `g` as a raw group_id, accepted only when the BOUND account
-    //    knows that group. Both failing → the generic banner (fail-closed).
-    let account: NseResolvedAccount
-    let realGroupHex: String
-    if let routed = routedGroup(deps.lookupRoute(accountIdB64: boundAccountIdB64, pushGidHex: groupHex)) {
-        account = NseResolvedAccount(accountIdB64: boundAccountIdB64, groupIdBytes: routed.bytes)
-        realGroupHex = routed.hex
-    } else if deps.accountKnowsGroup(accountIdB64: boundAccountIdB64, groupHex: groupHex),
-              let legacyBytes = hexToData(groupHex) {
-        account = NseResolvedAccount(accountIdB64: boundAccountIdB64, groupIdBytes: legacyBytes)
-        realGroupHex = groupHex
-    } else {
+    // 3. Resolve the wake's `g` to the real group_id, for the bound account:
+    //    the notify path sends `g = hex(push_gid)`, an opaque routing id, so
+    //    it is reverse-mapped through the App-Group index for (bound account,
+    //    push_gid), and only when the row's subscription id is the wake's
+    //    `s`. On a hit the row's REAL group_id drives everything downstream
+    //    (snapshot, group open, DS fetch, cursor). A miss — an unknown
+    //    push_gid, another account's row, a subscription this account does not
+    //    hold, an unprovisioned suite, a malformed row — is the generic banner
+    //    (fail-closed).
+    guard let routed = routedGroup(deps.lookupRoute(
+        accountIdB64: boundAccountIdB64, pushGidHex: groupHex,
+        subscriptionIdHex: wake?.subscriptionIdHex)) else {
         return .none
     }
+    let account = NseResolvedAccount(accountIdB64: boundAccountIdB64, groupIdBytes: routed.bytes)
+    let realGroupHex = routed.hex
 
     // 4. The AccountIdentity seed → the throwaway Identity.
     guard var seed = deps.loadIdentitySeed(accountIdB64: account.accountIdB64) else {
@@ -756,17 +743,12 @@ public func nseConversationThread(_ wake: NsePushWake?, _ deps: NsePushDecryptDe
     guard let rawGroupHex = wake?.groupHex else { return nil }
     let groupHex = rawGroupHex.lowercased()
     guard groupHex.count == groupHexLen, isLowerHex(groupHex) else { return nil }
-    guard let accountIdB64 = deps.boundAccount(wakeDevicePseudonymHex: wake?.devicePseudonymHex),
-          !accountIdB64.isEmpty else { return nil }
-    let realGroupHex: String
-    if let routed = routedGroup(deps.lookupRoute(accountIdB64: accountIdB64, pushGidHex: groupHex)) {
-        realGroupHex = routed.hex
-    } else if deps.accountKnowsGroup(accountIdB64: accountIdB64, groupHex: groupHex) {
-        realGroupHex = groupHex
-    } else {
-        return nil
-    }
-    return deps.conversationHex(accountIdB64: accountIdB64, groupIdHex: realGroupHex).lowercased()
+    guard let accountIdB64 = deps.boundAccount(wakeSubscriptionIdHex: wake?.subscriptionIdHex),
+          !accountIdB64.isEmpty,
+          let routed = routedGroup(deps.lookupRoute(
+            accountIdB64: accountIdB64, pushGidHex: groupHex,
+            subscriptionIdHex: wake?.subscriptionIdHex)) else { return nil }
+    return deps.conversationHex(accountIdB64: accountIdB64, groupIdHex: routed.hex).lowercased()
 }
 
 // MARK: - Ringing
@@ -1031,7 +1013,8 @@ private let committerBeaconEnvelopeFirstByte: UInt8 = 0x6C
 /// proto's first wire tag is one of `0x52` / `0x5A` / `0x62` / `0x6A`
 /// (`CallSignalingPayload.body` oneof fields 10..13, the 1x1 bodies),
 /// `0x72` / `0x7A` (`GroupCallStart` 14 / `GroupCallJoin` 15) or the two-byte
-/// `0x82 0x01` (`GroupCallLeave` 16), while a chat envelope starts with `{`
+/// `0x82 0x01` (`GroupCallLeave` 16) or `0x8A 0x01` (`ScreenShareSignal` 17,
+/// ADR-0083: call signalling that never rings), while a chat envelope starts with `{`
 /// (`0x7B`) — no overlap. Without the group tags a group-call body reached the
 /// chat parser's lossy fallback and became a notification preview of garbage.
 ///
@@ -1054,7 +1037,7 @@ public func nseLooksLikeCallSignaling(_ bytes: Data) -> Bool {
         return true
     case 0x72, 0x7A:
         return nseIsFramedGroupCallBody(bytes, tagLength: 1)
-    case 0x82:
+    case 0x82, 0x8A:
         return bytes.count >= 2
             && bytes[bytes.startIndex + 1] == 0x01
             && nseIsFramedGroupCallBody(bytes, tagLength: 2)
@@ -1313,9 +1296,37 @@ public func nseIsServiceEnvelope(
     // seed, so the slim FFI answers a yes / no (`isKeyRotationEnvelope`) and
     // the bytes never become a Swift value. Defaulted for the reason above.
     isKeyRotation: (Data) -> Bool = { _ in false },
-    keyRotationEnvelopeLen: Int = 0
+    keyRotationEnvelopeLen: Int = 0,
+    // ADR-0080 — the eleventh, a device card. It rides the account's own
+    // DeviceGroup, which this process never reads; recognised and suppressed
+    // like every service envelope, never stored. A yes / no from the slim
+    // FFI (`isDeviceCardEnvelope`). Defaulted for the reason above.
+    isDeviceCard: (Data) -> Bool = { _ in false },
+    deviceCardEnvelopeLens: ClosedRange<Int> = 0...0,
+    // ADR-0079 (reworked 2026-10-17) — the twelfth, a link-request claim. It
+    // rides the account's own DeviceGroup, which this process never reads;
+    // recognised and suppressed like every service envelope, never acted
+    // on. A yes / no from the slim FFI (`isLinkClaimEnvelope`). Defaulted for
+    // the reason above.
+    isLinkClaim: (Data) -> Bool = { _ in false },
+    linkClaimEnvelopeLen: Int = 0,
+    // ADR-0079 (order of 2026-10-17) — the thirteenth, a link-founded note.
+    // Rides the account's own DeviceGroup; recognised and suppressed, never
+    // acted on. A yes / no from the slim FFI (`isLinkFoundedEnvelope`).
+    // Defaulted for the reason above.
+    isLinkFounded: (Data) -> Bool = { _ in false },
+    linkFoundedEnvelopeLens: ClosedRange<Int> = 0...0
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
+    if nseLooksLikeLinkFounded(bytes, envelopeLens: linkFoundedEnvelopeLens), isLinkFounded(bytes) {
+        return true
+    }
+    if nseLooksLikeDeviceCard(bytes, envelopeLens: deviceCardEnvelopeLens), isDeviceCard(bytes) {
+        return true
+    }
+    if nseLooksLikeLinkClaim(bytes, envelopeLen: linkClaimEnvelopeLen), isLinkClaim(bytes) {
+        return true
+    }
     if nseLooksLikeKeyRotation(bytes, envelopeLen: keyRotationEnvelopeLen), isKeyRotation(bytes) {
         return true
     }
@@ -1353,6 +1364,46 @@ public func nseIsServiceEnvelope(
         return true
     }
     return false
+}
+
+/// First byte of the ADR-0080 device-card domain separator
+/// (`"lakko/device-card/v1\0"`): the same ASCII `l` as every other envelope
+/// domain, its own constant for the same reason as the others.
+private let deviceCardEnvelopeFirstByte: UInt8 = 0x6C
+
+/// Cheap PRE-FILTER for an ADR-0080 device card: the length range injected
+/// from the slim FFI (`deviceCardEnvelopeMinLen()` / `MaxLen()`, never a
+/// hand-copied number) plus the first domain byte. The peek decides nothing;
+/// `isDeviceCardEnvelope` is the verdict.
+public func nseLooksLikeDeviceCard(_ bytes: Data, envelopeLens: ClosedRange<Int>) -> Bool {
+    envelopeLens.lowerBound > 0 && envelopeLens.contains(bytes.count)
+        && bytes.first == deviceCardEnvelopeFirstByte
+}
+
+/// First byte of the ADR-0079 link-claim domain separator
+/// (`"lakko/link-claim/v1\0"`): the same ASCII `l` as every other envelope
+/// domain, its own constant for the same reason as the others.
+private let linkClaimEnvelopeFirstByte: UInt8 = 0x6C
+
+/// Cheap PRE-FILTER for an ADR-0079 link-request claim: the exact length
+/// injected from the slim FFI (`linkClaimEnvelopeLen()`, never a hand-copied
+/// number) plus the first domain byte. The peek decides nothing;
+/// `isLinkClaimEnvelope` is the verdict.
+public func nseLooksLikeLinkClaim(_ bytes: Data, envelopeLen: Int) -> Bool {
+    envelopeLen > 0 && bytes.count == envelopeLen && bytes.first == linkClaimEnvelopeFirstByte
+}
+
+/// First byte of the ADR-0079 link-founded domain separator
+/// (`"lakko/link-founded/v1\0"`).
+private let linkFoundedEnvelopeFirstByte: UInt8 = 0x6C
+
+/// Cheap PRE-FILTER for an ADR-0079 link-founded note: a length within the
+/// range injected from the slim FFI (`linkFoundedEnvelopeMinLen()` /
+/// `linkFoundedEnvelopeMaxLen()`) plus the first domain byte. The peek
+/// decides nothing; `isLinkFoundedEnvelope` is the verdict.
+public func nseLooksLikeLinkFounded(_ bytes: Data, envelopeLens: ClosedRange<Int>) -> Bool {
+    envelopeLens.lowerBound > 0 && envelopeLens.contains(bytes.count)
+        && bytes.first == linkFoundedEnvelopeFirstByte
 }
 
 /// First byte of the ADR-0057 registrar-seed domain separator — the same ASCII

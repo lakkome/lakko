@@ -212,6 +212,9 @@ interface Model {
   failPersistApplied: (fail: boolean) => void;
   /** ADR-0053 — flip to make the staged epoch's registration be refused. */
   failRegister: (fail: boolean) => void;
+  /** ADR-0081 — flip to make the commit route answer 409 (another commit
+   *  owns the staged epoch). */
+  conflictCommit: (on: boolean) => void;
   /** ADR-0053 — each `beginApply` completion: `release`, or `heal@N->M`. */
   readonly heals: string[];
 }
@@ -255,6 +258,7 @@ function model(opts: {
   let markWelcomesOwedFails = false;
   let persistAppliedFails = false;
   let registerFails = false;
+  let commitConflicts = false;
   const heals: string[] = [];
 
   const ports: SweepPorts = {
@@ -324,7 +328,12 @@ function model(opts: {
         order.push(`fetch>${after}`);
         return journal.filter((r) => r.id > after);
       },
-      publishGroup: async (bytes) => {
+      // ADR-0081 — the staged epoch's registration and the commit row in one
+      // request: "register" then "publish" in the order log, one call.
+      commitStaged: async (bytes) => {
+        if (registerFails) throw new Error("ds access: 401 proof required");
+        if (commitConflicts) throw Object.assign(new Error("409"), { status: 409 });
+        order.push("register");
         // ADR-0053 contract point 8 — the sweep writes only its commit to the
         // journal; anything else here is a defect the assertions will show.
         const label = bytes[0] === COMMIT ? "commit" : "other";
@@ -399,11 +408,13 @@ function model(opts: {
             return opts.mayRegister === true;
           },
         }),
-    // ADR-0053 contract point 3, the staged half.
-    registerStagedEpoch: async () => {
-      if (registerFails) throw new Error("ds access: 401 proof required");
-      order.push("register");
-    },
+    // ADR-0081 — what a failed commit call means.
+    classifyCommitFailure: (err) =>
+      (err as { status?: unknown }).status === 409
+        ? "lost"
+        : String(err).includes("401")
+          ? "refused"
+          : "unknown",
     // ADR-0053 contract point 4 — records whether the sweep asked to heal.
     beginApply: () => {
       const epochAtBegin = epoch;
@@ -452,6 +463,9 @@ function model(opts: {
     },
     failRegister: (fail) => {
       registerFails = fail;
+    },
+    conflictCommit: (on) => {
+      commitConflicts = on;
     },
     heals,
   };
@@ -569,8 +583,8 @@ describe("ADR-0045 — obligation 4: record before publish, verdict before merge
       "acting?0", // S4b — the fold runs first, and the owner always acts
       "fetch>0", // the stand-down re-read — STILL required after S4b
       "stage",
-      "register", // ADR-0053 — the staged epoch's key, before anything durable
-      "record", // BEFORE any publish (ADR-0040)
+      "record", // BEFORE anything leaves the device (ADR-0040)
+      "register", // ADR-0081 — the staged epoch's key and the commit row, one call
       "publish",
       "own:101",
       "fetch>0", // the verdict read
@@ -1238,34 +1252,48 @@ describe("ADR-0053 contract point 8 — the sweep delivers every Welcome to a ma
   });
 });
 
-describe("ADR-0053 contract point 3 — the staged epoch is registered before the sweep is published", () => {
-  it("registers after staging, before the outbox record and the publish", async () => {
+describe("ADR-0081 — the staged epoch is registered together with its commit", () => {
+  it("records first, then sends the registration and the row in one call", async () => {
     const m = model({ rank: 0, pending: 1, epoch: 6 });
 
     await runCommitterSweep(m.ports);
 
     const register = m.order.indexOf("register");
-    expect(register).toBeGreaterThan(m.order.indexOf("stage"));
-    expect(register).toBeLessThan(m.order.indexOf("record"));
-    expect(register).toBeLessThan(m.order.indexOf("publish"));
+    expect(register).toBeGreaterThan(m.order.indexOf("record"));
+    // One call: nothing comes between the registration and the publish.
+    expect(m.order[register + 1]).toBe("publish");
   });
 
-  it("a refused registration abandons the stage, records nothing and publishes nothing", async () => {
+  it("a refused commit abandons the stage, drops its entry and publishes nothing", async () => {
     const m = model({ rank: 0, pending: 1, epoch: 6 });
     m.failRegister(true);
 
     await expect(runCommitterSweep(m.ports)).rejects.toThrow(/proof required/);
 
     expect(m.published).toEqual([]);
-    expect(m.order).not.toContain("record");
     expect(m.order).toContain("abandon");
+    expect(m.entries().size).toBe(0);
     expect(m.staged()).toBe(false);
     expect(m.epoch()).toBe(6n);
     // The proposals survive for the next attempt.
     expect(m.pending()).toBe(1);
   });
 
-  it("the restart path does NOT re-send the registration (ADR-0057: a root re-registering N+1 would drop a winner's later epochs) and still re-publishes", async () => {
+  it("a 409 is a lost verdict: abandoned, entry dropped, nothing published", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6 });
+    m.conflictCommit(true);
+
+    const out = await runCommitterSweep(m.ports);
+
+    expect(out).toEqual({ kind: "lost" });
+    expect(m.published).toEqual([]);
+    expect(m.order).toContain("abandon");
+    expect(m.entries().size).toBe(0);
+    expect(m.staged()).toBe(false);
+    expect(m.pending()).toBe(1);
+  });
+
+  it("the restart path re-sends the same row through the commit route", async () => {
     const OWED: SweepDurableEntry = {
       id: "entry-owed",
       commitB64: Buffer.from(frame(COMMIT, 6, 0x5e)).toString("base64"),
@@ -1273,15 +1301,30 @@ describe("ADR-0053 contract point 3 — the staged epoch is registered before th
       welcomeMailboxesB64: [],
     };
     const m = model({ rank: 0, pending: 1, epoch: 6, owed: { entry: OWED } });
-    m.failRegister(true);
 
     const out = await resolveOwedVerdict(m.ports);
 
-    // The registration landed before the entry was written on the first run;
-    // the verdict decides what happens to the commit.
     expect(out.kind).toBe("committed");
-    expect(m.order).not.toContain("register");
+    expect(m.order.filter((o) => o === "register")).toHaveLength(1);
     expect(m.published).toEqual(["group:commit"]);
+  });
+
+  it("an unreachable DS leaves the sweep staged with its entry for the owed verdict", async () => {
+    const OWED: SweepDurableEntry = {
+      id: "entry-owed",
+      commitB64: Buffer.from(frame(COMMIT, 6, 0x5e)).toString("base64"),
+      welcomeEnvelopeB64: undefined,
+      welcomeMailboxesB64: [],
+    };
+    const m = model({ rank: 0, pending: 1, epoch: 6, owed: { entry: OWED } });
+    m.ports.journal.commitStaged = async () => {
+      throw new Error("network down");
+    };
+
+    await expect(resolveOwedVerdict(m.ports)).rejects.toThrow(/network/);
+
+    expect(m.staged()).toBe(true);
+    expect(m.order).not.toContain("abandon");
   });
 });
 

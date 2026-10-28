@@ -135,7 +135,7 @@ impl Notifiers {
     /// tasks that subscribe after this call do **not** see the event —
     /// they must double-check via a fresh fetch first (see
     /// `fetch_with_wait`'s loop).
-    fn wake(&self, key: NotifyKey) {
+    pub(crate) fn wake(&self, key: NotifyKey) {
         let arc = self.get_or_create(key);
         arc.notify_waiters();
     }
@@ -245,6 +245,29 @@ pub(crate) async fn publish(
         id,
         created_at: row.0,
     }))
+}
+
+/// Insert one row into `queue` on `conn` (inside a caller's transaction) and
+/// return its id. The caller wakes the long-polls once its transaction has
+/// committed (ADR-0081: the commit route appends inside the registration's
+/// transaction).
+pub(crate) async fn insert_row(
+    conn: &mut sqlx::MySqlConnection,
+    queue: Queue,
+    owner_id: &[u8; PSEUDONYM_LEN],
+    bytes: &[u8],
+) -> Result<u64, sqlx::Error> {
+    let sql = format!(
+        "INSERT INTO {} ({}, payload) VALUES (?, ?)",
+        queue.table(),
+        queue.owner_col(),
+    );
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(&owner_id[..])
+        .bind(bytes)
+        .execute(&mut *conn)
+        .await?;
+    Ok(result.last_insert_id())
 }
 
 /// Answer a mailbox publish exactly as [`publish`] would, and store nothing
@@ -482,23 +505,14 @@ pub(crate) async fn post_group(
     let resp = publish(&state.db, &state.notifiers, Queue::Group, &owner, &body).await?;
     // ADR-0054: the wake follows the append, and only a proven writer of a
     // claimed journal gets one. Fire-and-forget: it cannot delay or fail
-    // this response.
+    // this response. ADR-0078: the wake is sealed to push-gw; the DS forwards
+    // it unread and binds it to nothing (push-gw checks the wake-key
+    // signature only members can make).
     if let Some(wake) = wake {
-        if !matches!(gated, crate::access::Gated::Proven { .. }) {
-            tracing::debug!(
-                kind = wake.kind.as_str(),
-                outcome = "unclaimed",
-                "wake dropped"
-            );
-        } else if crate::ownership::wake_is_bound(&state, &owner, &wake.push_gid).await {
+        if matches!(gated, crate::access::Gated::Proven { .. }) {
             state.waker.fire(&owner, wake, resp.id);
         } else {
-            // ADR-0057: a journal wakes only the push_gid bound to it.
-            tracing::debug!(
-                kind = wake.kind.as_str(),
-                outcome = "unbound",
-                "wake dropped"
-            );
+            tracing::debug!(outcome = "unclaimed", "wake dropped");
         }
     }
     Ok((StatusCode::CREATED, resp).into_response())

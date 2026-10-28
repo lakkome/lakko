@@ -4,7 +4,9 @@
 //! Peer registry — tracks every connected client across calls.
 //!
 //! Each WebSocket connection that survives JWT verification
-//! is registered here under a fresh server-side [`PeerId`].
+//! is registered here under the [`PeerId`] its admission token
+//! carries: 16 random bytes the issuer draws per token
+//! (ADR-0078 section 2). The registry holds no account id.
 //! The registry is the join point between the signaling layer
 //! (which observes WS frames) and — in S-3-B-routing — the
 //! media-routing layer (which will hold `RTCPeerConnection`
@@ -36,39 +38,14 @@ use tokio::sync::{mpsc, RwLock};
 
 use crate::protocol::ServerFrame;
 
-/// Opaque per-connection identifier, generated server-side.
-///
-/// Distinct from the JWT-carried `sub` (account_id) — multiple
-/// peers from the same account (e.g. a desktop + a phone) get
-/// distinct [`PeerId`]s so they appear as separate participants
-/// in the call.
+/// Opaque per-connection identifier: the random `peer_id` of the
+/// connection's admission token (ADR-0078 section 2), 32 lower-case
+/// hex characters. Every token draws a fresh one, so two devices of
+/// one person are two peers and nothing ties a peer to an account.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PeerId(String);
 
 impl PeerId {
-    /// Generate a fresh peer id. The id is a monotone
-    /// counter mixed with the low 64 bits of the system-
-    /// clock nanos — long enough that the server-side log
-    /// never sees a collision in practice and dependency-
-    /// free (no `rand` needed for the SFU yet).
-    #[must_use]
-    pub fn fresh() -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use std::time::{SystemTime, UNIX_EPOCH};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        // Casting the u128 nanos to u64 is intentional — we
-        // only need uniqueness within the process lifetime,
-        // not absolute time. The low 64 bits cycle every
-        // ~584 years.
-        #[allow(clippy::cast_possible_truncation)]
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .map_or(0_u64, |d| d.as_nanos() as u64);
-        Self(format!("p{n:016x}{nanos:016x}"))
-    }
-
     /// Construct from a known string — used in tests to pin
     /// deterministic ids.
     #[cfg(test)]
@@ -83,6 +60,23 @@ impl PeerId {
     #[must_use]
     pub fn from_string(s: String) -> Self {
         Self(s)
+    }
+
+    /// What a log line names this peer by (ADR-0078 section 11): six hex
+    /// digits of a SipHash of the id under a key drawn at random once per
+    /// process and never written anywhere. Lines of one connection still
+    /// read together within a running SFU's log, but nothing at rest (no
+    /// table, no other log, no wire capture) maps a tag back to the id, and
+    /// a restart re-keys every tag. Collisions are possible (24 bits) and
+    /// harmless: the tag is a reading aid, not a key.
+    #[must_use]
+    pub fn log_tag(&self) -> String {
+        use std::collections::hash_map::RandomState;
+        use std::hash::BuildHasher;
+        use std::sync::OnceLock;
+        static KEY: OnceLock<RandomState> = OnceLock::new();
+        let hash = KEY.get_or_init(RandomState::new).hash_one(&self.0);
+        format!("{:06x}", hash & 0x00FF_FFFF)
     }
 
     /// Borrow the raw string form. Used by the routing
@@ -107,12 +101,9 @@ impl std::fmt::Display for PeerId {
 pub struct Peer {
     /// Server-assigned id.
     pub id: PeerId,
-    /// Call id this peer is part of, as carried by the
-    /// admission JWT.
-    pub call_id: String,
-    /// Account id from the JWT `sub`. Stored for log
-    /// pseudonymisation; never crosses into media frames.
-    pub account_id: String,
+    /// The room this peer is in, as its admission token names
+    /// it (`room`, a one-way function of the call id).
+    pub room: String,
     /// Outbound mpsc — frames the router pushes for the
     /// signaling task to write to the wire. `None` only in
     /// tests that bypass the registry. Holds a *clone* of
@@ -168,13 +159,9 @@ impl PeerRegistry {
     /// Used by the routing sprint to broadcast a new track
     /// to every other peer in the call.
     #[allow(dead_code)]
-    pub async fn peers_in_call(&self, call_id: &str) -> Vec<Peer> {
+    pub async fn peers_in_call(&self, room: &str) -> Vec<Peer> {
         let guard = self.inner.read().await;
-        guard
-            .values()
-            .filter(|p| p.call_id == call_id)
-            .cloned()
-            .collect()
+        guard.values().filter(|p| p.room == room).cloned().collect()
     }
 
     /// Look up a single peer by id. Cloned out under the
@@ -200,8 +187,7 @@ mod tests {
         let reg = PeerRegistry::new();
         let p = Peer {
             id: PeerId::from_str_for_test("p1"),
-            call_id: "call-a".into(),
-            account_id: "acct-a".into(),
+            room: "call-a".into(),
             outbound: None,
         };
         assert!(reg.register(p.clone()).await);
@@ -216,8 +202,7 @@ mod tests {
         let reg = PeerRegistry::new();
         let p = Peer {
             id: PeerId::from_str_for_test("dup"),
-            call_id: "c".into(),
-            account_id: "a".into(),
+            room: "c".into(),
             outbound: None,
         };
         assert!(reg.register(p.clone()).await);
@@ -229,20 +214,17 @@ mod tests {
         let reg = PeerRegistry::new();
         let p1 = Peer {
             id: PeerId::from_str_for_test("p1"),
-            call_id: "call-a".into(),
-            account_id: "a1".into(),
+            room: "call-a".into(),
             outbound: None,
         };
         let p2 = Peer {
             id: PeerId::from_str_for_test("p2"),
-            call_id: "call-a".into(),
-            account_id: "a2".into(),
+            room: "call-a".into(),
             outbound: None,
         };
         let p3 = Peer {
             id: PeerId::from_str_for_test("p3"),
-            call_id: "call-b".into(),
-            account_id: "a3".into(),
+            room: "call-b".into(),
             outbound: None,
         };
         reg.register(p1).await;
@@ -255,10 +237,18 @@ mod tests {
         assert_eq!(in_b.len(), 1);
     }
 
+    /// ADR-0078 section 2: the peer type carries no account. A
+    /// peer is its id, its room and its outbound channel; this
+    /// destructure fails to compile the day a field is added.
     #[test]
-    fn peer_ids_are_unique_per_process() {
-        let a = PeerId::fresh();
-        let b = PeerId::fresh();
-        assert_ne!(a, b);
+    fn the_peer_type_has_no_account_field() {
+        let Peer { id, room, outbound } = Peer {
+            id: PeerId::from_str_for_test("p"),
+            room: "r".into(),
+            outbound: None,
+        };
+        assert_eq!(id.as_str(), "p");
+        assert_eq!(room, "r");
+        assert!(outbound.is_none());
     }
 }

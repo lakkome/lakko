@@ -150,21 +150,30 @@ struct InviteLinkRow: Equatable, Identifiable {
     let createdAt: Date?
     /// UNIX millis; 0 = never expires.
     let expiryMs: UInt64
-    /// "1 use left", "3 uses left", "Used up", or `nil` for an unlimited
-    /// link, in the interface language of the moment the rows were built.
-    let usesLeft: String?
+    /// The limit the link was minted with ("single-use", "up to 5 uses",
+    /// "unlimited"), in the interface language of the moment the rows were
+    /// built.
+    let limit: String
+    /// How many uses a multi-use link has left, when the use count is known
+    /// (the ADR-0079 synced register carries it). `nil` for a single-use or
+    /// unlimited link, and when the count is not known: the row then shows
+    /// ``limit`` instead.
+    var usesLeft: UInt32? = nil
     let origin: Origin
 
     var id: String { slug }
 
-    var title: String { label.isEmpty ? Localization.text("chat.invite_link.label") : label }
+    /// The label the person gave the link, or `nil`: a link without a label
+    /// has no title line, its facts lead the row (no placeholder name).
+    var title: String? { label.isEmpty ? nil : label }
 }
 
 enum InviteLinkRows {
 
-    /// The server list first (it is the truth for uses and revocation), then
-    /// session links the server list does not carry, newest first. Expired
-    /// links are dropped: the sheet manages links that still work.
+    /// The links this device keeps a record of (ADR-0078 section 10: there is
+    /// no server list), then session links that list does not carry, newest
+    /// first. Expired links are dropped: the sheet manages links that still
+    /// work.
     static func merge(
         active: [ActiveInvite],
         sessionGenerated: [GeneratedInvite],
@@ -181,7 +190,8 @@ enum InviteLinkRows {
                 label: invite.label,
                 createdAt: parseCreatedAt(invite.createdAt),
                 expiryMs: invite.expiryMs,
-                usesLeft: usesLeftCopy(maxUses: invite.maxUses, usedCount: invite.usedCount),
+                limit: limitCopy(maxUses: invite.maxUses),
+                usesLeft: usesLeft(maxUses: invite.maxUses, used: invite.usedCount),
                 origin: .server)
         }
         let known = Set(rows.map(\.slug))
@@ -194,8 +204,7 @@ enum InviteLinkRows {
                 label: invite.label,
                 createdAt: Date(timeIntervalSince1970: TimeInterval(invite.createdAtMs) / 1000),
                 expiryMs: expiry,
-                usesLeft: usesLeftCopy(
-                    maxUses: UInt32(clamping: max(0, invite.maxUses)), usedCount: 0),
+                limit: limitCopy(maxUses: UInt32(clamping: max(0, invite.maxUses))),
                 origin: .session(blobId: invite.blobId)))
         }
         return rows.sorted { lhs, rhs in
@@ -222,16 +231,29 @@ enum InviteLinkRows {
         return InviteLinkSecret.link(base: ContactsRepository.inviteUrlPrefix + slug, secret: secret)
     }
 
-    /// Sentinels as `lakko-contacts` defines them: 0 = single use,
-    /// `UInt32.max` = unlimited, else N uses. `nil` for unlimited. Never
-    /// below zero; a link with nothing left reads "Used up" (the web
-    /// `describeInviteUses`, ADR-0061 batch 4).
-    static func usesLeftCopy(maxUses: UInt32, usedCount: UInt32) -> String? {
-        if maxUses == UInt32.max { return nil }
-        let total = maxUses == 0 ? 1 : Int(maxUses)
-        let left = max(0, total - Int(usedCount))
-        if left == 0 { return Localization.text("invite.links.used_up") }
-        return Localization.text("invite.links.uses_left", counts: ["count": UInt64(left)])
+    /// Uses left of a multi-use link, or `nil` when the link is single-use or
+    /// unlimited, or the use count is not known.
+    static func usesLeft(maxUses: UInt32, used: UInt32?) -> UInt32? {
+        guard let used, maxUses > 1, maxUses != UInt32.max else { return nil }
+        return maxUses - min(used, maxUses)
+    }
+
+    /// The use fact under a link: "N uses left" when known, else the limit the
+    /// link was minted with.
+    static func useFact(_ row: InviteLinkRow) -> String {
+        if let left = row.usesLeft {
+            return Localization.text("invite.links.uses_left", counts: ["count": UInt64(left)])
+        }
+        return row.limit
+    }
+
+    /// Sentinels as `lakko-contacts` defines them: 0 (or 1) = single use,
+    /// `UInt32.max` = unlimited, else up to N uses (the web
+    /// `describeInviteLimit`).
+    static func limitCopy(maxUses: UInt32) -> String {
+        if maxUses == UInt32.max { return Localization.text("invite.uses.unlimited") }
+        if maxUses <= 1 { return Localization.text("invite.uses.single") }
+        return Localization.text("invite.uses.up_to", counts: ["count": UInt64(maxUses)])
     }
 
     /// "Expires in 3d" / "Expires in 2h" / "Expires in 5m", "Never expires"
@@ -240,17 +262,33 @@ enum InviteLinkRows {
         if expiryMs == 0 { return Localization.text("invite.links.never_expires") }
         let expiry = Date(timeIntervalSince1970: TimeInterval(expiryMs) / 1000)
         if expiry <= now { return Localization.text("invite.links.expired") }
-        let delta = expiry.timeIntervalSince(now)
-        let days = Int(delta / 86_400)
-        if days >= 1 {
-            return Localization.text("invite.links.expires_days", counts: ["count": UInt64(days)])
+        switch remaining(expiry.timeIntervalSince(now)) {
+        case .days(let n):
+            return Localization.text("invite.links.expires_days", counts: ["count": UInt64(n)])
+        case .hours(let n):
+            return Localization.text("invite.links.expires_hours", counts: ["count": UInt64(n)])
+        case .minutes(let n):
+            return Localization.text("invite.links.expires_minutes", counts: ["count": UInt64(n)])
         }
-        let hours = Int(delta / 3_600)
-        if hours >= 1 {
-            return Localization.text("invite.links.expires_hours", counts: ["count": UInt64(hours)])
-        }
-        let minutes = max(1, Int(delta / 60))
-        return Localization.text("invite.links.expires_minutes", counts: ["count": UInt64(minutes)])
+    }
+
+    /// The time left until a link expires, in the one unit a row shows.
+    enum Remaining: Equatable {
+        case minutes(Int)
+        case hours(Int)
+        case days(Int)
+    }
+
+    /// The rule all three clients share: minutes rounded up while under an
+    /// hour; past that, hours rounded half up while under a day; then days
+    /// rounded half up. A 7-day link made an hour ago reads 7d, not 6d.
+    /// `delta` is in seconds and positive.
+    static func remaining(_ delta: TimeInterval) -> Remaining {
+        let minutes = max(1, Int((delta / 60).rounded(.up)))
+        if minutes < 60 { return .minutes(minutes) }
+        let hours = Int((delta / 3_600 + 0.5).rounded(.down))
+        if hours < 24 { return .hours(hours) }
+        return .days(Int((delta / 86_400 + 0.5).rounded(.down)))
     }
 
     /// The server's `created_at` string: ISO 8601 with or without fractional

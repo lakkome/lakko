@@ -46,7 +46,13 @@ public final class ChatViewModel: ObservableObject {
     /// uploads to storage immediately so the ref is ready by
     /// the time Send is tapped. Cleared on successful Send, on
     /// per-chip remove, and on screen dismount.
-    @Published public private(set) var pendingAttachments: [AttachmentRef] = []
+    @Published public private(set) var pendingAttachments: [AttachmentRef] = [] {
+        didSet { unsentAttachmentBlobIds = MessageBlobs.ids(of: pendingAttachments) }
+    }
+    /// ADR-0065 section 6 — the staged uploads' blob ids, for `deinit`: a
+    /// chat left with attachments never sent deletes them. Written on the
+    /// main actor only.
+    private nonisolated(unsafe) var unsentAttachmentBlobIds: [Data] = []
 
     // MARK: - Ephemeral status
 
@@ -539,6 +545,10 @@ public final class ChatViewModel: ObservableObject {
     }
 
     deinit {
+        let orphans = unsentAttachmentBlobIds
+        if !orphans.isEmpty {
+            Task { @MainActor in BlobLifecycle.shared.delete(orphans) }
+        }
         typingExpiryTimer?.invalidate()
         typingSendThrottle?.cancel()
         beaconTicker?.invalidate()
@@ -1414,6 +1424,28 @@ public final class ChatViewModel: ObservableObject {
     /// resolved through the joiner's ACCOUNT key (the request itself is keyed
     /// on their device leaf key, which no contact is stored under), else the
     /// label the row has always shown for a stranger.
+    /// ADR-0084 — whose photo a pending join row shows: the joiner's account
+    /// key when the request names one, else its leaf key.
+    func pendingJoinPhotoKey(_ ref: Data) -> Data {
+        repository.pendingExternalJoinAccountKey(groupIdHex: groupIdHex, joinerSignatureKey: ref) ?? ref
+    }
+
+    /// ADR-0084 — whose photo a roster row shows (`nil`: this device, the
+    /// own photo).
+    func memberPhoto(_ member: GroupMember) -> AvatarPhoto {
+        ownLeafIndex == member.leafIndex ? .own : .person(member.signaturePublicKey)
+    }
+
+    /// The bare name a roster row's initials are taken from (the list label
+    /// carries `· @username`, which would read as a second initial).
+    func memberInitialsName(_ member: GroupMember) -> String {
+        if ownLeafIndex == member.leafIndex {
+            return ProfileDirectory.shared.ownProfile?.displayName ?? ProfileDirectory.shared.ownUsername ?? ""
+        }
+        let resolved = ProfileDirectory.shared.resolve(signatureKey: member.signaturePublicKey)
+        return resolved.isPlaceholder ? "" : resolved.name
+    }
+
     func pendingJoinLabel(_ ref: Data) -> String {
         Self.pendingJoinLabel(
             accountKeyName: repository
@@ -1633,8 +1665,8 @@ public final class ChatViewModel: ObservableObject {
     /// there is nothing to commit and nothing to refuse.
     ///
     /// Deliberately NOT routed through ``onRemoveMember(leafIndex:)``, whose
-    /// own-leaf guard is still correct for the direct-commit path a table-less
-    /// group takes.
+    /// own-leaf guard dates from the direct-commit path a table-less group
+    /// took (deleted by the ADR-0081 amendment of 2026-10-19).
     ///
     /// The caller is expected to have confirmed first: a published request
     /// cannot be withdrawn — there is no wire withdraw, and evicting it locally
@@ -2050,17 +2082,17 @@ public final class ChatViewModel: ObservableObject {
         }
     }
 
-    /// The confirmation shown after Revoke (the web and Android rule): a
-    /// pointer link had a ledger row the server deleted, so the link is
-    /// revoked; an inline link (the censored-region fallback) had nothing to
-    /// revoke, so it is only cleared from the screen and must not claim more.
+    /// The confirmation shown after Revoke (the web and Android rule): a link
+    /// whose ledger row the server deleted is revoked; one this device holds
+    /// no revocation key for (or a malformed one) is only cleared from the
+    /// screen and must not claim more.
     nonisolated static func inviteLinkRevokeNotice(revoked: Bool) -> String {
         revoked ? "chat.invite_link.revoked" : "chat.invite_link.cleared"
     }
 
     /// ADR-0028 revoke — revoke the currently-shown group invite link (issuer
-    /// only). A pointer link carries a ledger blob the server deletes; an inline
-    /// link has nothing to revoke (we just clear the field). Fail-closed.
+    /// only): the server deletes its ledger row; without a kept revocation key
+    /// the field is only cleared. Fail-closed.
     func onRevokeInviteLink() {
         guard let link = inviteLink else { return }
         membershipError = nil
@@ -2905,6 +2937,58 @@ public final class ChatViewModel: ObservableObject {
         }
     }
 
+    // MARK: - ADR-0065 Save
+
+    /// `Save` / `Remove from saved` / no row, for `message`.
+    /// Any non-deleted message is savable, an older segment's row included
+    /// (named by its segment and DS id, ``SavedMessageRef``).
+    func saveMenuState(for message: ChatMessage, saved: [SavedMessageView]) -> SaveMenuState {
+        guard let ref = savedRef(of: message), !message.deleted, message.direction != .system else {
+            return .unavailable
+        }
+        return SaveMenuState.of(isSaved: SavedMessages.entry(in: saved, ref: ref) != nil, available: true)
+    }
+
+    /// The segment ref of a row in this conversation.
+    func savedRef(of message: ChatMessage) -> SavedMessageRef? {
+        conversationThread(in: repository.state)?.savedRef(rowId: message.messageId)
+    }
+
+    /// The author name kept in the snapshot.
+    private func savedAuthorName(_ message: ChatMessage) -> String {
+        if message.direction == .outgoing {
+            let directory = ProfileDirectory.shared
+            return directory.ownProfile?.displayName ?? directory.ownUsername ?? ""
+        }
+        return message.authorKeyB64.flatMap { personName(signatureKeyB64: $0) } ?? ""
+    }
+
+    func toggleSave(_ message: ChatMessage) {
+        let center = SavedMessagesCenter.shared
+        guard let ref = savedRef(of: message) else { return }
+        Task { @MainActor in
+            do {
+                if center.isSaved(ref) {
+                    try await center.unsave(ref)
+                } else {
+                    try await saveMessagesAwaiting([message])
+                }
+            } catch {
+                sendError = .key("chat.error.save")
+                NSLog("save failed: %@", String(describing: error))
+            }
+        }
+    }
+
+    /// Select mode's Save: the whole set, oldest first.
+    func saveMessagesAwaiting(_ messages: [ChatMessage]) async throws {
+        let items = messages.compactMap { message -> (message: ChatMessage, ref: SavedMessageRef, author: String)? in
+            guard let ref = savedRef(of: message) else { return nil }
+            return (message, ref, savedAuthorName(message))
+        }
+        try await SavedMessagesCenter.shared.save(items, kind: presentsAsGroup ? .group : .oneToOne)
+    }
+
     /// Delete (tombstone) own message `message`.
     func deleteMessage(_ message: ChatMessage) {
         guard message.messageId > 0 else { return }
@@ -2925,7 +3009,11 @@ public final class ChatViewModel: ObservableObject {
     func deleteMessageAwaiting(_ message: ChatMessage) async throws {
         let target = message.messageId
         guard target > 0 else { throw MessageSelectionError.notLanded }
+        // ADR-0065 section 6 — the files' ids are taken before the row is a
+        // tombstone; once the delete is published, the files go too.
+        let blobIds = message.direction == .outgoing ? MessageBlobs.ids(of: message.attachments) : []
         try await repository.deleteMessage(groupIdHex: groupIdHex, target: target)
+        BlobLifecycle.shared.delete(blobIds)
     }
 
     /// Why a bulk step refused before reaching the repository.
@@ -3370,6 +3458,8 @@ public final class ChatViewModel: ObservableObject {
             }
             pendingAttachments.append(ref)
         } catch let err as AttachmentBridgeError {
+            // The preview went up, the file did not: the preview is an orphan.
+            if let thumbRef { BlobLifecycle.shared.delete([thumbRef.blobId]) }
             sendError = err.userText(fileName: displayName)
             NSLog("attachment failed: %@", err.errorDescription ?? "")
         } catch {
@@ -3413,7 +3503,9 @@ public final class ChatViewModel: ObservableObject {
     /// matches the order in ``pendingAttachments``.
     public func onRemovePendingAttachment(at index: Int) {
         guard pendingAttachments.indices.contains(index) else { return }
-        pendingAttachments.remove(at: index)
+        let removed = pendingAttachments.remove(at: index)
+        // ADR-0065 section 6 — uploaded, never sent: deleted at once.
+        BlobLifecycle.shared.delete(MessageBlobs.ids(of: [removed]))
     }
 
     /// One long-poll tick — used by ``ChatScreen``'s

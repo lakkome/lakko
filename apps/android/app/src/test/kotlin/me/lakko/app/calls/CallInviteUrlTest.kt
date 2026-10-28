@@ -73,27 +73,6 @@ class CallInviteUrlTest {
     }
 
     // -----------------------------------------------------------
-    // Inline-URL round-trip
-    // -----------------------------------------------------------
-
-    @Test
-    fun `inline URL accepts a capability above the floor`() {
-        val bytes = ByteArray(CALL_INVITE_INLINE_MIN_LEN) { 0x42 }
-        val url = composeInlineCallInviteUrl(bytes)
-        assertTrue(url.contains("/c/"))
-    }
-
-    @Test
-    fun `inline URL rejects a too-small capability`() {
-        val tooSmall = ByteArray(CALL_INVITE_INLINE_MIN_LEN - 1) { 0x42 }
-        val ex = assertThrows(CallInviteUrlException.InlineTooSmall::class.java) {
-            composeInlineCallInviteUrl(tooSmall)
-        }
-        assertEquals(CALL_INVITE_INLINE_MIN_LEN, ex.minimum)
-        assertEquals(CALL_INVITE_INLINE_MIN_LEN - 1, ex.got)
-    }
-
-    // -----------------------------------------------------------
     // parseCallInviteSlug — discrimination on byte length
     // -----------------------------------------------------------
 
@@ -114,34 +93,18 @@ class CallInviteUrlTest {
         )
     }
 
+    /** The inline form is gone (2026-10-19): a sealed blob in the path is a
+     *  malformed slug, so the link opens as a dead one. */
     @Test
-    fun `parse recovers an inline payload`() {
-        val bytes = ByteArray(CALL_INVITE_INLINE_MIN_LEN + 50) { 0x33 }
-        val url = composeInlineCallInviteUrl(bytes)
-        val slug = url.substringAfter("/c/")
-        val parsed = parseCallInviteSlug(slug, L)
-        assertTrue(
-            "expected Inline, got ${parsed::class.simpleName}",
-            parsed is ParsedCallInvite.Inline,
-        )
-        assertEquals(
-            ParsedCallInvite.Inline(bytes),
-            parsed,
-        )
-    }
-
-    @Test
-    fun `parse rejects a slug of disallowed length`() {
-        // Decoded length 100 falls in the dead zone between the
-        // 6-byte pointer and the 400-byte inline floor.
-        val bytes = ByteArray(100) { 0x77 }
-        val slug = me.lakko.app.auth.base64UrlEncodeNoPad(bytes)
-        val ex = assertThrows(CallInviteUrlException.SlugWrongLength::class.java) {
-            parseCallInviteSlug(slug, L)
+    fun `an inline slug is refused, whatever its length`() {
+        for (len in listOf(100, 400, 450, 938)) {
+            val slug = me.lakko.app.auth.base64UrlEncodeNoPad(ByteArray(len) { 0x33 })
+            val ex = assertThrows(CallInviteUrlException.SlugWrongLength::class.java) {
+                parseCallInviteSlug(slug, L)
+            }
+            assertEquals(BLOB_ID_LEN, ex.blobIdLen)
+            assertEquals(len, ex.got)
         }
-        assertEquals(BLOB_ID_LEN, ex.blobIdLen)
-        assertEquals(CALL_INVITE_INLINE_MIN_LEN, ex.inlineMinLen)
-        assertEquals(100, ex.got)
     }
 
     @Test
@@ -187,21 +150,6 @@ class CallInviteUrlTest {
         assertThrows(CallInviteUrlException.WrongBlobIdLength::class.java) {
             composePointerCallInviteUrl(ByteArray(32), lengths = L)
         }
-    }
-
-    @Test
-    fun `inline minimum is documented at 400`() {
-        // Below this, the parser cannot discriminate inline
-        // from a malformed pointer URL.
-        assertEquals(400, CALL_INVITE_INLINE_MIN_LEN)
-    }
-
-    @Test
-    fun `auto compose forwards to the pointer URL on the id width`() {
-        val blobId = ByteArray(BLOB_ID_LEN) { 0x01 }
-        val urlAuto = composeCallInviteUrl(blobId)
-        val urlPointer = composePointerCallInviteUrl(blobId, lengths = L)
-        assertEquals(urlPointer, urlAuto)
     }
 
     @Test

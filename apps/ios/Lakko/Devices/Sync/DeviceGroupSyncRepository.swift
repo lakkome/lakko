@@ -18,8 +18,10 @@ import LakkoCore
 /// Lifecycle:
 ///
 ///   * [`bootstrap`] (idempotent for the same `accountId`) —
-///     loads the DeviceGroup handle from the existing snapshot
-///     or bootstraps a founder leaf, kicks off the poll loop.
+///     loads the DeviceGroup handle from the existing snapshot and kicks
+///     off the poll loop. With no usable snapshot (ADR-0081 decision 4) it
+///     founds only when the account's directory lists no other own device,
+///     and otherwise REJOINS through a sibling (``DeviceGroupRejoin``).
 ///   * [`clear`] — cancels the poll loop, drops the handle,
 ///     clears every reactive map. Called from
 ///     ``AuthRepository/logout`` and from
@@ -69,6 +71,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// ADR-0058 — the person's chat folders, in bar order. Only folders
     /// whose name has arrived, never a deleted one (the fold decides both).
     @Published public private(set) var folders: [FolderView] = []
+    /// ADR-0065 section 4 — the account's saved messages (live entries,
+    /// most recently saved first).
+    @Published public private(set) var saved: [SavedMessageView] = []
 
     /// ADR-0073 R.5 — the conversation lineage registers: which group
     /// continues which conversation. Read through ``ConversationLineage``.
@@ -84,6 +89,16 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// ADR-0076 section 3 — the account's own username, as its devices keep
     /// it: one more register of the synced state. `nil` when never written.
     @Published public private(set) var ownUsername: String?
+    /// ADR-0079 section 4 — the account's own invite links, every device's,
+    /// revoked ones included.
+    @Published public private(set) var linkRecords: [LinkRecord] = []
+    /// ADR-0079 (reworked 2026-10-17) — bumped whenever a claim of a link
+    /// request from another device of the account is recorded.
+    @Published public private(set) var linkClaimsVersion: Int = 0
+    /// When the last fetch that found the journal drained had STARTED (unix
+    /// ms): a fetch that started after a claim was published read every row
+    /// up to it.
+    private var lastDrainedFetchStartedAtMs: Int64 = 0
 
     /// The synced state of the bound account was loaded from disk: a write
     /// that waited for it can run. Wired by the composition root.
@@ -126,16 +141,32 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// The pending growth re-send, so two growths in a row send once.
     private var resendTask: Task<Void, Never>?
     private var restoreObserver: NSObjectProtocol?
-    /// The raw account id of the active session, for re-founding the
-    /// DeviceGroup (``repairForkedDeviceGroup``).
+    /// The raw account id of the active session (the DeviceGroup commit
+    /// outbox, the directory reads of a rejoin).
     private var activeAccountId: Data?
-    /// When the current fork suspicion started (``DeviceGroupFork``), `nil`
-    /// when there is none.
-    private var forkSuspectSince: Int64?
-    /// Accounts whose forked DeviceGroup this process already tried to
-    /// repair: at most one repair per session per account. Deliberately not
-    /// reset by ``clear()``.
-    private var forkRepairAttempted: Set<String> = []
+    /// ADR-0081 decision 3 — the snapshot generation the held handle was read
+    /// at (or last wrote). Every write of the handle names it, so a handle
+    /// still at N never puts N back over an N+1 another handle made current.
+    private var handleGeneration: Int?
+    /// ADR-0081 decision 4 — the founding decision or rejoin in progress.
+    private var rejoinTask: Task<Void, Never>?
+    /// ADR-0081 decision 4 — the sibling's admission record (when it started
+    /// watching, which keys it saw added, which knocks it handled).
+    private var admissions: DeviceGroupAdmissionRecord?
+    /// When the knocks were last read, and the DS id of the last knock row
+    /// read this session.
+    private var lastKnockCheckAtMs: Int64 = 0
+    private var knockCursor: Int64 = 0
+    private var changedHereObserver: NSObjectProtocol?
+
+    /// ADR-0081 decision 4 — this account's login handle (the knock payload
+    /// names it; a sibling admits only a knock naming it). Wired by the
+    /// composition root; `nil` for a guest, who has no other device.
+    var loginHandleProvider: @MainActor () -> Data? = { nil }
+    /// ADR-0081 decision 4 — publish this device's directory KeyPackage (a
+    /// rejoining device's first step: its signed device binding is what a
+    /// sibling checks). Wired by the composition root.
+    var republishDirectoryKeyPackage: @MainActor () async throws -> Void = {}
     /// ADR-0060 section 7 — service envelopes whose send failed or came
     /// before the handle was ready, one per envelope kind (a newer one of the
     /// same kind replaces an older). Retried by the poll loop. In memory: a
@@ -166,8 +197,29 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// head (unix ms); 0 before the first one. Read by
     /// ``waitForJournalHead(timeoutMs:)``.
     private var lastDrainedFetchAtMs: Int64 = 0
+    /// Callers waiting in ``waitForJournalHead(timeoutMs:)``. While any wait,
+    /// the poll does not hold its read open: a 25 s long poll per head read
+    /// made every step of an invite-link answer take about 25 s.
+    private var headWaiters = 0
+    /// The long poll out now, cut short when a caller starts waiting.
+    private var pollFetchTask: Task<FetchResult, Error>?
+    /// Set when ``pollFetchTask`` was cancelled for a waiter, so the poll
+    /// reads again at once instead of backing off.
+    private var pollKicked = false
 
     public init() {
+        // ADR-0081 — a DeviceGroup commit of this device landed through a
+        // handle of its own: reload the long-lived handle from the snapshot
+        // the outbox made current. Posted on the main actor (the outbox is
+        // main-actor), delivered synchronously.
+        changedHereObserver = NotificationCenter.default.addObserver(
+            forName: .lakkoDeviceGroupChangedHere, object: nil, queue: nil
+        ) { [weak self] note in
+            guard let account = note.userInfo?["accountIdB64"] as? String else { return }
+            MainActor.assumeIsolated {
+                self?.reloadFromDisk(accountIdB64: account)
+            }
+        }
         restoreObserver = NotificationCenter.default.addObserver(
             forName: .lakkoSyncedStateRestored, object: nil, queue: .main
         ) { [weak self] note in
@@ -211,14 +263,28 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 accountIdB64: accountIdB64,
                 deviceIdentitySeed: seed
             )
+        } catch is DeviceGroupLifecycle.NotJoined {
+            // ADR-0081 decision 4 — no usable DeviceGroup state: found only
+            // when the directory lists no other own device, rejoin otherwise.
+            startFoundOrRejoin(
+                accountIdBytes: secrets.accountId, accountIdB64: accountIdB64, deviceSeed: seed)
+            return
         } catch {
             NSLog("DeviceGroupSync bootstrap: ensureDeviceGroup %@", error.localizedDescription)
             activeAccountIdB64 = nil
             return
         }
+        adopt(ensured, accountIdB64: accountIdB64)
+    }
+
+    /// Take `ensured` as this session's DeviceGroup handle and start
+    /// following it: the removed check, the synced state, the roster, the
+    /// poll loop.
+    private func adopt(_ ensured: DeviceGroupLifecycle.Ensured, accountIdB64: String) {
         identity = ensured.identity
         group = ensured.group
-
+        handleGeneration = ensured.generation
+        loadAdmissions(accountIdB64: accountIdB64)
         // Removed while the app was closed: the persisted snapshot already
         // carries the commit that removed this device. Nothing is polled,
         // folded or persisted for it; the app root shows the removed screen.
@@ -241,6 +307,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         // seeds the acknowledged set; a later one may raise the notice for a
         // device added while the app was closed and already applied.
         reportRoster(group: ensured.group)
+        // ADR-0080 — this account's device cards, sent through this
+        // repository's DeviceGroup `ServiceEnvelope`.
+        DeviceCardCenter.shared.bind(accountIdB64: accountIdB64) { [weak self] envelope in
+            await self?.sendServiceEnvelope(envelope)
+        }
 
         let groupId: Data
         do {
@@ -279,6 +350,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
         cancelPollAndDropHandles()
         NewDeviceNoticeCenter.shared.bind(accountIdB64: nil)
+        DeviceCardCenter.shared.unbind()
         pendingServiceEnvelopes = [:]
         activeAccountIdB64 = nil
         activeAccountId = nil
@@ -370,11 +442,15 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if c != readCursors { readCursors = c }
         if o != order { order = o }
         if folderList != folders { folders = folderList }
+        let savedList = SavedMessages.ordered((try? s.saved()) ?? [])
+        if savedList != saved { saved = savedList }
         if lineageList != lineage { lineage = lineageList }
         let address = (try? s.recoveryEmail()).flatMap { $0 }
         if address != recoveryEmail { recoveryEmail = address }
         let name = (try? s.ownUsername()).flatMap { $0 }
         if name != ownUsername { ownUsername = name }
+        let links = (try? s.allLinkRecords()) ?? []
+        if links != linkRecords { linkRecords = links }
         let isPending = pending?.isPending ?? false
         if pendingSync != isPending { pendingSync = isPending }
     }
@@ -397,9 +473,14 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         resendTask = nil
         persistTask?.cancel()
         persistTask = nil
+        rejoinTask?.cancel()
+        rejoinTask = nil
         identity = nil
         group = nil
-        forkSuspectSince = nil
+        handleGeneration = nil
+        admissions = nil
+        lastKnockCheckAtMs = 0
+        knockCursor = 0
     }
 
     // MARK: - Removed device (docs/ux/second-device.md section 3.1)
@@ -423,7 +504,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         resendTask = nil
         persistTask?.cancel()
         persistTask = nil
-        forkSuspectSince = nil
+        rejoinTask?.cancel()
+        rejoinTask = nil
         return true
     }
 
@@ -503,6 +585,22 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         try await write(.folderChanges(changes: changes))
         markBackupDirty()
     }
+
+    /// ADR-0065 section 4 — publish saves and removals of saved messages, in
+    /// change sets of at most ``savedMaxPerChangeSet()`` (one journal row).
+    public func applySaved(_ registers: [SavedMessageRegister]) async throws {
+        let size = max(1, Int(savedMaxPerChangeSet()))
+        var start = 0
+        while start < registers.count {
+            let chunk = Array(registers[start..<min(registers.count, start + size)])
+            try await applyFolderChanges(FolderChangeSet(
+                metas: [], members: [], pins: [], removed: [], order: nil, saved: chunk))
+            start += size
+        }
+    }
+
+    /// Blob ids of every saved message's files (for the keep tick).
+    public func savedBlobIds() -> [Data] { (try? syncedState.savedBlobIds()) ?? [] }
 
     /// ADR-0058 section 5.2 — the backup carries this state, so a person's
     /// own folder or flag edit is a change worth backing up. Read cursors and
@@ -595,6 +693,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if isRecoveryEmailEnvelope(bytes: envelope) { return "recovery-email" }
         // ADR-0076 — likewise the own-username register.
         if isOwnUsernameEnvelope(bytes: envelope) { return "own-username" }
+        // ADR-0079 — every link record is its own slot.
+        if isLinkRecordEnvelope(bytes: envelope) { return "link-record:" + envelope.base64EncodedString() }
         guard let kind = try? dispatchIncomingEnvelope(plaintext: envelope).kind else {
             return envelope.base64EncodedString()
         }
@@ -682,12 +782,22 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     public func waitForJournalHead(timeoutMs: Int64 = DeviceGroupSyncRepository.journalHeadTimeoutMs) async -> Bool {
         guard ready, group != nil, !deviceRemoved else { return false }
         let start = Int64(Date().timeIntervalSince1970 * 1000)
+        headWaiters += 1
+        defer { headWaiters -= 1 }
+        // A long poll already out started before this call: cut it short so
+        // the next read starts now and does not wait.
+        if let out = pollFetchTask {
+            pollKicked = true
+            out.cancel()
+        }
+        // A read that STARTED after this call, so it carries every row
+        // published before it.
         while Int64(Date().timeIntervalSince1970 * 1000) - start < timeoutMs {
-            if lastDrainedFetchAtMs > start { return true }
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            if lastDrainedFetchStartedAtMs > start { return true }
+            try? await Task.sleep(nanoseconds: 100_000_000)
             if Task.isCancelled { return false }
         }
-        return lastDrainedFetchAtMs > start
+        return lastDrainedFetchStartedAtMs > start
     }
 
     private func sendBody(_ body: DeviceGroupBody, hlc: UInt64) async throws {
@@ -697,10 +807,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     }
 
     /// Encrypt with `compose` under the DeviceGroup's current epoch and
-    /// publish it on the DeviceGroup journal.
+    /// publish it on the DeviceGroup journal. Returns the DS message id.
+    @discardableResult
     private func publish(
         _ compose: (DeviceGroup, Identity) throws -> Data
-    ) async throws {
+    ) async throws -> Int64 {
         if deviceRemoved {
             throw NSError(
                 domain: "DeviceGroupSync",
@@ -719,10 +830,16 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         let wireBytes = try compose(group, identity)
         // The message took a step of this device's sender ratchet. That
         // state is on disk before the ciphertext is published, or nothing is
-        // published: a failed write, a session that ended, or a handle of an
-        // earlier session all stop here.
-        try DeviceGroupLifecycle.persistSnapshotOrThrow(
-            identity: identity, accountIdB64: accountIdB64)
+        // published: a failed write, a session that ended, a handle of an
+        // earlier session, or (ADR-0081 decision 3) a handle another one
+        // wrote past all stop here.
+        do {
+            handleGeneration = try DeviceGroupLifecycle.persistSnapshotOrThrow(
+                identity: identity, accountIdB64: accountIdB64, expectedGeneration: handleGeneration)
+        } catch let changed as DeviceGroupSnapshotStore.SnapshotChanged {
+            reloadFromDisk(accountIdB64: accountIdB64)
+            throw changed
+        }
         let groupId = try group.groupId()
         let ds = DsClient()
         // G-13 (ADR-0015): wrap in the journal envelope (application messages
@@ -731,16 +848,183 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             message: wireBytes,
             attestation: nil
         )
-        _ = try await ds.publishGroup(
+        let published = try await ds.publishGroup(
             groupId: groupId,
             payload: envelope,
             auth: DeviceGroupDsAccess.auth(
                 group: group, identity: identity, accountIdB64: accountIdB64, ds: ds)
         )
-        DeviceGroupLifecycle.persistSnapshot(
-            identity: identity,
-            accountIdB64: accountIdB64
-        )
+        // Already on disk before the publish; nothing to write again.
+        return published.id
+    }
+
+    /// ADR-0079 (reworked 2026-10-17) — seal and post this device's claim of
+    /// a link request into the account's DeviceGroup, on its own
+    /// `ServiceEnvelope` carrier. `beforePublish` gets the sealed bytes (hex)
+    /// and must record them durably (`false` aborts the publish). The
+    /// publish answer files nothing: the receive loop judges the row at its
+    /// position (``judgeOwnLinkRow``; it counts only when sealed at the
+    /// journal's epoch there). Returns the DS message id.
+    @discardableResult
+    public func postLinkClaim(
+        linkId: Data,
+        requesterKey: Data,
+        beforePublish: (String) -> Bool
+    ) async throws -> Int64 {
+        let envelope = try composeLinkClaimEnvelope(linkId: linkId, requesterAccountKey: requesterKey)
+        return try await publishRecorded(envelope: envelope, beforePublish: beforePublish)
+    }
+
+    /// ADR-0079 (order of 2026-10-17) — publish the link-founded note (the
+    /// request, the one-to-one founded for it, its Welcome) into the
+    /// account's DeviceGroup, BEFORE any Welcome is written. `beforePublish`
+    /// records the sealed bytes first, so the receive loop judges the row at
+    /// its position. Returns the DS message id; throws when the publish
+    /// failed.
+    @discardableResult
+    public func postLinkFounded(
+        linkId: Data, requesterKey: Data, groupId: Data, welcome: Data,
+        beforePublish: (String) -> Bool
+    ) async throws -> Int64 {
+        let envelope = try composeLinkFoundedEnvelope(
+            linkId: linkId, requesterAccountKey: requesterKey, groupId: groupId, welcome: welcome)
+        return try await publishRecorded(envelope: envelope, beforePublish: beforePublish)
+    }
+
+    private func publishRecorded(envelope: Data, beforePublish: (String) -> Bool) async throws -> Int64 {
+        try await publish { group, identity in
+            let wire = try group.createServiceEnvelopeMessage(identity: identity, envelope: envelope, hlc: Hlc.mint())
+            guard beforePublish(LinkClaims.hex(wire)) else {
+                throw NSError(
+                    domain: "DeviceGroupSync",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "Link row not recorded"]
+                )
+            }
+            return wire
+        }
+    }
+
+    /// ADR-0079 — another device's link-founded note, taken in. Kept (the
+    /// earliest per request) only from a sender leaf the roster this row was
+    /// sealed under resolves (C-68). `true` when the envelope was a note
+    /// (kept or dropped).
+    func receiveLinkFounded(_ envelope: Data, senderLeaf: UInt32?, group g: DeviceGroup, messageId: Int64) -> Bool {
+        guard isLinkFoundedEnvelope(bytes: envelope) else { return false }
+        guard let note = try? decodeLinkFoundedEnvelope(plaintext: envelope) else { return true }
+        guard let senderLeaf, let roster = try? g.devices(),
+              roster.contains(where: { $0.leafIndex == senderLeaf }),
+              let account = activeAccountIdB64 else { return true }
+        let changed = LinkClaims.Record(accountIdB64: account).recordNote(
+            LinkClaims.requestKeyHex(linkId: note.linkId, requesterKey: note.requesterAccountKey),
+            note: LinkClaims.HeldNote(
+                id: messageId, groupIdB64: base64Encode(note.groupId), welcomeB64: base64Encode(note.welcome)),
+            nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        if changed { linkClaimsVersion += 1 }
+        return true
+    }
+
+    /// ADR-0079 — this device's DeviceGroup leaf key and the current
+    /// roster's leaf keys, the inputs of the claim decision. `nil` while no
+    /// handle is held or this device was removed.
+    public func linkClaimRoster() -> (ownKey: Data, roster: [Data])? {
+        guard !deviceRemoved, let g = group, let devices = try? g.devices(), !devices.isEmpty,
+              let ownLeaf = try? g.ownLeafIndex(),
+              let ownKey = devices.first(where: { $0.leafIndex == ownLeaf })?.signaturePublicKey
+        else { return nil }
+        return (ownKey, devices.map(\.signaturePublicKey))
+    }
+
+    /// ADR-0079 (order of 2026-10-17) — the journal's epochs for one batch:
+    /// the record kept next to the claim record, or one starting at the
+    /// group's epoch when none is held for this DeviceGroup.
+    func loadJournalEpochs(_ g: DeviceGroup) -> (groupIdHex: String, epochs: FfiJournalEpochs)? {
+        guard let account = activeAccountIdB64, let groupId = try? g.groupId() else { return nil }
+        let groupIdHex = LinkClaims.hex(groupId)
+        if let stored = LinkClaims.Record(accountIdB64: account).journal(groupIdHex: groupIdHex) {
+            return (groupIdHex, FfiJournalEpochs(
+                base: stored.base, commitRowIds: stored.commitRowIds, commitEpochsAfter: stored.commitEpochsAfter))
+        }
+        guard let epoch = try? g.epoch() else { return nil }
+        let fresh = journalEpochsStartingAt(base: epoch)
+        // Kept at once: the start must not move with the group's epoch on
+        // later batches (an own commit merged early would then make an own
+        // claim sealed before it look straddled).
+        LinkClaims.Record(accountIdB64: account).setJournal(LinkClaims.Record.StoredJournal(
+            groupIdHex: groupIdHex, base: fresh.base,
+            commitRowIds: fresh.commitRowIds, commitEpochsAfter: fresh.commitEpochsAfter))
+        return (groupIdHex, fresh)
+    }
+
+    /// ADR-0079 — a journal row carrying one of this device's recorded sealed
+    /// claims or notes (its own application message cannot be decrypted
+    /// here) is judged at its position: it counts only when sealed at the
+    /// journal's epoch there. `true` when it was one.
+    func judgeOwnLinkRow(_ mlsMessage: Data, messageId: Int64, journal: FfiJournalEpochs) -> Bool {
+        guard let account = activeAccountIdB64 else { return false }
+        let record = LinkClaims.Record(accountIdB64: account)
+        guard record.hasUnmatchedWires() else { return false }
+        let counts = epochOfMessage(bytes: mlsMessage).map {
+            journalRowCounts(epochs: journal, rowId: UInt64(max(0, messageId)), sealedEpoch: $0)
+        } ?? false
+        guard record.judgeOwnRow(
+            wireHex: LinkClaims.hex(mlsMessage), messageId: messageId, counts: counts) != nil
+        else { return false }
+        linkClaimsVersion += 1
+        return true
+    }
+
+    /// ADR-0079 — after a row was processed (or judged as this device's
+    /// own): a commit that took effect moves the journal's epoch, and the
+    /// record is kept at once (it only ever follows the journal's content).
+    func observeJournalRow(
+        _ mlsMessage: Data, messageId: Int64, group g: DeviceGroup,
+        journal: inout FfiJournalEpochs, groupIdHex: String
+    ) {
+        guard let sealed = epochOfMessage(bytes: mlsMessage),
+              let after = epochAfterMessage(bytes: mlsMessage), after > sealed,
+              let groupEpoch = try? g.epoch(), let account = activeAccountIdB64 else { return }
+        let next = journalEpochsObserve(
+            epochs: journal, rowId: UInt64(max(0, messageId)), sealedEpoch: sealed,
+            epochAfter: after, groupEpochAfter: groupEpoch)
+        guard next != journal else { return }
+        journal = next
+        LinkClaims.Record(accountIdB64: account).setJournal(LinkClaims.Record.StoredJournal(
+            groupIdHex: groupIdHex, base: next.base,
+            commitRowIds: next.commitRowIds, commitEpochsAfter: next.commitEpochsAfter))
+    }
+
+    /// Wait until a fetch that STARTED after this call has found the
+    /// DeviceGroup journal drained, so every row up to a claim just published
+    /// has been applied. `false` when that did not happen in time.
+    ///
+    /// The same wait as ``waitForJournalHead(timeoutMs:)``, which cuts short a
+    /// long poll already out and reads with wait 0 while a caller waits. This
+    /// copy had neither and waited for the poll that was out to end on its
+    /// own: on a simulator an invite-link answer took 37 s (2026-10-23).
+    public func waitForJournalReadPastNow(
+        timeoutMs: Int64 = DeviceGroupSyncRepository.journalHeadTimeoutMs
+    ) async -> Bool {
+        await waitForJournalHead(timeoutMs: timeoutMs)
+    }
+
+    /// ADR-0079 (reworked 2026-10-17) — another device's claim of a link
+    /// request, taken in. Honoured only from a sender leaf the roster this
+    /// row was sealed under resolves (C-68); its DS id is kept with that
+    /// leaf's key. `true` when the envelope was a claim (kept or dropped).
+    func receiveLinkClaim(_ envelope: Data, senderLeaf: UInt32?, group g: DeviceGroup, messageId: Int64) -> Bool {
+        guard isLinkClaimEnvelope(bytes: envelope) else { return false }
+        guard let claim = try? decodeLinkClaimEnvelope(plaintext: envelope) else { return true }
+        guard let senderLeaf, let roster = try? g.devices(),
+              let sender = roster.first(where: { $0.leafIndex == senderLeaf }),
+              let account = activeAccountIdB64 else { return true }
+        let changed = LinkClaims.Record(accountIdB64: account).recordSeen(
+            LinkClaims.requestKeyHex(linkId: claim.linkId, requesterKey: claim.requesterAccountKey),
+            messageId: messageId,
+            authorHex: LinkClaims.hex(sender.signaturePublicKey),
+            nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        if changed { linkClaimsVersion += 1 }
+        return true
     }
 
     // MARK: - Inbound poll loop
@@ -775,12 +1059,15 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         await flushUnsentRecoveryEmail()
         guard bound.isCurrent else { return }
         await flushUnsentOwnUsername()
+        guard bound.isCurrent else { return }
+        await flushUnsentLinkRecords()
         while !Task.isCancelled, bound.isCurrent {
             if !pendingServiceEnvelopes.isEmpty {
                 await flushPendingServiceEnvelopes()
                 guard bound.isCurrent else { return }
             }
             let result: FetchResult
+            let fetchStartedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
             // ADR-0053 point 1 — the read is signed under the DeviceGroup's
             // current epoch.
             let auth = group.flatMap { g in
@@ -788,14 +1075,25 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     DeviceGroupDsAccess.auth(group: g, identity: $0, accountIdB64: accountIdB64, ds: ds)
                 }
             }
-            do {
-                result = try await ds.fetchGroup(
+            let waitSecs = headWaiters > 0 ? 0 : 25
+            let fetchTask = Task {
+                try await ds.fetchGroup(
                     groupId: groupId,
                     after: cursor,
                     limit: nil,
-                    waitSecs: 25,
+                    waitSecs: waitSecs,
                     auth: auth
                 )
+            }
+            pollFetchTask = fetchTask
+            do {
+                result = try await fetchTask.value
+                pollFetchTask = nil
+                pollKicked = false
+            } catch where pollKicked {
+                pollKicked = false
+                pollFetchTask = nil
+                continue
             } catch DsClientError.http(let status, _, _) where status == 404 {
                 continue
             } catch let err as DsClientError {
@@ -829,6 +1127,26 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             guard bound.isCurrent else { return }
             await flushPending()
 
+            // ADR-0081 decision 2, step 6 — a DeviceGroup commit of this device
+            // that did not finish (the DS could not be reached, a write failed,
+            // a crash) is finished before anything else; until it is, this
+            // device never reads itself as behind (the DS may hold its own next
+            // epoch). A landed entry made its epoch current and reloaded the
+            // handle (``reloadFromDisk(accountIdB64:)``).
+            var commitPending = false
+            if let accountId = activeAccountId {
+                do {
+                    if let owed = try await DeviceGroupCommits.resendOwed(
+                        accountIdBytes: accountId, accountIdB64: accountIdB64) {
+                        NSLog("DeviceGroup commit outbox: %@", owed == .lost ? "lost" : "landed")
+                    }
+                } catch {
+                    commitPending = true
+                    NSLog("DeviceGroup commit outbox: not finished yet (%@)", String(describing: error))
+                }
+            }
+            guard bound.isCurrent else { return }
+
             // G-13 (ADR-0015): the 32-byte verifying key peers feed to
             // processIncomingVerifyingRemovals. A zero key is a fail-closed
             // fallback when the device-attest endpoint is unreachable — it
@@ -852,6 +1170,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             guard bound.isCurrent else { return }
 
             var mutated = false
+            // ADR-0079 (order of 2026-10-17) — the journal readability rule for
+            // this batch: own claims and notes judged at their rows, commits
+            // moving the journal's epoch.
+            var journal = group.flatMap { loadJournalEpochs($0) }
             for message in result.messages {
                 cursor = message.id
                 guard let id = identity, let g = group else { return }
@@ -861,6 +1183,23 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     entry = try DeviceGroupJournalEnvelope.decode(message.payload)
                 } catch {
                     NSLog("DeviceGroupSync envelope decode failed: %@", error.localizedDescription)
+                    continue
+                }
+                // ADR-0079 — a commit that took effect moves the journal's
+                // epoch; observed after the row, whatever became of it.
+                defer {
+                    if var j = journal {
+                        observeJournalRow(
+                            entry.message, messageId: message.id, group: g,
+                            journal: &j.epochs, groupIdHex: j.groupIdHex)
+                        journal = j
+                    }
+                }
+                // ADR-0079 — this device's own claim or note, recognised by
+                // the sealed bytes it recorded before the publish and judged
+                // at this row's position; recorded before the cursor moves
+                // past it.
+                if let j = journal, judgeOwnLinkRow(entry.message, messageId: message.id, journal: j.epochs) {
                     continue
                 }
                 let attestations: [Data] = entry.attestation.map { [$0] } ?? []
@@ -882,35 +1221,73 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 }
                 mutated = true
                 switch processed {
-                case .application(let data, _, _):
+                case .application(let data, let senderLeaf, _):
                     // ADR-0023 added the sender leaf to the
-                    // Application case; the DeviceGroup sync path
-                    // doesn't authorise on it (removals are gated
-                    // upstream by the attestation verify), so it's
-                    // ignored here.
+                    // Application case. Removals do not authorise on it
+                    // (they are gated upstream by the attestation verify);
+                    // ADR-0080's device card keys on it, resolved to the
+                    // leaf's signature key HERE, against the roster this row
+                    // was sealed under (C-68: a leaf index is never stored).
                     do {
                         let parsed = try parseDevicegroupPayload(plaintext: data)
+                        if case .serviceEnvelope(let envelope) = parsed.body,
+                           receiveDeviceCard(envelope, senderLeaf: senderLeaf, group: g) {
+                            break
+                        }
+                        // ADR-0079 (reworked 2026-10-17) — another device's
+                        // claim of a link request, resolved the same way.
+                        if case .serviceEnvelope(let envelope) = parsed.body,
+                           receiveLinkClaim(envelope, senderLeaf: senderLeaf, group: g, messageId: message.id) {
+                            break
+                        }
+                        // ADR-0079 (order of 2026-10-17) — another device's
+                        // link-founded note, resolved the same way.
+                        if case .serviceEnvelope(let envelope) = parsed.body,
+                           receiveLinkFounded(envelope, senderLeaf: senderLeaf, group: g, messageId: message.id) {
+                            break
+                        }
                         applyParsed(parsed)
                     } catch {
                         NSLog("DeviceGroupSync parseDevicegroupPayload failed: %@", error.localizedDescription)
                     }
                 case .commit:
                     noteMembershipChange(before: devicesBefore, group: g)
+                    // ADR-0081 decision 4 — the sibling's record of which keys
+                    // it saw added, and when (the row's DS time), so a knock
+                    // answered by another sibling is not answered twice.
+                    if let record = admissions, let after = try? g.devices() {
+                        let beforeKeys = Set(devicesBefore.map(\.signaturePublicKey))
+                        let at = Self.parseMs(message.createdAt) ?? Int64(Date().timeIntervalSince1970 * 1000)
+                        admissions = after
+                            .filter { !beforeKeys.contains($0.signaturePublicKey) }
+                            .reduce(record) { $0.noteAdded(keyHex: hexEncode($1.signaturePublicKey), atMs: at) }
+                    }
                 case .proposal, .externalJoinProposal:
                     // No application-state mutation.
                     break
                 }
             }
 
-            if mutated {
-                if let id = identity {
-                    DeviceGroupLifecycle.persistSnapshot(
-                        identity: id,
-                        accountIdB64: accountIdB64
-                    )
-                    // ADR-0057 — no heal-on-apply: the device that committed
-                    // registered the epoch under the account's root.
+            if mutated, let id = identity {
+                // ADR-0081 decision 3 — fail-closed and conditional on the
+                // generation this handle read: a handle another one wrote past
+                // (a commit of this device made N+1 current) reloads instead of
+                // putting its older state back. Any other failure keeps the
+                // applied state in memory; the next batch writes it again (the
+                // cursor is in memory too, so nothing reads past what this
+                // process holds).
+                do {
+                    handleGeneration = try DeviceGroupLifecycle.persistSnapshotOrThrow(
+                        identity: id, accountIdB64: accountIdB64, expectedGeneration: handleGeneration)
+                    saveAdmissions(accountIdB64: accountIdB64)
+                } catch is DeviceGroupSnapshotStore.SnapshotChanged {
+                    NSLog("DeviceGroupSync: the snapshot moved under this handle; reloading")
+                    reloadFromDisk(accountIdB64: accountIdB64)
+                } catch {
+                    NSLog("DeviceGroupSync snapshot persist failed: %@", String(describing: error))
                 }
+                // ADR-0057 — no heal-on-apply: the device that committed
+                // registered the epoch, with its commit (ADR-0081).
             }
 
             // A row in this batch removed THIS device (docs/ux/second-device.md
@@ -922,169 +1299,436 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 return
             }
 
-            // Live walk 2026-09-30 — a DeviceGroup that forked from the one
-            // on the DS (``DeviceGroupFork``) repairs itself, once.
             let drained = result.messages.isEmpty && !result.hasMore
-            if drained { lastDrainedFetchAtMs = Int64(Date().timeIntervalSince1970 * 1000) }
-            var localEpoch: UInt64?
-            if let g = group, let id = identity {
-                localEpoch = try? g.dsAccessSigner(identity: id).epoch()
+            if drained {
+                lastDrainedFetchAtMs = Int64(Date().timeIntervalSince1970 * 1000)
+                lastDrainedFetchStartedAtMs = fetchStartedAtMs
             }
-            if let localEpoch {
-                let verdict = DeviceGroupFork.verdict(
-                    localEpoch: localEpoch,
-                    drained: drained,
-                    latestEpoch: result.latestEpoch,
-                    suspectSince: forkSuspectSince,
-                    now: Int64(Date().timeIntervalSince1970 * 1000))
-                switch verdict {
-                case .inSync:
-                    forkSuspectSince = nil
-                case .suspect(let since):
-                    forkSuspectSince = since
-                case .forked:
-                    forkSuspectSince = nil
-                    // The repair re-founds the account's DeviceGroup; it never
-                    // runs on a removed device. An inactive group cannot reach
-                    // this point anyway (the loop stopped above, and its epoch
-                    // comes from a DS signer an inactive group cannot derive -
-                    // the exporter refuses - so `localEpoch` is nil and no
-                    // verdict is taken); the guard keeps it so if either of
-                    // those changes.
-                    guard let g = group,
-                          RemovedDevice.forkRepairAllowed(RemovedDevice.readActive({ try g.isActive() }))
-                    else { break }
-                    if await repairForkedDeviceGroup(
-                        accountIdB64: accountIdB64,
-                        groupId: groupId,
-                        localEpoch: localEpoch,
-                        latestEpoch: result.latestEpoch ?? 0,
-                        cursor: cursor,
-                        bound: bound
-                    ) {
-                        // The poll loop stopped: either a new one runs over
-                        // the re-founded DeviceGroup, or the repair failed
-                        // and the next session retries.
-                        return
-                    }
+            // ADR-0081 decision 4 — behind for good? A drained read (no rows,
+            // nothing more) while the DS names a newer epoch than this
+            // handle's: since an epoch is registered only with its commit row,
+            // nothing left in the journal can bring this device forward. It
+            // drops its DeviceGroup state and rejoins through a sibling.
+            if drained, let g = group, let id = identity,
+               let localEpoch = try? g.dsAccessSigner(identity: id).epoch(),
+               DeviceGroupRejoin.isBehind(
+                   localEpoch: localEpoch, drained: drained, latestEpoch: result.latestEpoch,
+                   commitPending: commitPending),
+               RemovedDevice.rejoinAllowed(RemovedDevice.readActive({ try g.isActive() })) {
+                NSLog("DeviceGroupSync: behind the DS with nothing left to read (local epoch %llu, DS epoch %llu); rejoining",
+                      localEpoch, result.latestEpoch ?? 0)
+                enterRejoin(accountIdB64: accountIdB64)
+                return
+            }
+            // At the head: a sibling reads the knocks (ADR-0081 decision 4).
+            let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+            if drained, !commitPending, nowMs - lastKnockCheckAtMs >= DeviceGroupRejoin.knockCheckIntervalMs {
+                lastKnockCheckAtMs = nowMs
+                do {
+                    try await checkKnocks(accountIdB64: accountIdB64, bound: bound)
+                } catch {
+                    NSLog("DeviceGroupSync knock check failed: %@", String(describing: error))
                 }
+                guard bound.isCurrent else { return }
             }
         }
     }
 
-    // MARK: - Fork repair (live walk 2026-09-30)
+    // MARK: - ADR-0081 decision 4: founding, rejoining, admitting
 
-    /// Re-found this account's DeviceGroup after it forked from the one on
-    /// the DS: this device holds epoch `localEpoch` while the chain the
-    /// account root registered is at `latestEpoch`, and the journal carries
-    /// nothing more this device can apply.
-    ///
-    /// Only the DeviceGroup snapshot is deleted. It is a separate store
-    /// (``DeviceGroupSnapshotStore``, its own folder under Application
-    /// Support) holding the provider of the DeviceGroup's own `Identity`; the
-    /// conversation groups live in ``IdentitySnapshotStore`` under another
-    /// `Identity` instance, and the device identity seed, the device binding,
-    /// contacts and the synced state (``SyncedStateStore``, its own folder) are
-    /// all untouched. The device identity is the same seed and signature key,
-    /// so this device's leaves in conversation groups are unaffected. iOS keeps
-    /// no DeviceGroup journal cursor on disk (the poll starts from 0 each
-    /// session), so there is none to delete.
-    ///
-    /// The founding path then runs as for a new account: `createFounder`, and
-    /// the founding mark makes the claim a claim-or-reset under the account
-    /// root (ADR-0057 obligation 7), which replaces the old chain.
-    ///
-    /// Consequence: every OTHER device of the account loses the DeviceGroup.
-    /// Its epoch keys are gone after the reset, so its reads answer `401` and
-    /// it must be added again. A `401` is not a drained fetch, so those devices
-    /// never trigger a repair of their own.
-    ///
-    /// Returns `true` when this poll loop must stop (the repair ran, whether
-    /// or not it succeeded), `false` when nothing was changed and polling
-    /// continues.
-    private func repairForkedDeviceGroup(
-        accountIdB64: String,
-        groupId: Data,
-        localEpoch: UInt64,
-        latestEpoch: UInt64,
-        cursor: Int64,
-        bound: BindingEpoch.Captured
-    ) async -> Bool {
-        guard !deviceRemoved,
-              let held = group,
-              RemovedDevice.forkRepairAllowed(RemovedDevice.readActive({ try held.isActive() }))
-        else { return false }
-        guard !forkRepairAttempted.contains(accountIdB64) else {
-            NSLog("DeviceGroupSync fork persists (local epoch %llu, DS epoch %llu); already repaired this session",
-                  localEpoch, latestEpoch)
-            return false
+    /// No usable DeviceGroup state at bootstrap. Ask the directory: with no
+    /// other own device listed, found (nobody can be cut off); otherwise
+    /// rejoin through a sibling. A directory that cannot be read founds
+    /// nothing; the question is asked again.
+    private func startFoundOrRejoin(accountIdBytes: Data, accountIdB64: String, deviceSeed: Data) {
+        guard rejoinTask == nil else { return }
+        let bound = binding.capture()
+        rejoinTask = Task { [weak self] in
+            var mayFound: Bool?
+            while mayFound == nil, !Task.isCancelled, bound.isCurrent {
+                do {
+                    mayFound = try await Self.directoryListsNoOtherDevice(
+                        accountIdBytes: accountIdBytes, deviceSeed: deviceSeed)
+                } catch {
+                    NSLog("DeviceGroupSync: the directory could not be read; founding nothing (%@)",
+                          String(describing: error))
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                }
+            }
+            guard let self, let mayFound, !Task.isCancelled, bound.isCurrent,
+                  self.activeAccountIdB64 == accountIdB64 else { return }
+            if mayFound {
+                do {
+                    let ensured = try DeviceGroupLifecycle.ensureDeviceGroup(
+                        accountIdBytes: accountIdBytes, accountIdB64: accountIdB64,
+                        deviceIdentitySeed: deviceSeed, found: true)
+                    self.rejoinTask = nil
+                    NSLog("DeviceGroupSync: no other device listed; DeviceGroup founded")
+                    self.adopt(ensured, accountIdB64: accountIdB64)
+                } catch {
+                    NSLog("DeviceGroupSync: founding failed; retried next session (%@)",
+                          String(describing: error))
+                    self.rejoinTask = nil
+                }
+                return
+            }
+            NSLog("DeviceGroupSync: no DeviceGroup state while another device is listed; rejoining")
+            await self.runRejoin(accountIdBytes: accountIdBytes, accountIdB64: accountIdB64, bound: bound)
         }
-        forkRepairAttempted.insert(accountIdB64)
-        NSLog("DeviceGroupSync DeviceGroup forked: local epoch %llu, DS epoch %llu; re-founding",
-              localEpoch, latestEpoch)
-        guard let accountId = activeAccountId,
-              activeAccountIdB64 == accountIdB64 else { return true }
-        // The reset is signed by the journal root, derived from the account
-        // identity seed. Without it nothing could be claimed, so nothing is
-        // deleted either.
-        guard DeviceGroupDsAccess.rootSigner(accountIdB64: accountIdB64, groupId: groupId) != nil else {
-            NSLog("DeviceGroupSync fork repair skipped: the account identity seed is not on this device")
-            return false
-        }
+    }
 
-        // Stop this poll loop: from here on it runs no further.
+    /// Stop following the DeviceGroup, drop its local state, and rejoin.
+    /// Called from inside the poll loop, which returns right after.
+    private func enterRejoin(accountIdB64: String) {
+        guard let accountId = activeAccountId, activeAccountIdB64 == accountIdB64,
+              !deviceRemoved, rejoinTask == nil else { return }
         resendTask?.cancel()
         resendTask = nil
+        pollTask = nil
         identity = nil
         group = nil
+        handleGeneration = nil
+        admissions = nil
+        ready = false
+        let bound = binding.capture()
+        rejoinTask = Task { [weak self] in
+            await self?.runRejoin(accountIdBytes: accountId, accountIdB64: accountIdB64, bound: bound)
+        }
+    }
 
-        DeviceGroupSnapshotStore().deleteSnapshot(accountIdB64: accountIdB64)
-        let ensured: DeviceGroupLifecycle.Ensured
+    /// The device's side (``DeviceGroupRejoin/rejoinOnce(ports:firstPass:)``),
+    /// until joined or the session ends; then the joined DeviceGroup is loaded
+    /// like a bootstrap would.
+    private func runRejoin(accountIdBytes: Data, accountIdB64: String, bound: BindingEpoch.Captured) async {
+        let ports = rejoinPorts(accountIdBytes: accountIdBytes, accountIdB64: accountIdB64)
+        var first = true
+        while !Task.isCancelled, bound.isCurrent {
+            do {
+                let outcome = try await DeviceGroupRejoin.rejoinOnce(ports: ports, firstPass: first)
+                first = false
+                if outcome == .joined { break }
+            } catch {
+                NSLog("DeviceGroupSync rejoin attempt failed; trying again (%@)", String(describing: error))
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
+        guard !Task.isCancelled, bound.isCurrent, activeAccountIdB64 == accountIdB64 else { return }
+        rejoinTask = nil
         do {
             let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(accountIdB64: accountIdB64)
-            ensured = try DeviceGroupLifecycle.ensureDeviceGroup(
+            let ensured = try DeviceGroupLifecycle.ensureDeviceGroup(
+                accountIdBytes: accountIdBytes, accountIdB64: accountIdB64, deviceIdentitySeed: seed)
+            NSLog("DeviceGroupSync: rejoined the account's DeviceGroup")
+            adopt(ensured, accountIdB64: accountIdB64)
+        } catch {
+            NSLog("DeviceGroupSync: the joined DeviceGroup did not load (%@)", String(describing: error))
+        }
+    }
+
+    private func rejoinPorts(accountIdBytes: Data, accountIdB64: String) -> DeviceGroupRejoinPorts {
+        let store = DeviceGroupSnapshotStore()
+        return DeviceGroupRejoinPorts(
+            dropLocalState: {
+                store.dropStateForRejoin(accountIdB64: accountIdB64)
+            },
+            publishDirectoryKeyPackage: { [weak self] in
+                try await self?.republishDirectoryKeyPackage()
+            },
+            loadState: {
+                store.getPending(accountIdB64: accountIdB64, kind: .rejoin)
+                    .flatMap(DeviceGroupRejoinState.decode)
+            },
+            saveState: { state in
+                try store.putPending(accountIdB64: accountIdB64, kind: .rejoin, blob: try state.encoded())
+            },
+            knock: { [weak self] nowMs in
+                guard let loginHandle = self?.loginHandleProvider() else {
+                    throw DeviceGroupSyncError.notReady
+                }
+                guard let groupId = DeviceGroupLifecycle.groupId(accountIdB64: accountIdB64) else {
+                    throw DeviceGroupLifecycle.NoAccountSeed()
+                }
+                let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(accountIdB64: accountIdB64)
+                let joiner = try Identity.fromSeed(seed: seed)
+                let keyPackage = try joiner.createKeyPackage()
+                let rendezvous = PairingCodec.generateRendezvousPseudonym()
+                // ADR-0081 amendment — the device identity's key IS this
+                // device's old DeviceGroup leaf key: it signs that its leaf may
+                // be replaced by this KeyPackage in the commit leaving the
+                // journal's latest epoch (an empty knock is a probe that names
+                // it), which lets a sibling readmit it under the
+                // attested-removal policy without a passkey. An unclaimed
+                // journal names no epoch: no proof.
+                let ds = DsClient()
+                let probe = try await ds.knock(groupId: groupId, payloads: [])
+                let payload: Data
+                if let epoch = probe.epoch {
+                    let proof = try signDeviceGroupSelfRemoval(
+                        oldIdentity: joiner, groupId: groupId, epoch: epoch, replacementKeyPackage: keyPackage)
+                    payload = try PairingCodec.buildRejoinKnockPayload(
+                        loginHandle: loginHandle, keyPackage: keyPackage, rendezvousPseudonym: rendezvous,
+                        selfRemovalProof: proof)
+                } else {
+                    payload = try PairingCodec.buildPairingQrPayload(
+                        loginHandle: loginHandle, keyPackage: keyPackage, rendezvousPseudonym: rendezvous)
+                }
+                let state = DeviceGroupRejoinState(
+                    rendezvousB64: base64Encode(rendezvous),
+                    joinerSnapshotB64: base64Encode(try joiner.snapshotStorage()),
+                    knockedAtMs: nowMs)
+                // Kept BEFORE the knock: the joiner's provider is the only
+                // thing that can open the Welcome a sibling sends.
+                try store.putPending(accountIdB64: accountIdB64, kind: .rejoin, blob: try state.encoded())
+                _ = try await ds.knock(groupId: groupId, payloads: [payload])
+                return state
+            },
+            awaitWelcome: { state, deadlineMs in
+                guard let rendezvous = Data(base64Encoded: state.rendezvousB64) else { return nil }
+                let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+                let remaining = max(1, min(deadlineMs - nowMs, DeviceGroupRejoin.reknockAfterMs))
+                let outcome = try await WelcomeCourier.pollForWelcome(
+                    rendezvousPseudonym: rendezvous, timeoutSeconds: TimeInterval(remaining) / 1000)
+                if case .received(let welcome, _) = outcome { return welcome }
+                return nil
+            },
+            join: { state, welcome in
+                guard let joinerSnapshot = Data(base64Encoded: state.joinerSnapshotB64) else {
+                    throw DeviceGroupSyncError.notReady
+                }
+                let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(accountIdB64: accountIdB64)
+                let joiner = try Identity.fromSeed(seed: seed)
+                DeviceGroupLifecycle.noteHandle(joiner, accountIdB64: accountIdB64)
+                try joiner.restoreStorage(snapshot: joinerSnapshot)
+                _ = try DeviceGroup.joinFromWelcome(
+                    welcome: welcome, identity: joiner, accountId: accountIdBytes)
+                try DeviceGroupLifecycle.persistSnapshotOrThrow(identity: joiner, accountIdB64: accountIdB64)
+                // A fresh observer of the journal.
+                try store.putPending(
+                    accountIdB64: accountIdB64, kind: .admissions,
+                    blob: try DeviceGroupAdmissionRecord(
+                        watchingSinceMs: Int64(Date().timeIntervalSince1970 * 1000)).encoded())
+            },
+            clearState: {
+                store.deletePending(accountIdB64: accountIdB64, kind: .rejoin)
+            },
+            now: { Int64(Date().timeIntervalSince1970 * 1000) }
+        )
+    }
+
+    /// The directory check of the founding policy: `true` when the account's
+    /// directory lists no own device other than this one. A failure throws
+    /// (nothing is founded on an unread directory).
+    private static func directoryListsNoOtherDevice(accountIdBytes: Data, deviceSeed: Data) async throws -> Bool {
+        let ownKey = try Identity.fromSeed(seed: deviceSeed).signaturePublicKey()
+        let listed = try await DiscoveryClient().fetchKeyPackages(accountId: accountIdBytes) ?? []
+        return listed.allSatisfy { $0.deviceId == ownKey }
+    }
+
+    /// The account's directory rows whose device binding verifies under the
+    /// account key the conversation leaves are bound to: leaf key to its
+    /// directory KeyPackage. A deleted device is tombstoned (ADR-0074) and not
+    /// listed.
+    private static func ownDirectory(accountIdBytes: Data, accountIdB64: String) async throws -> [Data: Data] {
+        guard let lineage = DeviceGroupLifecycle.lineageSeed(accountIdB64: accountIdB64) else { return [:] }
+        let accountKey = try Identity.fromSeed(seed: lineage).signaturePublicKey()
+        let listed = try await DiscoveryClient().fetchKeyPackages(accountId: accountIdBytes) ?? []
+        var out: [Data: Data] = [:]
+        for row in listed {
+            guard let bound = (try? keyPackageAccountKey(keyPackage: row.keyPackage)) ?? nil else { continue }
+            // A Phase 1 unbound leaf resolves to itself: not a binding.
+            guard bound == accountKey, bound != row.deviceId else { continue }
+            out[row.deviceId] = row.keyPackage
+        }
+        return out
+    }
+
+    private func loadAdmissions(accountIdB64: String) {
+        admissions = DeviceGroupSnapshotStore()
+            .getPending(accountIdB64: accountIdB64, kind: .admissions)
+            .flatMap(DeviceGroupAdmissionRecord.decode)
+            ?? DeviceGroupAdmissionRecord(watchingSinceMs: Int64(Date().timeIntervalSince1970 * 1000))
+    }
+
+    private func saveAdmissions(accountIdB64: String) {
+        guard let admissions, activeAccountIdB64 == accountIdB64 else { return }
+        do {
+            try DeviceGroupSnapshotStore().putPending(
+                accountIdB64: accountIdB64, kind: .admissions, blob: try admissions.encoded())
+        } catch {
+            // The record is a guard against admitting twice; an unsaved update
+            // is rebuilt from the journal by the next batch.
+            NSLog("DeviceGroup admission record not saved: %@", String(describing: error))
+        }
+    }
+
+    /// A sibling's side: read the DeviceGroup's knocks and admit each one
+    /// ``DeviceGroupRejoin/admissionVerdict(_:)`` allows — replace the
+    /// device's previous leaf, if it is still in the roster, by its KeyPackage
+    /// in one commit carrying its self-removal proof (ADR-0081 amendment),
+    /// else add the KeyPackage; one commit through the outbox, the Welcome to
+    /// the knock's rendezvous.
+    private func checkKnocks(accountIdB64: String, bound: BindingEpoch.Captured) async throws {
+        guard let g = group, let id = identity, let accountId = activeAccountId, admissions != nil,
+              let loginHandle = loginHandleProvider() else { return }
+        let ds = DsClient()
+        let knocks = try await ds.fetchKnocks(
+            groupId: try g.groupId(), after: knockCursor,
+            auth: DeviceGroupDsAccess.auth(group: g, identity: id, accountIdB64: accountIdB64, ds: ds))
+        guard bound.isCurrent, !knocks.messages.isEmpty else { return }
+        knockCursor = knocks.messages.last?.id ?? knockCursor
+        guard let held = group, let heldId = identity else { return }
+        let roster = ((try? held.devices()) ?? []).map {
+            DeviceGroupRejoin.RosterMember(leaf: $0.leafIndex, key: $0.signaturePublicKey)
+        }
+        let ownKey = heldId.signaturePublicKey()
+        let policy = (try? held.requireAttestedRemovals()) ?? false
+        let heldGroupId = try held.groupId()
+        let heldEpoch = try held.epoch()
+        var directory: [Data: Data]?
+        for knock in knocks.messages {
+            guard let decoded = try? PairingCodec.parsePairingQrPayload(
+                      wireBytes: knock.payload, expectedLoginHandle: loginHandle),
+                  let key = try? keyPackageSignatureKey(keyPackage: decoded.keyPackage)
+            else { continue }
+            if directory == nil {
+                directory = try await Self.ownDirectory(accountIdBytes: accountId, accountIdB64: accountIdB64)
+                guard bound.isCurrent else { return }
+            }
+            guard let record = admissions else { return }
+            let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+            // Checked BEFORE a commit is built: a commit the DS takes but every
+            // peer refuses would leave this device ahead of them.
+            let proof = decoded.selfRemovalProof
+            let proofCovers = proof.map {
+                deviceGroupSelfRemovalCovers(
+                    identity: heldId, proof: $0, groupId: heldGroupId, epoch: heldEpoch,
+                    removedSignaturePubkey: key, keyPackage: decoded.keyPackage)
+            } ?? false
+            let verdict = DeviceGroupRejoin.admissionVerdict(DeviceGroupRejoin.AdmissionInput(
+                knockId: knock.id,
+                knockAtMs: Self.parseMs(knock.createdAt) ?? 0,
+                key: key,
+                ownKey: ownKey,
+                roster: roster,
+                handled: Set(record.handled),
+                watchingSinceMs: record.watchingSinceMs,
+                lastAddedAtMs: record.lastAddedAtMs[hexEncode(key)],
+                listed: directory?[key] != nil,
+                policyRequiresAttestation: policy,
+                selfRemovalProofCovers: proofCovers,
+                keyPackageAlreadyIn: (try? held.containsLeafOfKeyPackage(
+                    identity: heldId, keyPackage: decoded.keyPackage)) ?? false,
+                nowMs: nowMs))
+            guard verdict == .admit else { continue }
+            let added = try await DeviceGroupCommits.commitChange(
                 accountIdBytes: accountId,
                 accountIdB64: accountIdB64,
-                deviceIdentitySeed: seed)
+                build: { fresh in
+                    // Another sibling answered it meanwhile.
+                    if (try? fresh.group.containsLeafOfKeyPackage(
+                        identity: fresh.identity, keyPackage: decoded.keyPackage)) ?? false {
+                        return nil
+                    }
+                    let previous = ((try? fresh.group.devices()) ?? [])
+                        .first(where: { $0.signaturePublicKey == key })
+                    guard let previous else {
+                        let addition = try fresh.group.addDeviceFromWire(
+                            identity: fresh.identity, keyPackage: decoded.keyPackage)
+                        return DeviceGroupCommits.Built(
+                            kind: .rejoinAdd,
+                            row: DeviceGroupJournalEnvelope.encode(message: addition.commit, attestation: nil),
+                            welcome: addition.welcome,
+                            welcomeRendezvous: decoded.rendezvousPseudonym)
+                    }
+                    // ADR-0081 amendment — the previous leaf out and the new
+                    // one in, in ONE commit; the proof rides in the
+                    // removal-authorisation slot. Re-checked at the epoch this
+                    // commit leaves: a proof names one epoch, and peers refuse
+                    // it at any other. Under the policy a removal it does not
+                    // cover would be refused by every peer.
+                    let freshEpoch = try fresh.group.epoch()
+                    let freshGroupId = try fresh.group.groupId()
+                    let covers = proof.map {
+                        deviceGroupSelfRemovalCovers(
+                            identity: fresh.identity, proof: $0, groupId: freshGroupId, epoch: freshEpoch,
+                            removedSignaturePubkey: key, keyPackage: decoded.keyPackage)
+                    } ?? false
+                    if !covers, (try? fresh.group.requireAttestedRemovals()) ?? true { return nil }
+                    let replaced = try fresh.group.replaceDeviceAt(
+                        identity: fresh.identity, leafIndex: previous.leafIndex,
+                        keyPackage: decoded.keyPackage)
+                    return DeviceGroupCommits.Built(
+                        kind: .rejoinReplace,
+                        row: DeviceGroupJournalEnvelope.encode(
+                            message: replaced.commit, attestation: covers ? proof : nil),
+                        welcome: replaced.welcome,
+                        welcomeRendezvous: decoded.rendezvousPseudonym)
+                },
+                after: { _ in () }
+            )
+            guard bound.isCurrent else { return }
+            if let added, case .landed = added.outcome, let current = admissions {
+                admissions = current.noteAdded(keyHex: hexEncode(key), atMs: nowMs).noteHandled(knock.id)
+                saveAdmissions(accountIdB64: accountIdB64)
+                NSLog("DeviceGroupSync: a device of this account was admitted again")
+            }
+            // The commits reloaded the long-lived handle; the next pass re-reads.
+            return
+        }
+    }
+
+    /// A DS `created_at` (ISO 8601, with or without fractional seconds) as
+    /// unix milliseconds.
+    static func parseMs(_ iso: String) -> Int64? {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = withFraction.date(from: iso) { return Int64(date.timeIntervalSince1970 * 1000) }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: iso).map { Int64($0.timeIntervalSince1970 * 1000) }
+    }
+
+    /// ADR-0081 — reload the held handle from the snapshot after another
+    /// handle on this device made a new epoch current (the commit outbox), or
+    /// after a write of this handle was refused because one had.
+    private func reloadFromDisk(accountIdB64: String) {
+        guard activeAccountIdB64 == accountIdB64, !deviceRemoved, group != nil,
+              let accountId = activeAccountId else { return }
+        let before = (try? group?.devices()) ?? []
+        do {
+            let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(accountIdB64: accountIdB64)
+            let ensured = try DeviceGroupLifecycle.ensureDeviceGroup(
+                accountIdBytes: accountId, accountIdB64: accountIdB64, deviceIdentitySeed: seed)
+            identity = ensured.identity
+            group = ensured.group
+            handleGeneration = ensured.generation
+            if noteDeviceGroupActivity(RemovedDevice.readActive { try ensured.group.isActive() }) {
+                return
+            }
+            noteMembershipChange(before: before, group: ensured.group)
+            sendHandOverIfGrown(before: before, group: ensured.group, accountIdB64: accountIdB64)
         } catch {
-            NSLog("DeviceGroupSync fork repair: founding failed, retried next session: %@",
-                  error.localizedDescription)
-            return true
+            NSLog("DeviceGroupSync reload failed: %@", String(describing: error))
         }
-        guard ensured.bootstrapped, (try? ensured.group.groupId()) == groupId else {
-            NSLog("DeviceGroupSync fork repair: the DeviceGroup was not re-founded; retried next session")
-            return true
-        }
+    }
 
-        // The claim: the founding mark set by ``DeviceGroupLifecycle`` turns
-        // it into claim-or-reset, and it is cleared only when one landed.
-        let ds = DsClient()
-        await DeviceGroupDsAccess.claim(
-            group: ensured.group, identity: ensured.identity,
-            accountIdB64: accountIdB64, ds: ds)
-        if JournalFoundingMarks.shared.isMarked(journalIdHex: DsClient.pseudonymHex(groupId)) {
-            // Fail closed: the re-founded group is not on the DS. Nothing is
-            // sent under it (``DeviceGroupDsAccess/requireFoundingClaim``), and
-            // the next session's open claims-or-resets again because the mark
-            // is still set.
-            NSLog("DeviceGroupSync fork repair: the journal reset did not land; retried next session")
-            return true
+    /// ADR-0060 section 7 — a device was added: send it the setting, the
+    /// reach-key versions and (ADR-0048 section 4a) the own profile, original
+    /// stamps, through THIS handle, reloaded at the post-add epoch. Never from
+    /// the committing handle: two handles of one DeviceGroup sealing at the
+    /// same sender generation reuse a key and nonce (seen live on web
+    /// 2026-09-30, SecretReuseError on the new device).
+    private func sendHandOverIfGrown(before: [DeviceLeaf], group g: DeviceGroup, accountIdB64: String) {
+        let after = (try? g.devices()) ?? []
+        guard after.count > before.count else { return }
+        let envelopes = Self.handOverEnvelopes(
+            accountIdB64: accountIdB64, reach: .shared, profiles: .shared)
+            + [DeviceCardCenter.shared.ownEnvelope()].compactMap { $0 }
+        Task { @MainActor [weak self] in
+            for envelope in envelopes {
+                await self?.sendServiceEnvelope(envelope)
+            }
         }
-        // The epoch and not the account id alone: the same account signed out
-        // and in again while the claim was out has a runtime of its own.
-        guard !Task.isCancelled, bound.isCurrent, activeAccountIdB64 == accountIdB64 else { return true }
-
-        identity = ensured.identity
-        group = ensured.group
-        NSLog("DeviceGroupSync fork repair: DeviceGroup re-founded at epoch %llu; other devices must be added again",
-              (try? ensured.group.dsAccessSigner(identity: ensured.identity).epoch()) ?? 0)
-        // The old group's rows cannot be read by the new group: resume at the
-        // journal head this loop last saw.
-        pollTask = Task { [weak self] in
-            await self?.runPollLoop(
-                accountIdB64: accountIdB64, groupId: groupId, startCursor: cursor)
-        }
-        return true
     }
 
     /// Fold one payload another device sent. Every kind goes through the one
@@ -1116,6 +1760,18 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     }
                 } catch {
                     NSLog("ADR-0075: recovery-email envelope refused")
+                }
+                return
+            }
+            // ADR-0079 — a link-record register, the same way.
+            if isLinkRecordEnvelope(bytes: envelope) {
+                do {
+                    if try syncedState.applyLinkRecordEnvelope(envelope: envelope) {
+                        if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+                        stateChanged()
+                    }
+                } catch {
+                    NSLog("ADR-0079: link-record envelope refused")
                 }
                 return
             }
@@ -1168,6 +1824,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     private func noteMembershipChange(before: [DeviceLeaf], group g: DeviceGroup) {
         reportRoster(group: g)
         guard let after = try? g.devices(), let own = try? g.ownLeafIndex() else { return }
+        // ADR-0080 — every device that was there re-sends its own card.
+        let beforeKeys = Set(before.map(\.signaturePublicKey))
+        if after.contains(where: { !beforeKeys.contains($0.signaturePublicKey) }) {
+            DeviceCardCenter.shared.scheduleResend()
+        }
         guard DeviceGroupGrowth.shouldResend(ownLeaf: own, before: before, after: after) else {
             return
         }
@@ -1205,6 +1866,24 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             accountIdB64: accountIdB64,
             roster: devices.map(\.signaturePublicKey),
             ownKey: own)
+        // ADR-0080 — a leaf that left takes its card with it.
+        DeviceCardCenter.shared.prune(rosterKeysHex: devices.map { hexEncode($0.signaturePublicKey) })
+    }
+
+    /// ADR-0080 — take in `envelope` when it is a device card. `true` when it
+    /// was one (kept or dropped), `false` for any other envelope. The sender
+    /// is the MLS-authenticated leaf of the row, resolved against the roster
+    /// at receipt; a row with no sender leaf, or a leaf the roster does not
+    /// hold, is dropped.
+    func receiveDeviceCard(_ envelope: Data, senderLeaf: UInt32?, group g: DeviceGroup) -> Bool {
+        guard let card = try? decodeDeviceCardEnvelope(plaintext: envelope) else { return false }
+        guard let senderLeaf, let roster = try? g.devices(),
+              let sender = roster.first(where: { $0.leafIndex == senderLeaf }) else { return true }
+        DeviceCardCenter.shared.receive(
+            senderKeyHex: hexEncode(sender.signaturePublicKey),
+            card: DeviceCardCenter.stored(card),
+            rosterKeysHex: roster.map { hexEncode($0.signaturePublicKey) })
+        return true
     }
 
     /// Publish every catch-up part as its own DeviceGroup message, each under
@@ -1245,6 +1924,124 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if let envelope = (try? syncedState.ownUsernameEnvelope()).flatMap({ $0 }) {
             await sendServiceEnvelope(envelope)
         }
+        // ADR-0079 — and every link record, with its original stamp.
+        for envelope in (try? syncedState.linkRecordEnvelopes()) ?? [] {
+            await sendServiceEnvelope(envelope)
+        }
+    }
+
+    // MARK: - ADR-0079: the link-record register
+
+    static func linkRecordsUnsentKey(accountIdB64: String) -> String {
+        "lakko.link-records.unsent.v1.\(accountIdB64)"
+    }
+
+    func flushUnsentLinkRecords() async {
+        guard let account = activeAccountIdB64 else { return }
+        let key = Self.linkRecordsUnsentKey(accountIdB64: account)
+        guard UserDefaults.standard.object(forKey: key) != nil else { return }
+        do {
+            try await sendLineageEnvelopes((try? syncedState.linkRecordEnvelopes()) ?? [])
+            UserDefaults.standard.removeObject(forKey: key)
+        } catch {
+            NSLog("ADR-0079: link-record register send failed; retried at the next start")
+        }
+    }
+
+    /// Fold a write here at once, persist it, mark it unsent and send the
+    /// one record to the account's other devices.
+    private func afterLinkRecordWrite(linkId: Data) async {
+        foldLinkRecordWrite()
+        await sendLinkRecord(linkId: linkId)
+    }
+
+    /// The local half of ``afterLinkRecordWrite(linkId:)``: fold, persist and
+    /// mark the register unsent (a start retries it).
+    private func foldLinkRecordWrite() {
+        stateChanged()
+        persistSyncState()
+        guard let account = activeAccountIdB64 else { return }
+        UserDefaults.standard.set(true, forKey: Self.linkRecordsUnsentKey(accountIdB64: account))
+    }
+
+    /// The network half: send the one record, then clear the unsent mark.
+    private func sendLinkRecord(linkId: Data) async {
+        guard let account = activeAccountIdB64 else { return }
+        let key = Self.linkRecordsUnsentKey(accountIdB64: account)
+        do {
+            if let envelope = try syncedState.linkRecordEnvelopeFor(linkId: linkId) {
+                try await sendLineageEnvelopes([envelope])
+            }
+            UserDefaults.standard.removeObject(forKey: key)
+        } catch {
+            NSLog("ADR-0079: link-record register send failed; retried at the next start")
+        }
+    }
+
+    /// Record a link just minted (ADR-0079 section 4). `false` when the
+    /// synced state is not loaded or the record is refused.
+    @discardableResult
+    public func setLinkRecord(_ record: LinkRecord) async -> Bool {
+        guard ready, !deviceRemoved else { return false }
+        let written: Bool
+        do {
+            written = try syncedState.setLinkRecord(hlc: Hlc.mint(), record: record)
+        } catch {
+            NSLog("ADR-0079: link record refused")
+            return false
+        }
+        if written { await afterLinkRecordWrite(linkId: record.linkId) }
+        return written
+    }
+
+    /// Mark a link revoked (final). `false` when nothing changed.
+    @discardableResult
+    public func revokeLinkRecord(linkId: Data) async -> Bool {
+        guard ready, !deviceRemoved else { return false }
+        let written = (try? syncedState.revokeLinkRecord(hlc: Hlc.mint(), linkId: linkId)) ?? false
+        if written { await afterLinkRecordWrite(linkId: linkId) }
+        return written
+    }
+
+    /// Mark a link copied (final; `docs/ux/contact-invite-link.md` section 9):
+    /// from then on no device of the account offers to edit it. Sent to the
+    /// other devices like a revoke. `false` when nothing changed.
+    @discardableResult
+    public func markLinkShared(linkId: Data) async -> Bool {
+        guard ready, !deviceRemoved else { return false }
+        let written = (try? syncedState.markLinkShared(hlc: Hlc.mint(), linkId: linkId)) ?? false
+        guard written else { return false }
+        // Folded and persisted before this returns, so Copy writes the
+        // clipboard only once this device has stopped offering the edit; the
+        // send to the other devices does not hold the clipboard back (an
+        // unsent register is retried at the next start).
+        foldLinkRecordWrite()
+        Task { [weak self] in await self?.sendLinkRecord(linkId: linkId) }
+        return true
+    }
+
+    /// Count one request accepted through a link, remembering the requester.
+    @discardableResult
+    public func recordLinkUse(linkId: Data, requesterKey: Data) async -> Bool {
+        guard ready, !deviceRemoved else { return false }
+        let written = (try? syncedState.recordLinkUse(
+            hlc: Hlc.mint(), linkId: linkId, requesterKey: requesterKey)) ?? false
+        if written { await afterLinkRecordWrite(linkId: linkId) }
+        return written
+    }
+
+    /// The one rule for a request's link answer (ADR-0079 section 3 as
+    /// amended 2026-10-19), asked of the fold: the link's expiry is judged at
+    /// `pressedAtMs` (the time the DS stamped on the request row), its
+    /// revocation and uses now. `nil` while the fold is not loaded: the
+    /// request stays undecided (no timer) and is decided once ``ready`` turns
+    /// `true`.
+    public func linkAnswerVerdictAt(
+        linkId: Data, linkSecret: Data, requesterKey: Data, pressedAtMs: UInt64
+    ) -> LinkAnswerVerdict? {
+        guard ready else { return nil }
+        return (try? syncedState.linkAnswerVerdict(
+            linkId: linkId, linkSecret: linkSecret, requesterKey: requesterKey, pressedAtMs: pressedAtMs)) ?? .dead
     }
 
     // MARK: - ADR-0076: the own-username register
@@ -1433,41 +2230,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// before its own commit.
     public func reloadAfterLocalMembershipChange(secrets: IdentitySecrets) {
         guard let accountIdB64 = activeAccountIdB64,
-              accountIdB64 == base64Encode(secrets.accountId),
-              !deviceRemoved else { return }
-        let before = (try? group?.devices()) ?? []
-        do {
-            let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(accountIdB64: accountIdB64)
-            let ensured = try DeviceGroupLifecycle.ensureDeviceGroup(
-                accountIdBytes: secrets.accountId,
-                accountIdB64: accountIdB64,
-                deviceIdentitySeed: seed)
-            identity = ensured.identity
-            group = ensured.group
-            if noteDeviceGroupActivity(RemovedDevice.readActive { try ensured.group.isActive() }) {
-                return
-            }
-            noteMembershipChange(before: before, group: ensured.group)
-            // ADR-0060 section 7 — a device was added: send it the setting,
-            // the reach-key versions and (ADR-0048 section 4a) the own
-            // profile, original stamps, through THIS handle, reloaded at the
-            // post-add epoch. Never from the pairing's own handle: two handles
-            // of one DeviceGroup sealing at the same sender generation reuse a
-            // key and nonce (seen live on web 2026-09-30, SecretReuseError on
-            // the new device).
-            let after = (try? ensured.group.devices()) ?? []
-            if after.count > before.count {
-                let envelopes = Self.handOverEnvelopes(
-                    accountIdB64: accountIdB64, reach: .shared, profiles: .shared)
-                Task { @MainActor [weak self] in
-                    for envelope in envelopes {
-                        await self?.sendServiceEnvelope(envelope)
-                    }
-                }
-            }
-        } catch {
-            NSLog("DeviceGroupSync reload failed: %@", error.localizedDescription)
-        }
+              accountIdB64 == base64Encode(secrets.accountId) else { return }
+        // ADR-0081 — the commit outbox already reloaded the handle when the
+        // commit landed (``lakkoDeviceGroupChangedHere``); a second reload is
+        // a no-op on the roster.
+        reloadFromDisk(accountIdB64: accountIdB64)
     }
 }
 

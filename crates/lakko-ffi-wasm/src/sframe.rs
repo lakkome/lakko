@@ -621,6 +621,9 @@ pub enum WasmMediaCodec {
     Vp8 = 1,
     /// Opus audio: nothing is left in the clear.
     Opus = 2,
+    /// An RFC 2198 RED container of Opus frames (`audio/red`): nothing is
+    /// left in the clear, and the trailer says the frame holds RED.
+    RedOpus = 3,
 }
 
 impl From<WasmMediaCodec> for lakko_calls::MediaCodec {
@@ -629,6 +632,7 @@ impl From<WasmMediaCodec> for lakko_calls::MediaCodec {
             WasmMediaCodec::Other => Self::Other,
             WasmMediaCodec::Vp8 => Self::Vp8,
             WasmMediaCodec::Opus => Self::Opus,
+            WasmMediaCodec::RedOpus => Self::RedOpus,
         }
     }
 }
@@ -639,12 +643,13 @@ impl From<lakko_calls::MediaCodec> for WasmMediaCodec {
             lakko_calls::MediaCodec::Other => Self::Other,
             lakko_calls::MediaCodec::Vp8 => Self::Vp8,
             lakko_calls::MediaCodec::Opus => Self::Opus,
+            lakko_calls::MediaCodec::RedOpus => Self::RedOpus,
         }
     }
 }
 
-/// Map a negotiated RTP codec MIME type (`"video/VP8"`, `"audio/opus"`, any
-/// case) to a `MediaCodec`. Anything else is `Other`.
+/// Map a negotiated RTP codec MIME type (`"video/VP8"`, `"audio/opus"`,
+/// `"audio/red"`, any case) to a `MediaCodec`. Anything else is `Other`.
 #[wasm_bindgen(js_name = "mediaCodecFromMime")]
 #[must_use]
 pub fn media_codec_from_mime(mime: &str) -> WasmMediaCodec {
@@ -669,9 +674,20 @@ pub fn vp8_is_key_frame(frame: &[u8]) -> Option<bool> {
     lakko_calls::vp8_is_key_frame(frame)
 }
 
+/// The primary (current) frame of an RFC 2198 RED container, which a
+/// receiver whose browser does not decode RED hands to its Opus decoder in
+/// place of the container. Call it on an OPENED frame whose `MediaFrameInfo`
+/// said `isRedOpus`. `undefined` when the bytes are not a container.
+#[wasm_bindgen(js_name = "redPrimary")]
+#[must_use]
+pub fn red_primary(container: &[u8]) -> Option<Vec<u8>> {
+    lakko_calls::red_primary(container).map(<[u8]>::to_vec)
+}
+
 /// Read the trailer and the SFrame header of a sealed media frame without a
-/// key: the KID, the counter and the clear prefix length. Nothing here is
-/// authenticated; it is for selecting a key and for diagnostics.
+/// key: the KID, the counter, the clear prefix length and whether the frame
+/// holds a RED container. Nothing here is authenticated until the frame
+/// opens; it is for selecting a key and for diagnostics.
 ///
 /// # Errors
 ///
@@ -689,6 +705,7 @@ fn media_frame_info(wire: &[u8]) -> Result<WasmMediaFrameInfo, lakko_calls::Medi
         counter: parts.header.ctr,
         // At most 16 by the split's bound.
         clear_prefix_len: u32::try_from(parts.clear_prefix.len()).unwrap_or(0),
+        red_opus: parts.content == lakko_calls::MediaContent::RedOpus,
     })
 }
 
@@ -698,6 +715,7 @@ pub struct WasmMediaFrameInfo {
     kid: u64,
     counter: u64,
     clear_prefix_len: u32,
+    red_opus: bool,
 }
 
 #[wasm_bindgen(js_class = "MediaFrameInfo")]
@@ -722,6 +740,14 @@ impl WasmMediaFrameInfo {
     #[must_use]
     pub fn clear_prefix_len(&self) -> u32 {
         self.clear_prefix_len
+    }
+
+    /// The trailer says the frame holds an RFC 2198 RED container of Opus.
+    /// Authenticated once the frame opens (the trailer is additional data).
+    #[wasm_bindgen(getter, js_name = "isRedOpus")]
+    #[must_use]
+    pub fn is_red_opus(&self) -> bool {
+        self.red_opus
     }
 }
 
@@ -915,6 +941,27 @@ mod tests {
             0
         );
         assert_eq!(vp8_is_key_frame(&[]), None);
+    }
+
+    /// A RED container seals with the trailer saying so, opens whole, and
+    /// its primary frame comes out of `redPrimary`.
+    #[test]
+    fn a_red_frame_is_marked_and_its_primary_can_be_taken() {
+        assert_eq!(media_codec_from_mime("audio/red"), WasmMediaCodec::RedOpus);
+        let call_key = ok(WasmCallKey::new(&GOLDEN_SEED));
+        let sender = ok(call_key.participant_key(GOLDEN_LEAF, 0));
+        let receiver = ok(call_key.participant_key(GOLDEN_LEAF, 0));
+        let mut container = vec![0xef, 0x0f, 0x00, 0x02, 0x6f, 0xaa, 0xbb];
+        container.extend_from_slice(b"primary");
+        let wire = ok(sender.seal_media_frame(&container, WasmMediaCodec::RedOpus));
+        let info = media_frame_info(&wire).expect("ok");
+        assert!(info.is_red_opus());
+        assert_eq!(info.clear_prefix_len(), 0);
+        let opened = ok(receiver.open_media_frame(&wire));
+        assert_eq!(opened, container);
+        assert_eq!(red_primary(&opened), Some(b"primary".to_vec()));
+        let plain = ok(sender.seal_media_frame(b"opus", WasmMediaCodec::Opus));
+        assert!(!media_frame_info(&plain).expect("ok").is_red_opus());
     }
 
     /// The parser refuses a header-first frame and garbage without a key.

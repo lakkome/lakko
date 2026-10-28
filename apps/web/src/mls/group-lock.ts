@@ -88,19 +88,18 @@
  *     surfacing an unhandled rejection (the caller still sees the real one).
  *
  * This adds NO rollback of its own. Every failure path inside `task` behaves
- * exactly as it did before — in particular the ADR-0040 F1 reset stays where it
- * is, and a publish failure still does NOT reset (the durable entry is
- * re-published by `sweepPendingCommits`).
+ * exactly as it did before. (The ADR-0040 F1 reset that served the direct
+ * commits went with them in the ADR-0081 amendment of 2026-10-19; a staged
+ * sweep is rolled back per group by `abandonStagedSweep`.)
  *
  * ## Deadlock
  *
  * The lock is NON-REENTRANT: a region that re-entered it on the same key would
  * await its own promise forever. Audited, and it holds in both directions:
  *
- *   - nothing awaited inside a commit region reaches an apply. The four regions
- *     await only `loadWasm()` (a module-cached promise), `persistCommitOrThrow` /
- *     `resetGroupAfterPersistAbort` (device key + IndexedDB + `restoreStorage`)
- *     and plain-HTTP publishes;
+ *   - nothing awaited inside a membership region reaches an apply. The regions
+ *     await only `loadWasm()` (a module-cached promise), the fail-closed
+ *     persists (device key + IndexedDB) and plain-HTTP publishes;
  *   - nothing awaited inside an apply region reaches a commit. The poll's region
  *     awaits only `parseBodyEnvelope` / `tryDecodeSecretEnvelope` (wasm codecs)
  *     and the best-effort snapshot persist;

@@ -120,8 +120,10 @@ final class UnsupportedWireVersionTests: XCTestCase {
     private struct StubDeps: NsePushDecryptDeps {
         let rows: [NseFetchedRow]
 
-        func boundAccount(wakeDevicePseudonymHex: String?) -> String? { "acct" }
-        func lookupRoute(accountIdB64: String, pushGidHex: String) -> String? { nil }
+        func boundAccount(wakeSubscriptionIdHex: String?) -> String? { "acct" }
+        func lookupRoute(accountIdB64: String, pushGidHex: String, subscriptionIdHex: String?) -> String? {
+            accountIdB64 == "acct" ? pushGidHex : nil
+        }
         func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool { accountIdB64 == "acct" }
         func loadIdentitySeed(accountIdB64: String) -> Data? { Data(repeating: 1, count: 64) }
         func loadSnapshot(accountIdB64: String) -> Data? { Data(repeating: 2, count: 8) }

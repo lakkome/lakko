@@ -10,11 +10,9 @@ import {
   AnonTokenUnavailableError,
 } from "./anon-token-pool";
 import { ACTION_ALLOWANCE_USED, LOOKUP_ALLOWANCE_USED, anonTokenMessage } from "./token-copy";
-import { findByName, findByNameMessage } from "../chat/find-by-name";
 import { joinFailureNotice } from "../routes/join-group-failure";
 import { formatContactsError } from "../contacts/errors";
 import { ContactsError } from "../contacts/client";
-import type { UiRules } from "../chat/ui-rules";
 
 const NET = "network copy";
 
@@ -35,6 +33,7 @@ describe("anonTokenMessage", () => {
     "blob-upload",
     "blob-read",
     "mailbox-write",
+    "call-join",
   ] as const)(
     "%s: the allowance copy",
     (context) => {
@@ -61,31 +60,6 @@ describe("anonTokenMessage", () => {
 });
 
 describe("the surfaces", () => {
-  const rules = {
-    bareName: (s: string) => s.replace(/^@/, ""),
-    looksLikeAName: () => true,
-  } as unknown as UiRules;
-
-  it("search: an allowance used up is neither 'nothing found' nor 'unreachable'", async () => {
-    let personAsked = false;
-    const found = await findByName(
-      "alice",
-      {
-        channel: async () => {
-          throw new AnonTokenQuotaExhaustedError("discovery-lookup", 100);
-        },
-        person: async () => {
-          personAsked = true;
-          return null;
-        },
-      },
-      rules,
-    );
-    expect(found).toEqual({ kind: "allowance-used" });
-    expect(personAsked).toBe(false);
-    expect(findByNameMessage(found, "alice", rules)).toBe(LOOKUP_ALLOWANCE_USED());
-  });
-
   it("a contact request whose lookup ran out says so", () => {
     const err = ContactsError.wrap(new AnonTokenQuotaExhaustedError("discovery-lookup", 1));
     expect(formatContactsError(err, "contacts.error.send")).toBe(LOOKUP_ALLOWANCE_USED());

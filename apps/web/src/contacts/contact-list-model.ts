@@ -91,6 +91,9 @@ export interface SentRequestRecord {
   readonly recipientAccountIdHex: string;
   /** When this device sent it (ms since epoch). */
   readonly sentAtMs: number;
+  /** ADR-0084 - the recipient's signature key (standard base64), for their
+   *  photo once this device holds their profile. Absent in older records. */
+  readonly recipientKeyB64?: string;
 }
 
 /** Add or refresh a sent record; one row per recipient, the newest send

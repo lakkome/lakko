@@ -133,10 +133,38 @@ import { SpeakingMonitor, type VoiceSource } from "../calls/speaking-monitor";
 import { TileControlsReveal } from "../calls/tile-controls-reveal";
 import { describeVoices, stageReason } from "../calls/voice-diagnostics";
 import type { LevelReceiver } from "../calls/audio-level";
+import {
+  currentShareStream,
+  screenShareActions,
+  screenShareState,
+  type ShareOnScreen,
+} from "../calls/screen-share-store";
+import {
+  isRemoteShare,
+  nameOrUnnamed,
+  panBy,
+  SCREEN_TILE_ID,
+  screenTileLabel,
+  screenTilePerson,
+  SHARE_ZOOM_WHOLE,
+  shareAnnouncement,
+  zoomBy,
+  zoomScale,
+  type ShareZoom,
+} from "../calls/screen-share-layout";
 import { uiRules } from "../chat/ui-rules";
 import { paths } from "./paths";
 import { Icon } from "../ui/icons";
 import { initialsOf, toneOf } from "../ui/Avatar";
+import { avatarMediaFor } from "../profile/avatar-runtime";
+
+/** ADR-0084 - a person's photo when this device holds it, else their
+ *  initials: what a call surface shows while the camera is off. */
+const PhotoOrInitials: Component<{ name: string; personKey: string | undefined; class: string }> = (props) => (
+  <Show when={avatarMediaFor(props.personKey, false)?.stillUrl} fallback={initialsOf(props.name)}>
+    {(url) => <img class={props.class} src={url()} alt="" />}
+  </Show>
+);
 import { currentLanguage, t } from "../l10n";
 
 // ============================================================================
@@ -639,6 +667,8 @@ const ControlBar: Component<{
   /** The link to this call is being prepared (`docs/ux/call-links.md`
    *  section 5). */
   inviteBusy: boolean;
+  /** The screen-share picker is open or the share is being set up. */
+  shareBusy?: boolean;
   onPress: (spec: CallControlSpec) => void;
 }> = (props) => (
   <div
@@ -655,7 +685,8 @@ const ControlBar: Component<{
           spec={spec}
           busy={
             (spec.id === "camera" && props.cameraBusy) ||
-            (spec.id === "participants" && props.inviteBusy)
+            (spec.id === "participants" && props.inviteBusy) ||
+            (spec.id === "screen" && props.shareBusy === true)
           }
           onPress={(): void => props.onPress(spec)}
         />
@@ -685,6 +716,8 @@ const CallStatus: Component<{
    *  video fill and the group grid, where the status floats at the top over
    *  the picture. */
   avatar?: boolean;
+  /** ADR-0084 - whose photo the voice portrait shows. */
+  personKey?: string | undefined;
   /** What `Invite` is doing, or `null` (`docs/ux/call-links.md` section 5:
    *  the wait "says what it is doing rather than only spinning"). Rendered as
    *  a second plain line rather than a banner, so it reads like the rest of
@@ -695,7 +728,7 @@ const CallStatus: Component<{
   <div class="lk-call-status">
     <Show when={props.avatar === true}>
       <div class="lk-call-portrait-avatar" aria-hidden="true">
-        {initialsOf(props.name)}
+        <PhotoOrInitials name={props.name} personKey={props.personKey} class="lk-call-photo" />
       </div>
     </Show>
     <h1 class="lk-call-name">{props.name}</h1>
@@ -741,10 +774,16 @@ const CallStatus: Component<{
  * The one thing §4.2 says we deliberately do not copy is an animation that
  * keeps moving for the whole call: decoration with a battery cost.
  */
-const CallPortrait: Component<{ name: string; toneId: string }> = (props) => (
+const CallPortrait: Component<{ name: string; toneId: string; personKey?: string | undefined }> = (props) => (
   <div class="lk-call-portrait" data-tone={toneOf(props.toneId)} aria-hidden="true">
     <div class="lk-call-portrait-wash">
-      <span class="lk-call-portrait-blur">{initialsOf(props.name)}</span>
+      {/* ADR-0084 - the person's own photo, blurred, when this device holds it. */}
+      <Show
+        when={avatarMediaFor(props.personKey, false)?.stillUrl}
+        fallback={<span class="lk-call-portrait-blur">{initialsOf(props.name)}</span>}
+      >
+        {(url) => <img class="lk-call-portrait-photo" src={url()} alt="" />}
+      </Show>
     </div>
   </div>
 );
@@ -1405,7 +1444,11 @@ const ParticipantTile: Component<TileProps> = (props) => {
         when={props.participant.camOn}
         fallback={
           <div class="lk-call-tile-avatar" aria-hidden="true">
-            {initialsOf(name())}
+            <PhotoOrInitials
+              name={name()}
+              personKey={props.participant.personKeyB64}
+              class="lk-call-photo lk-call-tile-photo"
+            />
           </div>
         }
       >
@@ -1498,6 +1541,224 @@ const ParticipantTile: Component<TileProps> = (props) => {
   );
 };
 
+// ============================================================================
+// The screen share (`docs/ux/screen-share.md`)
+// ============================================================================
+
+/**
+ * A shared screen: the share's own tile (group) or the large picture
+ * (one-to-one), sections 5.1 to 5.3.
+ *
+ * Whole, uncropped, on black. Until its first frame: the screen glyph, a
+ * spinner and `Waiting for Anna's screen`; a picture that stops later keeps
+ * its last frame (the element holds it) and nothing claims the share ended.
+ * Large, it zooms (`+` / `-` buttons and keys, `0` or a double click back to
+ * whole) and pans by dragging; a tile that leaves the large place is a new
+ * element, so its zoom starts whole. Muted: the share's sound plays through
+ * the call host's sink.
+ *
+ * This device's own share shows no picture (the endless mirror): the glyph
+ * and `You're sharing your screen`.
+ */
+const ScreenShareView: Component<{
+  share: ShareOnScreen;
+  stream: MediaStream | undefined;
+  large: boolean;
+  class?: string;
+}> = (props) => {
+  const label = (): string => screenTileLabel(props.share.name);
+  const [hasFrame, setHasFrame] = createSignal(false);
+  const [zoom, setZoom] = createSignal<ShareZoom>(SHARE_ZOOM_WHOLE);
+  let box: HTMLDivElement | undefined;
+  let videoEl: HTMLVideoElement | undefined;
+  let drag: { pointerId: number; x: number; y: number } | null = null;
+
+  createEffect(
+    on(
+      () => props.stream,
+      (stream) => {
+        setHasFrame(false);
+        if (videoEl === undefined) return;
+        videoEl.srcObject = stream ?? null;
+        if (stream !== undefined) {
+          void videoEl.play().catch(() => {
+            // Autoplay of a muted element is allowed; a refusal leaves the
+            // waiting state up rather than a blank box.
+          });
+        }
+      },
+    ),
+  );
+
+  const size = (): { width: number; height: number } => ({
+    width: box?.clientWidth ?? 0,
+    height: box?.clientHeight ?? 0,
+  });
+  const zoomIn = (): void => {
+    const { width, height } = size();
+    setZoom((z) => zoomBy(z, 1, width, height));
+  };
+  const zoomOut = (): void => {
+    const { width, height } = size();
+    setZoom((z) => zoomBy(z, -1, width, height));
+  };
+  const zoomReset = (): void => {
+    setZoom(SHARE_ZOOM_WHOLE);
+  };
+
+  return (
+    <Show
+      when={!props.share.isOwn}
+      fallback={
+        <div class={`lk-call-share own ${props.class ?? ""}`} role="img" aria-label={t("call.screen_share.own_tile")}>
+          <Icon name="monitor" size={props.large ? 36 : 22} strokeWidth={1.4} />
+          <span class="lk-call-share-own-text">{t("call.screen_share.own_tile")}</span>
+        </div>
+      }
+    >
+      <div
+        class={`lk-call-share ${props.class ?? ""}`}
+        classList={{ large: props.large, zoomed: zoom().step > 0 }}
+        ref={box}
+        role="group"
+        aria-label={label()}
+        data-tile-id={SCREEN_TILE_ID}
+        tabIndex={props.large ? 0 : undefined}
+        onKeyDown={(event): void => {
+          if (!props.large) return;
+          if (event.key === "+" || event.key === "=") {
+            event.preventDefault();
+            zoomIn();
+          } else if (event.key === "-") {
+            event.preventDefault();
+            zoomOut();
+          } else if (event.key === "0") {
+            event.preventDefault();
+            zoomReset();
+          }
+        }}
+        onDblClick={(): void => {
+          if (props.large) zoomReset();
+        }}
+        onPointerDown={(event): void => {
+          if (!props.large || zoom().step === 0) return;
+          if ((event.target as HTMLElement).closest("button") !== null) return;
+          drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+          box?.setPointerCapture(event.pointerId);
+          event.stopPropagation();
+        }}
+        onPointerMove={(event): void => {
+          if (drag === null || event.pointerId !== drag.pointerId) return;
+          const dx = event.clientX - drag.x;
+          const dy = event.clientY - drag.y;
+          drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+          const { width, height } = size();
+          setZoom((z) => panBy(z, dx, dy, width, height));
+        }}
+        onPointerUp={(event): void => {
+          if (drag === null || event.pointerId !== drag.pointerId) return;
+          box?.releasePointerCapture(event.pointerId);
+          drag = null;
+        }}
+        onPointerCancel={(): void => {
+          drag = null;
+        }}
+      >
+        <video
+          ref={videoEl}
+          class="lk-call-share-video"
+          muted
+          autoplay
+          playsinline
+          aria-hidden="true"
+          style={{
+            transform: `translate(${zoom().panX}px, ${zoom().panY}px) scale(${zoomScale(zoom())})`,
+          }}
+          onLoadedData={(): void => void setHasFrame(true)}
+          onPlaying={(): void => void setHasFrame(true)}
+        />
+        <Show when={!hasFrame()}>
+          <div class="lk-call-share-waiting" role="status">
+            <Icon name="monitor" size={props.large ? 36 : 22} strokeWidth={1.4} />
+            <Spinner size={props.large ? 24 : 18} />
+            <span>{t("call.screen_share.waiting", { name: nameOrUnnamed(props.share.name) })}</span>
+          </div>
+        </Show>
+        <div class="lk-call-tile-strip">
+          <span class="lk-call-share-glyph" aria-hidden="true">
+            <Icon name="monitor" size={14} />
+          </span>
+          <span class="lk-call-tile-name">{label()}</span>
+        </div>
+        <Show when={props.large}>
+          <div class="lk-call-share-zoom">
+            <button
+              type="button"
+              class="lk-call-share-zoom-btn"
+              aria-label={t("call.screen_share.zoom_out")}
+              title={t("call.screen_share.zoom_out")}
+              disabled={zoom().step === 0}
+              onClick={(event): void => {
+                event.stopPropagation();
+                zoomOut();
+              }}
+            >
+              -
+            </button>
+            <button
+              type="button"
+              class="lk-call-share-zoom-btn"
+              aria-label={t("call.screen_share.zoom_reset")}
+              title={t("call.screen_share.zoom_reset")}
+              disabled={zoom().step === 0}
+              onClick={(event): void => {
+                event.stopPropagation();
+                zoomReset();
+              }}
+            >
+              <Icon name="monitor" size={14} />
+            </button>
+            <button
+              type="button"
+              class="lk-call-share-zoom-btn"
+              aria-label={t("call.screen_share.zoom_in")}
+              title={t("call.screen_share.zoom_in")}
+              onClick={(event): void => {
+                event.stopPropagation();
+                zoomIn();
+              }}
+            >
+              +
+            </button>
+          </div>
+        </Show>
+      </div>
+    </Show>
+  );
+};
+
+/** One tile of the group layout: a person, or the shared screen. */
+type LayoutTile = Participant & { readonly screen?: boolean };
+
+/** The roster with the share's tile in it (sections 5.2 and 6.3): someone
+ *  else's share first among the others, so it is on the first page; this
+ *  device's own last, beside its own tile. */
+function withShareTile(people: readonly Participant[], share: ShareOnScreen | null): LayoutTile[] {
+  const tile = screenTilePerson(share);
+  if (tile === null) return [...people];
+  const asTile: LayoutTile = {
+    id: tile.id,
+    displayName: tile.displayName,
+    isLocal: tile.isLocal,
+    micOn: true,
+    camOn: true,
+    quality: "good",
+    speaking: false,
+    screen: true,
+  };
+  return tile.isLocal ? [...people, asTile] : [asTile, ...people];
+}
+
 /**
  * The tiles of a group call (`docs/ux/group-call-grid.md` sections 3 to 6).
  *
@@ -1536,8 +1797,10 @@ const GroupArea: Component<{
     onCleanup(() => observer.disconnect());
   });
 
-  const people = (): Participant[] => callState.participants();
-  const personById = (id: string): Participant | undefined => people().find((p) => p.id === id);
+  const people = createMemo((): LayoutTile[] =>
+    withShareTile(callState.participants(), screenShareState.current()),
+  );
+  const personById = (id: string): LayoutTile | undefined => people().find((p) => p.id === id);
   const kind = createMemo(() =>
     groupLayoutKind(callState.layoutChoice(), callState.pinnedId(), people()),
   );
@@ -1642,6 +1905,13 @@ const GroupArea: Component<{
   // whole roster update half way (`calls/held.ts`). Which tiles exist is
   // decided by the lists of ids above, which follow the roster.
   const tile = (id: string, large: boolean, compact = false): JSX.Element => {
+    if (id === SCREEN_TILE_ID) {
+      return (
+        <Show when={screenShareState.current()} keyed={false}>
+          {(share) => <ScreenShareView share={share()} stream={currentShareStream()} large={large} />}
+        </Show>
+      );
+    }
     const person = lastDefined(() => personById(id));
     return (
       <Show when={person() !== undefined}>
@@ -1750,6 +2020,28 @@ const GroupArea: Component<{
             )}
           </For>
         </div>
+        {/* A share started while a pin holds the stage (section 5.2): offered
+            by a chip, never moved onto the stage over the pin. */}
+        <Show when={callState.pinnedId() !== null && isRemoteShare(screenShareState.current())}>
+          <div class="lk-call-share-chip" role="status">
+            <Icon name="monitor" size={16} />
+            <span>
+              {t("call.screen_share.pinned_chip", {
+                name: nameOrUnnamed(screenShareState.current()?.name ?? ""),
+              })}
+            </span>
+            <button
+              type="button"
+              class="lk-call-share-chip-btn"
+              onClick={(event): void => {
+                event.stopPropagation();
+                callActions.pin(null);
+              }}
+            >
+              {t("call.screen_share.view")}
+            </button>
+          </div>
+        </Show>
         <Show when={stageId()}>
           {(id) => (
             <div
@@ -1941,6 +2233,9 @@ const Call: Component<{
    *  sheet's one sentence (§5). Omitted on a group call, where there is no
    *  "other person". */
   peerName?: string | null;
+  /** The group's shared name on a group call placed in a conversation: the
+   *  name at the top of the screen. Omitted on a link call. */
+  groupName?: string | null;
   /** What the portrait's colour is hashed from, so one person is one colour
    *  everywhere in the app. Falls back to the name. */
   peerId?: string | null;
@@ -2178,11 +2473,27 @@ const Call: Component<{
   const remoteCameraOn = (): boolean => remotes()[0]?.camOn === true;
   const localCameraOn = (): boolean => local()?.camOn === true;
 
+  /** The share on screen (`docs/ux/screen-share.md`), someone else's or this
+   *  device's own. */
+  const share = (): ShareOnScreen | null => screenShareState.current();
+  /** Someone else's share on a one-to-one call: the large picture (5.1). */
+  const remoteShare = (): ShareOnScreen | null => {
+    const c = share();
+    return props.group !== true && c !== null && !c.isOwn ? c : null;
+  };
+  /** This device's own share on a one-to-one call: the small tile beside the
+   *  self-view (section 3). */
+  const ownShare = (): ShareOnScreen | null => {
+    const c = share();
+    return props.group !== true && c !== null && c.isOwn ? c : null;
+  };
+
   const surface = createMemo<CallSurfaceKind>(() =>
     callSurfaceKind({
       groupCall: props.group === true,
       remoteCount: remotes().length,
-      remoteCameraOn: remoteCameraOn(),
+      // A voice call shows the video layout while a share is live (5.1).
+      remoteCameraOn: remoteCameraOn() || remoteShare() !== null,
       localCameraOn: localCameraOn(),
     }),
   );
@@ -2190,7 +2501,9 @@ const Call: Component<{
   /** Whose picture the video surface is showing. §4.1: a person who turns their
    *  camera on gets the video layout even when the other side has not, and the
    *  only picture that exists then is their own. */
-  const fill = createMemo(() => callFillSource(surface(), remoteCameraOn(), localCameraOn()));
+  const fill = createMemo(() =>
+    remoteShare() !== null ? "none" : callFillSource(surface(), remoteCameraOn(), localCameraOn()),
+  );
   /** The other person's stream on the video surface, and the one its picture
    *  keeps reading while it is taken down (`calls/held.ts`). */
   const fillStream = (): MediaStream | undefined =>
@@ -2206,6 +2519,7 @@ const Call: Component<{
       peerName: props.peerName,
       participantCount: callState.participants().length,
       soleRemoteName: remotes()[0]?.displayName,
+      groupName: props.groupName,
     }),
   );
 
@@ -2232,8 +2546,31 @@ const Call: Component<{
     callState.settings().availableDevices.filter((d) => d.kind === "videoinput"),
   );
 
+  // The layout a share moves the group to and gives back (section 5.2).
+  createEffect(() => {
+    if (props.group !== true) return;
+    share();
+    const step = screenShareActions.stepLayout(untrack(callState.layoutChoice));
+    if (step !== null) callActions.setLayoutChoice(step.choice);
+  });
+
+  // Section 5.3: someone else's share starting and stopping is said once,
+  // politely.
+  const [shareSaid, setShareSaid] = createSignal("");
+  let shareBefore: ShareOnScreen | null = null;
+  createEffect(() => {
+    const now = share();
+    const line = shareAnnouncement(shareBefore, now);
+    shareBefore = now;
+    if (line !== null) setShareSaid(line);
+  });
+
   const controls = createMemo(() =>
     callControls({
+      screenShare:
+        screenShareState.control() !== null
+          ? { sharing: share()?.isOwn === true, busy: screenShareState.busy() }
+          : undefined,
       surface: surface(),
       phase: phaseKind(),
       micOn: local()?.micOn === true,
@@ -2264,6 +2601,15 @@ const Call: Component<{
       case "camera":
         callActions.setCamera(local()?.camOn !== true);
         return;
+      case "screen": {
+        // Called in the press itself, so the browser sees the gesture it
+        // wants before it opens its picker.
+        const control = screenShareState.control();
+        if (control === null) return;
+        if (share()?.isOwn === true) control.stop();
+        else control.start();
+        return;
+      }
       case "participants":
         // With a link to hand out: the menu. Without one: the list itself,
         // since a menu of one item is a second step for nothing.
@@ -2391,7 +2737,7 @@ const Call: Component<{
       {/* The ground. A voice call gets the other person's colour, blurred and
           darkened (§4.2); a video call gets the other person. */}
       <Show when={surface() !== "group"}>
-        <CallPortrait name={peerLabel()} toneId={toneId()} />
+        <CallPortrait name={peerLabel()} toneId={toneId()} personKey={remotes()[0]?.personKeyB64} />
       </Show>
 
       {/* The picture, edge to edge. `object-fit: cover` in the stylesheet, so a
@@ -2409,6 +2755,42 @@ const Call: Component<{
           />
         </Show>
       </Show>
+      <Show when={remoteShare()}>
+        {(s) => (
+          <>
+            <ScreenShareView
+              share={s()}
+              stream={currentShareStream()}
+              large={true}
+              class="lk-call-fill lk-call-share-fill"
+            />
+            {/* The other person moves to a small tile (5.1): their camera,
+                or their initials. */}
+            <div class="lk-call-peer-mini" data-tone={toneOf(toneId())}>
+              <Show
+                when={remoteCameraOn() && fillStream() !== undefined}
+                fallback={
+                  <div class="lk-call-tile-avatar" aria-hidden="true">
+                    <PhotoOrInitials
+                      name={peerLabel()}
+                      personKey={remotes()[0]?.personKeyB64}
+                      class="lk-call-photo lk-call-tile-photo"
+                    />
+                  </div>
+                }
+              >
+                <RemoteVideo
+                  stream={shownFillStream() as MediaStream}
+                  light={undefined}
+                  peerId={peerIdOfParticipant(remotes()[0]?.id ?? "")}
+                  class="lk-call-tile-video"
+                  ariaLabel={t("call.fill.remote_camera_a11y", { name: peerLabel() })}
+                />
+              </Show>
+            </div>
+          </>
+        )}
+      </Show>
       <Show when={fill() === "local"}>
         <Show when={props.localStream?.() !== undefined}>
           <LocalVideo
@@ -2425,6 +2807,7 @@ const Call: Component<{
         detail={statusDetail()}
         spokenDetail={spokenDetail()}
         avatar={surface() === "voice"}
+        personKey={remotes()[0]?.personKeyB64}
         inviteStatus={props.inviteStatus ?? null}
         onOpenEncryption={(): void => {
           setEncryptionSheetOpen(true);
@@ -2445,6 +2828,12 @@ const Call: Component<{
         </Show>
       </Show>
 
+      {/* This device's own share on a one-to-one call: a small tile with no
+          picture, next to the self-view (section 3). */}
+      <Show when={ownShare()}>
+        {(s) => <ScreenShareView share={s()} stream={undefined} large={false} class="lk-call-own-share-mini" />}
+      </Show>
+
       <Show when={selfViewVisible(surface(), localCameraOn(), fill())}>
         <SelfView
           stream={props.localStream?.()}
@@ -2454,11 +2843,38 @@ const Call: Component<{
         />
       </Show>
 
+      {/* While this device shares (section 3): a strip across the top with
+          Stop, read once when it appears. */}
+      <Show when={share()?.isOwn === true ? share() : null}>
+        {(s) => (
+          <div class="lk-call-share-strip" role="status" aria-live="polite">
+            <Icon name="monitor" size={18} />
+            <span>
+              {s().withSound ? t("call.screen_share.own_strip_sound") : t("call.screen_share.own_strip")}
+            </span>
+            <button
+              type="button"
+              class="lk-call-share-strip-stop"
+              onClick={(event): void => {
+                event.stopPropagation();
+                screenShareState.control()?.stop();
+              }}
+            >
+              {t("call.screen_share.stop")}
+            </button>
+          </div>
+        )}
+      </Show>
+      <p class="lakko-visually-hidden" role="status" aria-live="polite">
+        {shareSaid()}
+      </p>
+
       <ControlBar
         surface={surface()}
         hidden={barHidden()}
         controls={controls()}
         cameraBusy={callState.videoPublishState() === "starting"}
+        shareBusy={screenShareState.busy()}
         inviteBusy={props.inviteBusy === true}
         onPress={press}
       />

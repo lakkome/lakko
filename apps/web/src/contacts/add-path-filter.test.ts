@@ -14,7 +14,7 @@
  * an in-memory `localStorage`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fakeAccessSigner } from "../ds/access-test-doubles";
+import { fakeAccessSigner, withCommitRoute, withStagedTwins } from "../ds/access-test-doubles";
 
 vi.mock("../chat/commit-outbox", () => ({
   markAcked: async () => {},
@@ -89,14 +89,14 @@ function client(devices: readonly Uint8Array[]): ContactsClient {
       fetchKeyPackages: async () =>
         devices.map((keyPackage) => ({ deviceId: key(keyPackage[1] ?? 0), keyPackage })),
     } as unknown as DiscoveryClient,
-    { registerGroupEpoch: async () => {} } as unknown as DsClient,
+    withCommitRoute({ registerGroupEpoch: async () => {} }) as unknown as DsClient,
     { identityProvider: () => IDENTITY },
   );
 }
 
-/** A group with no role table whose add records what it was handed. */
+/** A role-table group whose Add proposal records what it was handed. */
 function group(added: Uint8Array[]): WasmGroup {
-  return {
+  return withStagedTwins({
     get groupId(): Uint8Array {
       return new Uint8Array([4, 4, 4, 4]);
     },
@@ -104,14 +104,15 @@ function group(added: Uint8Array[]): WasmGroup {
       return 5n;
     },
     members: () => [],
-    roleTableOwner: () => undefined,
+    roleTableOwner: () => new Uint8Array(32).fill(1),
+    roleTableAdmins: () => new Uint8Array(0),
     pendingProposals: () => [],
     dsAccessSigner: fakeAccessSigner(() => 5n),
-    addMember: (_id: unknown, keyPackage: Uint8Array) => {
+    proposeAddMember: (_id: unknown, keyPackage: Uint8Array) => {
       added.push(keyPackage);
       throw new Sentinel("add reached");
     },
-  } as unknown as WasmGroup;
+  }) as unknown as WasmGroup;
 }
 
 /** The account as this device holds it after a PROVEN rotation OLD -> NEW. */

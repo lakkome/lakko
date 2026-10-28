@@ -59,9 +59,13 @@ struct ContactDetailScreen: View {
 
     @ViewBuilder
     private var content: some View {
-        if let contact = viewModel.contact(messageId: messageId) {
+        // The accepted contact, else a person the viewer removed whose
+        // one-to-one remains (section 2.1, amended 2026-10-24).
+        if let contact = viewModel.person(messageId: messageId) {
             ResolvedName(signatureKey: contact.request.fromPubkey) { resolved in
-                detail(contact: contact, resolved: resolved)
+                detail(
+                    contact: contact, isContact: viewModel.isContact(messageId: messageId),
+                    resolved: resolved)
             }
         } else {
             ContentUnavailableView(
@@ -75,16 +79,17 @@ struct ContactDetailScreen: View {
     }
 
     @ViewBuilder
-    private func detail(contact: AcceptedContact, resolved: ResolvedDisplayName) -> some View {
+    private func detail(contact: AcceptedContact, isContact: Bool, resolved: ResolvedDisplayName) -> some View {
         let chat = viewModel.chatGroupIdHex(for: contact)
         let callable = chat.map { viewModel.canCall(groupIdHex: $0) } ?? false
         // Section 2.1, decided once in `crates/lakko-ui-rules` where the host
-        // test suite can run it, never by a flag read down in the layout. The
-        // contact is in the list by construction — this branch only draws when
-        // `viewModel.contact(messageId:)` found one.
+        // test suite can run it, never by a flag read down in the layout. A
+        // person the viewer removed is not a contact: their card offers `Add
+        // to contacts` in place of Rename and Remove (amended 2026-10-24).
         let sections = personInfoSections(
             caps: PersonInfoCapabilities(
-                membershipEnded: chat.map { viewModel.membershipEnded(groupIdHex: $0) } ?? false))
+                membershipEnded: chat.map { viewModel.membershipEnded(groupIdHex: $0) } ?? false,
+                isContact: isContact))
         List {
             Section {
                 VStack(spacing: 8) {
@@ -92,7 +97,9 @@ struct ContactDetailScreen: View {
                         name: resolved.isPlaceholder ? "" : resolved.name,
                         identity: base64Encode(contact.request.fromPubkey),
                         size: 72,
-                        placeholderSymbol: "person.fill"
+                        placeholderSymbol: "person.fill",
+                        photo: .person(contact.request.fromPubkey),
+                        playsVideo: true
                     )
                     Text(resolved.name)
                         .font(.title2.weight(.semibold))
@@ -181,6 +188,27 @@ struct ContactDetailScreen: View {
                 }
             }
 
+            // `Add to contacts` (section 2.1, amended 2026-10-24): local and
+            // instant, it sends nothing, so it asks nothing first.
+            if sections.contains(.addContact) {
+                Section {
+                    Button {
+                        viewModel.onAddContactClicked(person: contact)
+                    } label: {
+                        HStack {
+                            Label(l10n.t("contacts.add_back.control"), systemImage: "person.badge.plus")
+                                .foregroundStyle(Color.lakkoText)
+                            Spacer()
+                            Text(l10n.t("contacts.add_back.action"))
+                                .foregroundStyle(chat == nil ? Color.lakkoTextMuted : Color.lakkoAccent)
+                        }
+                    }
+                    .disabled(chat == nil)
+                } footer: {
+                    Text(l10n.t("contacts.add_back.sub", texts: ["name": resolved.name]))
+                }
+            }
+
             // The two destructive controls, in their own block at the bottom
             // where iOS puts what cannot be undone. They are different acts on
             // different things — one forgets the PERSON, the other forgets the
@@ -208,53 +236,52 @@ struct ContactDetailScreen: View {
         .listStyle(.insetGrouped)
         .navigationTitle(resolved.name)
         .navigationBarTitleDisplayMode(.inline)
-        .alert(l10n.t("contacts.rename.action"), isPresented: $renaming) {
-            TextField(l10n.t("contacts.rename.placeholder"), text: $draftName)
-            Button(l10n.t("common.save")) {
-                viewModel.onRenameContactClicked(messageId: contact.request.messageId, name: draftName)
-            }
-            Button(l10n.t("common.cancel"), role: .cancel) {}
-        } message: {
-            Text(l10n.t("contacts.rename.sub_local"))
+        .lakkoDialog(
+            isPresented: $renaming,
+            title: l10n.t("contacts.rename.action"),
+            message: l10n.t("contacts.rename.sub_local"),
+            field: LakkoDialogField(placeholder: l10n.t("contacts.rename.placeholder"), text: $draftName)
+        ) {
+            [
+                .primary(l10n.t("common.save")) {
+                    viewModel.onRenameContactClicked(messageId: contact.request.messageId, name: draftName)
+                },
+                .cancel(),
+            ]
         }
         // Local only, and the body says exactly that: the peer is not told,
         // and an existing chat is deliberately left behind, because leaving a
         // conversation is the conversation's own action.
-        .confirmationDialog(
-            l10n.t("contacts.remove.title"),
+        .lakkoDialog(
             isPresented: $confirmingRemove,
-            titleVisibility: .visible
+            title: l10n.t("contacts.remove.title"),
+            message: l10n.t("contacts.remove.body")
         ) {
-            Button(
-                l10n.t("contacts.remove.confirm_named", texts: ["name": resolved.name]),
-                role: .destructive
-            ) {
-                viewModel.onRemoveContactClicked(messageId: contact.request.messageId)
-            }
-            Button(l10n.t("common.cancel"), role: .cancel) {}
-        } message: {
-            Text(l10n.t("contacts.remove.body"))
+            [
+                .danger(l10n.t("contacts.remove.confirm_named", texts: ["name": resolved.name])) {
+                    viewModel.onRemoveContactClicked(messageId: contact.request.messageId)
+                },
+                .cancel(),
+            ]
         }
         // ADR-0045 UX 6.2.4 — the same control, the same words and the same
         // repository call as the group panel's. A second set of words for one
         // act is how the three clients drifted in the first place.
-        .confirmationDialog(
-            deleteChatTitle,
+        .lakkoDialog(
             isPresented: $confirmingDeleteChat,
-            titleVisibility: .visible
-        ) {
-            Button(l10n.t("common.delete"), role: .destructive) {
+            title: deleteChatTitle,
+            message: deleteChatBody
+        ) {[
+            .danger(l10n.t("common.delete")) {
                 // Route away only when the delete actually landed; a refusal
                 // leaves the screen where it is rather than dropping the user
                 // out of a chat that is still there.
                 if let chat, viewModel.onDeleteChatClicked(groupIdHex: chat) {
                     onChatDeleted()
                 }
-            }
-            Button(l10n.t("common.cancel"), role: .cancel) {}
-        } message: {
-            Text(deleteChatBody)
-        }
+            },
+            .cancel(),
+        ]}
     }
 }
 
@@ -304,7 +331,7 @@ struct SafetyNumberScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                if let contact = viewModel.contact(messageId: messageId) {
+                if let contact = viewModel.person(messageId: messageId) {
                     if let number = viewModel.safetyNumber(for: contact) {
                         ResolvedName(signatureKey: contact.request.fromPubkey) { resolved in
                             Text(resolved.isPlaceholder

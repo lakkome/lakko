@@ -54,14 +54,11 @@ import {
 
 // ---- Typed server frames ------------------------------------------
 
-/** Roster entry in a {@link SfuWelcome}. */
+/** Roster entry in a {@link SfuWelcome}: the peer id only. Who the peer is
+ *  comes from its own sealed, signed announcement over `signal-relay`
+ *  (ADR-0078 section 2, `call-relay.ts`); the SFU knows no account. */
 export interface SfuPeerSnapshot {
   readonly peer_id: string;
-  readonly account_pseudonym: string;
-  /** Per-call peer tag (ADR-0021). Re-derive `sfuPeerTag(call_id,
-   *  account_id)` over a contact's account id and match to resolve this
-   *  entry to a name. Optional — absent from a pre-ADR-0021 SFU. */
-  readonly peer_tag?: string;
 }
 
 /** Machine-readable SFU error code (kebab-case wire form). */
@@ -80,17 +77,17 @@ export type SfuErrorCode =
 
 export interface SfuWelcome {
   readonly kind: "welcome";
+  /** This connection's peer id: the random `peer_id` of its admission
+   *  token, the value the device announces to the other members. */
   readonly peer_id: string;
-  readonly call_id: string;
+  /** The room (the token's `room`). */
+  readonly room: string;
   readonly roster: readonly SfuPeerSnapshot[];
   readonly server_ts: number;
 }
 export interface SfuPeerJoined {
   readonly kind: "peer-joined";
   readonly peer_id: string;
-  readonly account_pseudonym: string;
-  /** Per-call peer tag (ADR-0021) — see {@link SfuPeerSnapshot.peer_tag}. */
-  readonly peer_tag?: string;
 }
 export interface SfuPeerLeft {
   readonly kind: "peer-left";
@@ -353,11 +350,21 @@ export class SfuSignalingClient {
    * of this client's camera (ADR-0070 step 1), so the SFU forwards it as the
    * camera's light companion; `middleMids` those that carry its middle sender
    * (step 5), which the SFU forwards only to a viewer that asks for it. Each
-   * is empty when there is none.
+   * is empty when there is none. `screenMids` names the m-lines of this
+   * client's screen share, picture and sound (ADR-0083), which the SFU
+   * forwards to everyone under `<peer>~screen`.
    */
-  sendSdpOffer(sdp: string, lightMids: readonly string[], middleMids: readonly string[] = []): void {
+  sendSdpOffer(
+    sdp: string,
+    lightMids: readonly string[],
+    middleMids: readonly string[] = [],
+    screenMids: readonly string[] = [],
+  ): void {
+    const wasm = this.requireWasm();
     this.sendRaw(
-      this.requireWasm().composeSfuSdpOfferWithMiddle(sdp, [...lightMids], [...middleMids]),
+      screenMids.length === 0
+        ? wasm.composeSfuSdpOfferWithMiddle(sdp, [...lightMids], [...middleMids])
+        : wasm.composeSfuSdpOfferWithScreen(sdp, [...lightMids], [...middleMids], [...screenMids]),
     );
   }
 

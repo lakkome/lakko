@@ -258,7 +258,13 @@ class AccountLocalWipeTest {
         val predecessors = me.lakko.app.auth.KeyRotationFiles.DIR + "/" + hex +
             me.lakko.app.auth.KeyRotationFiles.PREDECESSOR_SUFFIX
         val sent = me.lakko.app.contacts.SentRequestsFiles.DIR + "/" + me.lakko.app.contacts.SentRequestsFiles.nameOf(a)
-        for ((step, path) in listOf("key-rotation-files" to predecessors, "sent-contact-requests" to sent)) {
+        val pending = me.lakko.app.contacts.PendingContactsFiles.DIR + "/" +
+            me.lakko.app.contacts.PendingContactsFiles.nameOf(a)
+        for ((step, path) in listOf(
+            "key-rotation-files" to predecessors,
+            "sent-contact-requests" to sent,
+            "pending-contacts" to pending,
+        )) {
             seed(rawA, a, marker = "account-A")
             AcceptedContactsStore.unbind()
             AccountLocalWipe.runSteps(context, a, stepsWithPlainChannelPublisherPrefs().filterNot { it.name == step })
@@ -451,6 +457,8 @@ class AccountLocalWipeTest {
             me.lakko.app.auth.KeyRotationFiles.DIR + "/" + me.lakko.app.auth.KeyRotationFiles.hexOf(acct) +
                 me.lakko.app.auth.KeyRotationFiles.PREDECESSOR_SUFFIX,
             me.lakko.app.contacts.SentRequestsFiles.DIR + "/" + me.lakko.app.contacts.SentRequestsFiles.nameOf(acct),
+            // ADR-0079: the people added through their invite link.
+            me.lakko.app.contacts.PendingContactsFiles.DIR + "/" + me.lakko.app.contacts.PendingContactsFiles.nameOf(acct),
             // ADR-0073 R.6: the successor claim states (they hold a prepared
             // Welcome, so they are sealed under the Keystore wrap key).
             "lakko-feed/" + me.lakko.app.chat.SealedSuccessorClaimBackend.DIR + "/$safe.bin",
@@ -476,7 +484,7 @@ class AccountLocalWipeTest {
         // last filled by A.
         File(context.noBackupFilesDir, "lakko-anon-tokens/pool.json").apply { parentFile?.mkdirs() }
             .writeText("""{"v":1,"owner":"$a","tokens":[]}""")
-        PushWakeBindingStore(context).bind(ByteArray(32) { 0x0A }, a)
+        PushWakeBindingStore(context).bind(a)
         SessionStore(context).save(PersistedSession(accountIdB64 = a, username = "alice"))
         for (path in listOf("chat-media/s1/e1/voice.m4a", "chat-media-outbox/take", "shared-attachments/u1/photo.jpg")) {
             File(context.cacheDir, path).apply { parentFile?.mkdirs() }.writeText("plaintext")
@@ -586,8 +594,9 @@ class AccountLocalWipeTest {
 
         /** Eight Keystore-envelope files, one played-marks file, one recall
          *  record, one commit-outbox entry, one anonymous-token pool and one
-         *  sealed successor-claim file per account. */
-        const val FILES_SEEDED_PER_ACCOUNT = 15
+         *  sealed successor-claim file per account, and (ADR-0079) one sealed
+         *  pending-contacts file. */
+        const val FILES_SEEDED_PER_ACCOUNT = 16
 
         /** Device-wide rows of builds before 2026-09-30, never read. */
         val RETIRED_ROWS = listOf(

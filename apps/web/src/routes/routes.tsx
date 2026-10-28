@@ -33,6 +33,7 @@ import Home from "./Home";
 import ChatsLayout from "./ChatsLayout";
 import GroupsLayout, { GroupsIndex } from "./GroupsLayout";
 import NewGroup from "./NewGroup";
+import Saved from "./Saved";
 import Contacts from "./Contacts";
 import Settings from "./Settings";
 import Call from "./Call";
@@ -42,6 +43,7 @@ import FeedImport from "./FeedImport";
 import { ChannelSubscribe, ChannelView, JoinCoPublisher, NewChannel } from "./Channels";
 import ChannelsLayout, { ChannelsIndex } from "./ChannelsLayout";
 import Chat from "./Chat";
+import PendingChat from "./PendingChat";
 import DevProbe from "./DevProbe";
 import Devices from "./Devices";
 import Invite from "./Invite";
@@ -57,6 +59,7 @@ import {
   groupJoinRoutePattern,
   inviteRoutePattern,
   paths,
+  pendingChatRoutePattern,
 } from "./paths";
 
 /** All app routes. Consumed by `<Router>` in `App.tsx`. */
@@ -125,6 +128,8 @@ export const routes: RouteDefinition[] = [
         children: [
           { path: paths.home, component: Home },
           { path: chatRoutePattern, component: () => <Chat backTo={paths.home} /> },
+          // ADR-0079 — the chat with an inviter whose app has not answered.
+          { path: pendingChatRoutePattern, component: PendingChat },
         ],
       },
       // Groups: the same chat view, beside the group list; Back returns to it.
@@ -148,6 +153,8 @@ export const routes: RouteDefinition[] = [
       { path: paths.feed, component: Feed },
       { path: paths.feedImport, component: FeedImport },
       { path: paths.calls, component: Calls },
+      // ADR-0065 — saved messages, from the Chats screen's menu.
+      { path: paths.saved, component: Saved },
       { path: "/settings/:section?", component: Settings },
       // The old profile URL lands on its Settings section.
       { path: "/profile", component: () => <Navigate href={paths.settingsSection("profile")} /> },

@@ -39,9 +39,72 @@ The old device shows nothing extra during pairing beyond the existing
 
 ## 3. Devices screen
 
-Lists the account's connected devices: this device / other, platform when
-known, added-on date (from the binding). Remove asks for confirmation and
-removes the device everywhere. Nothing about chats appears here.
+Rewritten 2026-10-16. Until then every row read "Device 1", "Device 2" and so
+on, and a person could not tell which was which. The screen now follows the
+shape people know from other messengers' "active sessions".
+
+**Layout.**
+
+- **This device**, a section of its own at the top, one row, marked "online".
+- **Other devices**, a section below, newest activity first.
+- At the end of the first section, when other devices exist: **Remove all
+  other devices** (destructive colour), with the line under it "Signs out
+  every device except this one."
+
+**A row.**
+
+- Icon by platform (phone, tablet, computer, browser).
+- First line: the device's model or name, e.g. "iPhone 16 Pro", "MacBook Pro",
+  "Pixel 7a", or for a browser "Chrome on macOS".
+- Second line: app and version, then the system and its version, e.g.
+  "Lakko 1.4 · iOS 27.0.1", "Lakko web · macOS 26".
+- Third line, when known: the city and country, e.g. "Almere, Netherlands".
+- Right side: last activity, "online" for this device, otherwise a time for
+  today ("14:05"), a weekday within the last week ("Sun"), else a date.
+- Other devices only: **Remove**.
+
+A device whose card has not arrived yet (it was added before this change, or
+its card is still on the way) shows its platform icon, "Device" and the date
+it was added, until the card arrives.
+
+**Remove one.** Confirmation dialog: title **Remove "iPhone 16 Pro"?**, body
+"It will be signed out and lose access to your messages.", buttons **Remove**
+and **Cancel**. Then the same removal as before (ADR-0074: the password or
+passkey may be asked for once).
+
+**Remove all others.** Confirmation dialog: title **Remove all other
+devices?**, body "They will be signed out and lose access to your messages.
+This device stays signed in.", buttons **Remove all** and **Cancel**. One
+password or passkey prompt covers all of them. While it runs, each row shows
+its own progress; a device that could not be removed keeps its row with
+"Could not remove. Try again." and its own **Remove** button.
+
+**Where the city comes from.** Each device asks a Lakko server, without
+signing in and without naming its account, which city its own internet address
+belongs to, and puts the answer in its card. The server keeps nothing. When
+the device uses the anti-censorship connection, the address is Lakko's own
+relay, so no city is asked for and the third line is left out. A person who
+does not want the city shown can turn it off in Settings > Privacy ("Show my
+city to my other devices", on by default); the row then has no third line.
+
+**Data the UI needs (feeds the ADR).**
+
+1. A **device card** each device publishes about itself, end-to-end encrypted,
+   to the account's own devices only (the DeviceGroup): platform, model or
+   browser name, app version, system name and version, city and country when
+   known, last active time. The server never sees it.
+2. "Last active" is the last time the person did something on that device
+   (opened a chat, wrote, pressed a control), not when the app happened to
+   run. A device sends a fresh card after such an action when its last card
+   is older than 30 minutes, and when a field other than the time changes
+   (app or system version, city). A device nobody touches sends nothing, so
+   its time stays where it was. Decided by the maintainer 2026-10-16.
+3. An anonymous city lookup route on an existing service: no session, no
+   token, no account; answers city and country (or nothing); keeps no record
+   and writes no log line; limited per address in memory. The city database
+   lives on the server.
+4. The card is keyed by the device's leaf, so removing a device removes its
+   card.
 
 ### 3.1 This device was removed
 

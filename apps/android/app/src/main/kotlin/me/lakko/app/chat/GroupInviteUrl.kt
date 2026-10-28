@@ -11,8 +11,7 @@ import me.lakko.app.discovery.InviteLinkLengths
  * Android-side helpers for the group join-ticket URL shape (ADR-0028, G-3).
  *
  * Sibling of [me.lakko.app.calls.parseCallInviteSlug] for the
- * `GroupInviteCapability` ecosystem. The `/g/<slug>` slug comes in two forms,
- * discriminated purely by the decoded byte length:
+ * `GroupInviteCapability` ecosystem. The `/g/<slug>` slug is one form:
  *
  *   - **pointer** — the 6-byte server-assigned ledger id (8 base64url
  *     characters, ADR-0028 amendment of 2026-09-27) from
@@ -20,12 +19,10 @@ import me.lakko.app.discovery.InviteLinkLengths
  *     production default: a short URL, the joiner fetches the capability from
  *     `/discovery/group-invite/<blob_id>`. This is the OQ1 indirection that
  *     adds the server-side anti-abuse ledger (consume dedup + soft max_uses).
- *   - **inline** — the full `GroupInviteCapability` wire bytes (>= 108 bytes).
- *     The censored-region fallback: no `/discovery/group-invite` round-trip.
  *
- * The smallest legal inline capability is 108 bytes (a 1-byte group_id), well
- * above the 6-byte pointer, so a byte-length test cleanly discriminates. The
- * pre-amendment 32-byte pointer falls between the two and is refused.
+ * Anything else is refused: the pre-amendment 32-byte pointer, and the inline
+ * form that carried the sealed blob in the path (removed 2026-10-19: a failed
+ * upload mints no link, and an inline URL opens as a dead link).
  *
  * The pointer width comes from the core ([InviteLinkLengths.core]); every
  * function here takes it as a parameter so a host JVM test can pass it in.
@@ -39,12 +36,6 @@ public const val GROUP_INVITE_URL_PREFIX: String = "/g/"
  *  the stack this build talks to ([ApiEndpoints.webOrigin]). */
 public val GROUP_INVITE_DEFAULT_ORIGIN: String
     get() = me.lakko.app.config.ApiEndpoints.webOrigin
-
-/** Floor on the inline-bytes form. The real minimum is 108 bytes; we pin the
- *  discriminator floor at 100 — comfortably above the 6-byte pointer and below
- *  any real capability, so the byte-length test never misclassifies. Anything
- *  other than the pointer width and below 100 is invalid input. */
-public const val GROUP_INVITE_INLINE_MIN_LEN: Int = 100
 
 // =============================================================
 // URL builders
@@ -72,32 +63,11 @@ public fun composePointerGroupInviteUrl(
     return "$origin$GROUP_INVITE_URL_PREFIX${base64UrlEncodeNoPad(blobId)}"
 }
 
-/**
- * Builder for the **inline-bytes** URL form — the long shape that carries the
- * capability inside the URL itself, no server round-trip on open. Reserved for
- * the censored-region fallback; the pointer form is the production default.
- *
- * @throws GroupInviteUrlException.InlineTooSmall when
- *         `capabilityBytes.size < 100`.
- */
-public fun composeInlineGroupInviteUrl(
-    capabilityBytes: ByteArray,
-    origin: String = GROUP_INVITE_DEFAULT_ORIGIN,
-): String {
-    if (capabilityBytes.size < GROUP_INVITE_INLINE_MIN_LEN) {
-        throw GroupInviteUrlException.InlineTooSmall(
-            minimum = GROUP_INVITE_INLINE_MIN_LEN,
-            got = capabilityBytes.size,
-        )
-    }
-    return "$origin$GROUP_INVITE_URL_PREFIX${base64UrlEncodeNoPad(capabilityBytes)}"
-}
-
 // =============================================================
 // URL parsing
 // =============================================================
 
-/** Discriminated parse result for a `/g/<slug>` segment. */
+/** Parse result for a `/g/<slug>` segment: always the ledger id. */
 public sealed class ParsedGroupInvite {
     /** Short form — [blobId] is the 6-byte ledger id. Joiner
      *  fetches via `DiscoveryClient.fetchGroupInvite(blobId)` ->
@@ -111,28 +81,16 @@ public sealed class ParsedGroupInvite {
 
         override fun hashCode(): Int = blobId.contentHashCode()
     }
-
-    /** Long form — the bytes are the wire-format `GroupInviteCapability`.
-     *  Joiner runs `GroupInviteCapability.decodeAndVerify(...)` directly. */
-    public data class Inline(val capabilityBytes: ByteArray) : ParsedGroupInvite() {
-        override fun equals(other: Any?): Boolean {
-            if (this === other) return true
-            if (other !is Inline) return false
-            return capabilityBytes.contentEquals(other.capabilityBytes)
-        }
-
-        override fun hashCode(): Int = capabilityBytes.contentHashCode()
-    }
 }
 
 /**
- * Discriminated parse of a URL slug. The dispatch rule is a byte-length test:
- * the ledger-id width (6) => pointer, >= 100 => inline. Anything else is
- * invalid input, the pre-amendment 32-byte pointer included.
+ * Parse a URL slug into its ledger id (the core's width, 6 bytes). Anything
+ * else is invalid input: the pre-amendment 32-byte pointer and an inline
+ * sealed blob included.
  *
  * @throws GroupInviteUrlException.InvalidBase64Url when the slug doesn't decode.
  * @throws GroupInviteUrlException.SlugWrongLength when the decoded byte count
- *         falls outside both branches.
+ *         is not the ledger-id width.
  */
 public fun parseGroupInviteSlug(
     slug: String,
@@ -143,15 +101,10 @@ public fun parseGroupInviteSlug(
     } catch (e: IllegalArgumentException) {
         throw GroupInviteUrlException.InvalidBase64Url
     }
-    return when {
-        bytes.size == lengths.blobIdLen -> ParsedGroupInvite.Pointer(bytes)
-        bytes.size >= GROUP_INVITE_INLINE_MIN_LEN -> ParsedGroupInvite.Inline(bytes)
-        else -> throw GroupInviteUrlException.SlugWrongLength(
-            blobIdLen = lengths.blobIdLen,
-            inlineMinLen = GROUP_INVITE_INLINE_MIN_LEN,
-            got = bytes.size,
-        )
+    if (bytes.size != lengths.blobIdLen) {
+        throw GroupInviteUrlException.SlugWrongLength(blobIdLen = lengths.blobIdLen, got = bytes.size)
     }
+    return ParsedGroupInvite.Pointer(bytes)
 }
 
 // =============================================================
@@ -164,19 +117,11 @@ public sealed class GroupInviteUrlException(message: String) : Exception(message
         val got: Int,
     ) : GroupInviteUrlException("blobId must be $expected bytes, got $got")
 
-    public data class InlineTooSmall(
-        val minimum: Int,
-        val got: Int,
-    ) : GroupInviteUrlException("capabilityBytes must be >= $minimum bytes, got $got")
-
     public object InvalidBase64Url :
         GroupInviteUrlException("slug is not valid base64url-no-pad")
 
     public data class SlugWrongLength(
         val blobIdLen: Int,
-        val inlineMinLen: Int,
         val got: Int,
-    ) : GroupInviteUrlException(
-        "group-invite slug decoded to $got bytes — neither a $blobIdLen-byte pointer nor a >= $inlineMinLen-byte inline capability",
-    )
+    ) : GroupInviteUrlException("group-invite slug decoded to $got bytes, not a $blobIdLen-byte ledger id")
 }

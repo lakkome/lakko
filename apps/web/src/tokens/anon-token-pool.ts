@@ -13,15 +13,31 @@
  * unblinded here, and spent later WITHOUT the session, so the verifying
  * service learns only that some rationed account produced it.
  *
- * ## The pool
+ * ## The pool, refilled on a schedule (ADR-0078 section 8)
  *
- * For the signed-in account, one bucket per context. A context that drops
- * below its low-water mark ({@link lowWater}: two for `discovery-lookup`,
- * empty for the rest) is refilled in the background in batches sized to how
- * often the action happens ({@link refillBatch}), never above
- * {@link MAX_POOL}. An action with no token at hand waits for the refill as
- * part of its normal loading state, bounded by {@link TAKE_WAIT_MS}, then
- * fails with {@link AnonTokenUnavailableError} (the network copy).
+ * For the signed-in account, one bucket per context, kept at about a day of
+ * use plus a reserve ({@link POOL_TARGET}, never above {@link MAX_POOL}).
+ * Refills run on a randomised schedule that does not look at spending: when
+ * a session is installed each context is topped up at once (a fresh session
+ * holds no tokens and its first actions need them), and after that at independent
+ * random intervals between {@link REFILL_INTERVAL_MIN_MS} and
+ * {@link REFILL_INTERVAL_MAX_MS}. A take never starts an issuance. Before
+ * ADR-0078 a take below a low-water mark started one, so the bearer issuance
+ * landed seconds from the anonymous spend it refilled for, from the same
+ * address, and the issuer and the spending service could pair them by time.
+ * An action that finds its bucket empty waits only for a refill the schedule
+ * already has running (bounded by {@link TAKE_WAIT_MS}), else fails with
+ * {@link AnonTokenUnavailableError} (the network copy) until the next
+ * scheduled refill.
+ *
+ * ## Issuance on its own connection
+ *
+ * The issuance is a bearer request with the browser's default credentials
+ * mode; every spend is built by {@link anonymousFetchInit} with
+ * `credentials: "omit"`. Browsers keep the two on separate connection pools
+ * (Chromium's privacy-mode socket pools, Firefox's anonymous connections), so
+ * an issuance and a spend do not share a keep-alive connection. A page cannot
+ * do more than that.
  *
  * ## The tokens belong to the account (2026-10-01)
  *
@@ -80,11 +96,13 @@ import { defaultAnonTokenStore, type AnonTokenStore } from "./anon-token-store";
 
 /**
  * The token contexts, in wire order: the names `anonTokenContexts()` returns
- * (`lakko_anon_token::TokenContext::ALL`, wire bytes 1..=11), pinned against
+ * (`lakko_anon_token::TokenContext::ALL`, wire bytes 1..=12), pinned against
  * the wasm core by `anon-token-contexts.test.ts`. `channel-subscribe` and
- * `directory-search` are ADR-0059; `vault-claim` is ADR-0064; `blob-upload`
- * and `blob-read` are ADR-0065 (nothing spends those three yet);
- * `mailbox-write` is ADR-0078: a mailbox write with no reach proof.
+ * `directory-search` are ADR-0059; `vault-claim` is ADR-0064 (nothing spends
+ * it yet); `blob-upload` and `blob-read` are ADR-0065, one per hour-long
+ * blob pass (`storage/blob-access.ts`);
+ * `mailbox-write` is ADR-0078 section 1: a mailbox write with no reach proof;
+ * `call-join` is ADR-0078 section 2: one SFU call admission.
  */
 export const ANON_TOKEN_CONTEXTS = [
   "discovery-lookup",
@@ -98,56 +116,52 @@ export const ANON_TOKEN_CONTEXTS = [
   "blob-upload",
   "blob-read",
   "mailbox-write",
+  "call-join",
 ] as const;
 
 /** One token context (see {@link ANON_TOKEN_CONTEXTS}). */
 export type AnonTokenContext = (typeof ANON_TOKEN_CONTEXTS)[number];
 
-/** Tokens asked for per refill, by how often each action happens. The
- *  values for `vault-claim`, `blob-upload` and `blob-read` are chosen, not
- *  measured: no flow spends them yet. */
-export const REFILL_BATCH: Readonly<Record<AnonTokenContext, number>> = {
-  "discovery-lookup": 8,
-  "push-register": 4,
-  "invite-consume": 2,
-  "ds-knock": 2,
-  "discovery-register": 1,
-  "channel-subscribe": 2,
-  "directory-search": 1,
-  "vault-claim": 4,
-  "blob-upload": 2,
-  "blob-read": 2,
-  // ADR-0078 - a proofless mailbox write (a contact request to someone in
-  // Everyone). Chosen, not measured.
-  "mailbox-write": 2,
-};
-/** Refill a context when it holds fewer than this many tokens: lookups keep
- *  a spare, the rarer actions refill only once empty. The three storage
- *  contexts (`vault-claim`, `blob-upload`, `blob-read`) refill once empty
- *  too; chosen, not measured. */
-export const LOW_WATER: Readonly<Record<AnonTokenContext, number>> = {
-  "discovery-lookup": 2,
-  "push-register": 1,
-  "invite-consume": 1,
-  "ds-knock": 1,
-  "discovery-register": 1,
-  "channel-subscribe": 1,
-  "directory-search": 1,
-  "vault-claim": 1,
-  "blob-upload": 1,
-  "blob-read": 1,
-  "mailbox-write": 1,
+/** Tokens a context keeps on hand: about a day of use plus a reserve, so a
+ *  spend finds a token without waiting for an issuance (ADR-0078 section 8).
+ *  A scheduled refill tops the bucket up to this. Chosen, not measured; each
+ *  stays well under the issuer's daily quota for its context. */
+export const POOL_TARGET: Readonly<Record<AnonTokenContext, number>> = {
+  "discovery-lookup": 32,
+  "push-register": 8,
+  "invite-consume": 4,
+  "ds-knock": 8,
+  "discovery-register": 2,
+  "channel-subscribe": 4,
+  "directory-search": 4,
+  "vault-claim": 8,
+  "blob-upload": 4,
+  "blob-read": 4,
+  "mailbox-write": 4,
+  // ADR-0078 section 2: a join, a reconnect, the TURN credential of a
+  // one-to-one call. Chosen, not measured.
+  "call-join": 4,
 };
 
-/** The refill batch of `context`. */
-export function refillBatch(context: AnonTokenContext): number {
-  return REFILL_BATCH[context];
+/** The pool target of `context`. */
+export function poolTarget(context: AnonTokenContext): number {
+  return POOL_TARGET[context];
 }
 
-/** The low-water mark of `context`. */
-export function lowWater(context: AnonTokenContext): number {
-  return LOW_WATER[context];
-}
+/** A context's first refill after a session is installed falls at a random
+ *  moment within this window. Zero since 2026-10-22: a fresh session holds no
+ *  tokens, so a signup or a first sign-in whose first lookup came before a
+ *  later first refill failed after {@link TAKE_WAIT_MS}. The issuer sees the
+ *  session start either way. */
+export const INITIAL_REFILL_SPREAD_MS = 0;
+/** After that, a context is topped up at independent random intervals
+ *  between these two. Chosen, not measured: short enough that a burst which
+ *  empties a bucket recovers within the hour and a half, long enough that
+ *  the issuer sees a handful of issuances a day per context, none of them
+ *  caused by a spend. */
+export const REFILL_INTERVAL_MIN_MS = 30 * 60_000;
+export const REFILL_INTERVAL_MAX_MS = 90 * 60_000;
+
 /** Never hold more than this many tokens of one context. */
 export const MAX_POOL = 32;
 /** How long an action waits for a refill before failing. */
@@ -223,6 +237,19 @@ function findInChain<T>(err: unknown, name: string): T | null {
 /** The quota refusal, if `err` is or wraps one. */
 export function anonTokenQuotaExhausted(err: unknown): AnonTokenQuotaExhaustedError | null {
   return findInChain<AnonTokenQuotaExhaustedError>(err, "AnonTokenQuotaExhaustedError");
+}
+
+/** The reason a take gives when the context holds no token and no refill is
+ *  running: the device used the tokens it had, and a take never starts an
+ *  issuance (ADR-0078 section 8). */
+export const POOL_EMPTY_REASON = "pool empty until the next scheduled refill";
+
+/** `true` when `err` is or wraps a take that found the context's pool empty
+ *  with no refill running ({@link POOL_EMPTY_REASON}). The search field reads
+ *  it as "out of searches" (`docs/ux/who-can-find-me.md` section 6.1). */
+export function anonTokenPoolEmpty(err: unknown): boolean {
+  const e = findInChain<AnonTokenUnavailableError>(err, "AnonTokenUnavailableError");
+  return e !== null && e.reason === POOL_EMPTY_REASON;
 }
 
 /** `true` when `err` is or wraps a failure the UI shows as the generic
@@ -324,6 +351,27 @@ export interface AnonTokenPoolOptions {
   /** Where the pool survives a relaunch; `null` = memory only. Defaults to
    *  IndexedDB where the environment has it. */
   readonly store?: AnonTokenStore | null;
+  /** A uniform random number in [0, 1); defaults to `crypto.getRandomValues`. */
+  readonly random?: () => number;
+  /** The timer the refill schedule runs on; defaults to `setTimeout`. */
+  readonly timers?: RefillTimers;
+}
+
+/** The timer the refill schedule runs on (injectable for the tests). */
+export interface RefillTimers {
+  set(fn: () => void, ms: number): unknown;
+  clear(handle: unknown): void;
+}
+
+const DEFAULT_TIMERS: RefillTimers = {
+  set: (fn, ms) => setTimeout(fn, ms),
+  clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+function cryptoRandom(): number {
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  return (buf[0] ?? 0) / 4_294_967_296;
 }
 
 interface Bucket {
@@ -335,6 +383,15 @@ interface Bucket {
   /** Unix ms until which the background refill is not retried. */
   backoffUntil: number;
   disabledUntil: number;
+  /** The pending scheduled refill of this context. */
+  timer: unknown;
+  /** Why the last refill of this context failed, for the error a take
+   *  reports when it finds the bucket empty. */
+  lastFailure: string | null;
+  /** Settles once this session's first scheduled refill of the context has
+   *  run (whatever its outcome); a take on an empty bucket waits for it. */
+  initial: Promise<void> | null;
+  resolveInitial: (() => void) | null;
 }
 
 interface IssueResponse {
@@ -390,11 +447,12 @@ export class AnonTokenPool {
   private readonly now: () => number;
   private readonly takeWaitMs: number;
   private readonly store: AnonTokenStore | null;
+  private readonly random: () => number;
+  private readonly timers: RefillTimers;
 
   private sessionToken: string | null = null;
   /** The load of the stored tokens for the current account, once started. */
   private hydration: Promise<void> | null = null;
-  private hydrated = false;
   /** Store operations run in order: a write queued before an account's
    *  rows are deleted lands before the delete, and a load sees every write
    *  queued ahead of it. */
@@ -418,6 +476,8 @@ export class AnonTokenPool {
     this.now = options.now ?? (() => Date.now());
     this.takeWaitMs = options.takeWaitMs ?? TAKE_WAIT_MS;
     this.store = options.store === undefined ? defaultAnonTokenStore() : options.store;
+    this.random = options.random ?? cryptoRandom;
+    this.timers = options.timers ?? DEFAULT_TIMERS;
   }
 
   // ------------------------------------------------------------------
@@ -442,6 +502,7 @@ export class AnonTokenPool {
     this.accountKey = key;
     this.sessionToken = token;
     if (fresh || this.hydration === null) this.startHydration(key);
+    if (fresh) this.startSchedule();
   }
 
   /** Drop the held tokens, every refill in flight and the session from
@@ -474,11 +535,14 @@ export class AnonTokenPool {
 
   private dropMemory(): void {
     this.generation += 1;
+    for (const bucket of this.buckets.values()) {
+      if (bucket.timer !== null) this.timers.clear(bucket.timer);
+      bucket.resolveInitial?.();
+    }
     this.buckets.clear();
     this.sessionToken = null;
     this.accountKey = null;
     this.hydration = null;
-    this.hydrated = false;
   }
 
   /** Resolves once every store write queued so far has landed (tests,
@@ -508,25 +572,60 @@ export class AnonTokenPool {
   // Taking and spending
   // ------------------------------------------------------------------
 
-  /** Start a background refill of `context` if it runs low. Never throws. */
-  prefill(context: AnonTokenContext): void {
-    if (this.hydration !== null && !this.hydrated) {
-      const generation = this.generation;
-      void this.hydration.then(() => {
-        if (generation === this.generation) this.prefill(context);
+  /**
+   * Arm the refill schedule of every context for a newly installed account:
+   * a first refill at once ({@link INITIAL_REFILL_SPREAD_MS} is zero).
+   */
+  private startSchedule(): void {
+    const generation = this.generation;
+    for (const context of ANON_TOKEN_CONTEXTS) {
+      const bucket = this.bucket(context);
+      if (bucket.timer !== null) this.timers.clear(bucket.timer);
+      bucket.initial = new Promise<void>((resolve) => {
+        bucket.resolveInitial = resolve;
       });
-      return;
+      this.armTimer(context, Math.floor(this.random() * INITIAL_REFILL_SPREAD_MS), generation);
     }
+  }
+
+  private armTimer(context: AnonTokenContext, delayMs: number, generation: number): void {
     const bucket = this.bucket(context);
-    if (bucket.tokens.length >= lowWater(context)) return;
+    bucket.timer = this.timers.set(() => {
+      bucket.timer = null;
+      if (generation !== this.generation) return;
+      void this.scheduledRefill(context).finally(() => {
+        bucket.resolveInitial?.();
+        bucket.resolveInitial = null;
+        if (generation !== this.generation) return;
+        const span = REFILL_INTERVAL_MAX_MS - REFILL_INTERVAL_MIN_MS;
+        this.armTimer(context, REFILL_INTERVAL_MIN_MS + Math.floor(this.random() * span), generation);
+      });
+    }, delayMs);
+  }
+
+  /** One scheduled top-up of `context` to its target. Never throws; a
+   *  failure is recorded on the bucket and the next take reports it. */
+  private async scheduledRefill(context: AnonTokenContext): Promise<void> {
+    await this.ready().catch(() => undefined);
     if (this.sessionToken === null) return;
+    const bucket = this.bucket(context);
     const now = this.now();
-    if (bucket.exhaustedUntil > now || bucket.disabledUntil > now || bucket.backoffUntil > now) {
+    if (bucket.exhaustedUntil > now || bucket.disabledUntil > now) return;
+    try {
+      const wasm = await this.wasmLoader();
+      const current = this.currentEpoch(wasm);
+      bucket.tokens = bucket.tokens.filter((t) => wasm.anonTokenIsLive(t.epoch, current));
+    } catch {
       return;
     }
-    void this.refill(context).catch(() => {
-      /* recorded on the bucket; the next take reports it */
-    });
+    if (bucket.tokens.length >= poolTarget(context)) return;
+    await this.refill(context).catch(() => undefined);
+  }
+
+  /** Run a scheduled top-up of every context now (what the schedule does
+   *  one context at a time; tests and diagnostics). */
+  async runScheduledRefills(): Promise<void> {
+    await Promise.all(ANON_TOKEN_CONTEXTS.map((c) => this.scheduledRefill(c)));
   }
 
   /**
@@ -549,7 +648,6 @@ export class AnonTokenPool {
     const held = bucket.tokens.shift();
     if (held !== undefined) {
       this.persist(context);
-      this.prefill(context);
       return held;
     }
     const now = this.now();
@@ -560,13 +658,31 @@ export class AnonTokenPool {
     if (this.sessionToken === null) {
       throw new AnonTokenUnavailableError(context, "no session");
     }
+    // ADR-0078 section 8: a take never starts an issuance. It may wait for
+    // one the schedule already runs: this session's first refill of the
+    // context, or a scheduled refill in flight.
+    const pending = bucket.refill ?? bucket.initial;
+    if (pending === null) {
+      throw new AnonTokenUnavailableError(context, POOL_EMPTY_REASON);
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<"timeout">((resolve) => {
       timer = setTimeout(() => resolve("timeout"), this.takeWaitMs);
     });
     try {
-      const outcome = await Promise.race([this.refill(context).then(() => "done" as const), timeout]);
+      const outcome = await Promise.race([pending.then(() => "done" as const), timeout]);
       if (outcome === "timeout") throw new AnonTokenUnavailableError(context, "refill timed out");
+      bucket.initial = null;
+      const refusedNow = this.now();
+      if (bucket.tokens.length === 0 && bucket.exhaustedUntil > refusedNow) {
+        throw new AnonTokenQuotaExhaustedError(context, bucket.exhaustedRetryAfter);
+      }
+      if (bucket.tokens.length === 0 && bucket.disabledUntil > refusedNow) {
+        throw new AnonTokensDisabledError(context);
+      }
+      if (bucket.tokens.length === 0 && bucket.lastFailure !== null) {
+        throw new AnonTokenUnavailableError(context, bucket.lastFailure);
+      }
     } catch (err) {
       if (
         err instanceof AnonTokenQuotaExhaustedError ||
@@ -583,7 +699,6 @@ export class AnonTokenPool {
     const next = bucket.tokens.shift();
     this.persist(context);
     if (next === undefined) throw new AnonTokenUnavailableError(context, "refill produced no token");
-    this.prefill(context);
     return next;
   }
 
@@ -634,11 +749,9 @@ export class AnonTokenPool {
 
   /** Load the stored tokens of `account` into the buckets. */
   private startHydration(account: string): void {
-    this.hydrated = false;
     const store = this.store;
     if (store === null) {
       this.hydration = null;
-      this.hydrated = true;
       return;
     }
     const generation = this.generation;
@@ -667,9 +780,7 @@ export class AnonTokenPool {
         // Write back, which drops the dead-epoch tokens from the store.
         if (live.length !== rows.length) this.persist(context);
       }
-    }, "load").finally(() => {
-      if (generation === this.generation) this.hydrated = true;
-    });
+    }, "load");
     this.hydration = run;
   }
 
@@ -698,6 +809,10 @@ export class AnonTokenPool {
         exhaustedRetryAfter: null,
         backoffUntil: 0,
         disabledUntil: 0,
+        timer: null,
+        lastFailure: null,
+        initial: null,
+        resolveInitial: null,
       };
       this.buckets.set(context, bucket);
     }
@@ -725,7 +840,12 @@ export class AnonTokenPool {
     if (session === null) throw new AnonTokenUnavailableError(context, "no session");
     const generation = this.generation;
     const wasm = await this.wasmLoader();
-    const count = Math.min(refillBatch(context), MAX_POOL - bucket.tokens.length, wasm.anonTokenMaxBatch());
+    // A top-up to the target, in one issuance.
+    const count = Math.min(
+      poolTarget(context) - bucket.tokens.length,
+      MAX_POOL - bucket.tokens.length,
+      wasm.anonTokenMaxBatch(),
+    );
     if (count <= 0) return;
 
     try {
@@ -763,6 +883,7 @@ export class AnonTokenPool {
             return out;
           });
           if (generation !== this.generation) return; // signed out meanwhile
+          bucket.lastFailure = null;
           bucket.tokens.push(...pooled);
           if (bucket.tokens.length > MAX_POOL) bucket.tokens.length = MAX_POOL;
           this.persist(context);
@@ -773,6 +894,8 @@ export class AnonTokenPool {
       }
     } catch (err) {
       const now = this.now();
+      bucket.lastFailure =
+        err instanceof AnonTokenUnavailableError ? err.reason : err instanceof Error ? err.message : String(err);
       if (err instanceof AnonTokenQuotaExhaustedError) {
         bucket.exhaustedUntil = now + Math.max(1, err.retryAfterSecs ?? 60) * 1000;
         bucket.exhaustedRetryAfter = err.retryAfterSecs;

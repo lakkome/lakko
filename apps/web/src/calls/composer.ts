@@ -29,8 +29,8 @@
  *      it under a fresh link secret (`InviteLinkMint`).
  *   5. `DiscoveryClient.uploadCallInvite(...)` — pushes the
  *      sealed blob plus the clear fields to the ledger, which
- *      assigns a random 6-byte id (inline fallback on a
- *      transport failure only).
+ *      assigns a random 6-byte id. A failed upload mints no
+ *      link (the inline form was removed on 2026-10-19).
  *   6. `composeSealedInviteLink(...)` — builds the
  *      `https://<origin>/c/<slug>#<secret>` shape the
  *      owner shares.
@@ -46,8 +46,9 @@
  * values rather than the form presets that fed it.
  */
 
+import { newRevocationKey } from "../contacts/own-links";
 import { loadWasm } from "../wasm";
-import { DiscoveryClient, DiscoveryNetworkError } from "../discovery/client";
+import { DiscoveryClient } from "../discovery/client";
 import { CALL_ID_LEN, CALL_INVITE_LABEL_MAX_LEN, CALL_INVITE_URL_PREFIX } from "./invite";
 import { composeSealedInviteLink, inviteLinkWidths } from "../contacts/invite-link";
 import { reachSession } from "../reach/reach-service";
@@ -108,10 +109,9 @@ export interface ComposeCallInviteOptions {
  *  revoke (see [`revokeCallInviteLink`]), and keeps `callId`
  *  around for the in-call signaling layer. */
 export interface ComposedCallInvite {
-  /** The 6-byte ledger id, or `null` for the inline link a transport
-   *  failure fell back to. Pass to [`revokeCallInviteLink`] when the
+  /** The 6-byte ledger id. Pass to [`revokeCallInviteLink`] when the
    *  owner cancels the link. */
-  readonly blobId: Uint8Array | null;
+  readonly blobId: Uint8Array;
   /** The link's 16-byte reach scope id: revoking the link
    *  removes exactly this key from the owner's mailbox. */
   readonly linkId: Uint8Array;
@@ -127,6 +127,10 @@ export interface ComposedCallInvite {
   /** The 12-byte link secret (the URL fragment), for the device's own
    *  record of the link (`contacts/minted-links.ts`). */
   readonly linkSecret: Uint8Array;
+  /** The 32-byte seed of the link's own revocation key (ADR-0078 section
+   *  10), kept in the same record: the ledger row names no owner, so this
+   *  seed is the only thing that revokes it. */
+  readonly revocationSeed: Uint8Array;
 }
 
 /** Programmer-error path: input validation caught before any
@@ -238,29 +242,26 @@ export async function composeAndUploadCallInvite(
   }
   const sealed = mint.sealed;
   const linkSecret = mint.linkSecret;
-  const issuerPubkey = mint.issuerPubkey;
   mint.free();
+  // ADR-0078 section 10: the ledger row carries a key minted for this link
+  // alone, never the owner's identity key.
+  const revocation = await newRevocationKey();
 
   // ---- 6. uploadCallInvite via HTTP ------------------------
-  // The inline sealed form is the fallback for a TRANSPORT failure only; a
-  // server answer surfaces as an error (and the key of a link that was
-  // never handed out is removed).
-  let blobId: Uint8Array | null;
+  // Any failure, a network one included, mints no link: the error surfaces
+  // (the page offers a retry) and the key of a link that was never handed
+  // out is removed. There is no inline form.
+  let blobId: Uint8Array;
   try {
     blobId = await opts.discoveryClient.uploadCallInvite({
       sealed,
-      issuerPubkey,
+      revocationPubkey: revocation.publicKey,
       expiryMs: opts.expiryMs,
       maxUses: opts.maxUses,
     });
   } catch (err) {
-    if (!(err instanceof DiscoveryNetworkError)) {
-      await session.revokeLink(linkId).catch(() => undefined);
-      throw err;
-    }
-    // eslint-disable-next-line no-console
-    console.warn("call-invite: ledger unreachable, using the inline link");
-    blobId = null;
+    await session.revokeLink(linkId).catch(() => undefined);
+    throw err;
   }
 
   // ---- 7. URL build ----------------------------------------
@@ -269,7 +270,6 @@ export async function composeAndUploadCallInvite(
     origin: opts.origin ?? defaultOrigin(),
     prefix: CALL_INVITE_URL_PREFIX,
     blobId,
-    sealed,
     secret: linkSecret,
     widths: inviteLinkWidths(wasm),
   });
@@ -281,27 +281,26 @@ export async function composeAndUploadCallInvite(
     callId,
     sealed,
     linkSecret,
+    revocationSeed: revocation.seed,
   };
 }
 
 /**
- * Revoke a call link the owner minted: the ledger row (owner-signed
- * delete) and the link's reach key (ADR-0060 section 6), so a joiner
+ * Revoke a call link the owner minted: the ledger row (a delete signed by
+ * the link's own revocation key, ADR-0078 section 10) and the link's reach
+ * key (ADR-0060 section 6), so a joiner
  * who already holds the link can neither fetch it nor write to the
  * owner's mailbox under it. The key goes even when the ledger answers
- * "not found" (the row may already be gone), and an inline link (no
- * ledger row) only loses its key.
+ * "not found" (the row may already be gone).
  */
 export async function revokeCallInviteLink(opts: {
   readonly discoveryClient: DiscoveryClient;
-  readonly blobId: Uint8Array | null;
+  readonly blobId: Uint8Array;
   readonly linkId: Uint8Array;
-  readonly ownerSigningSeed: Uint8Array;
+  readonly revocationSeed: Uint8Array;
 }): Promise<void> {
   try {
-    if (opts.blobId !== null) {
-      await opts.discoveryClient.revokeCallInvite(opts.blobId, opts.ownerSigningSeed);
-    }
+    await opts.discoveryClient.revokeCallInvite(opts.blobId, opts.revocationSeed);
   } finally {
     await reachSession()?.revokeLink(opts.linkId);
   }

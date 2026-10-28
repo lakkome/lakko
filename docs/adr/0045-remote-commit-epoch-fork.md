@@ -5,6 +5,27 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0045: Closing the remote-commit epoch fork — proposal-based commits with a designated committer (G-38 residual 1)
 
+> **Amended by [ADR-0081](0081-devicegroup-commits-cannot-strand.md)
+> (2026-10-18).** The staged lifecycle this ADR built for the sweep
+> (`has_staged_sweep`, `staged_export_secret`, `merge_staged_sweep`,
+> `abandon_staged_sweep`) now also carries the direct commits of a group
+> with no role table: `stage_add_members`, `stage_remove_member` and
+> `stage_set_group_roles` leave the group at N holding the commit as
+> pending, and the clients finish an unanswered one through the same owed
+> verdict (`resolveOwedVerdict`). The verdict is the DS commit route's
+> answer (`201` / `200` won, `409` lost) rather than a journal read alone.
+> Where this document says only `stage_pending_proposals` can stage a
+> commit, or that every direct path merges before it returns, read "every
+> eager direct path".
+>
+> **Amended again by ADR-0081 (2026-10-19, "Amendment (2026-10-19,
+> second)").** "A group with no role table keeps direct commits" no longer
+> holds on any client: the direct paths are deleted, a membership operation
+> on such a group is refused with `NoRoleTable`, and the core refuses a
+> conversation Welcome without a role table, so no client holds one. The core
+> keeps its staged twins, uncalled. Obligation 5 (every direct path becomes
+> propose-or-sweep) is therefore complete.
+
 - **Status:** **Accepted.** **The arc is built end to end** — the core (sprints
   S0-S3 plus four unplanned ones), both FFI surfaces, and **all three clients**
   (S4a/S4b web, S5 iOS, S6 Android); see the date line and the

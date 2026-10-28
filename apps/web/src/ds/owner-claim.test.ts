@@ -11,10 +11,10 @@
  * scripted fetch, where the order of requests on the wire is the thing under
  * test: the claim precedes the first registration.
  *
- * Discrimination (run): with the `await this.ensureOwnerClaim(groupId)` line
- * removed from `DsClient.registerGroupEpoch`, "a registration in an owned
- * journal is preceded by the owner's claim" fails with the `access` request
- * first on the wire.
+ * Discrimination (run before ADR-0081, on the registration it then made):
+ * with the `await this.ensureOwnerClaim(groupId)` line removed, "a commit in
+ * an owned journal is preceded by the owner's claim" fails with the commit
+ * request first on the wire. `DsClient.commitGroupEpoch` keeps that line.
  */
 import { describe, expect, it, vi } from "vitest";
 
@@ -147,7 +147,8 @@ function wire(script: number[]): { fetchImpl: typeof fetch; sent: string[]; bodi
     const b = init?.body;
     bodies.push(b === undefined || b === null ? "" : new TextDecoder().decode(b as ArrayBuffer));
     const status = script.shift() ?? 204;
-    return new Response(status === 401 ? "proof required" : null, { status });
+    const body = status === 401 ? "proof required" : status === 201 ? '{"id":1,"created_at":"t"}' : null;
+    return new Response(body, { status });
   }) as unknown as typeof fetch;
   return { fetchImpl, sent, bodies };
 }
@@ -171,16 +172,16 @@ describe("DsClient - the owner claims on open, before any registration", () => {
     const reg = ownerRegistry(true, held);
     const heard: string[] = [];
     reg.onOwnerClaimed(() => heard.push("claimed"));
-    const { fetchImpl, sent, bodies } = wire([204, 204]);
+    const { fetchImpl, sent, bodies } = wire([204, 201]);
     const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
 
     // Opening the group (the ownership provider's reconcile, the DeviceGroup
     // provider, the channel's Manage screen).
     expect(await ds.ensureOwnerClaim(GID)).toBe("claimed");
-    // The sweep then registers the staged epoch: no second claim.
-    await ds.registerGroupEpoch(GID, 5n, new Uint8Array(32).fill(5));
+    // The sweep then commits the staged epoch: no second claim.
+    await ds.commitGroupEpoch(GID, 5n, new Uint8Array(32).fill(5), [], new Uint8Array([1]), fakeSigner(4n));
 
-    expect(sent).toEqual(["PUT:claim", "PUT:access"]);
+    expect(sent).toEqual(["PUT:claim", "POST:commit"]);
     const claim = parseFakeStatement(bodies[0] ?? "{}");
     expect(claim.signer).toBe("root");
     expect(claim.epoch).toBe("4");
@@ -190,22 +191,22 @@ describe("DsClient - the owner claims on open, before any registration", () => {
     expect(heard).toEqual(["claimed"]);
   });
 
-  it("a registration in an owned journal is preceded by the owner's claim", async () => {
+  it("a commit in an owned journal is preceded by the owner's claim", async () => {
     const reg = ownerRegistry(true, new Set());
-    const { fetchImpl, sent } = wire([204, 204, 204]);
+    const { fetchImpl, sent } = wire([204, 201, 201]);
     const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
-    await ds.registerGroupEpoch(GID, 5n, new Uint8Array(32).fill(5));
-    await ds.registerGroupEpoch(GID, 6n, new Uint8Array(32).fill(6));
-    expect(sent).toEqual(["PUT:claim", "PUT:access", "PUT:access"]);
+    await ds.commitGroupEpoch(GID, 5n, new Uint8Array(32).fill(5), [], new Uint8Array([1]), fakeSigner(4n));
+    await ds.commitGroupEpoch(GID, 6n, new Uint8Array(32).fill(6), [], new Uint8Array([2]), fakeSigner(5n));
+    expect(sent).toEqual(["PUT:claim", "POST:commit", "POST:commit"]);
   });
 
-  it("a 409 claim never turns into a reset, and the registration still goes out", async () => {
+  it("a 409 claim never turns into a reset, and the commit still goes out", async () => {
     const reg = ownerRegistry(true, new Set());
-    const { fetchImpl, sent } = wire([409, 204]);
+    const { fetchImpl, sent } = wire([409, 201]);
     const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
     expect(await ds.ensureOwnerClaim(GID)).toBe("already-claimed");
-    await ds.registerGroupEpoch(GID, 5n, new Uint8Array(32).fill(5));
-    expect(sent).toEqual(["PUT:claim", "PUT:access"]);
+    await ds.commitGroupEpoch(GID, 5n, new Uint8Array(32).fill(5), [], new Uint8Array([1]), fakeSigner(4n));
+    expect(sent).toEqual(["PUT:claim", "POST:commit"]);
   });
 
   it("a member (not the owner) never claims", async () => {

@@ -511,42 +511,58 @@ public class ReachManager internal constructor(
         }
     }
 
-    /** The conversation groups this account is in: each carries a `member`
-     *  key, and the setting decides its `group` key. */
+    /** The conversation groups this account is in: while it is in any, the
+     *  one `member` key is registered, and the setting decides the `group`
+     *  key. A group LEFT since the last list rotates both (ADR-0078 section
+     *  9) and republishes the profile in every remaining group. */
     public fun setJoinedGroups(groups: Set<String>) {
         val b = binding.get() ?: return
         val normalised = groups.map { it.lowercase() }.sorted()
         if (normalised == doc.joinedGroups) return
         scope.launch {
-            lock.withLock {
-                if (binding.get() !== b) return@withLock
-                doc = doc.copy(joinedGroups = normalised)
+            val envelope = lock.withLock {
+                if (binding.get() !== b) return@launch
+                val left = reachDeparted(doc.joinedGroups, normalised)
+                // An empty list is "not loaded yet": the last one stays.
+                if (normalised.isNotEmpty() || doc.joinedGroups.isEmpty()) {
+                    doc = doc.copy(joinedGroups = normalised)
+                }
+                val envelope = if (left) bumpLocked(listOf(ReachKind.GROUP, ReachKind.MEMBER)) else null
                 store.save(b.accountIdB64, doc)
                 syncLocked(b, System.currentTimeMillis())
+                envelope
             }
+            afterRotation(b, envelope)
         }
     }
 
-    /** The channels this account is in: the setting decides their keys. */
+    /** The channels this account is in: the setting decides the one
+     *  `channel` key. A channel LEFT since the last list rotates it (ADR-0078
+     *  section 9). */
     public fun setChannels(channels: Set<String>) {
         val b = binding.get() ?: return
         val normalised = channels.map { it.lowercase() }.sorted()
         if (normalised == doc.channels) return
         scope.launch {
-            lock.withLock {
-                if (binding.get() !== b) return@withLock
-                doc = doc.copy(channels = normalised)
+            val envelope = lock.withLock {
+                if (binding.get() !== b) return@launch
+                val left = reachDeparted(doc.channels, normalised)
+                if (normalised.isNotEmpty() || doc.channels.isEmpty()) {
+                    doc = doc.copy(channels = normalised)
+                }
+                val envelope = if (left) bumpLocked(listOf(ReachKind.CHANNEL)) else null
                 store.save(b.accountIdB64, doc)
                 syncLocked(b, System.currentTimeMillis())
+                envelope
             }
+            afterRotation(b, envelope)
         }
     }
 
     /**
-     * Rotate a slot (ADR-0060 §1): bump its version, so the old key comes off
-     * the mailbox and a new one goes on. `contact` and `fof` when a contact is
-     * removed; `group` and `member` of a group that shrank (strictly after the
-     * remove commit, C-61 shape); `channel` on a channel epoch.
+     * Rotate a class (ADR-0060 §1): bump its version, so the old key comes
+     * off the mailbox and a new one goes on. `contact` and `fof` when a
+     * contact is removed. [scopeHex] matters only for `link` / `reply`.
      */
     public suspend fun rotate(kind: ReachKind, scopeHex: String = "") {
         val b = binding.get() ?: return
@@ -567,6 +583,48 @@ public class ReachManager internal constructor(
         // through the next account's devices.
         if (binding.get() !== b) return
         envelope?.let(::publishToDevices)
+    }
+
+    /**
+     * Rotate several account-wide classes at once (ADR-0078 section 9): one
+     * stamp, one registration, one hand-over to the other devices, then the
+     * profiles are republished in every group with the new grants. A group
+     * that shrank rotates `group` and `member` this way, strictly after the
+     * remove commit (C-61 shape).
+     */
+    public suspend fun rotateClasses(kinds: List<ReachKind>) {
+        val b = binding.get() ?: return
+        val envelope = lock.withLock {
+            if (binding.get() !== b) return
+            val envelope = bumpLocked(kinds)
+            store.save(b.accountIdB64, doc)
+            syncLocked(b, System.currentTimeMillis())
+            envelope
+        }
+        afterRotation(b, envelope)
+    }
+
+    /** Bump each account-wide class in [kinds] once and stamp the state.
+     *  Under [lock]; the caller saves and syncs. */
+    private fun bumpLocked(kinds: List<ReachKind>): ByteArray? {
+        for (kind in kinds.distinct()) {
+            if (!kind.scopeless) continue
+            val slot = ReachSlot(kind, "")
+            val next = versionOf(doc, slot) + 1
+            doc = doc.copy(
+                versions = doc.versions.filterNot { it.kind == kind.name && it.scopeHex == "" } +
+                    StoredVersion(kind.name, "", next),
+            )
+        }
+        return stampReachStateLocked()
+    }
+
+    /** After a class rotation: the state goes to the other devices and the
+     *  profiles (with the new grants) to every group. */
+    private suspend fun afterRotation(b: Binding, envelope: ByteArray?) {
+        if (envelope == null || binding.get() !== b) return
+        publishToDevices(envelope)
+        currentVisibility()?.let { rerunAfterAdopt(it) }
     }
 
     /** Compose the counters now held as a ReachState stamped strictly after
@@ -994,6 +1052,12 @@ public class ReachManager internal constructor(
      * Apply a setting the person chose (UX section 3: takes effect at once, no
      * Save button). Stamped strictly after the one it replaces, persisted, the
      * mailbox reconciled, then [onVisibilityChanged] runs.
+     *
+     * ADR-0078 section 9, decision 4 — a change made HERE also rotates the
+     * `group` and `channel` keys, so a group or channel the setting no longer
+     * allows stops holding a working key (one key serves them all). A setting
+     * adopted from another device arrives with that device's bumped counters
+     * and is not rotated again.
      */
     public suspend fun updateVisibility(chosen: FfiVisibilitySetting) {
         val b = binding.get() ?: return
@@ -1005,17 +1069,21 @@ public class ReachManager internal constructor(
         // catches up under the lock.
         mutableVisibility.value = stamped
         mutableStatus.value = ReachApplyStatus.APPLYING
-        lock.withLock {
+        val stateEnvelope = lock.withLock {
             if (binding.get() !== b) return
             doc = doc.copy(visibilityHex = reachHex(envelope))
+            val stateEnvelope = bumpLocked(listOf(ReachKind.GROUP, ReachKind.CHANNEL))
             store.save(b.accountIdB64, doc)
             syncLocked(b, System.currentTimeMillis())
+            stateEnvelope
         }
         // Signed out while the mailbox was reconciled: the setting is saved
         // for its account; nothing is sent as whoever is bound now.
         if (binding.get() !== b) return
-        // ADR-0060 §7 — the account's other devices take the same setting.
+        // ADR-0060 §7 — the account's other devices take the same setting,
+        // and the rotated counters.
         publishToDevices(envelope)
+        stateEnvelope?.let(::publishToDevices)
         try {
             onVisibilityChanged?.invoke(stamped)
         } catch (cancellation: CancellationException) {
@@ -1460,34 +1528,10 @@ public class ReachManager internal constructor(
     // -----------------------------------------------------------------
 
     /**
-     * The `channel` key is versioned by the channel epoch: raise the slot of
-     * [channelHex] to [epoch] when it is behind (never lowers it), so the
-     * mailbox carries the key of the epoch the member card names (web
-     * `channelEpoch`).
+     * ADR-0078 section 9: the `channel` key is the account's one key of that
+     * class, the same in every channel and no longer versioned by a channel's
+     * epoch; it rotates when a channel is left or the setting changes.
      */
-    public suspend fun raiseChannelVersion(channelHex: String, epoch: Int) {
-        val b = binding.get() ?: return
-        val slot = ReachSlot(ReachKind.CHANNEL, channelHex.lowercase())
-        val envelope = lock.withLock {
-            if (binding.get() !== b) return
-            if (versionOf(doc, slot) >= epoch) {
-                syncLocked(b, System.currentTimeMillis())
-                return
-            }
-            doc = doc.copy(
-                versions = doc.versions.filterNot { it.kind == slot.kind.name && it.scopeHex == slot.scopeHex } +
-                    StoredVersion(slot.kind.name, slot.scopeHex, epoch),
-            )
-            val envelope = stampReachStateLocked()
-            store.save(b.accountIdB64, doc)
-            syncLocked(b, System.currentTimeMillis())
-            envelope
-        }
-        // An envelope composed for an account that is gone is not sent
-        // through the next account's devices.
-        if (binding.get() !== b) return
-        envelope?.let(::publishToDevices)
-    }
 
     /**
      * Seal this account's member card (ADR-0060 §3): [profile] (a profile

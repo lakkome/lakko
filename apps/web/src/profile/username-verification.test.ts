@@ -23,6 +23,7 @@ import { base64Decode, base64Encode } from "../auth/account-id";
 import type { StoredVerification } from "./profile-store";
 import {
   ERROR_RETRY_MS,
+  errorRetryDelayMs,
   MISMATCH_RECHECK_MS,
   UsernameVerifier,
   verdictFor,
@@ -131,15 +132,60 @@ describe("UsernameVerifier", () => {
     expect(h.verifier.state(k, "alice")).toBe("verified");
   });
 
-  it("a failed lookup is an error, retried only after the retry interval", async () => {
+  it("a failed lookup is an error, retried after a wait that starts at seconds and grows", async () => {
     const h = harness({ alice: "throw" });
     const k = base64Encode(ALICE_KEY);
     expect(await h.verifier.ensure(k, "alice")).toBe("error");
     await h.verifier.ensure(k, "alice");
     expect(h.resolve).toHaveBeenCalledTimes(1);
-    h.advance(ERROR_RETRY_MS);
+    h.advance(errorRetryDelayMs(1, null));
     await h.verifier.ensure(k, "alice");
     expect(h.resolve).toHaveBeenCalledTimes(2);
+    // The second wait is longer than the first.
+    h.advance(errorRetryDelayMs(1, null));
+    await h.verifier.ensure(k, "alice");
+    expect(h.resolve).toHaveBeenCalledTimes(2);
+    h.advance(errorRetryDelayMs(2, null) - errorRetryDelayMs(1, null));
+    await h.verifier.ensure(k, "alice");
+    expect(h.resolve).toHaveBeenCalledTimes(3);
+  });
+
+  it("the retry waits grow to five minutes and honour a 429's Retry-After", () => {
+    expect(errorRetryDelayMs(1, null)).toBe(15_000);
+    expect(errorRetryDelayMs(2, null)).toBe(30_000);
+    expect(errorRetryDelayMs(50, null)).toBe(ERROR_RETRY_MS);
+    expect(errorRetryDelayMs(1, 90_000)).toBe(90_000);
+    expect(errorRetryDelayMs(5, 1_000)).toBe(ERROR_RETRY_MS);
+  });
+
+  it("a failed lookup schedules its own retry, which reaches a verdict once the directory answers", async () => {
+    const directory: Record<string, Uint8Array | "throw"> = { alice: "throw" };
+    let now = 5_000_000;
+    const cache = new Map<string, StoredVerification>();
+    const scheduled: { retry: () => Promise<unknown>; delayMs: number }[] = [];
+    const verifier = new UsernameVerifier({
+      resolve: async (username) => {
+        const hit = directory[username];
+        if (hit === "throw") throw Object.assign(new Error("429"), { retryAfterSecs: 20 });
+        return hit === undefined ? { kind: "unregistered" } : { kind: "key", signatureKey: hit };
+      },
+      validate: (u) => wasm.validateUsername(u),
+      cached: (k, u) => cache.get(`${k}|${u}`),
+      record: (k, u, v) => {
+        cache.set(`${k}|${u}`, v);
+      },
+      now: () => now,
+      decodeKey: base64Decode,
+      scheduleRetry: (retry, delayMs) => {
+        scheduled.push({ retry, delayMs });
+      },
+    });
+    const k = base64Encode(ALICE_KEY);
+    expect(await verifier.ensure(k, "alice")).toBe("error");
+    expect(scheduled.map((s) => s.delayMs)).toEqual([20_000]);
+    directory.alice = ALICE_KEY;
+    now += 20_000;
+    expect(await scheduled[0]?.retry()).toBe("verified");
   });
 
   it("a mismatch is re-checked only after a long interval", async () => {

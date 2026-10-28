@@ -57,6 +57,7 @@ import {
 import { A, useLocation, useNavigate, useParams } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
+import { Avatar } from "../ui/Avatar";
 import { useChats } from "../chat/ChatContext";
 import { useProfiles } from "../profile/ProfileContext";
 import { createDisplayNameCheck } from "../profile/username-field";
@@ -67,16 +68,17 @@ import { isAbortError } from "../auth/pow";
 import { signupErrorMessage } from "../auth/auth-error-copy";
 import { guestWorkingTitle, signupWorkingLine } from "../auth/signup-working";
 import { loadWasm } from "../wasm";
-import { DiscoveryClient, DiscoveryHttpError, isDiscoveryRateLimited } from "../discovery/client";
+import { DiscoveryClient, isDiscoveryRateLimited } from "../discovery/client";
 import {
   INVITE_LINK_DAMAGED,
+  INVITE_LINK_OPEN_FAILED,
   INVITE_LINK_RATE_LIMITED,
   INVITE_LINK_TRY_AGAIN,
   inviteLinkWidths,
   isInviteLinkDamaged,
+  isInviteLinkUnreachable,
   openInviteLinkFromUrl,
 } from "../contacts/invite-link";
-import { CALL_INVITE_INLINE_MIN_LEN } from "../calls/invite";
 import { useCallHost, type CallHostApi } from "../calls/CallHostContext";
 import { callIdHex } from "../calls/call-signaling-dispatch";
 import { hexKey } from "../calls/multi-joiner-election";
@@ -120,11 +122,29 @@ export default function JoinCall() {
     const resolved = profiles.resolve(d.ownerSignatureKey);
     return resolved.source === "fingerprint" ? null : resolved.name;
   };
+  /** The host's signature key, standard base64 (empty when unknown). */
+  const hostKeyB64 = (): string => {
+    const d = decoded();
+    if (d === null || d === undefined) return "";
+    let bin = "";
+    for (const b of d.ownerSignatureKey) bin += String.fromCharCode(b);
+    return btoa(bin);
+  };
   const callHost: CallHostApi = useCallHost();
 
   // ADR-0048 UX §4 — a guest (no account yet) is asked their name here,
-  // prefilled `Guest`, and it becomes the new account's profile name.
-  const [guestName, setGuestName] = createSignal(t("call.guest.default_name"));
+  // prefilled with "<adjective> <animal>" from the shared rule
+  // (`lakko_ui_rules::guest_name`), and it becomes the new account's profile
+  // name. The prefill lands once the core has loaded, and never over a name
+  // the visitor has started typing.
+  const [guestName, setGuestName] = createSignal("");
+  let guestNameEdited = false;
+  void loadWasm().then((wasm) => {
+    if (guestNameEdited) return;
+    const random = new Uint32Array(1);
+    crypto.getRandomValues(random);
+    setGuestName(wasm.guestName(random[0] ?? 0));
+  });
   const guestNameCheck = createDisplayNameCheck(guestName);
   /** The name to save once the guest session lands; `undefined` = nothing to
    *  save (the visitor already had a session). */
@@ -145,6 +165,9 @@ export default function JoinCall() {
   /** The link does not open under its fragment (missing, malformed, wrong
    *  secret, tampered or substituted): docs/ux/call-links.md section 5. */
   const [damaged, setDamaged] = createSignal(false);
+  /** The ledger could not be asked for the link (the network, a server
+   *  error): the link may be fine, so it is offered again. */
+  const [openFailed, setOpenFailed] = createSignal(false);
   const [decoded, { refetch }] = createResource(
     slugSignal,
     async ({ slug, hash }): Promise<DecodedCall | null> => {
@@ -152,6 +175,7 @@ export default function JoinCall() {
       try {
         setRateLimited(false);
         setDamaged(false);
+        setOpenFailed(false);
         const wasm = await loadWasm();
         // Sealed-link amendment of ADR-0028 / ADR-0009 (2026-09-28): a
         // missing or malformed fragment is refused before any request, and
@@ -160,7 +184,6 @@ export default function JoinCall() {
           slug,
           hash,
           widths: inviteLinkWidths(wasm),
-          inlineMinLen: CALL_INVITE_INLINE_MIN_LEN,
           what: "call-invite",
           fetchPointer: (blobId) => discovery.fetchCallInvite(blobId),
           open: (sealed, secret) => wasm.CallInviteCapability.openLink(sealed, secret),
@@ -185,13 +208,16 @@ export default function JoinCall() {
           isOwner,
         };
       } catch (err) {
-        if (err instanceof DiscoveryHttpError && err.status === 404) return null;
         if (isDiscoveryRateLimited(err)) {
           setRateLimited(true);
           return null;
         }
         if (isInviteLinkDamaged(err)) {
           setDamaged(true);
+          return null;
+        }
+        if (isInviteLinkUnreachable(err)) {
+          setOpenFailed(true);
           return null;
         }
         // eslint-disable-next-line no-console
@@ -435,9 +461,6 @@ export default function JoinCall() {
           <Show when={decoded.loading}>
             <p>{t("call.link.loading")}</p>
           </Show>
-          <Show when={!decoded.loading && decoded() === null && damaged()}>
-            <p>{INVITE_LINK_DAMAGED()}</p>
-          </Show>
           <Show when={!decoded.loading && decoded() === null && rateLimited()}>
             <p>{INVITE_LINK_RATE_LIMITED()}</p>
             <button type="button" class="primary" onClick={() => void refetch()}>
@@ -449,10 +472,17 @@ export default function JoinCall() {
             <p>{INVITE_LINK_DAMAGED()}</p>
             <A href={paths.home}>{t("common.open_lakko")}</A>
           </Show>
+          <Show when={!decoded.loading && decoded() === null && openFailed()}>
+            <p>{INVITE_LINK_OPEN_FAILED()}</p>
+            <button type="button" class="primary" onClick={() => void refetch()}>
+              {INVITE_LINK_TRY_AGAIN()}
+            </button>
+            <A href={paths.home}>{t("common.open_lakko")}</A>
+          </Show>
           <Show
             when={
               !decoded.loading &&
-              ((decoded() === null && !rateLimited() && !damaged()) ||
+              ((decoded() === null && !rateLimited() && !damaged() && !openFailed()) ||
                 decoded()?.valid === false)
             }
           >
@@ -472,7 +502,13 @@ export default function JoinCall() {
               </p>
             </Show>
             <Show when={hostName()}>
-              {(name) => <p>{t("call.link.host", { name: name() })}</p>}
+              {(name) => (
+                <p class="lk-person-line">
+                  {/* ADR-0084 - the host's photo beside their name. */}
+                  <Avatar label={name()} id={hostKeyB64()} size="sm" personKey={hostKeyB64()} />
+                  <span>{t("call.link.host", { name: name() })}</span>
+                </p>
+              )}
             </Show>
             <Show when={busyMessage()}>
               {(message) => (
@@ -492,7 +528,10 @@ export default function JoinCall() {
                     type="text"
                     autocomplete="name"
                     value={guestName()}
-                    onInput={(e) => setGuestName(e.currentTarget.value)}
+                    onInput={(e) => {
+                      guestNameEdited = true;
+                      setGuestName(e.currentTarget.value);
+                    }}
                     aria-invalid={guestNameCheck().kind === "invalid"}
                   />
                 </label>

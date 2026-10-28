@@ -603,11 +603,7 @@ pub(crate) async fn signup_finish(
         )
     })?;
 
-    tracing::info!(
-        account_id = %B64.encode(account_id),
-        with_recovery,
-        "signup completed",
-    );
+    tracing::info!(with_recovery, "signup completed",);
     // A fresh account is at the genesis generation; the read is one more
     // round trip but keeps a single issuance path.
     let session = crate::session::issue_pair(&state, &account_id, &device_id).await?;
@@ -1015,7 +1011,6 @@ async fn login_finish_inner(
         tracing::warn!(
             session_kind = kind,
             expected_kind,
-            account_id = %B64.encode(account_id),
             "login_finish: session kind mismatch (cross-flow attempt)",
         );
         return Err((
@@ -1051,7 +1046,7 @@ async fn login_finish_inner(
         (StatusCode::UNAUTHORIZED, "invalid credentials".to_string())
     })?;
 
-    tracing::info!(kind, account_id = %B64.encode(account_id), "login completed");
+    tracing::info!(kind, "login completed");
 
     // At the generation read with the state row (see `take_login_state`),
     // never at one read now. No row: the account was deleted meanwhile.
@@ -1404,7 +1399,6 @@ pub(crate) async fn password_reset_finish(
         // attacker gets one shot at most; surface 401.
         tracing::warn!(
             session_kind = kind,
-            account_id = %B64.encode(account_id),
             "password_reset_finish: session kind mismatch (cross-flow attempt)",
         );
         return Err((
@@ -1466,7 +1460,6 @@ pub(crate) async fn password_reset_finish(
     // the account's, and the password it would set must not land.
     if current != Some(proven_generation) {
         tracing::info!(
-            account_id = %B64.encode(account_id),
             "password_reset_finish: the account's keys changed since the proof; refused",
         );
         return Err(invalid().into());
@@ -1501,10 +1494,7 @@ pub(crate) async fn password_reset_finish(
     .map_err(ApiError::Db)?;
     tx.commit().await.map_err(ApiError::Db)?;
 
-    tracing::info!(
-        account_id = %B64.encode(account_id),
-        "password reset completed (mnemonic-driven)",
-    );
+    tracing::info!("password reset completed (mnemonic-driven)",);
 
     let session =
         crate::session::issue_pair_at(&state, &account_id, proven_generation, &device_id)?;
@@ -2011,7 +2001,7 @@ mod signup_login_limits_e2e_tests {
             turn: None,
             totp_enc_key: None,
             vault_enc_key: None,
-            throttle: crate::throttle::ThrottleConfig::disabled(),
+            room_cap: std::sync::Arc::new(crate::room_cap::RoomAdmissionCap::disabled()),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
@@ -3579,7 +3569,6 @@ mod signup_login_limits_e2e_tests {
             &attest,
             &state.attest_key.verifying,
             &lakko_attest::key_reset_account_ref(&a),
-            &lakko_attest::device_group_journal_id(&a),
             &new_pubkey,
         )
         .expect("the attestation verifies under the attest key and binds the reset");
@@ -3593,7 +3582,6 @@ mod signup_login_limits_e2e_tests {
             &attest,
             &state.attest_key.verifying,
             &lakko_attest::key_reset_account_ref(&a),
-            &lakko_attest::device_group_journal_id(&a),
             &[0u8; 32],
         )
         .is_err());

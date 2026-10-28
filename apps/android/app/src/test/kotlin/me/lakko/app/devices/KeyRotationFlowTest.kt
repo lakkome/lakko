@@ -77,7 +77,7 @@ class KeyRotationFlowTest {
         var revokedWithCommit: ByteArray? = null
         var phraseSavedWithCommit: Boolean? = null
         val identityCalls = mutableListOf<Pair<String?, Boolean>>()
-        val rootCalls = mutableListOf<Pair<String?, Long?>>()
+        var rootCalls = 0
         var paused = 0L
 
         override fun freshGrant(): String? = grant
@@ -146,9 +146,9 @@ class KeyRotationFlowTest {
             return keyPackage()
         }
 
-        override suspend fun moveDeviceGroupRoot(attestationB64: String?, keyGeneration: Long?): Boolean {
+        override suspend fun moveDeviceGroupRoot(): Boolean {
             calls += "dg-root"
-            rootCalls += attestationB64 to keyGeneration
+            rootCalls += 1
             return deviceGroupRoot()
         }
 
@@ -262,7 +262,7 @@ class KeyRotationFlowTest {
         assertTrue(device.contentEquals(ports.revokedWithCommit))
         // The directory gets the proof AND the attestation; the root too.
         assertEquals(listOf<Pair<String?, Boolean>>("ATTEST" to true), ports.identityCalls)
-        assertEquals(listOf<Pair<String?, Long?>>("ATTEST" to 5L), ports.rootCalls)
+        assertEquals(1, ports.rootCalls)
         // The step list moves through its three lines in order.
         assertEquals(
             listOf(RotationUiStep.RemovingDevice, RotationUiStep.ChangingKeys, RotationUiStep.UpdatingDevices),
@@ -529,7 +529,7 @@ class KeyRotationFlowTest {
         // No attestation in hand: the directory gets the proof alone and the
         // device list's root a plain transfer.
         assertEquals(listOf<Pair<String?, Boolean>>(null to true), ports.identityCalls)
-        assertEquals(listOf<Pair<String?, Long?>>(null to 6L), ports.rootCalls)
+        assertEquals(1, ports.rootCalls)
     }
 
     @Test

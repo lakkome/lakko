@@ -53,14 +53,14 @@
 //!   authenticator UI. Default: `Lakko`.
 //! - `LAKKO_WEBAUTHN_RP_ORIGIN` — full origin including scheme,
 //!   e.g. `https://lakko.me`. Required when `RP_ID` is set.
-//! - `LAKKO_AUTH_GUEST_ACCOUNT_AGE_SECS` — an account younger than this counts
-//!   as fresh/guest for the ADR-0033 call-admission throttle (default 3600).
-//! - `LAKKO_AUTH_CALL_ADMISSION_WINDOW_SECS` — the throttle's sliding window
+//! - `LAKKO_AUTH_ROOM_ADMISSION_LIMIT` — call admission tokens one SFU room
+//!   may be issued per window (ADR-0078 section 2; default 100, **0 =
+//!   disabled**; in memory, no account involved; see `src/room_cap.rs`).
+//! - `LAKKO_AUTH_ROOM_ADMISSION_WINDOW_SECS` — that cap's sliding window
 //!   (default 60).
-//! - `LAKKO_AUTH_CALL_ADMISSION_BURST_LIMIT` — max distinct fresh accounts per
-//!   `call_id` per window before throttling (default 8; **0 = disabled**).
-//! - `LAKKO_AUTH_CALL_THROTTLE_SECS` — how long a call stays throttled once
-//!   tripped (default 300).
+//! - `LAKKO_AUTH_YOUNG_ACCOUNT_AGE_SECS` — an account younger than this draws
+//!   the young `call-join` quota at token issuance (default 86400; see
+//!   `src/anon_tokens.rs`).
 //! - `LAKKO_BACKUP_HEAD_MINT_RATE_LIMIT` — max backup-head mints per account per
 //!   window before `429` (ADR-0037 F5b; **default 0 = disabled**; set a positive
 //!   value, e.g. 60, to arm it — fails OPEN on a store error).
@@ -116,7 +116,8 @@
 //! - `DELETE /webauthn/credentials/{id}` — remove a passkey (Phase 2a2a, bearer-auth)
 //! - `POST /webauthn/auth/start`     — passkey login, step 1 (Phase 2a2b, anonymous)
 //! - `POST /webauthn/auth/finish`    — passkey login, step 2 (Phase 2a2b, anonymous)
-//! - `POST /call/jwt`                — issue SFU-bound JWT (Phase 3b4 forward, bearer-auth)
+//! - `POST /call/jwt`                — issue SFU-bound JWT + TURN credential (anonymous: spends
+//!   one `call-join` token, ADR-0078 section 2; `429 room-admission-limit` past the room cap)
 //! - `GET  /.well-known/jwks.json`   — publish call-JWT public key (Phase 3b4 forward, anonymous)
 //! - `POST /auth/tokens`             — issue anonymous tokens against a quota (ADR-0054, bearer-auth)
 //! - `GET  /auth/tokens/key/{context}/{epoch}` — anonymous-token public key (ADR-0054, anonymous)
@@ -217,8 +218,8 @@ mod recall_tests;
 mod recovery_email;
 #[cfg(test)]
 mod recovery_email_tests;
+mod room_cap;
 mod session;
-mod throttle;
 mod totp;
 mod turn;
 mod unclaimed;
@@ -324,9 +325,8 @@ pub(crate) struct AppState {
     pub(crate) attest_key: Arc<lakko_call_jwt::CallSigningKey>,
     /// G3-{1,2}-turn step 1 — short-lived TURN-credential
     /// minter. `None` when `LAKKO_TURN_URIS` /
-    /// `LAKKO_TURN_SHARED_SECRET` are unset; the
-    /// `POST /call/turn-credential` route returns 503 in
-    /// that case and clients fall back to STUN-only ICE.
+    /// `LAKKO_TURN_SHARED_SECRET` are unset; `POST /call/jwt` then
+    /// answers `turn: null` and clients fall back to STUN-only ICE.
     pub(crate) turn: Option<Arc<turn::TurnConfig>>,
     /// ADR-0018 factor (c) — server-static AEAD key encrypting TOTP
     /// secrets at rest (`totp_secrets.secret_enc`). Loaded from
@@ -337,13 +337,9 @@ pub(crate) struct AppState {
     /// ADR-0072 — the key that wraps the passkey blobs at rest (`LAKKO_VAULT_ENC_KEY`). `None` disables the
     /// `/vault/passkey*` routes (503).
     pub(crate) vault_enc_key: Option<Arc<[u8; 32]>>,
-    /// ADR-0033 — call-admission anti-spam throttle config. Loaded from the
-    /// environment at startup and consulted by `issue_call_jwt` before minting.
-    /// `burst_limit == 0` (the default when
-    /// `LAKKO_AUTH_CALL_ADMISSION_BURST_LIMIT` is unset / 0) disables it. The
-    /// throttle sees only admission bookkeeping (call_id, account_id,
-    /// timestamps) and fails OPEN on a store error — no E2EE / invariant impact.
-    pub(crate) throttle: throttle::ThrottleConfig,
+    /// ADR-0078 section 2 — the per-room call admission cap (the rebuilt
+    /// ADR-0033 throttle): in memory, keyed on the room id, no account.
+    pub(crate) room_cap: Arc<room_cap::RoomAdmissionCap>,
     /// ADR-0037 F5b — generous, fail-open per-account rate-limit on the
     /// backup-head mint (`POST /auth/backup/head`). Loaded from the environment
     /// at startup and consulted by `backup_head` before the counter bump.
@@ -487,9 +483,11 @@ async fn main() -> Result<()> {
     // soft-disable when both env vars are simply unset.
     let turn_config = turn::TurnConfig::from_env().context("load TURN config")?;
     if turn_config.is_some() {
-        tracing::info!("turn-credential endpoint enabled");
+        tracing::info!("TURN credentials issued beside call tokens");
     } else {
-        tracing::info!("turn-credential endpoint disabled (LAKKO_TURN_URIS / LAKKO_TURN_SHARED_SECRET not set)");
+        tracing::info!(
+            "TURN credentials disabled (LAKKO_TURN_URIS / LAKKO_TURN_SHARED_SECRET not set)"
+        );
     }
 
     // ADR-0018 factor (c) — TOTP secret-encryption key. Loud-fail on a
@@ -512,22 +510,10 @@ async fn main() -> Result<()> {
         tracing::info!("passkey-vault endpoints disabled (LAKKO_VAULT_ENC_KEY not set)");
     }
 
-    // ADR-0033 — call-admission anti-spam throttle. Loaded from the environment;
-    // disabled by default (burst_limit 0 / unset).
-    let throttle_config = throttle::ThrottleConfig::from_env();
-    if throttle_config.enabled() {
-        tracing::info!(
-            burst_limit = throttle_config.burst_limit,
-            window_secs = throttle_config.window_secs,
-            guest_age_secs = throttle_config.guest_age_secs,
-            throttle_secs = throttle_config.throttle_secs,
-            "call-admission throttle enabled"
-        );
-    } else {
-        tracing::info!(
-            "call-admission throttle disabled (LAKKO_AUTH_CALL_ADMISSION_BURST_LIMIT unset / 0)"
-        );
-    }
+    // ADR-0078 section 2 — the per-room call admission cap. Loud-fail on a
+    // malformed knob.
+    let room_cap = room_cap::RoomAdmissionCap::from_env().context("load the room admission cap")?;
+    room_cap.log_startup();
 
     // ADR-0037 F5b — generous, fail-open per-account backup-head mint
     // rate-limit. Loaded from the environment; enabled by default at a generous
@@ -583,7 +569,7 @@ async fn main() -> Result<()> {
         turn: turn_config.map(Arc::new),
         totp_enc_key: totp_enc_key.map(Arc::new),
         vault_enc_key: vault_enc_key.map(Arc::new),
-        throttle: throttle_config,
+        room_cap: Arc::new(room_cap),
         backup_head_mint_rate,
         anon_tokens: anon_tokens.clone().map(Arc::new),
         handle_pepper: handle_pepper.map(Arc::new),
@@ -612,8 +598,11 @@ async fn main() -> Result<()> {
     // deleted. Off where sign-in by name is not configured.
     let _unclaimed_pruner =
         unclaimed::spawn_pruner(pool.clone(), names_enabled, unclaimed_ttl_secs);
-    // ADR-0033 — prune expired call-admission events + throttled-call rows.
-    let _throttle_pruner = throttle::spawn_pruner(pool.clone(), throttle_config);
+    // ADR-0078 section 2 — the `call-join` spent-set `POST /call/jwt` writes.
+    let _call_join_spent_pruner = anon_tokens.as_ref().map(|i| {
+        lakko_anon_token_server::TokenVerifier::new(pool.clone(), Some(i.server.clone()))
+            .spawn_pruner()
+    });
     // ADR-0054 — drop issuance-quota rows older than the previous epoch.
     let _anon_token_pruner = anon_tokens.as_ref().map(|i| {
         lakko_anon_token_server::spawn_issuance_pruner(pool.clone(), i.server.window_secs)
@@ -798,31 +787,12 @@ fn build_app(state: AppState) -> Router {
             webauthn::require_session,
         ));
 
-    // Phase 3b4 forward — `POST /call/jwt` mints a JWT
-    // scoped to (account_id, call_id, role). Bearer-auth
-    // required (same session-token middleware webauthn
-    // routes use). The SFU verifies the JWT against the
-    // public key it fetched from `/.well-known/jwks.json`.
-    let call_jwt_routes = Router::new()
-        .route("/call/jwt", post(call_jwt::issue_call_jwt))
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            webauthn::require_session,
-        ));
-
-    // G3-{1,2}-turn step 1 — `POST /call/turn-credential`
-    // mints a short-lived TURN credential per the coturn
-    // `static-auth-secret` REST API. Same bearer-auth
-    // middleware as `/call/jwt`. Caller invokes once at
-    // call-start; the TURN credential's expiry (default 10
-    // minutes) comfortably outlasts ICE gathering on every
-    // tested mobile network.
-    let turn_routes = Router::new()
-        .route("/call/turn-credential", post(turn::issue_turn_credential))
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            webauthn::require_session,
-        ));
+    // ADR-0078 section 2 — `POST /call/jwt` mints a JWT scoped to
+    // (room, random peer id, role) plus a TURN credential. No session: it
+    // spends one anonymous `call-join` token, so the issuer never learns who
+    // joins which room. The SFU verifies the JWT against the public key it
+    // fetched from `/.well-known/jwks.json`.
+    let call_jwt_routes = Router::new().route("/call/jwt", post(call_jwt::issue_call_jwt));
 
     // G-30 finding 2 (ADR-0036) — `POST /auth/genesis/attest` mints a signed
     // genesis attestation binding the OPAQUE-authenticated account to its
@@ -998,7 +968,6 @@ fn build_app(state: AppState) -> Router {
         )
         .merge(webauthn_routes)
         .merge(call_jwt_routes)
-        .merge(turn_routes)
         .merge(genesis_routes)
         .merge(backup_head_routes)
         // ADR-0054 — the anonymous-token public key for (context, epoch).
@@ -1009,7 +978,7 @@ fn build_app(state: AppState) -> Router {
             get(anon_tokens::public_key),
         )
         .merge(anon_token_routes)
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }
 

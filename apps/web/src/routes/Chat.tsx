@@ -82,6 +82,20 @@ import {
   withoutDone,
   type Selection,
 } from "../chat/selection";
+import { blobIdsOfRefs, bytesToHex as blobHex } from "../chat/blob-ids";
+import { goneLines, isSendLimit, openFailureOf, openLimitText, sendLimitText } from "../chat/attachment-failure";
+import {
+  chunkSaveEdits,
+  saveEdit,
+  savedTargetOf,
+  saveRefusal,
+  savedEntryKey,
+  savedKeySet,
+  unsaveEdit,
+  type SaveSource,
+} from "../chat/saved-messages";
+import type { ConversationRef } from "../chat/folders/folder-model";
+import { deleteBlobs } from "../storage/blob-deletes";
 import {
   persistedFromReplyRef,
   replyRefFromPersisted,
@@ -101,7 +115,7 @@ import {
 } from "../chat/person-key";
 import { groupTitle, isUnnamedGroupLabel } from "../chat/group-title";
 import { UNNAMED_MEMBER, memberListLabelOf, memberNameOf } from "../profile/member-label";
-import { pendingJoinLabel } from "../chat/pending-join-label";
+import { pendingJoinLabel, pendingJoinPersonKey } from "../chat/pending-join-label";
 import { JoinAttributionGate } from "../chat/join-attribution-gate";
 import { groupCallsFor } from "../calls/group-call-store";
 import { chatCallAffordance, type ChatCallAffordance } from "../calls/group-call-host";
@@ -247,7 +261,6 @@ import {
   type AttachmentRefBytes,
   type ThumbRefBytes,
   AttachmentSizeError,
-  AttachmentMissingError,
   MAX_ATTACHMENT_BYTES,
 } from "../chat/attachments";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
@@ -291,15 +304,12 @@ import { mayLookUp, usernameReason } from "../profile/rules";
 import {
   ensureGroupPushRouting,
   memberSignatureKeys,
-  publishRemoveThenRotate,
-  pushGidForGroup,
+  sealedWakeForGroup,
   readPushRotationRole,
   receivePushRoutingSecretGated,
   redistributeSecretToGroup,
   retireOldPushGid,
-  rotatePushRoutingSecret,
   rotatePushRoutingSecretIfMembershipShrank,
-  type PushRotationOutcome,
 } from "../push/group-routing";
 import { getGroupRoutingSecretForAccount } from "../push/group-routing-store";
 import { createPushWakeReach } from "../push/wake-reach";
@@ -572,13 +582,27 @@ export default function Chat(props: { backTo?: string }): JSX.Element {
           keyed
           fallback={<GroupNotFound />}
         >
-          {(_id) => (
-            <ChatView
-              entry={entry() as ActiveGroup}
-              requireIdentity={requireIdentity}
-              onLeave={() => navigate(props.backTo ?? paths.home)}
-            />
-          )}
+          {(id) => {
+            // Navigating away clears the route param before this Show
+            // disposes the view, so for a moment `entry()` is undefined while
+            // the view's effects and its receive loop still read
+            // `props.entry`. A read that threw there broke the navigation
+            // itself. The view keeps the last entry of ITS chat until it is
+            // gone (a persist-abort reset still hands it the new entry).
+            let last = entry() as ActiveGroup;
+            const stableEntry = (): ActiveGroup => {
+              const current = entry();
+              if (current !== undefined && current.groupIdB64 === id) last = current;
+              return last;
+            };
+            return (
+              <ChatView
+                entry={stableEntry()}
+                requireIdentity={requireIdentity}
+                onLeave={() => navigate(props.backTo ?? paths.home)}
+              />
+            );
+          }}
         </Show>
       </Show>
     </article>
@@ -657,10 +681,10 @@ function ChatView(props: {
     // ADR-0042 — route the notify wake under the opaque `push_gid` instead
     // of the leaky DS `group_id`. Returns null when no secret is held yet
     // (→ the wake is skipped; recipients catch up on foreground poll).
-    pushGidResolver: async (groupId) => {
+    wakeSealer: async (groupId, kind) => {
       const s = auth.state();
       if (s.kind !== "session") return null;
-      return pushGidForGroup(s.account.accountId, base64Encode(groupId));
+      return sealedWakeForGroup(s.account.accountId, base64Encode(groupId), kind);
     },
   });
   // 1.18g — ContactsClient is the home of the addMemberToGroup
@@ -670,7 +694,7 @@ function ChatView(props: {
   // `chats.persistSnapshot` after every mutation.
   // The discovery client reads the session token at request time: the group
   // invite upload and revoke sit behind discovery's `require_session`, and a
-  // tokenless client made every upload a 401 that fell back to the inline link.
+  // tokenless client made every upload a 401.
   const contacts = new ContactsClient(
     new DiscoveryClient(undefined, {
       sessionToken: () => auth.identitySecrets()?.sessionToken ?? null,
@@ -692,19 +716,6 @@ function ChatView(props: {
           throw new Error("no active session — commit aborted (ADR-0040)");
         }
         await chats.persistSnapshotWithCommit(s.account.accountId, entry);
-      },
-      // ADR-0040 F1 (lakko-security) — on a FAIL-CLOSED commit persist-abort, reset
-      // the in-memory group back to the last durable snapshot (epoch N), dropping
-      // the un-published eager merge. Reloads the group from IDB + replaces the
-      // cached registry reference so the next `props.entry.group` read (reactive
-      // via `chats.get`) sees the epoch-N group — a subsequent commit builds on N,
-      // not the poisoned N+1 that would strand the whole group.
-      onCommitPersistAbort: async (groupIdB64) => {
-        const s = auth.state();
-        if (s.kind !== "session") {
-          throw new Error("no active session — cannot reset group (ADR-0040 F1)");
-        }
-        await chats.resetGroupToDurableSnapshot(s.account.accountId, groupIdB64);
       },
     },
   );
@@ -1317,18 +1328,17 @@ function ChatView(props: {
    * exactly the way the contact list opens it, Message included - from here
    * Message is just the way back. Until 2026-09-26 the chat rendered a
    * second copy of that card as a layer, with Message withheld, and the same
-   * person had two cards. A one-to-one whose contact record cannot be found
-   * (a roster that cannot be read) opens nothing at all (`infoOpening`):
-   * every one-to-one peer is a contact by construction
-   * (`contacts/adopt-one-to-one.ts`), so there is no "not a contact" card
-   * left to draw.
+   * person had two cards. A person the viewer removed has no contact record
+   * but keeps the conversation; their card is the same page, which then
+   * offers `Add to contacts` (amended 2026-10-24). A one-to-one whose peer
+   * cannot be read opens nothing at all (`infoOpening`).
    */
   function openInfo(): void {
     setHeaderMenuOpen(false);
-    const opening = infoOpening(infoTarget(), personRecord());
+    const opening = infoOpening(infoTarget(), infoPerson());
     if (opening === "nothing") return;
     if (opening === "contact-page") {
-      const record = personRecord();
+      const record = infoPerson();
       if (record === null) return;
       navigate(paths.contact(base64UrlEncodeNoPad(base64Decode(record.signaturePubkeyB64))));
       return;
@@ -1624,6 +1634,41 @@ function ChatView(props: {
   const [pendingAttachments, setPendingAttachments] = createSignal<
     AttachmentRefBytes[]
   >([]);
+
+  // ----- ADR-0065: file lifetime and saved messages ---------------------
+
+  /** The signed-in account, for the blob deletes it owes. */
+  const blobAccount = (): string | null => {
+    const s = auth.state();
+    return s.kind === "session" ? s.account.accountId : null;
+  };
+  /** ADR-0065 section 6 — files uploaded and never sent are deleted at once. */
+  function deleteUnsent(refs: readonly AttachmentRefBytes[]): void {
+    const account = blobAccount();
+    if (account === null) return;
+    void deleteBlobs(account, blobIdsOfRefs(refs));
+  }
+  /** The reference a saved message names its conversation by: the group of
+   *  the SEGMENT that holds it (this group, or an older one), with the
+   *  conversation's own kind (rule of 2026-10-27). */
+  const savedRefOf = (groupId: Uint8Array): ConversationRef => ({
+    kind: conversationKind() === "group" ? 2 : 1,
+    id: groupId,
+  });
+  /** The current group's reference (a message of the head segment). */
+  const savedRef = (): ConversationRef => savedRefOf(props.entry.group.groupId);
+  /** The segment and DS id an on-screen row id names. */
+  const savedTarget = (rowId: number): { readonly groupId: Uint8Array; readonly messageId: number } | null =>
+    savedTargetOf(
+      rowId,
+      props.entry.group.groupId,
+      historySegments().map((g) => g.group.groupId),
+    );
+  const savedKeys = createMemo(() => savedKeySet(sync.saved()));
+  const isSavedOf = (rowId: number): boolean => {
+    const target = savedTarget(rowId);
+    return target !== null && savedKeys().has(savedEntryKey(blobHex(target.groupId), target.messageId));
+  };
   const [uploading, setUploading] = createSignal(false);
   /** Per-file upload-progress snapshot — drives the
    *  "Uploading hello.png (2/5)…" indicator in the composer
@@ -2102,10 +2147,11 @@ function ChatView(props: {
   // ADR-0045 — proposal-based membership
   // -------------------------------------------------------------------------
 
-  /** Does this group route membership through proposals? A group with NO role
-   *  table has no owner, hence no rank 0, hence no committer — and every peer's
-   *  receipt gate drops proposals in it — so it keeps direct commits. A torn
-   *  read is treated as "no role table", which keeps the direct path working. */
+  /** Does this group carry a role table, and so a committer? A group with NO
+   *  role table has no owner, hence no rank 0, hence no committer, and every
+   *  peer's receipt gate drops proposals in it; since the ADR-0081 amendment of
+   *  2026-10-19 a membership change in it is refused (the direct-commit path is
+   *  deleted) and no client reaches one. A torn read is "no role table". */
   const usesProposalPath = (): boolean => {
     try {
       return props.entry.group.roleTableOwner() !== undefined;
@@ -3665,8 +3711,9 @@ function ChatView(props: {
       return applyOp(prev, { op: "edit", target: e.target, text: e.text });
     }
     // Section 4.1 — an author-gated delete takes the message's pin records
-    // with it (shared and personal).
+    // with it (shared and personal), and (ADR-0065) it leaves Saved.
     void pins.messageDeleted(props.entry.groupIdB64, e.target);
+    savedMessageDeleted(e.target);
     return applyOp(prev, { op: "delete", target: e.target });
   }
 
@@ -4527,7 +4574,7 @@ function ChatView(props: {
       // here and never sent: its target exists only in the old session.
       if (opRouteNow() === "send") {
         const envelopeBytes = await composeEditEnvelope(messageId, newText);
-        await chat.sendMessage(props.requireIdentity(), props.entry.group, envelopeBytes);
+        await publishQuiet(envelopeBytes);
       }
       // Apply locally (no echo). Author == us, so the gate the
       // receive loop runs would accept it; we mirror that here.
@@ -4541,14 +4588,112 @@ function ChatView(props: {
    *  locally, drop its pin records. The single delete and the bulk one both
    *  run this (section 8). A throw means this message was not deleted. */
   async function deleteOne(messageId: number): Promise<void> {
-    if (opRouteNow() === "send") {
+    // ADR-0065 section 6 — the message's files, read BEFORE the tombstone
+    // hides them; deleted from the server once the delete is published.
+    const row = uniqueRows().find((r) => rowMessageId(r) === messageId);
+    const blobIds =
+      row?.kind === "outgoing" ? blobIdsOfRefs(row.attachments) : row?.kind === "incoming" && row.event.kind === "application" ? blobIdsOfRefs(row.event.attachments) : [];
+    const published = opRouteNow() === "send";
+    if (published) {
       const envelopeBytes = await composeDeleteEnvelope(messageId);
-      await chat.sendMessage(props.requireIdentity(), props.entry.group, envelopeBytes);
+      await publishQuiet(envelopeBytes);
     }
     setMsgOps(applyOp(msgOps(), { op: "delete", target: messageId }));
     // Section 4.1 — a deleted message leaves the bar and its pin records
     // go with it.
     void pins.messageDeleted(props.entry.groupIdB64, messageId);
+    savedMessageDeleted(messageId);
+    const account = blobAccount();
+    if (published && account !== null) void deleteBlobs(account, blobIds);
+  }
+
+  /** ADR-0065 section 3 — a message its author deleted for everyone leaves
+   *  Saved, as it leaves the pinned bar. */
+  function savedMessageDeleted(messageId: number): void {
+    if (!isSavedOf(messageId)) return;
+    void sync.applyFolderEdits([unsaveEdit(savedRef(), messageId)]).catch(() => undefined);
+  }
+
+  /** What a Save of `messageId` records, from the row this view holds. */
+  function saveSourceOf(rowId: number): SaveSource | null {
+    const target = savedTarget(rowId);
+    if (target === null) return null;
+    const messageId = target.messageId;
+    const row = uniqueRows().find((r) => rowMessageId(r) === rowId);
+    if (row === undefined) return null;
+    if (row.kind === "outgoing") {
+      return {
+        ref: savedRefOf(target.groupId),
+        messageId,
+        author: profiles.ownProfile().displayName ?? profiles.ownUsername() ?? t("chat.author.you"),
+        text: (msgOps().get(rowId) ?? historyOps().get(rowId))?.editedText ?? row.plaintext,
+        attachments: row.attachments,
+        sentAtMs: row.createdAt === undefined ? 0 : new Date(row.createdAt).getTime(),
+      };
+    }
+    if (row.kind === "incoming" && row.event.kind === "application") {
+      const ev = row.event;
+      return {
+        ref: savedRefOf(target.groupId),
+        messageId,
+        author: ev.senderKey === undefined ? t("chat.members.unnamed") : memberName(ev.senderKey),
+        text: (msgOps().get(rowId) ?? historyOps().get(rowId))?.editedText ?? ev.text,
+        attachments: ev.attachments,
+        sentAtMs: new Date(ev.createdAt).getTime(),
+      };
+    }
+    return null;
+  }
+
+  /** ADR-0065 section 2 — `Save` / `Remove from saved`. */
+  async function onToggleSaved(rowId: number): Promise<void> {
+    setError(null);
+    try {
+      const target = savedTarget(rowId);
+      if (target === null) {
+        setError(() => t("chat.error.save"));
+        return;
+      }
+      if (isSavedOf(rowId)) {
+        await sync.applyFolderEdits([unsaveEdit(savedRefOf(target.groupId), target.messageId)]);
+        return;
+      }
+      const src = saveSourceOf(rowId);
+      if (src === null || saveRefusal(sync.saved().length, 1) !== null) {
+        setError(() => t("chat.error.save"));
+        return;
+      }
+      await sync.applyFolderEdits([saveEdit(src, Date.now())]);
+    } catch (err) {
+      console.warn("[chat] save failed", err instanceof Error ? err.name : "");
+      setError(() => t("chat.error.save"));
+    }
+  }
+
+  /** ADR-0065 section 2 — Select mode's Save: every selected message not
+   *  saved yet, in change sets of at most 32. */
+  async function saveSelection(): Promise<void> {
+    setError(null);
+    const edits = oldestFirst(selection())
+      .filter((id) => !isSavedOf(id))
+      .map((id) => saveSourceOf(id))
+      .filter((src): src is SaveSource => src !== null)
+      .map((src) => saveEdit(src, Date.now()));
+    if (edits.length === 0) {
+      leaveSelectionMode();
+      return;
+    }
+    if (saveRefusal(sync.saved().length, edits.length) !== null) {
+      setError(() => t("chat.error.save"));
+      return;
+    }
+    try {
+      for (const chunk of chunkSaveEdits(edits)) await sync.applyFolderEdits(chunk);
+      leaveSelectionMode();
+    } catch (err) {
+      console.warn("[chat] save failed", err instanceof Error ? err.name : "");
+      setError(() => t("chat.error.save"));
+    }
   }
 
   /** Delete our own message — publish a delete op + tombstone it
@@ -4607,7 +4752,7 @@ function ChatView(props: {
     try {
       if (opRouteNow() === "send") {
         const envelopeBytes = await composeReactionEnvelope(messageId, emoji);
-        await chat.sendMessage(props.requireIdentity(), props.entry.group, envelopeBytes);
+        await publishQuiet(envelopeBytes);
       }
       // Our own identity, not our own leaf: the chip's "mine" test
       // and the peers' fold must agree on one value that survives a
@@ -4641,16 +4786,23 @@ function ChatView(props: {
    *  read-receipt) without an optimistic bubble. Swallows failures
    *  (these signals are non-essential; the next one supersedes a
    *  dropped one). */
+  /**
+   * Publish an envelope that wakes nobody: an edit, a deletion, a reaction,
+   * a typing signal or a read receipt. Only a message the person would want
+   * to be told about (text, media) is sent with a push wake (`sendMessage`);
+   * before this, every keystroke's typing signal woke the other person with
+   * "New message". The same rule as the iOS and Android clients.
+   */
+  async function publishQuiet(envelopeBytes: Uint8Array): Promise<void> {
+    await chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes);
+  }
+
   async function publishEphemeral(envelopeBytes: Uint8Array): Promise<void> {
     // ADR-0073 R.7 case 1 — a typing signal or a read receipt is not sent
     // into a superseded one-to-one either (the publish would refuse it).
     if (opRouteNow() !== "send") return;
     try {
-      await chat.sendMessage(
-        props.requireIdentity(),
-        props.entry.group,
-        envelopeBytes,
-      );
+      await publishQuiet(envelopeBytes);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("publishEphemeral failed", err);
@@ -4897,6 +5049,9 @@ function ChatView(props: {
                 limit: formatAttachmentSize(max),
               }),
             );
+          } else if (isSendLimit(err)) {
+            // UX 4.2 — the text stays in the composer.
+            setError(() => sendLimitText());
           } else {
             const name = file.name;
             console.warn("[chat] attachment upload failed", err);
@@ -5017,9 +5172,12 @@ function ChatView(props: {
   }
 
   function removePendingAttachment(index: number): void {
+    const removed = pendingAttachments()[index];
     setPendingAttachments(
       pendingAttachments().filter((_, i) => i !== index),
     );
+    // ADR-0065 section 6 — removed from the composer: never sent, so gone.
+    if (removed !== undefined) deleteUnsent([removed]);
   }
 
   // ----- ADR-0047 media messages ----------------------------------------
@@ -5051,6 +5209,16 @@ function ChatView(props: {
     reply?: ReplyRef;
   }
   const mediaJobs = new Map<number, MediaSendJob>();
+  // ADR-0065 section 6 — leaving the chat abandons what was uploaded and not
+  // sent: the composer's staged files and media takes that never went out.
+  onCleanup(() => {
+    const unsent: AttachmentRefBytes[] = [...pendingAttachments()];
+    for (const job of mediaJobs.values()) {
+      if (job.uploaded === undefined) continue;
+      unsent.push(job.uploaded);
+    }
+    if (unsent.length > 0) deleteUnsent(unsent);
+  });
   const [mediaUploads, setMediaUploads] = createSignal<ReadonlyMap<number, number | "failed">>(new Map());
   function setMediaUpload(tempId: number, value: number | "failed" | null): void {
     const next = new Map(mediaUploads());
@@ -5215,6 +5383,7 @@ function ChatView(props: {
       }
       setMediaUpload(job.tempId, "failed");
       setMediaRowAck(job.tempId, "failed");
+      if (isSendLimit(err)) setError(() => sendLimitText());
       if (err instanceof AttachmentSizeError) {
         const { got, max } = err;
         setError(() =>
@@ -5397,8 +5566,12 @@ function ChatView(props: {
         ref.mime,
       );
     } catch (err) {
-      if (err instanceof AttachmentMissingError) {
-        setError(() => t("chat.attachment.error.gone"));
+      // UX 4.1 / 4.2 — gone, limited, or the generic failure.
+      const failure = openFailureOf(err);
+      if (failure === "gone") {
+        setError(() => `${goneLines().title} ${goneLines().body}`);
+      } else if (failure === "limit") {
+        setError(() => openLimitText());
       } else {
         console.warn("[chat] attachment download failed", err);
         setError(() => t("chat.attachment.error.download"));
@@ -5437,8 +5610,11 @@ function ChatView(props: {
       // when this view unmounts.
       await hub.load(ref);
     } catch (err) {
-      if (err instanceof AttachmentMissingError) {
-        setError(() => t("chat.attachment.error.gone"));
+      const failure = openFailureOf(err);
+      if (failure === "gone") {
+        setError(() => `${goneLines().title} ${goneLines().body}`);
+      } else if (failure === "limit") {
+        setError(() => openLimitText());
       } else {
         console.warn("[chat] attachment preview failed", err);
         setError(() => t("chat.attachment.error.preview"));
@@ -5665,120 +5841,47 @@ function ChatView(props: {
     setNotice(null);
     setBusy(true);
     try {
-      // C-61 — rotate STRICTLY AFTER the Remove commit is published. Both
-      // guarantees the ordering buys depend on it:
-      //
-      //   - forward secrecy (ADR-0043): the distribution envelope is an MLS
-      //     application message, so sealed BEFORE the commit it is readable
-      //     by the member being evicted (still in that epoch) and the
-      //     rotation buys nothing;
-      //   - recency (ADR-0044): the new secret is stamped with `group.epoch`
-      //     at mint time, so after the commit it strictly out-ranks the
-      //     secret it replaces. Before it, it would TIE with a stale secret
-      //     minted at the same epoch and win or lose on the byte tiebreak.
-      //
-      // The sequencing lives in `publishRemoveThenRotate` rather than in two
-      // adjacent statements here, so it is pinned by a test instead of by
-      // convention.
-      //
-      // Owner-or-admin (ADR-0043 ratified option (b)) — the gate lives inside
-      // `rotatePushRoutingSecret`, which also no-ops when this device holds no
-      // secret, so rotation never becomes a second mint path.
-      //
-      // Fire-and-forget: push is best-effort and a failed rotation must not
-      // unwind the removal. A failed BROADCAST leaves the row pending, and
-      // the existing `ensureGroupPushRouting` re-broadcast branch re-sends it
-      // on the next chat-open / launch.
-      const session = auth.state();
-
-      // ADR-0045 — on the proposal path the removal does NOT happen here: this
-      // publishes a request, and the member leaves the group only when a
-      // committer sweeps it. That moves C-61 with it.
-      //
-      // C-61 requires the rotation to follow the Remove COMMIT, because the
-      // distribution envelope is an MLS application message: sealed before the
-      // commit, it is readable by the leaf being evicted and the rotation buys
-      // nothing. Rotating after publishing a *proposal* would do exactly that —
-      // the proposal advances no epoch, so the evicted member is still in the
-      // one the new secret would be sealed at.
-      //
-      // So the rotation moves to where the removal actually lands: the sweep,
-      // via the same membership-SHRINK detection the poll loop already runs for
-      // someone else's removal. `sweepNow` captures the roster either side and
-      // rotates when it shrinks, which keeps the ordering correct by
-      // construction rather than by an argument about two adjacent statements.
-      if (usesProposalPath()) {
-        // ADR-0045 UX §7 — armed against the member's signature key, resolved
-        // now and re-resolved to a leaf at fire time. A torn roster read means
-        // no retry for this attempt rather than a retry against a guess.
-        const targetKeyB64 = rosterViews().find(
-          (m) => m.leafIndex === leafIndex,
-        )?.signatureKeyB64;
-        const removeRun = () =>
-          contacts.removeMemberFromGroup(
-            props.requireIdentity(),
-            props.entry.group,
-            leafIndex,
-          );
-        const proposed =
-          targetKeyB64 === undefined
-            ? await removeRun()
-            : await withMembershipRetry(
-                { kind: "remove", subjectKeyB64: targetKeyB64 },
-                removeRun,
-              );
-        chat.markOwnPublishedCommit(
-          props.entry.groupIdB64,
-          proposed.kind === "committed"
-            ? proposed.commitMessageId
-            : proposed.proposalMessageId,
+      // ADR-0045 — the removal does NOT happen here: this publishes a request,
+      // and the member leaves the group only when a committer sweeps it. That
+      // moves C-61 with it: the push-routing rotation must follow the Remove
+      // COMMIT (an envelope sealed before it is readable by the leaf being
+      // evicted, and stamped at an epoch that only ties with the secret it
+      // still holds), so it runs where the removal lands — the sweep, via the
+      // membership-shrink detection `sweepNow` and the poll loop share.
+      // ADR-0081 amendment (2026-10-19): there is no direct-commit removal any
+      // more; a group with no role table is refused by `removeMemberFromGroup`.
+      // ADR-0045 UX §7 — armed against the member's signature key, resolved
+      // now and re-resolved to a leaf at fire time. A torn roster read means
+      // no retry for this attempt rather than a retry against a guess.
+      const targetKeyB64 = rosterViews().find(
+        (m) => m.leafIndex === leafIndex,
+      )?.signatureKeyB64;
+      const removeRun = () =>
+        contacts.removeMemberFromGroup(
+          props.requireIdentity(),
+          props.entry.group,
+          leafIndex,
         );
-        if (proposed.kind === "proposed") noteOwnRequest(`remove:${leafIndex}`);
-        const swept = await sweepNow();
-        setMemberCount(peopleCountOf(props.entry.group));
-        setMembersVersion(membersVersion() + 1);
-        const removeLanded = swept?.kind === "committed";
-        setNotice(() =>
-          removeLanded ? t("chat.members.remove.done") : t("chat.members.remove.requested"),
-        );
-        void refresh();
-        return;
-      }
-
-      const result = await publishRemoveThenRotate({
-        publishRemove: async () => {
-          const removed = await contacts.removeMemberFromGroup(
-            props.requireIdentity(),
-            props.entry.group,
-            leafIndex,
-          );
-          if (removed.kind === "committed") {
-            chat.markOwnPublishedCommit(props.entry.groupIdB64, removed.commitMessageId);
-          }
-          return removed;
-        },
-        rotate:
-          session.kind === "session"
-            ? async (): Promise<PushRotationOutcome> =>
-                rotatePushRoutingSecret(
-                  session.account.accountId,
-                  props.entry.group,
-                  // Live role read, same reason as the poll path: the
-                  // `ownRole()` signal can still hold a pre-commit value.
-                  await readOwnRoleNow(),
-                  broadcastToGroup,
-                )
-            : undefined,
-        onRotationError: (err) => {
-          // eslint-disable-next-line no-console
-          console.warn("push-routing rotation failed", err);
-        },
-      });
+      const proposed =
+        targetKeyB64 === undefined
+          ? await removeRun()
+          : await withMembershipRetry(
+              { kind: "remove", subjectKeyB64: targetKeyB64 },
+              removeRun,
+            );
+      chat.markOwnPublishedCommit(
+        props.entry.groupIdB64,
+        proposed.kind === "committed"
+          ? proposed.commitMessageId
+          : proposed.proposalMessageId,
+      );
+      if (proposed.kind === "proposed") noteOwnRequest(`remove:${leafIndex}`);
+      const swept = await sweepNow();
       setMemberCount(peopleCountOf(props.entry.group));
       setMembersVersion(membersVersion() + 1);
-      const removeCommitted = result.kind === "committed";
+      const removeLanded = swept?.kind === "committed";
       setNotice(() =>
-        removeCommitted ? t("chat.members.remove.done") : t("chat.members.remove.requested_short"),
+        removeLanded ? t("chat.members.remove.done") : t("chat.members.remove.requested"),
       );
       void refresh();
     } catch (err) {
@@ -5981,9 +6084,9 @@ function ChatView(props: {
     }
   }
 
-  // ADR-0028 revoke — kill the currently-shown group invite link. A pointer
-  // link carries a ledger blob the server deletes (issuer-signed); an inline
-  // link has no ledger row, so we just clear the field.
+  // ADR-0028 revoke — kill the currently-shown group invite link: the ledger
+  // row is deleted with this device's revocation seed; without a kept seed
+  // the field is only cleared.
   async function onRevokeInviteLink(): Promise<void> {
     const link = inviteLink();
     if (!link) return;
@@ -6667,6 +6770,17 @@ function ChatView(props: {
     });
   });
 
+  /** Who the header's info opens for a person: their contact record, else -
+   *  a person the viewer removed, whose conversation remains - the peer of
+   *  this one-to-one, whose card then offers `Add to contacts`. */
+  const infoPerson = (): { readonly signaturePubkeyB64: string } | null => {
+    const record = personRecord();
+    if (record !== null) return record;
+    if (isGroupChat()) return null;
+    const peer = peerKeyB64();
+    return peer === null ? null : { signaturePubkeyB64: peer };
+  };
+
   // The timeline scrolls in its own region. Follow new rows while the reader
   // is at (or near) the bottom; leave the position alone once they have
   // scrolled up to read.
@@ -6950,12 +7064,17 @@ function ChatView(props: {
           // A dialog only where one opens: a contact's info is their own
           // page, and the button is then a plain link-like control.
           aria-haspopup={
-            infoOpening(infoTarget(), personRecord()) === "layer" ? "dialog" : undefined
+            infoOpening(infoTarget(), infoPerson()) === "layer" ? "dialog" : undefined
           }
           aria-expanded={infoOpen()}
           onClick={openInfo}
         >
-          <Avatar label={resolvePeerName()} id={props.entry.groupIdB64} size="sm" />
+          <Avatar
+            label={resolvePeerName()}
+            id={props.entry.groupIdB64}
+            size="sm"
+            personKey={isGroupChat() ? undefined : (peerKeyB64() ?? undefined)}
+          />
           <div class="lk-chat-title-text">
             {/* ADR-0021 follow-up: show the linked contact's user-chosen
                 name in the chat header (falls back to the chat label). */}
@@ -7109,6 +7228,7 @@ function ChatView(props: {
           <QuietIncomingCallPanel
             callerName={resolvePeerName()}
             callerId={props.entry.groupIdB64}
+            callerKey={isGroupChat() ? null : peerKeyB64()}
             video={offer().video}
             onAccept={(withVideo) => void callHost.acceptIncomingCall(withVideo)}
             onDecline={() => void callHost.declineIncomingCall()}
@@ -7560,12 +7680,19 @@ function ChatView(props: {
                           gap: "0.5rem",
                         }}
                       >
+                        <Avatar
+                          label={pendingJoinLabel(props.entry.group, ref, base64Encode, (k) => profiles.resolve(k))}
+                          id={pendingJoinPersonKey(props.entry.group, ref, base64Encode)}
+                          size="sm"
+                          personKey={pendingJoinPersonKey(props.entry.group, ref, base64Encode)}
+                        />
                         <div
                           style={{
                             display: "flex",
                             "flex-direction": "column",
                             gap: "0.1rem",
                             overflow: "hidden",
+                            flex: "1",
                           }}
                         >
                           <span class="lk-ellipsis" style={{ "font-size": "0.85rem" }}>
@@ -7872,7 +7999,7 @@ function ChatView(props: {
                       class="lk-row"
                       style={{ padding: "8px 10px", gap: "10px" }}
                     >
-                      <Avatar label={label()} id={memberKeyB64} size="sm" />
+                      <Avatar label={label()} id={memberKeyB64} size="sm" personKey={memberKeyB64} />
                       <span
                         style={{
                           display: "flex",
@@ -8211,6 +8338,7 @@ function ChatView(props: {
                           checked={transferPick() === row.signatureKeyB64}
                           onChange={() => setTransferPick(row.signatureKeyB64)}
                         />
+                        <Avatar label={row.label} id={row.signatureKeyB64} size="sm" personKey={row.signatureKeyB64} />
                         <span aria-hidden="true">{row.label}</span>
                         {/* MARK, do not filter and do not sort. Who is already an
                             admin is information the owner assigned and is worth
@@ -8460,6 +8588,8 @@ function ChatView(props: {
                 onForward={(id) => setForwardingId(id)}
                 pinLabelOf={pinLabelOf}
                 onPin={onPinRow}
+                isSavedOf={isSavedOf}
+                onToggleSaved={(id) => void onToggleSaved(id)}
                 onOpenForwardOrigin={onOpenForwardOrigin}
                 onSaveEdit={onSaveEdit}
                 onDeleteMessage={onDeleteMessage}
@@ -8468,11 +8598,15 @@ function ChatView(props: {
                 // is read-only: no op can name it in this group's journal.
                 actionsAvailable={messageActionsAvailable() && !isHistoryRowId(rowMessageId(row()))}
                 // ...except that a pin of an older segment can be removed.
-                unpinOnly={((): boolean => {
+                // ...and (2026-10-27) saved: an older segment's row opens the
+                // restricted menu for Save, with Unpin only where it is offered.
+                unpinOnly={isHistoryRowId(rowMessageId(row()))}
+                pinRowShown={((): boolean => {
                   const id = rowMessageId(row());
+                  if (!isHistoryRowId(id)) return true;
                   return (
                     id !== undefined &&
-                    historyRowOffersUnpin({ isHistoryRow: isHistoryRowId(id), pinRow: pinLabelOf(id) })
+                    historyRowOffersUnpin({ isHistoryRow: true, pinRow: pinLabelOf(id) })
                   );
                 })()}
                 hub={hub}
@@ -8768,6 +8902,15 @@ function ChatView(props: {
             >
               <Icon name="forward" size={18} />
               <span>{t("chat.message.forward")}</span>
+            </button>
+            <button
+              type="button"
+              class="lk-select-action"
+              disabled={selection().size === 0}
+              onClick={() => void saveSelection()}
+            >
+              <Icon name="bookmark" size={18} />
+              <span>{t("chat.select.save")}</span>
             </button>
             <button
               type="button"

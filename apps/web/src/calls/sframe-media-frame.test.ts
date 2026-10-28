@@ -22,6 +22,7 @@ import init, {
   mediaClearPrefixLen,
   mediaCodecFromMime,
   parseMediaFrame,
+  redPrimary,
   vp8IsKeyFrame,
 } from "../../wasm/lakko_ffi_wasm";
 import {
@@ -32,6 +33,7 @@ import {
   type CodecResolver,
 } from "./sframe-codec";
 import { openFrame, sealFrame, type SealState } from "./sframe-seal-stream";
+import { redReceive } from "./sframe-worker-core";
 
 const SEED = new Uint8Array(32).fill(0x42);
 const LEAF = 3;
@@ -94,6 +96,12 @@ function harness(mediaKind: "audio" | "video", stream = CAMERA): Harness {
 
 const bytesOf = (frame: { data: ArrayBuffer }): Uint8Array => new Uint8Array(frame.data);
 
+/** The worker's key-free read of a sealed frame. */
+const readInfo = (wire: Uint8Array): { kid: bigint; isRedOpus: boolean } => {
+  const info = parseMediaFrame(wire);
+  return { kid: info.kid, isRedOpus: info.isRedOpus };
+};
+
 beforeAll(async () => {
   const wasmPath = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await init({ module_or_path: readFileSync(wasmPath) });
@@ -150,7 +158,7 @@ describe("sealing then opening a VP8 frame", () => {
     expect(text.includes("lakko media frame")).toBe(false);
 
     const ring = new CallKeyRing(SEED);
-    const readKid = (wire: Uint8Array): bigint => parseMediaFrame(wire).kid;
+    const readKid = readInfo;
     expect(openFrame(ring, readKid, key)).toEqual({ what: "opened", kid: KID });
     expect(openFrame(ring, readKid, delta)).toEqual({ what: "opened", kid: KID });
     expect(bytesOf(key)).toEqual(VP8_KEY);
@@ -163,7 +171,7 @@ describe("sealing then opening a VP8 frame", () => {
     expect(sealFrame(state, sealed)).toBe(true);
     const wire = bytesOf(sealed);
     const ring = new CallKeyRing(SEED);
-    const readKid = (w: Uint8Array): bigint => parseMediaFrame(w).kid;
+    const readKid = readInfo;
 
     const tampered = (index: number, mask: number): { data: ArrayBuffer } => {
       const copy = wire.slice();
@@ -198,7 +206,7 @@ describe("sealing then opening a VP8 frame", () => {
   it("refuses a frame in the header-first layout", () => {
     const old = new CallKeyRing(SEED).participantKey(LEAF, CAMERA).sealFramed(VP8_KEY);
     const ring = new CallKeyRing(SEED);
-    const outcome = openFrame(ring, (w) => parseMediaFrame(w).kid, {
+    const outcome = openFrame(ring, readInfo, {
       data: old.slice().buffer as ArrayBuffer,
     });
     expect(outcome.what).not.toBe("opened");
@@ -336,5 +344,71 @@ describe("reading a sender's negotiated codecs", () => {
         },
       }),
     ).toEqual([]);
+  });
+});
+
+describe("audio RED containers (ADR-0071, amended 2026-10-26)", () => {
+  /** A container as Chrome's encoder hands it over with `audio/red`
+   *  negotiated: one redundant block of 3 bytes, then the primary. */
+  const CONTAINER = concat([0xef, 0x0f, 0x00, 0x03, 0x6f], [9, 9, 9], new TextEncoder().encode("primary"));
+  const PRIMARY = new TextEncoder().encode("primary");
+  const red = redReceive({ redPrimary }, false);
+  const redWhereBrowserDecodes = redReceive({ redPrimary }, true);
+
+  const audioFrame = (bytes: Uint8Array, metadata: unknown): TestFrame => ({
+    data: bytes.slice().buffer as ArrayBuffer,
+    getMetadata: () => metadata,
+  });
+
+  const sealedRed = (): Uint8Array => {
+    const { state } = harness("audio", 0);
+    const frame = audioFrame(CONTAINER, { mimeType: "audio/red", payloadType: 63 });
+    expect(sealFrame(state, frame)).toBe(true);
+    return bytesOf(frame);
+  };
+
+  it("a sender seals a RED container marked as one, with nothing in the clear", () => {
+    expect(mediaCodecFromMime("audio/red")).toBe(MediaCodec.RedOpus);
+    const wire = sealedRed();
+    const info = parseMediaFrame(wire);
+    expect(info.isRedOpus).toBe(true);
+    expect(info.clearPrefixLen).toBe(0);
+    const { state } = harness("audio", 0);
+    const opus = audioFrame(PRIMARY, { mimeType: "audio/opus", payloadType: 111 });
+    expect(sealFrame(state, opus)).toBe(true);
+    expect(parseMediaFrame(bytesOf(opus)).isRedOpus).toBe(false);
+  });
+
+  it("a receiver whose decoder expects Opus gets the primary frame", () => {
+    const ring = new CallKeyRing(SEED);
+    const frame = audioFrame(sealedRed(), { mimeType: "audio/opus", payloadType: 109 });
+    expect(openFrame(ring, readInfo, frame, red).what).toBe("opened");
+    expect(bytesOf(frame)).toEqual(PRIMARY);
+  });
+
+  it("a receiver that negotiated RED gets the container whole", () => {
+    const ring = new CallKeyRing(SEED);
+    const frame = audioFrame(sealedRed(), { mimeType: "audio/red", payloadType: 63 });
+    expect(openFrame(ring, readInfo, frame, red).what).toBe("opened");
+    expect(bytesOf(frame)).toEqual(CONTAINER);
+  });
+
+  it("with no codec in the metadata, the browser's own RED support decides", () => {
+    const ring = new CallKeyRing(SEED);
+    const firefox = audioFrame(sealedRed(), {});
+    expect(openFrame(ring, readInfo, firefox, red).what).toBe("opened");
+    expect(bytesOf(firefox)).toEqual(PRIMARY);
+    const chrome = audioFrame(sealedRed(), {});
+    expect(openFrame(ring, readInfo, chrome, redWhereBrowserDecodes).what).toBe("opened");
+    expect(bytesOf(chrome)).toEqual(CONTAINER);
+  });
+
+  it("an Opus frame is never read as a container", () => {
+    const { state } = harness("audio", 0);
+    const opus = audioFrame(CONTAINER, { mimeType: "audio/opus", payloadType: 111 });
+    expect(sealFrame(state, opus)).toBe(true);
+    const ring = new CallKeyRing(SEED);
+    expect(openFrame(ring, readInfo, opus, red).what).toBe("opened");
+    expect(bytesOf(opus)).toEqual(CONTAINER);
   });
 });

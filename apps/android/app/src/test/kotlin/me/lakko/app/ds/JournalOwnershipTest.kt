@@ -47,21 +47,28 @@ class JournalOwnershipTest {
     }
 
     @Test
-    fun `register-before-publish signs N+1 with the chosen signer and carries the revoke list`() = runTest {
+    fun `the commit signs N+1 with the chosen signer, carries the revoke list and the row, and is proven under N`() = runTest {
         val registrar = RecordingStatementSigner("registrar")
         val revoke = listOf(key(0x44))
-        var putPath: String? = null
-        val current = registerEpochBeforePublish(
+        var postPath: String? = null
+        var provenAt: ULong? = null
+        commitEpochWith(
             journalId = journal,
             before = FakeJournalSigner(4uL),
             after = FakeJournalSigner(5uL),
             statements = registrar,
             revoke = revoke,
-        ) { make -> putPath = make().path }
-        assertEquals(4uL, current.epoch)
+            row = byteArrayOf(0x5A),
+        ) { make, proof ->
+            postPath = make().path
+            provenAt = proof.epoch
+            DsCommitAnswer(id = 1, createdAt = "t", resent = false)
+        }
+        assertEquals(4uL, provenAt)
         assertEquals(listOf("register@5"), registrar.calls)
         assertArrayEquals(revoke.single(), registrar.lastRevoke.single())
-        assertTrue(putPath!!.endsWith("/access"))
+        assertArrayEquals(byteArrayOf(0x5A), registrar.lastRow)
+        assertTrue(postPath!!.endsWith("/commit"))
     }
 
     @Test
@@ -69,8 +76,9 @@ class JournalOwnershipTest {
         var puts = 0
         assertThrows(DsRegistrationUnavailable::class.java) {
             runBlocking {
-                registerEpochBeforePublish(journal, FakeJournalSigner(1uL), FakeJournalSigner(2uL), null, emptyList()) {
+                commitEpochWith(journal, FakeJournalSigner(1uL), FakeJournalSigner(2uL), null, emptyList(), byteArrayOf(1)) { _, _ ->
                     puts += 1
+                    DsCommitAnswer(id = 1, createdAt = "t", resent = false)
                 }
             }
         }
@@ -545,14 +553,6 @@ class JournalOwnershipTest {
         }
     }
 
-    @Test
-    fun `a push binding refusal is classified, never thrown`() {
-        assertEquals(PushBindingOutcome.BOUND, pushBindingOutcomeOf(null))
-        assertEquals(PushBindingOutcome.CONFLICT, pushBindingOutcomeOf(DsHttpError(409, "/push-binding", "")))
-        assertEquals(PushBindingOutcome.DISABLED, pushBindingOutcomeOf(DsHttpError(503, "/push-binding", "push-binding-disabled")))
-        assertEquals(PushBindingOutcome.FAILED, pushBindingOutcomeOf(IllegalStateException("x")))
-    }
-
     // ------------------------------------------------------------ second security pass
 
     @Test
@@ -574,20 +574,23 @@ class JournalOwnershipTest {
     }
 
     @Test
-    fun `a commit registration is an append`() = runTest {
+    fun `a commit registration is an append on the commit route`() = runTest {
         val root = RecordingStatementSigner("root")
-        registerEpochBeforePublish(journal, FakeJournalSigner(4uL), FakeJournalSigner(5uL), root, emptyList()) { make -> make() }
+        commitEpochWith(journal, FakeJournalSigner(4uL), FakeJournalSigner(5uL), root, emptyList(), byteArrayOf(1)) { make, _ ->
+            make()
+            DsCommitAnswer(id = 1, createdAt = "t", resent = false)
+        }
         assertEquals(listOf("register@5"), root.calls)
     }
 
     @Test
-    fun `an append 409 aborts the commit and never sends a replace`() {
+    fun `a lost epoch aborts the commit and never sends a replace`() {
         val root = RecordingStatementSigner("root")
-        assertThrows(DsHttpError::class.java) {
+        assertThrows(DsCommitConflictError::class.java) {
             runBlocking {
-                registerEpochBeforePublish(journal, FakeJournalSigner(4uL), FakeJournalSigner(5uL), root, emptyList()) { make ->
+                commitEpochWith(journal, FakeJournalSigner(4uL), FakeJournalSigner(5uL), root, emptyList(), byteArrayOf(1)) { make, _ ->
                     make()
-                    throw DsHttpError(409, "/access", "")
+                    throw DsCommitConflictError("/commit", "")
                 }
             }
         }

@@ -20,23 +20,18 @@ import LakkoCore
 /// key + the present-key set, and (b) computes that present-key set from what
 /// the client can observe on the SFU roster.
 ///
-/// ## Presence — what the reference can and cannot bind
+/// ## Presence — how a peer is bound to a member
 ///
 ///   * **Self** — this client is connected, so its own signature key is always
 ///     present.
-///   * **Owner** — the owner's per-call `peer_tag`
-///     (`sfuPeerTag(call_id, owner_account_id)`, ADR-0021) is re-derivable from
-///     the capability's `owner_account_id`, so the owner is present iff that tag
-///     appears in the current roster. This makes the common case (owner-present
-///     → owner commits) and the reclaim case (owner returns → tag reappears →
-///     committer reverts to the owner) fully correct.
-///
-/// A NON-owner member's leaf↔peer binding is the documented residual: a stranger
-/// joiner only knows its own + the owner's account id, so it binds a non-owner
-/// member opportunistically when it observes a relay FROM that peer
-/// (``CallPresence/bindPeerToMember(peerId:memberKeyHex:)``). Per ADR-0032 this
-/// is a low-severity residual (a redirected joiner lands in an isolated group,
-/// never a plaintext or cross-group E2EE break).
+///   * **Every other member, the owner included** — each participant announces
+///     its own SFU peer id, signed with its MLS leaf key and sealed under the
+///     call seed (ADR-0078 section 2, ``CallRelay``); a verified announcement
+///     binds that peer to that leaf
+///     (``CallPresence/bindPeerToMember(peerId:memberKeyHex:)``). The owner is
+///     present iff a peer in the roster announced the capability's owner key.
+///     This replaces the ADR-0021 peer tag the SFU used to send; a member that
+///     has not announced yet is treated as absent until it does.
 
 /// Lowercase-hex of a byte slice — the canonical key form used everywhere in
 /// the ADR-0032 orchestration (leaf indices renumber across removes; signature
@@ -84,37 +79,31 @@ func electActingCommitterLeaf(
 /// Accessed only from the `@MainActor`-isolated ``MultiJoinerCall``, so it needs
 /// no internal synchronisation.
 final class CallPresence {
-    /// peer_id → peer_tag (empty string when the SFU emits no tag).
-    private var roster: [String: String] = [:]
-    /// peer_id → member signature-key hex, learned from a relay's `from`.
+    /// The peer ids currently in the SFU room.
+    private var roster: Set<String> = []
+    /// peer_id → member signature-key hex, from a verified announcement
+    /// (ADR-0078 section 2) or the committer's own admission of a KeyPackage
+    /// relayed by that peer.
     private var peerToMember: [String: String] = [:]
 
     /// This client's own signature-key hex — always present.
     private let selfKeyHex: String
     /// The capability owner's signature-key hex.
     private let ownerKeyHex: String
-    /// The owner's per-call `peer_tag` (`sfuPeerTag(call_id, owner_account_id)`),
-    /// or `nil` when this client IS the owner (then owner-presence rides
-    /// `selfKeyHex`).
-    private let ownerPeerTag: String?
 
-    init(selfKeyHex: String, ownerKeyHex: String, ownerPeerTag: String?) {
+    init(selfKeyHex: String, ownerKeyHex: String) {
         self.selfKeyHex = selfKeyHex
         self.ownerKeyHex = ownerKeyHex
-        self.ownerPeerTag = ownerPeerTag
     }
 
     /// Replace the roster from an SFU `Welcome` snapshot.
-    func setRoster(_ entries: [(peerId: String, peerTag: String)]) {
-        roster.removeAll(keepingCapacity: true)
-        for entry in entries {
-            roster[entry.peerId] = entry.peerTag
-        }
+    func setRoster(_ peerIds: [String]) {
+        roster = Set(peerIds)
     }
 
     /// A peer joined the SFU room.
-    func addPeer(peerId: String, peerTag: String) {
-        roster[peerId] = peerTag
+    func addPeer(peerId: String) {
+        roster.insert(peerId)
     }
 
     /// The member signature-key hex bound to a peer, or `nil` when this client
@@ -127,27 +116,25 @@ final class CallPresence {
 
     /// A peer left the SFU room. Also drops any member binding it had.
     func removePeer(peerId: String) {
-        roster.removeValue(forKey: peerId)
+        roster.remove(peerId)
         peerToMember.removeValue(forKey: peerId)
     }
 
-    /// Opportunistically bind a peer to a member signature key — learned when a
-    /// relay arrives FROM that peer carrying a KeyPackage (committer side) or a
-    /// Welcome (joiner side, binds the committer/owner peer).
+    /// Bind a peer to a member signature key: from that peer's verified
+    /// announcement, or (committer side) from the KeyPackage it relayed and
+    /// this client admitted. A later announcement replaces it.
     func bindPeerToMember(peerId: String, memberKeyHex: String) {
         peerToMember[peerId] = memberKeyHex
     }
 
-    /// `true` iff the owner is currently present (this client is the owner, or
-    /// the owner's peer_tag is in the roster). Load-bearing for the common case
-    /// + reclaim.
+    /// `true` iff the owner is currently present: this client is the owner, or
+    /// a peer in the roster announced the owner's key. Load-bearing for the
+    /// common case + reclaim.
     func ownerPresent() -> Bool {
         if ownerKeyHex == selfKeyHex { return true }
-        guard let tag = ownerPeerTag, !tag.isEmpty else { return false }
-        for value in roster.values where !value.isEmpty {
-            if value == tag { return true }
+        return peerToMember.contains { peerId, memberKeyHex in
+            memberKeyHex == ownerKeyHex && roster.contains(peerId)
         }
-        return false
     }
 
     /// The present member signature-key set for the election: self, the owner
@@ -156,7 +143,7 @@ final class CallPresence {
     func presentKeySet() -> Set<String> {
         var present: Set<String> = [selfKeyHex]
         if ownerPresent() { present.insert(ownerKeyHex) }
-        for (peerId, memberKeyHex) in peerToMember where roster[peerId] != nil {
+        for (peerId, memberKeyHex) in peerToMember where roster.contains(peerId) {
             present.insert(memberKeyHex)
         }
         return present

@@ -80,6 +80,10 @@ public data class IncomingCallRing(
      * has no way to resolve it still rings rather than silently going quiet.
      */
     val muted: Boolean = false,
+    /** ADR-0084 — the caller's signature key (standard base64), mirrored
+     *  from the same source as [callerName], so the ring shows their photo.
+     *  `null` when the caller is not known. */
+    val callerKeyB64: String? = null,
 )
 
 /** The two verbs, so the host and the push path share one implementation. */
@@ -213,6 +217,8 @@ public sealed interface CallRingSignal {
         val video: Boolean,
         val offeredAtMs: Long?,
         val callerName: String? = null,
+        /** ADR-0084 — the caller's signature key, standard base64. */
+        val callerKeyB64: String? = null,
     ) : CallRingSignal
 
     /** The call is over: the caller cancelled, or it was answered elsewhere. */
@@ -274,6 +280,7 @@ public fun foldCallRingSignals(
                     video = signal.video,
                     offeredAtMs = signal.offeredAtMs,
                     muted = muted,
+                    callerKeyB64 = signal.callerKeyB64,
                 )
             }
             is CallRingSignal.End -> {

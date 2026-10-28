@@ -114,31 +114,50 @@ class ContactListPresentationTest {
         assertEquals(OTHER_SECTION, sectionLetterOf(row("k", "  ")))
         assertEquals(OTHER_SECTION, sectionLetterOf(row("k", "_under")))
     }
+
+    /** docs/ux/conversation-info.md section 2.1, amended 2026-10-24. */
+    @Test
+    fun `a removed person's card is built from the one-to-one they still have`() {
+        val key = ByteArray(32) { 0x21 }
+        val route = contactRouteKey(key)
+        val card = removedPeerContact(route) { k -> if (k.contentEquals(key)) "beef" else null }
+        assertTrue(card != null && card.request.fromPubkey.contentEquals(key))
+        assertEquals("beef", card?.groupIdHex)
+        // No one-to-one, or a malformed key: no card.
+        assertEquals(null, removedPeerContact(route) { null })
+        assertEquals(null, removedPeerContact("not base64url!") { "beef" })
+    }
 }
 
 /** The invite-links sheet rules. */
 class InviteLinkRowsTest {
 
-    private fun row(slug: String, createdAtMs: Long? = null, expiryMs: Long = 1_000L, usesLeft: Long? = null, fromSession: Boolean = createdAtMs != null) =
+    private fun row(slug: String, createdAtMs: Long? = null, expiryMs: Long = 1_000L, maxUses: Long = 0L, fromSession: Boolean = createdAtMs != null) =
         InviteLinkRow(
             slug = slug, url = "https://lakko.me/i/$slug", label = "", createdAtMs = createdAtMs,
-            expiryMs = expiryMs, usesLeft = usesLeft, fromSession = fromSession,
+            expiryMs = expiryMs, maxUses = maxUses, fromSession = fromSession,
         )
 
     @Test
-    fun `uses left follows the wire sentinels and never goes negative`() {
-        assertEquals(null, invitesUsesLeft(INVITE_UNLIMITED_USES, 5))
-        assertEquals(1L, invitesUsesLeft(0L, 0))
-        assertEquals(0L, invitesUsesLeft(0L, 1))
-        assertEquals(7L, invitesUsesLeft(10L, 3))
-        assertEquals(0L, invitesUsesLeft(2L, 9))
+    fun `a link without a label has no title line`() {
+        assertEquals(null, inviteRowTitle(row("a")))
+        assertEquals(null, inviteRowTitle(row("a").copy(label = "   ")))
+        assertEquals("Work", inviteRowTitle(row("a").copy(label = " Work ")))
     }
 
     @Test
-    fun `merge keeps the session row, takes the server count, and orders`() {
+    fun `the limit follows the wire sentinels`() {
+        assertEquals("unlimited", describeInviteLimit(INVITE_UNLIMITED_USES).en)
+        assertEquals("single-use", describeInviteLimit(0L).en)
+        assertEquals("single-use", describeInviteLimit(1L).en)
+        assertEquals("up to 10 uses", describeInviteLimit(10L).en)
+    }
+
+    @Test
+    fun `merge keeps the session row and orders`() {
         val session = listOf(row("a", createdAtMs = 10L), row("b", createdAtMs = 20L))
         val server = listOf(
-            row("a", expiryMs = 500L, usesLeft = 3L),
+            row("a", expiryMs = 500L, maxUses = 3L),
             row("z", expiryMs = 0L),
             row("c", expiryMs = 900L),
             row("d", expiryMs = 100L),
@@ -147,7 +166,6 @@ class InviteLinkRowsTest {
         assertEquals(listOf("b", "a", "d", "c", "z"), merged.map { it.slug })
         val a = merged.first { it.slug == "a" }
         assertEquals(10L, a.createdAtMs)
-        assertEquals(3L, a.usesLeft)
         assertTrue(a.fromSession)
         assertTrue(merged.none { it.slug == "a" && it.createdAtMs == null })
     }
@@ -160,9 +178,22 @@ class InviteLinkRowsTest {
         assertEquals("Expires in 2d", describeInviteExpiry(now + 2 * 24 * 3_600_000L + 5, now).en)
         assertEquals("Expires in 3h", describeInviteExpiry(now + 3 * 3_600_000L + 5, now).en)
         assertEquals("Expires in 1m", describeInviteExpiry(now + 10, now).en)
-        assertEquals(null, describeUsesLeft(null)?.en)
-        assertEquals("1 use left", describeUsesLeft(1L)?.en)
-        assertEquals("0 uses left", describeUsesLeft(0L)?.en)
-        assertEquals("4 uses left", describeUsesLeft(4L)?.en)
+    }
+
+    @Test
+    fun `expiry rounds to the nearest unit, minutes up`() {
+        val now = 1_000_000L
+        val min = 60_000L
+        val hour = 60 * min
+        val day = 24 * hour
+        // A 7-day link made an hour ago still reads 7d (was a floored 6d).
+        assertEquals("Expires in 7d", describeInviteExpiry(now + 7 * day - hour, now).en)
+        assertEquals("Expires in 7d", describeInviteExpiry(now + (6.9 * day).toLong(), now).en)
+        assertEquals("Expires in 1d", describeInviteExpiry(now + (23.6 * hour).toLong(), now).en)
+        assertEquals("Expires in 23h", describeInviteExpiry(now + (23.4 * hour).toLong(), now).en)
+        assertEquals("Expires in 2d", describeInviteExpiry(now + 36 * hour, now).en)
+        assertEquals("Expires in 1h", describeInviteExpiry(now + (59.5 * min).toLong(), now).en)
+        assertEquals("Expires in 59m", describeInviteExpiry(now + 59 * min, now).en)
+        assertEquals("Expires in 1m", describeInviteExpiry(now + 30_000L, now).en)
     }
 }

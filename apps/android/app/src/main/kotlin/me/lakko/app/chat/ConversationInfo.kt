@@ -38,11 +38,12 @@ package me.lakko.app.chat
 /** Which info a conversation's header opens. */
 public sealed interface ConversationInfo {
     /**
-     * A person. [contactKey] is the route key of their contact card — every
-     * one-to-one peer is a contact by construction
-     * ([me.lakko.app.contacts.OneToOneIsAContact]), so the only way it is
-     * `null` is a roster that cannot be read (no record resolves), and then
-     * there is nothing to open: not a state with a screen.
+     * A person. [contactKey] is the route key of their card: their contact
+     * row's, else the peer's own key — a person the viewer removed keeps the
+     * conversation, and their card then offers `Add to contacts` (amended
+     * 2026-10-24). It is `null` only when no contact matches and the peer
+     * cannot be read, and then there is nothing to open: not a state with a
+     * screen.
      */
     public data class Person(val contactKey: String?) : ConversationInfo
 
@@ -88,7 +89,10 @@ public fun conversationInfo(
         contacts.firstOrNull { it.routeKey == peerRouteKey }
             ?.let { return ConversationInfo.Person(it.routeKey) }
     }
-    return ConversationInfo.Person(contactKey = null)
+    // No contact row: a person the viewer removed, whose card is opened by
+    // the peer's key (docs/ux/conversation-info.md section 2.1, amended
+    // 2026-10-24).
+    return ConversationInfo.Person(contactKey = peerRouteKey)
 }
 
 /**

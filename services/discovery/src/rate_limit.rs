@@ -539,7 +539,7 @@ pub fn spawn_pruner(limits: Arc<DiscoveryLimits>) -> tokio::task::JoinHandle<()>
 ///
 /// This relies on the service being reachable only through nginx: it binds
 /// `127.0.0.1` in production, so no client can set these headers directly.
-fn source_ip(req: &Request<Body>) -> Option<IpAddr> {
+pub(crate) fn source_ip(req: &Request<Body>) -> Option<IpAddr> {
     let header = |name: &str| req.headers().get(name).and_then(|v| v.to_str().ok());
 
     if let Some(ip) = header("x-real-ip").and_then(|s| s.trim().parse::<IpAddr>().ok()) {

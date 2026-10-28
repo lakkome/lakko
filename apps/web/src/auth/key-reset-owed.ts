@@ -39,7 +39,7 @@ export type KeyResetStep = "directory" | "device-group";
 /** The stored record. */
 export interface KeyResetOwed {
   readonly v: 1;
-  /** URL-safe base64 (no pad) of the 177-byte attestation, as auth returned
+  /** URL-safe base64 (no pad) of the 145-byte attestation, as auth returned
    *  it. Re-encoded to standard base64 for discovery and the DS. */
   readonly attestationB64Url: string;
   /** The generation the reset moved the account to (decimal string: JSON
@@ -128,14 +128,17 @@ export function isKeyResetOwed(storage: MarkerStorage | undefined, accountIdB64:
 // The pure rules
 // ---------------------------------------------------------------------------
 
-/** The fixed length of the attestation (`lakko-attest`, ADR-0073 2.2). */
-export const KEY_RESET_ATTESTATION_LEN = 177;
+/** The fixed length of the attestation (`lakko-attest`, ADR-0073 2.2;
+ *  145 bytes since ADR-0078 phase 6 dropped the DeviceGroup journal id). */
+export const KEY_RESET_ATTESTATION_LEN = 145;
 
-/** Byte offset of `signed_at_unix_millis` in the fixed layout:
- *  `version(1) ‖ account_ref(32) ‖ device_group_journal_id(32) ‖
- *  key_generation(8) ‖ new_signature_pubkey(32) ‖ signed_at(8 BE i64) ‖
- *  sig(64)`. */
-const SIGNED_AT_OFFSET = 1 + 32 + 32 + 8 + 32;
+/** Byte offset of `key_generation` in the fixed layout:
+ *  `version(1) ‖ account_ref(32) ‖ key_generation(8) ‖
+ *  new_signature_pubkey(32) ‖ signed_at(8 BE i64) ‖ sig(64)`. */
+const GENERATION_OFFSET = 1 + 32;
+
+/** Byte offset of `signed_at_unix_millis` in the same layout. */
+const SIGNED_AT_OFFSET = GENERATION_OFFSET + 8 + 32;
 
 /**
  * The attestation's `signed_at`, read off the wire layout for the record
@@ -156,7 +159,7 @@ export function keyResetAttestationGeneration(attestation: Uint8Array): bigint {
   if (attestation.length !== KEY_RESET_ATTESTATION_LEN) {
     throw new Error(`key-reset attestation is ${attestation.length} bytes, expected ${KEY_RESET_ATTESTATION_LEN}`);
   }
-  const view = new DataView(attestation.buffer, attestation.byteOffset + 1 + 32 + 32, 8);
+  const view = new DataView(attestation.buffer, attestation.byteOffset + GENERATION_OFFSET, 8);
   return view.getBigUint64(0, false);
 }
 
@@ -236,25 +239,6 @@ export function directoryResetOutcome(input: {
   if (input.status === 401 && input.errorCode === "key-generation-superseded") return "superseded";
   if (input.status === 400 && input.errorCode === "key-reset-attestation-invalid") return "refused";
   if (input.status === 409) return "refused";
-  return "retry";
-}
-
-/**
- * The DeviceGroup reset's answer (contract section 5 step 5). A `409` on a
- * retry means the generation already landed; the caller then confirms with
- * the `PUT .../root` probe naming itself (`probeConfirmedRoot`), because a
- * `409` is also what a competing registration answers.
- */
-export function deviceGroupResetOutcome(input: {
-  readonly status: number;
-  readonly errorCode: string | null;
-  /** The root probe's answer after a 409, `null` when it was not run. */
-  readonly probeConfirmedRoot: boolean | null;
-}): KeyResetStepOutcome {
-  if (input.status >= 200 && input.status < 300) return "done";
-  if (input.status === 409) return input.probeConfirmedRoot === true ? "done" : "retry";
-  if (input.status === 401) return "refused";
-  if (input.status === 400 && input.errorCode === "key-reset-attestation-invalid") return "refused";
   return "retry";
 }
 

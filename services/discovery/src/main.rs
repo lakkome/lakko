@@ -104,9 +104,6 @@
 //!   warning), and since no unattested key change is accepted any more, a
 //!   published key can then change only through a supersession proof.
 //!   Malformed: startup fails.
-//! - `LAKKO_DISCOVERY_RENAME_INTERVAL_SECS` — minimum seconds between two
-//!   renames of one account (ADR-0076 D2; default 2592000 = 30 days, chosen
-//!   not measured; 0 = no minimum).
 //! - `LAKKO_DISCOVERY_RETIRED_NAME_HOLD_SECS` — seconds a name an account
 //!   renamed away from stays unclaimable before the hourly pruner frees it
 //!   (ADR-0076 D1; default 2592000 = 30 days, chosen not measured).
@@ -121,7 +118,7 @@
 //! - `POST   /discovery/register`  — bind an account's FIRST OPRF-hashed username
 //!   (`409 username-taken` / `409 username-already-set`, ADR-0076)
 //! - `POST   /discovery/username/replace` — rename: retire the current name and bind another
-//!   (ADR-0076; `409 no-username` / `username-taken`, `429 rename-too-soon`)
+//!   (ADR-0076; `409 no-username` / `username-taken`)
 //! - `POST   /discovery/lookup`    — resolve OPRF-hashed username → account_id (Everyone only, ADR-0060)
 //! - `PUT    /discovery/visibility`  — enter / leave Everyone, publish name terms (ADR-0060)
 //! - `POST   /discovery/name/lookup` — accounts in Everyone with one name term (ADR-0060)
@@ -158,6 +155,7 @@ mod invite;
 mod key_reset;
 mod keypackage;
 mod ledger_id;
+mod locate;
 mod oprf;
 mod rate_limit;
 mod registry;
@@ -238,9 +236,9 @@ pub(crate) struct AppState {
     /// `503 key-reset-disabled`, so no published key can change without a
     /// supersession proof.
     pub(crate) key_reset_attest_key: Option<lakko_crypto::signing::VerifyingKey>,
-    /// ADR-0076 — how often an account may rename and how long a retired
-    /// name stays unclaimable (both 30 days by default; chosen).
-    pub(crate) name_policy: registry::NamePolicy,
+    /// ADR-0080 — the city database `GET /discovery/locate` reads. Knows
+    /// nothing when `LAKKO_DISCOVERY_CITY_DB` is unset or unreadable.
+    pub(crate) city_lookup: Arc<dyn locate::CityLookup>,
 }
 
 /// G-discovery-ratelimit: token buckets on the anonymous OPRF / lookup
@@ -403,7 +401,7 @@ async fn main() -> Result<()> {
         anon_tokens,
         username_cert_key: Arc::new(username_cert_key),
         key_reset_attest_key,
-        name_policy,
+        city_lookup: locate::city_lookup_from_env(),
     };
 
     let _spent_pruner = state.anon_tokens.spawn_pruner();
@@ -488,7 +486,8 @@ fn protected_routes(state: &AppState) -> Router<AppState> {
             get(visibility::get_certificate),
         )
         // A3 (GDPR erasure) — purge this account's discovery footprint
-        // (username binding, identity bundle, KeyPackage, owned invites).
+        // (username binding, identity bundle, KeyPackage). Invite rows name no
+        // owner (ADR-0078 section 10) and are not touched.
         // Session-token-gated; the account_id comes from the verified token.
         .route(
             "/discovery/account",
@@ -505,53 +504,40 @@ fn protected_routes(state: &AppState) -> Router<AppState> {
         )
         .route("/discovery/invite", post(invite::upload))
         // Phase 3c3-server — call-invite blob upload. Session-
-        // token-gated like the contact-invite upload above; the
-        // handler additionally enforces capability-owner /
-        // token-account match (anti-impersonation).
+        // token-gated like the contact-invite upload above, as a
+        // rate-limit gate only; the account is not stored.
         .route("/discovery/call-invite", post(call_invite::upload))
-        // Phase 3c3-revoke — owner-signed call-invite delete.
-        // Body carries Ed25519 signature over the canonical
-        // bytes per `lakko_contacts::call_invite::
-        // call_revoke_canonical_bytes`. Session-token-gated
-        // for DoS rate-limiting; the signature is the actual
-        // authorisation gate.
+        // Phase 3c3-revoke — call-invite delete signed by the link's
+        // revocation key (ADR-0078 section 10) over
+        // `lakko_contacts::call_invite::call_revoke_canonical_bytes`.
+        // Session-token-gated for DoS rate-limiting; the signature is
+        // the actual authorisation gate.
         .route(
             "/discovery/call-invite/{blob_id}",
             axum::routing::delete(call_invite::revoke),
         )
         // ADR-0028 (G-3) — group join-ticket blob upload. Session-
-        // token-gated as a DoS / logged-in-user rate-limit; there
-        // is no owner-account binding on the capability to enforce
-        // (the issuer is identified by its Ed25519 pubkey only).
+        // token-gated as a DoS / logged-in-user rate-limit; the row
+        // stores neither the account nor the issuer key.
         .route("/discovery/group-invite", post(group_invite::upload))
-        // ADR-0028 revoke — issuer-signed group-invite delete. Body carries the
-        // Ed25519 signature over the group-invite revoke canonical bytes;
+        // ADR-0028 revoke — group-invite delete signed by the link's
+        // revocation key over the group-invite revoke canonical bytes;
         // session-token-gated for DoS rate-limiting, the signature is the
-        // authorisation gate (verified against the stored capability's
-        // issuer_signature_pubkey).
+        // authorisation gate (verified against the stored revocation_pk).
         .route(
             "/discovery/group-invite/{blob_id}",
             axum::routing::delete(group_invite::revoke),
         )
-        // `DELETE /discovery/invite/{blob_id}` is owner-signed via
-        // its body, but we ALSO require a session token: the
-        // signature proves "owner of the capability", the token
-        // proves "logged-in Lakko user", and the union is strictly
-        // stronger than the signature alone (rate-limits a stolen
-        // signing seed to one account).
+        // `DELETE /discovery/invite/{blob_id}` is signed by the link's
+        // revocation key via its body, and ALSO requires a session token
+        // as a rate-limit gate (the account is not recorded).
         .route(
             "/discovery/invite/{blob_id}",
             axum::routing::delete(invite::revoke),
         )
-        // Phase 1.18d2b-list — owner-signed POST that returns
-        // every live invite for the calling account. Body
-        // carries the Ed25519 signature; the session-token
-        // middleware here is a DoS gate, same role as on
-        // `revoke` above.
-        .route(
-            "/discovery/invite/by-owner",
-            post(invite::list_by_owner),
-        )
+        // ADR-0078 section 10 removed `POST /discovery/invite/by-owner`:
+        // no ledger row names its owner, and a client lists its own links
+        // from the record it keeps for each link it minted.
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state.rate_limits),
             rate_limit::write_middleware,
@@ -621,6 +607,9 @@ pub(crate) fn build_app(state: AppState) -> Router {
         // ADR-0060 — find people in Everyone by one name term.
         .route("/discovery/name/lookup", post(visibility::name_lookup))
         .route("/discovery/channel/lookup", post(channel_names::lookup))
+        // ADR-0080 — the city of the request's own address, for a device
+        // card. Anonymous, stores nothing, logs nothing; per-IP bucket only.
+        .route("/discovery/locate", get(locate::locate))
         // The three invite ledgers' open fetch routes. Since the
         // short-link amendment of ADR-0028 (2026-09-27) a ledger id is a
         // random 6-byte handle (2^48), so guessing live ids is an
@@ -674,7 +663,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
     open.merge(rate_limited)
         .merge(protected)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }
 
@@ -726,11 +715,10 @@ fn spawn_bucket_and_tombstone_pruners(
     ]
 }
 
-/// ADR-0076 — read and log the rename interval and the retired-name hold.
+/// ADR-0076 — read and log the retired-name hold.
 fn load_name_policy() -> Result<registry::NamePolicy> {
     let policy = registry::NamePolicy::from_env().context("username rename policy")?;
     tracing::info!(
-        rename_interval_secs = policy.rename_interval_secs,
         retired_hold_secs = policy.retired_hold_secs,
         "username rename policy"
     );
@@ -872,6 +860,9 @@ async fn shutdown_signal() {
 mod anon_token_route_tests;
 
 #[cfg(test)]
+mod log_capture_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
@@ -893,17 +884,14 @@ mod tests {
     /// real router over a lazy pool that is never reached: a malformed id is
     /// refused with 400 before any DB work, so the first `burst` requests
     /// from one address answer 400 and the next one 429.
-    #[tokio::test]
-    async fn invite_fetch_and_consume_routes_are_rate_limited() {
+    /// The real state over a lazy pool that is never reached: a route that
+    /// touched the database would fail, so a route that answers did not.
+    fn lazy_state(limit: rate_limit::Limit, city_lookup: Arc<dyn locate::CityLookup>) -> AppState {
         let secret = Arc::new(TokenSecret::new(vec![7u8; 32]).unwrap());
-        let limit = rate_limit::Limit {
-            per_minute: 60.0,
-            burst: 3.0,
-        };
         let db = MySqlPoolOptions::new()
             .connect_lazy("mysql://nobody:nothing@127.0.0.1:1/none")
             .unwrap();
-        let state = AppState {
+        AppState {
             anon_tokens: TokenVerifier::new(db.clone(), None),
             db,
             oprf: Arc::new(
@@ -920,8 +908,23 @@ mod tests {
             transparency: None,
             username_cert_key: Arc::new(lakko_crypto::signing::SigningKey::from_seed(&[3u8; 32])),
             key_reset_attest_key: None,
-            name_policy: registry::NamePolicy::defaults(),
+            city_lookup,
+        }
+    }
+
+    /// The three ledgers' open fetch + consume routes sit behind the per-IP
+    /// bucket (the short-link amendment of ADR-0028: a 6-byte id is
+    /// guessable, so the rate limit is what bounds enumeration). Builds the
+    /// real router over a lazy pool that is never reached: a malformed id is
+    /// refused with 400 before any DB work, so the first `burst` requests
+    /// from one address answer 400 and the next one 429.
+    #[tokio::test]
+    async fn invite_fetch_and_consume_routes_are_rate_limited() {
+        let limit = rate_limit::Limit {
+            per_minute: 60.0,
+            burst: 3.0,
         };
+        let state = lazy_state(limit, Arc::new(locate::NoCityLookup));
         let app = build_app(state);
         for (method, uri) in [
             ("GET", "/discovery/invite/too-long-for-an-id"),
@@ -952,6 +955,173 @@ mod tests {
                 statuses[3],
                 StatusCode::TOO_MANY_REQUESTS,
                 "{method} {uri} must be behind the per-IP bucket: {statuses:?}"
+            );
+        }
+    }
+
+    /// A fake city database: answers for the documentation addresses it was
+    /// given and counts nothing.
+    struct FakeCities(Vec<(std::net::IpAddr, locate::Place)>);
+
+    impl locate::CityLookup for FakeCities {
+        fn locate(&self, ip: std::net::IpAddr) -> Option<locate::Place> {
+            self.0
+                .iter()
+                .find(|(a, _)| *a == ip)
+                .map(|(_, p)| p.clone())
+        }
+    }
+
+    fn almere() -> locate::Place {
+        locate::Place {
+            city: Some("Almere".to_string()),
+            country: Some("NL".to_string()),
+        }
+    }
+
+    fn locate_app(burst: f64) -> Router {
+        let lookup = FakeCities(vec![
+            ("203.0.113.7".parse().unwrap(), almere()),
+            (
+                "2001:db8::1".parse().unwrap(),
+                locate::Place {
+                    city: None,
+                    country: Some("DE".to_string()),
+                },
+            ),
+        ]);
+        build_app(lazy_state(
+            rate_limit::Limit {
+                per_minute: 60.0,
+                burst,
+            },
+            Arc::new(lookup),
+        ))
+    }
+
+    async fn locate_as(app: &Router, headers: &[(&str, &str)]) -> (StatusCode, String, String) {
+        let mut req = Request::builder().method("GET").uri("/discovery/locate");
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let r = app
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = r.status();
+        let cache = r
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let body = r.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(body.to_vec()).unwrap(), cache)
+    }
+
+    /// ADR-0080 section 4: no session, no token; the address nginx wrote is
+    /// the one located (the same rule the per-IP limiter trusts), and the
+    /// answer is never cached. The lazy pool is never reached, so the route
+    /// read and wrote no database.
+    #[tokio::test]
+    async fn locate_answers_for_the_trusted_source_address_without_a_session() {
+        let app = locate_app(100.0);
+        let (status, body, cache) = locate_as(&app, &[("x-real-ip", "203.0.113.7")]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, r#"{"city":"Almere","country":"NL"}"#);
+        assert_eq!(cache, "no-store");
+        // The client-supplied leftmost forwarded entry is ignored.
+        let (_, body, _) =
+            locate_as(&app, &[("x-forwarded-for", "198.51.100.1, 203.0.113.7")]).await;
+        assert_eq!(body, r#"{"city":"Almere","country":"NL"}"#);
+        let (_, body, _) =
+            locate_as(&app, &[("x-forwarded-for", "203.0.113.7, 198.51.100.1")]).await;
+        assert_eq!(body, "{}");
+        let (_, body, _) = locate_as(&app, &[("x-real-ip", "2001:db8::1")]).await;
+        assert_eq!(body, r#"{"country":"DE"}"#);
+        let (status, body, _) = locate_as(&app, &[("x-real-ip", "198.51.100.200")]).await;
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "{}"));
+    }
+
+    #[tokio::test]
+    async fn locate_without_a_database_answers_empty() {
+        let app = build_app(lazy_state(
+            rate_limit::Limit {
+                per_minute: 60.0,
+                burst: 10.0,
+            },
+            Arc::new(locate::NoCityLookup),
+        ));
+        let (status, body, _) = locate_as(&app, &[("x-real-ip", "203.0.113.7")]).await;
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "{}"));
+    }
+
+    #[tokio::test]
+    async fn locate_is_behind_the_per_address_bucket() {
+        let app = locate_app(2.0);
+        let mut statuses = Vec::new();
+        for _ in 0..3 {
+            statuses.push(locate_as(&app, &[("x-real-ip", "203.0.113.7")]).await.0);
+        }
+        assert_eq!(
+            statuses,
+            vec![
+                StatusCode::OK,
+                StatusCode::OK,
+                StatusCode::TOO_MANY_REQUESTS
+            ]
+        );
+        // Another address has its own bucket.
+        let (status, _, _) = locate_as(&app, &[("x-real-ip", "198.51.100.9")]).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// ADR-0080 section 4 / ADR-0078 section 11: no log line names the
+    /// address or the answer. Captures EVERY event and span field at TRACE
+    /// level while the real router (with its request `TraceLayer`) serves a
+    /// locate, then searches the output.
+    #[tokio::test]
+    async fn locate_logs_neither_the_address_nor_the_answer() {
+        use std::io::Write;
+        use std::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Sink::default();
+        let writer = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::FULL)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        let app = locate_app(100.0);
+        let (_, body, _) = locate_as(
+            &app,
+            &[
+                ("x-real-ip", "203.0.113.7"),
+                ("x-forwarded-for", "203.0.113.7"),
+            ],
+        )
+        .await;
+        drop(guard);
+        assert!(body.contains("Almere"), "the fake answered");
+        let logged = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        assert!(!logged.is_empty(), "the request span was captured");
+        for secret in ["203.0.113.7", "Almere", "\"NL\"", "country"] {
+            assert!(
+                !logged.contains(secret),
+                "a log line names {secret:?}: {logged}"
             );
         }
     }

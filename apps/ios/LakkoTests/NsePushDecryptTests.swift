@@ -89,16 +89,17 @@ final class NsePushDecryptTests: XCTestCase {
         let openThrows: Bool
         let armed: Bool
 
-        var resolveCount = 0
         var openCount = 0
         var dsFetchCount = 0
         var lastAfterId: Int64?
         var lookupCount = 0
         var lastLookupPushGid: String?
         var lastLookupAccount: String?
-        var lastKnowsGroupAccount: String?
         var boundCount = 0
-        var lastWakeDevice: String?
+        var lastWakeSub: String?
+        var lastLookupSub: String?
+        /// When set, the only subscription id the account holds.
+        var heldSub: String?
         var lastFetchGroupIdBytes: Data?
         var lastCursorGroupHex: String?
         /// ADR-0053 — the group the fetch was handed to sign with.
@@ -132,24 +133,26 @@ final class NsePushDecryptTests: XCTestCase {
             self.armed = armed
         }
 
-        func boundAccount(wakeDevicePseudonymHex: String?) -> String? {
+        func boundAccount(wakeSubscriptionIdHex: String?) -> String? {
             boundCount += 1
-            lastWakeDevice = wakeDevicePseudonymHex
+            lastWakeSub = wakeSubscriptionIdHex
             return bound
         }
 
-        func lookupRoute(accountIdB64: String, pushGidHex: String) -> String? {
+        /// The route row: `route` when given; otherwise, when `account` is
+        /// given, a row of that account mapping the wake's `g` to itself (the
+        /// fixture for tests that do not care how `g` resolves). A wake whose
+        /// `s` is not `heldSub` (when set) is a miss, as the real store's.
+        func lookupRoute(accountIdB64: String, pushGidHex: String, subscriptionIdHex: String?) -> String? {
             lookupCount += 1
             lastLookupPushGid = pushGidHex
             lastLookupAccount = accountIdB64
-            guard let route, route.accountIdB64 == accountIdB64 else { return nil }
-            return route.groupIdHex
-        }
-
-        func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool {
-            resolveCount += 1
-            lastKnowsGroupAccount = accountIdB64
-            return account?.accountIdB64 == accountIdB64
+            lastLookupSub = subscriptionIdHex
+            if let heldSub, subscriptionIdHex != heldSub { return nil }
+            if let route {
+                return route.accountIdB64 == accountIdB64 ? route.groupIdHex : nil
+            }
+            return account?.accountIdB64 == accountIdB64 ? pushGidHex : nil
         }
 
         /// Every account a per-account store was read for.
@@ -377,7 +380,6 @@ final class NsePushDecryptTests: XCTestCase {
             NsePushWake(groupHex: String(repeating: "z", count: 64), pointer: 5), deps
         )
         XCTAssertNil(nonHex, "non-hex")
-        XCTAssertEqual(deps.resolveCount, 0, "no account lookup for a malformed wake")
     }
 
     func testUnknownGroupYieldsNil() async {
@@ -509,7 +511,6 @@ final class NsePushDecryptTests: XCTestCase {
 
         XCTAssertNil(preview, "armed → no direct connection, generic banner")
         XCTAssertEqual(deps.dsFetchCount, 0, "armed must make NO DS fetch")
-        XCTAssertEqual(deps.resolveCount, 0, "armed short-circuits before any store read")
         XCTAssertEqual(deps.openCount, 0, "armed opens no throwaway group")
     }
 
@@ -529,12 +530,12 @@ final class NsePushDecryptTests: XCTestCase {
         XCTAssertEqual(deps.dsFetchCount, 1, "disarmed still fetches")
     }
 
-    // MARK: - ADR-0042 Sprint 4 — push_gid reverse-map (route-first, legacy fallback)
+    // MARK: - ADR-0042 Sprint 4 — push_gid reverse-map (no legacy fallback since ADR-0078)
 
     func testPushGidWakeResolvesViaReverseIndexAndDecrypts() async {
         // The wake's `g` is an opaque push_gid; the reverse index maps it to
-        // the REAL (account, group_id). The legacy resolve must never be
-        // consulted on a hit — `account: nil` proves it is not needed.
+        // the REAL (account, group_id). `account: nil` proves nothing else is
+        // consulted.
         let group = FakeThrowawayGroup(decode: { _ in self.chat("routed hello") })
         let deps = FakeDeps(
             account: nil,
@@ -548,61 +549,37 @@ final class NsePushDecryptTests: XCTestCase {
         XCTAssertEqual(preview?.tag, groupHex, "tag is the REAL group hex, not the push_gid")
         XCTAssertEqual(deps.lookupCount, 1, "reverse index consulted first")
         XCTAssertEqual(deps.lastLookupPushGid, pushGidHex)
-        XCTAssertEqual(deps.resolveCount, 0, "route hit never consults the legacy resolve")
         XCTAssertEqual(deps.lastFetchGroupIdBytes, groupIdBytes, "DS fetch uses the REAL group_id")
         XCTAssertEqual(deps.lastCursorGroupHex, groupHex, "cursor read keyed on the REAL group hex")
         XCTAssertTrue(group.closed, "throwaway group closed on the routed path too")
         XCTAssertFalse(group.persistAttempted, "no persist entry point on the routed path")
     }
 
-    func testRouteMissFallsBackToLegacyRawGroupIdPath() async {
-        // A legacy wake: `g` IS the raw group_id and the reverse index has
-        // no row for it — the pre-ADR-0042 path runs byte-for-byte.
-        let group = FakeThrowawayGroup(decode: { _ in self.chat("legacy") })
-        let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)], route: nil)
-        let preview = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 11), deps)
-
-        XCTAssertEqual(preview?.body, "legacy")
-        XCTAssertEqual(preview?.tag, groupHex)
-        XCTAssertEqual(deps.lookupCount, 1, "reverse index consulted first even for a legacy wake")
-        XCTAssertEqual(deps.resolveCount, 1, "miss falls back to the raw-group_id resolve")
-        XCTAssertEqual(deps.lastCursorGroupHex, groupHex)
-    }
-
-    func testMalformedRouteRowFallsBackToLegacy() async {
-        // A corrupt plaintext row (wrong-length / non-hex group id, empty
-        // account) must DEGRADE to the legacy path, never crash / mis-route.
-        let badRoutes: [(accountIdB64: String, groupIdHex: String)] = [
-            (accountIdB64: accountId, groupIdHex: "abc"),
-            (accountIdB64: accountId, groupIdHex: String(repeating: "z", count: 64)),
-            (accountIdB64: accountId, groupIdHex: ""),
-            (accountIdB64: "", groupIdHex: groupHex),
-        ]
-        for badRoute in badRoutes {
+    func testAMalformedRouteRowIsRefused() async {
+        // ADR-0078 — the raw-group_id fallback is gone: a corrupt plaintext
+        // row (wrong-length / non-hex group id) is the generic line, never a
+        // crash or a mis-route.
+        let badGroups = ["abc", String(repeating: "z", count: 64), ""]
+        for bad in badGroups {
             let group = FakeThrowawayGroup(decode: { _ in self.chat("survivor") })
             let deps = FakeDeps(
-                account: okAccount(), group: group, rows: [row(10, 1)], route: badRoute
+                account: okAccount(), group: group, rows: [row(10, 1)],
+                route: (accountIdB64: accountId, groupIdHex: bad)
             )
-            let preview = await decryptPushPreview(
-                NsePushWake(groupHex: groupHex, pointer: 11), deps
-            )
-            XCTAssertEqual(
-                preview?.body, "survivor",
-                "bad route row \(badRoute) must degrade to the legacy path"
-            )
-            XCTAssertEqual(deps.resolveCount, 1, "legacy resolve ran for \(badRoute)")
+            let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 11), deps)
+            XCTAssertEqual(outcome, .none, "bad route row \(bad) is refused")
+            XCTAssertEqual(deps.openCount, 0)
         }
     }
 
     func testRouteMissAndUnknownLegacyGroupYieldGeneric() async {
-        // Neither the reverse index nor the legacy known-groups match →
-        // nil → the generic banner (fail-closed), with no group opened.
+        // The reverse index does not match → nil → the generic banner
+        // (fail-closed), with no group opened.
         let deps = FakeDeps(account: nil, route: nil)
         let preview = await decryptPushPreview(NsePushWake(groupHex: pushGidHex, pointer: 5), deps)
 
         XCTAssertNil(preview)
         XCTAssertEqual(deps.lookupCount, 1)
-        XCTAssertEqual(deps.resolveCount, 1)
         XCTAssertEqual(deps.openCount, 0, "no throwaway group on a double miss")
         XCTAssertEqual(deps.dsFetchCount, 0, "no DS fetch on a double miss")
     }
@@ -622,7 +599,6 @@ final class NsePushDecryptTests: XCTestCase {
 
         XCTAssertNil(preview)
         XCTAssertEqual(deps.lookupCount, 0, "armed gate precedes the reverse-index read")
-        XCTAssertEqual(deps.resolveCount, 0)
         XCTAssertEqual(deps.dsFetchCount, 0)
     }
 
@@ -660,14 +636,14 @@ final class NsePushDecryptTests: XCTestCase {
         XCTAssertEqual(deps.dsFetchCount, 1)
     }
 
-    // MARK: - ADR-0042 (amended 2026-09-30) — only the signed-in account
+    // MARK: - ADR-0042 (amended 2026-09-30) with ADR-0078 — only the signed-in account
 
     private let otherAccount = "other-b64=="
-    private let wakeDevice = String(repeating: "d", count: 64)
+    private let wakeSub = String(repeating: "5", count: 32)
 
-    func testNoBindingOrAMismatchedDShowsNothingAndReadsNothing() async {
-        // `bound: .some(nil)` is the gate refusing: no binding, no `d`, or a
-        // `d` that is not the bound pseudonym. Nothing behind it may run.
+    func testNoBindingOrNoSShowsNothingAndReadsNothing() async {
+        // `bound: .some(nil)` is the gate refusing: no binding, or no
+        // well-formed `s`. Nothing behind it may run.
         let group = FakeThrowawayGroup(decode: { _ in self.chat("secret") })
         let deps = FakeDeps(
             account: okAccount(),
@@ -677,23 +653,39 @@ final class NsePushDecryptTests: XCTestCase {
             bound: .some(nil)
         )
         let outcome = await decryptPushOutcome(
-            NsePushWake(groupHex: pushGidHex, pointer: 11, devicePseudonymHex: wakeDevice), deps)
+            NsePushWake(groupHex: pushGidHex, pointer: 11, subscriptionIdHex: wakeSub), deps)
 
         XCTAssertEqual(outcome, .none, "a refused wake gets the generic line")
         XCTAssertEqual(deps.boundCount, 1)
         XCTAssertEqual(deps.lookupCount, 0, "no reverse-index read")
-        XCTAssertEqual(deps.resolveCount, 0, "no known-groups read")
         XCTAssertTrue(deps.readAccounts.isEmpty, "no per-account store read")
         XCTAssertEqual(deps.openCount, 0)
         XCTAssertEqual(deps.dsFetchCount, 0)
     }
 
-    func testTheGateIsHandedTheWakesDevicePseudonym() async {
+    func testTheGateAndTheRouteAreHandedTheWakesSubscriptionId() async {
         let group = FakeThrowawayGroup(decode: { _ in self.chat("hello") })
         let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)])
         _ = await decryptPushOutcome(
-            NsePushWake(groupHex: groupHex, pointer: 11, devicePseudonymHex: wakeDevice), deps)
-        XCTAssertEqual(deps.lastWakeDevice, wakeDevice)
+            NsePushWake(groupHex: groupHex, pointer: 11, subscriptionIdHex: wakeSub), deps)
+        XCTAssertEqual(deps.lastWakeSub, wakeSub)
+        XCTAssertEqual(deps.lastLookupSub, wakeSub)
+    }
+
+    /// ADR-0078 — a wake for a subscription the bound account does not hold
+    /// (another account that used this device, a stale row) shows nothing.
+    func testAWakeForASubscriptionNotHeldIsAMiss() async {
+        let group = FakeThrowawayGroup(decode: { _ in self.chat("not yours") })
+        let deps = FakeDeps(
+            account: nil, group: group, rows: [row(10, 1)],
+            route: (accountIdB64: accountId, groupIdHex: groupHex))
+        deps.heldSub = String(repeating: "6", count: 32)
+        let outcome = await decryptPushOutcome(
+            NsePushWake(groupHex: pushGidHex, pointer: 11, subscriptionIdHex: wakeSub), deps)
+        XCTAssertEqual(outcome, .none)
+        XCTAssertEqual(deps.openCount, 0)
+        XCTAssertEqual(deps.dsFetchCount, 0)
+        XCTAssertTrue(deps.readAccounts.isEmpty)
     }
 
     func testEveryReadIsForTheBoundAccount() async {
@@ -705,7 +697,7 @@ final class NsePushDecryptTests: XCTestCase {
             route: (accountIdB64: accountId, groupIdHex: groupHex)
         )
         let preview = await decryptPushPreview(
-            NsePushWake(groupHex: pushGidHex, pointer: 11, devicePseudonymHex: wakeDevice), deps)
+            NsePushWake(groupHex: pushGidHex, pointer: 11, subscriptionIdHex: wakeSub), deps)
 
         XCTAssertEqual(preview?.body, "routed")
         XCTAssertEqual(deps.lastLookupAccount, accountId)
@@ -714,8 +706,7 @@ final class NsePushDecryptTests: XCTestCase {
 
     func testARouteRowOfAnotherAccountIsAMiss() async {
         // Two accounts in one group derive the same push_gid. The row here was
-        // written by the other account, and the bound account knows no group
-        // by the wake's `g`: nothing is shown.
+        // written by the other account: nothing is shown.
         let group = FakeThrowawayGroup(decode: { _ in self.chat("not yours") })
         let deps = FakeDeps(
             account: nil,
@@ -724,47 +715,12 @@ final class NsePushDecryptTests: XCTestCase {
             route: (accountIdB64: otherAccount, groupIdHex: groupHex)
         )
         let outcome = await decryptPushOutcome(
-            NsePushWake(groupHex: pushGidHex, pointer: 11, devicePseudonymHex: wakeDevice), deps)
+            NsePushWake(groupHex: pushGidHex, pointer: 11, subscriptionIdHex: wakeSub), deps)
 
         XCTAssertEqual(outcome, .none)
         XCTAssertEqual(deps.lastLookupAccount, accountId, "looked up for the bound account")
         XCTAssertEqual(deps.openCount, 0)
         XCTAssertEqual(deps.dsFetchCount, 0)
         XCTAssertFalse(deps.readAccounts.contains(otherAccount))
-    }
-
-    func testTheLegacyFallbackSearchesOnlyTheBoundAccount() async {
-        // Another account on this device knows the raw group id; the bound
-        // account does not. The legacy scan must not find it.
-        let group = FakeThrowawayGroup(decode: { _ in self.chat("not yours") })
-        let deps = FakeDeps(
-            account: NseResolvedAccount(accountIdB64: otherAccount, groupIdBytes: groupIdBytes),
-            group: group,
-            rows: [row(10, 1)],
-            route: nil
-        )
-        let outcome = await decryptPushOutcome(
-            NsePushWake(groupHex: groupHex, pointer: 11, devicePseudonymHex: wakeDevice), deps)
-
-        XCTAssertEqual(outcome, .none)
-        XCTAssertEqual(deps.lastKnowsGroupAccount, accountId, "only the bound account was asked")
-        XCTAssertEqual(deps.openCount, 0)
-        XCTAssertFalse(deps.readAccounts.contains(otherAccount))
-    }
-
-    func testTheLegacyFallbackForTheBoundAccountStillPreviews() async {
-        let group = FakeThrowawayGroup(decode: { _ in self.chat("legacy mine") })
-        let deps = FakeDeps(
-            account: okAccount(),
-            group: group,
-            rows: [row(10, 1)],
-            route: (accountIdB64: otherAccount, groupIdHex: String(repeating: "c", count: 64))
-        )
-        let preview = await decryptPushPreview(
-            NsePushWake(groupHex: groupHex, pointer: 11, devicePseudonymHex: wakeDevice), deps)
-
-        XCTAssertEqual(preview?.body, "legacy mine")
-        XCTAssertEqual(deps.lastFetchGroupIdBytes, groupIdBytes)
-        XCTAssertEqual(Set(deps.readAccounts), [accountId])
     }
 }

@@ -42,6 +42,23 @@ final class MembershipRefusalTests: XCTestCase {
 
     // MARK: - Coverage
 
+    /// ADR-0081 amendment (2026-10-19) — the direct-commit path is gone: a
+    /// membership operation on a group with no role table is refused with the
+    /// core's typed `NoRoleTable`, never committed directly. No client can
+    /// make such a group (and `Group.joinFromWelcome` refuses its Welcome),
+    /// so the rule is driven over an injected role-table read.
+    func testAMembershipOperationOnAGroupWithNoRoleTableIsRefusedTyped() throws {
+        XCTAssertThrowsError(try ChatRepository.requireRoleTable(op: "add") { nil }) { error in
+            XCTAssertEqual(membershipRefusalReason(of: error), .noRoleTable, "\(error)")
+        }
+        XCTAssertThrowsError(try ChatRepository.requireRoleTable(op: "remove") { throw CocoaError(.fileReadUnknown) }) {
+            XCTAssertEqual(membershipRefusalReason(of: $0), .noRoleTable, "a torn read refuses too")
+        }
+        XCTAssertNoThrow(try ChatRepository.requireRoleTable(op: "add") {
+            RoleTable(owner: Data(repeating: 0x01, count: 32), admins: [])
+        })
+    }
+
     func testEveryReasonHasADecidedAnswer() {
         // `allMembershipRefusalReasons` is hand-listed, so it can fall out of
         // step with the enum — nothing in Swift checks that, and every

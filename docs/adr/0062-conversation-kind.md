@@ -7,6 +7,13 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 - **Status:** Accepted 2026-09-30 (the maintainer chose to refuse membership changes in a one-to-one on every device, and to keep deleting a one-to-one local only); S1 core, S2 FFI and S3 clients (web, iOS, Android) built 2026-10-01, see [What was built](#what-was-built-s1-s3). Not walked live on any platform
 - **Date:** 2026-09-30
+- **Amended by** [ADR-0081](0081-devicegroup-commits-cannot-strand.md)
+  "Amendment (2026-10-19, second)": `join_from_welcome` now also refuses a
+  Welcome with no `0xFF02` role table (typed `NoRoleTable`), not only a
+  role-table Welcome with no kind, and both refusals leave nothing in the
+  provider. `PublisherGroup` and `DeviceGroup` join through their own entry
+  points. Where this document says the kind check applies "when the role
+  table is there", read "a conversation Welcome must carry both".
 - **Context:** Phase 3 (product hardening). The maintainer's decision of
   2026-09-30: *"A one-to-one chat always has the same two people; a group can
   add and remove members."* This ADR records how that rule is carried and

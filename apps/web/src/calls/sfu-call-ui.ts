@@ -48,20 +48,19 @@ import type { SfuPeerSnapshot } from "./sfu-signaling-client";
 import type { VideoQuality } from "./video-wants";
 import { splitStreamId, withLightStream, withoutLightStream } from "./light-stream";
 import { t } from "../l10n";
+import { GroupScreenShare } from "./group-screen-share";
+import { screenShareActions } from "./screen-share-store";
+import { SCREEN_SHARE_NOTICE_MS } from "./screen-share-capability";
+import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 
 /** Options that shape the roster presentation. */
 export interface SfuCallUiOptions {
   /** Display name for the local participant tile. Defaults to "You". */
   readonly localDisplayName?: string;
-  /** Resolve a peer to the person's name. `peerTag` is the ADR-0021
-   *  per-call tag (when the SFU emits one); the resolver matches it against
-   *  the people this device knows (`calls/tile-name.ts`). `null` while it
-   *  cannot name the peer yet. */
-  readonly resolveDisplayName?: (
-    peerId: string,
-    accountPseudonym: string,
-    peerTag: string | undefined,
-  ) => string | null;
+  /** The name of the person behind a peer (base64 account key, from the
+   *  peer's verified announcement, ADR-0078 section 2), or `null` while it
+   *  cannot be named (`calls/tile-name.ts`). */
+  readonly resolveDisplayName?: (personKeyB64: string) => string | null;
   /** Canonical call safety number (`callSafetyNumber(seed)` from the
    *  wasm core) for the in-call E2EE pill — the same string every
    *  participant derives from the shared seed, read aloud out-of-band to
@@ -136,9 +135,8 @@ export interface SfuCallUiHandle {
   rekey(newSeed: Uint8Array): void;
   /** Re-run `resolveDisplayName` for every remote peer in the roster and
    *  patch the tiles whose name changed. The caller runs it when what the
-   *  resolver reads has changed — a profile carrying an account id landing
-   *  after the call started (ADR-0048 v2), a rename — so a tile that joined
-   *  as a pseudonym is not stuck with it for the call's lifetime. */
+   *  resolver reads has changed — a profile landing after the call started,
+   *  a rename — so a tile that joined unnamed is not stuck that way. */
   refreshNames(): void;
 }
 
@@ -201,23 +199,22 @@ export function createSfuCallUi(
   // concurrency; the whole handle (and this map) is discarded on `hangUp`.
   const lastKnownCameraOn = new Map<string, boolean>();
 
-  // The naming inputs of every remote peer in the roster, keyed by the
-  // roster tile id. `refreshNames` replays them through the resolver; the
-  // store's `Participant` deliberately carries neither.
-  const namingInputs = new Map<string, { pseudonym: string; peerTag: string | undefined }>();
+  // The person (base64 account key) behind every remote peer whose sealed
+  // announcement verified (ADR-0078 section 2), keyed by the roster tile id.
+  // `refreshNames` replays them through the resolver; the store's
+  // `Participant` deliberately carries neither.
+  const peerPersons = new Map<string, string | null>();
 
   const localName = options.localDisplayName ?? t("call.participant.you");
   /** What this device joined without (section 4.4), once capture ran. */
   let captureFallback: CaptureFallback | null = null;
-  const nameOf = (
-    peerId: string,
-    pseudonym: string,
-    peerTag: string | undefined,
-  ): string =>
-    // Never the SFU pseudonym (a piece of the account id). An empty name is
-    // the call screen's unnamed state, for the moment before the person's
-    // profile reaches this device (`calls/tile-name.ts`).
-    options.resolveDisplayName?.(peerId, pseudonym, peerTag) ?? "";
+  const nameOf = (personKeyB64: string | null | undefined): string =>
+    // An empty name is the call screen's unnamed state, for the moment
+    // before the peer's announcement reaches this device
+    // (`calls/tile-name.ts`).
+    (personKeyB64 === null || personKeyB64 === undefined
+      ? null
+      : options.resolveDisplayName?.(personKeyB64)) ?? "";
 
   const localParticipant = (): Participant => ({
     id: "local",
@@ -232,6 +229,7 @@ export function createSfuCallUi(
     camOn: config.media.video && captureFallback === null,
     quality: "good",
     speaking: false,
+    personKeyB64: OWN_AVATAR_KEY,
   });
 
   // The roster participant id for a peer is `peer-<peerId>`, and the SFU
@@ -300,6 +298,28 @@ export function createSfuCallUi(
     });
   };
 
+  // The screen share (ADR-0083): its fold, the button, the received share's
+  // stream. Built before the session so every callback below can reach it;
+  // the session is read only when the share calls it.
+  const share = new GroupScreenShare({
+    announcer: config.peerAnnouncer,
+    session: {
+      sendSealedRelay: (plaintext) => session.sendSealedRelay(plaintext),
+      attachScreenShare: (capture) => session.attachScreenShare(capture),
+      detachScreenShare: () => session.detachScreenShare(),
+      getSelfPeerId: () => session.getSelfPeerId(),
+    },
+    nameOf: (personKeyB64) => nameOf(personKeyB64),
+    notice: (text) => callActions.showNotice(text, SCREEN_SHARE_NOTICE_MS),
+    store: screenShareActions,
+  });
+  // The fold is built from the core the session loaded at connect: by the
+  // Welcome it is there. Without it nothing is shared or folded.
+  const initShare = (): void => {
+    const wasm = session.loadedWasm?.();
+    if (wasm !== null && wasm !== undefined) share.init(wasm);
+  };
+
   const session = new SfuCallSession(config, {
     onStateChange: (state): void => {
       switch (state) {
@@ -316,9 +336,13 @@ export function createSfuCallUi(
             active: true,
             shortFingerprint: options.safetyNumber ?? null,
           });
+          initShare();
+          share.onConnected();
           break;
         case "failed":
         case "closed":
+          share.dispose();
+          screenShareActions.reset();
           callActions.setPhase({ kind: "ended", endedAt: Date.now() });
           break;
         case "idle":
@@ -327,40 +351,51 @@ export function createSfuCallUi(
       options.onSessionStateChange?.(state);
     },
     onWelcome: (selfPeerId, roster): void => {
-      namingInputs.clear();
+      initShare();
+      peerPersons.clear();
       const remotes = roster
         .filter((p: SfuPeerSnapshot) => p.peer_id !== selfPeerId)
         .map((p: SfuPeerSnapshot) => {
-          namingInputs.set(peerParticipantId(p.peer_id), {
-            pseudonym: p.account_pseudonym,
-            peerTag: p.peer_tag,
-          });
-          return remoteParticipant(
-            nameOf(p.peer_id, p.account_pseudonym, p.peer_tag),
-            p.peer_id,
-          );
+          peerPersons.set(peerParticipantId(p.peer_id), null);
+          return remoteParticipant(nameOf(null), p.peer_id);
         });
       callActions.setParticipants([localParticipant(), ...remotes]);
     },
-    onPeerJoined: (peerId, accountPseudonym, peerTag): void => {
-      namingInputs.set(peerParticipantId(peerId), { pseudonym: accountPseudonym, peerTag });
-      callActions.participantJoined(
-        remoteParticipant(nameOf(peerId, accountPseudonym, peerTag), peerId),
-      );
+    onPeerJoined: (peerId): void => {
+      share.onPeerJoined();
+      peerPersons.set(peerParticipantId(peerId), null);
+      callActions.participantJoined(remoteParticipant(nameOf(null), peerId));
+    },
+    onPeerIdentified: (peerId, identity): void => {
+      // ADR-0078 section 2: the peer's sealed announcement verified against
+      // a leaf of the call's group, so the tile names that person.
+      share.onPeerIdentified(peerId, identity.memberKeyHex);
+      const id = peerParticipantId(peerId);
+      if (!peerPersons.has(id)) return;
+      if (peerPersons.get(id) === identity.personKeyB64) return;
+      peerPersons.set(id, identity.personKeyB64);
+      callActions.setParticipantName(id, nameOf(identity.personKeyB64));
+      callActions.setParticipantPerson(id, identity.personKeyB64);
     },
     onPeerLeft: (peerId): void => {
       const id = peerParticipantId(peerId);
       // Forget the departed peer's sticky camera state so a later rejoin under
       // the same id starts from a clean slate (join-race guard).
       lastKnownCameraOn.delete(id);
-      namingInputs.delete(id);
+      peerPersons.delete(id);
+      share.onPeerLeft(peerId);
       // The companion and the middle track go with their peer.
       setRemoteLightStreams((prev) => withoutLightStream(prev, peerId));
       setRemoteMiddleStreams((prev) => withoutLightStream(prev, peerId));
       callActions.participantLeft(id);
     },
     onRemoteTrack: (rt): void => {
+      // A shared screen is not a participant (ADR-0083).
+      if (share.onRemoteTrack(rt.streamId, rt.track)) return;
       addStream(rt);
+    },
+    onRemoteScreenShareState: (peerId, state): void => {
+      share.onState(peerId, state);
     },
     onVideoGiven: (given): void => {
       setRemoteVideoGiven(given);
@@ -408,8 +443,10 @@ export function createSfuCallUi(
     videoPublishState,
     connect: (): Promise<void> => session.connect(),
     hangUp: (): void => {
+      share.dispose();
+      screenShareActions.reset();
       session.hangUp();
-      namingInputs.clear();
+      peerPersons.clear();
       setRemoteStreams(new Map());
       setRemoteLightStreams(new Map());
       setRemoteMiddleStreams(new Map());
@@ -431,12 +468,10 @@ export function createSfuCallUi(
       session.switchVideoInput(deviceId),
     rekey: (newSeed): void => session.rekey(newSeed),
     refreshNames: (): void => {
-      for (const [id, inputs] of namingInputs) {
-        callActions.setParticipantName(
-          id,
-          nameOf(id.slice(PEER_PREFIX.length), inputs.pseudonym, inputs.peerTag),
-        );
+      for (const [id, person] of peerPersons) {
+        callActions.setParticipantName(id, nameOf(person));
       }
+      share.refreshNames();
     },
   };
 }

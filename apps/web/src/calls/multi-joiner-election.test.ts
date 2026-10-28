@@ -90,13 +90,15 @@ describe("electActingCommitterLeaf (owner-if-present-else-lowest-leaf)", () => {
 
 describe("CallPresence", () => {
   it("always counts self present", () => {
-    const p = new CallPresence(hexKey(KEY_B), OWNER_HEX, "tag-owner");
+    const p = new CallPresence(hexKey(KEY_B), OWNER_HEX);
     expect(p.presentKeySet().has(hexKey(KEY_B))).toBe(true);
   });
 
-  it("counts the owner present iff the owner peer_tag is in the roster", () => {
-    const p = new CallPresence(hexKey(KEY_B), OWNER_HEX, "tag-owner");
-    p.setRoster([{ peerId: "p-owner", peerTag: "tag-owner" }]);
+  it("counts the owner present iff a peer in the roster announced the owner key", () => {
+    const p = new CallPresence(hexKey(KEY_B), OWNER_HEX);
+    p.setRoster(["p-owner"]);
+    expect(p.ownerPresent()).toBe(false);
+    p.bindPeerToMember("p-owner", OWNER_HEX);
     expect(p.ownerPresent()).toBe(true);
     expect(p.presentKeySet().has(OWNER_HEX)).toBe(true);
 
@@ -106,13 +108,13 @@ describe("CallPresence", () => {
   });
 
   it("treats owner-is-self as always present (owner's own client)", () => {
-    // On the owner's client, ownerPeerTag is null and owner == self.
-    const p = new CallPresence(OWNER_HEX, OWNER_HEX, null);
+    // On the owner's client, owner == self.
+    const p = new CallPresence(OWNER_HEX, OWNER_HEX);
     expect(p.ownerPresent()).toBe(true);
   });
 
   it("remembers who a peer is until the peer leaves, so a departure can be answered", () => {
-    const p = new CallPresence("self", "owner", "tag-owner");
+    const p = new CallPresence("self", "owner");
     p.addPeer("p1");
     p.bindPeerToMember("p1", "member-1");
     expect(p.memberKeyFor("p1")).toBe("member-1");
@@ -122,8 +124,8 @@ describe("CallPresence", () => {
   });
 
   it("counts a bound peer present only while its peer is in the roster", () => {
-    const p = new CallPresence(OWNER_HEX, OWNER_HEX, null);
-    p.addPeer("p-c", "tag-c");
+    const p = new CallPresence(OWNER_HEX, OWNER_HEX);
+    p.addPeer("p-c");
     p.bindPeerToMember("p-c", hexKey(KEY_C));
     expect(p.presentKeySet().has(hexKey(KEY_C))).toBe(true);
     p.removePeer("p-c");

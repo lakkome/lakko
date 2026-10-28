@@ -4,9 +4,9 @@
 //! The sealed form every invite link carries (`/i/`, `/c/`, `/g/`) — the
 //! 2026-09-28 security-pass amendment of ADR-0028 and ADR-0009.
 //!
-//! A link is `https://<host>/<k>/<id>#<secret>` (a pointer into the discovery
-//! ledger) or `https://<host>/<k>/<sealed blob>#<secret>` (the inline
-//! fallback when the upload failed). Either way the **signed capability is
+//! A link is `https://<host>/<k>/<id>#<secret>`, a pointer into the discovery
+//! ledger (the inline form that carried the sealed blob in the path was
+//! removed on 2026-10-19: a failed upload mints no link). The **signed capability is
 //! encrypted** under a key derived from a random [`LINK_SECRET_LEN`]-byte
 //! secret that rides in the URL **fragment**. A fragment never reaches a
 //! server, so the discovery ledger stores ciphertext only, and a link without
@@ -141,6 +141,14 @@ pub fn generate_link_secret() -> [u8; LINK_SECRET_LEN] {
 /// bytes.
 pub fn link_secret_from_slice(secret: &[u8]) -> Result<[u8; LINK_SECRET_LEN]> {
     <[u8; LINK_SECRET_LEN]>::try_from(secret).map_err(|_| ContactError::LinkDamaged)
+}
+
+/// Compare two link secrets in constant time (ADR-0079 section 3: the
+/// inviter's device checks a request's link answer against its own record
+/// without a timing side channel on the secret).
+#[must_use]
+pub fn link_secrets_match(a: &[u8; LINK_SECRET_LEN], b: &[u8; LINK_SECRET_LEN]) -> bool {
+    lakko_crypto::secret::SecretBytes::new(*a) == lakko_crypto::secret::SecretBytes::new(*b)
 }
 
 fn link_key(kind: LinkKind, secret: &[u8; LINK_SECRET_LEN], nonce: &Nonce) -> Result<AeadKey> {

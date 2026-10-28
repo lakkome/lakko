@@ -16,7 +16,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { fingerprintLabel, ownPreviewLabel, resolveDisplay } from "./resolver";
+import { fingerprintLabel, resolveDisplay } from "./resolver";
 
 const KEY = new Uint8Array([0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, ...new Array<number>(26).fill(0)]);
 
@@ -101,16 +101,25 @@ describe("resolveDisplay — a username is shown only when verified", () => {
     expect(r.usernameNotVerified).toBe(false);
   });
 
-  it("a failed or mismatched claim is noted for the contact detail", () => {
-    for (const verification of ["mismatch", "error"] as const) {
-      const r = resolveDisplay({
-        signatureKey: KEY,
-        profile: { displayName: "Pavel", username: "pavel" },
-        verification,
-      });
-      expect(r.usernameNotVerified).toBe(true);
-      expect(r.listLabel).toBe("Pavel");
-    }
+  it("a mismatched claim is noted for the contact detail", () => {
+    const r = resolveDisplay({
+      signatureKey: KEY,
+      profile: { displayName: "Pavel", username: "pavel" },
+      verification: "mismatch",
+    });
+    expect(r.usernameNotVerified).toBe(true);
+    expect(r.listLabel).toBe("Pavel");
+  });
+
+  it("a check that could not reach the directory is not noted: it reads as still running", () => {
+    const r = resolveDisplay({
+      signatureKey: KEY,
+      profile: { displayName: "Pavel", username: "pavel" },
+      verification: "error",
+    });
+    expect(r.usernameNotVerified).toBe(false);
+    expect(r.username).toBeNull();
+    expect(r.listLabel).toBe("Pavel");
   });
 
   it("no claim is no note", () => {
@@ -126,12 +135,5 @@ describe("resolveDisplay — a username is shown only when verified", () => {
 describe("fingerprint + own preview", () => {
   it("groups the first four bytes", () => {
     expect(fingerprintLabel(new Uint8Array([0, 1, 0xab, 0xff, 9]))).toBe("0001 abff");
-  });
-
-  it("previews how others see you", () => {
-    expect(ownPreviewLabel("Alice Petrova", "alice")).toBe("Alice Petrova · @alice");
-    expect(ownPreviewLabel(null, "alice")).toBe("@alice");
-    expect(ownPreviewLabel("  Guest ", null)).toBe("Guest");
-    expect(ownPreviewLabel(null, null)).toBeNull();
   });
 });

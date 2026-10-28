@@ -78,14 +78,15 @@ class PushPreviewDecryptTest {
         val cursor: Long? = null,
         val dsThrows: Boolean = false,
         val openThrows: Boolean = false,
-        /** ADR-0042: the reverse-index row `lookupRoute` returns
-         *  (`null` = miss → legacy raw-group_id path). */
+        /** ADR-0042: the reverse-index row `lookupRoute` returns. `null`:
+         *  when [account] is given, a row of that account mapping the wake's
+         *  `g` to itself (the fixture for tests that do not care how `g`
+         *  resolves); otherwise a miss. */
         val route: Pair<String, String>? = null,
         val routeThrows: Boolean = false,
     ) : PushDecryptDeps {
         var lookupCount = 0
         var lastLookupGid: String? = null
-        var resolveCount = 0
         var openCount = 0
         var dsFetchCount = 0
         var lastAfterId: Long? = null
@@ -94,24 +95,23 @@ class PushPreviewDecryptTest {
         var lastSeedZeroed = false
 
         var lastLookupAccount: String? = null
-        var lastLegacyAccount: String? = null
+
+        /** ADR-0078 — when set, the only subscription id the account holds. */
+        var heldSub: String? = null
+        var lastLookupSub: String? = null
 
         /** Models the account-keyed store: [route] is `(owner, groupIdHex)`
-         *  and answers only a lookup for its owner. */
-        override fun lookupRoute(accountIdB64: String, pushGidHex: String): String? {
+         *  and answers only a lookup for its owner, and only for [heldSub]
+         *  when set. */
+        override fun lookupRoute(accountIdB64: String, pushGidHex: String, subscriptionIdHex: String?): String? {
             lookupCount++
             lastLookupGid = pushGidHex
             lastLookupAccount = accountIdB64
+            lastLookupSub = subscriptionIdHex
             if (routeThrows) throw RuntimeException("route lookup failure")
-            return route?.takeIf { it.first == accountIdB64 }?.second
-        }
-
-        /** Models the per-account known-groups set: [account] names the one
-         *  account that knows the wake's group. */
-        override fun accountKnowsGroup(accountIdB64: String, groupHex: String): Boolean {
-            resolveCount++
-            lastLegacyAccount = accountIdB64
-            return account?.accountIdB64 == accountIdB64
+            heldSub?.let { if (subscriptionIdHex != it) return null }
+            route?.let { return it.takeIf { r -> r.first == accountIdB64 }?.second }
+            return if (account?.accountIdB64 == accountIdB64) pushGidHex else null
         }
 
         val seedAskedFor = mutableListOf<String>()
@@ -335,7 +335,6 @@ class PushPreviewDecryptTest {
         assertNull(decryptPushPreview(PushWake(groupHex, null, accountIdB64 = accountId), deps))
         assertNull(decryptPushPreview(PushWake("abc", 5, accountIdB64 = accountId), deps)) // wrong length
         assertNull(decryptPushPreview(PushWake("z".repeat(64), 5, accountIdB64 = accountId), deps)) // non-hex
-        assertEquals("no account lookup for a malformed wake", 0, deps.resolveCount)
     }
 
     @Test
@@ -453,8 +452,7 @@ class PushPreviewDecryptTest {
     fun `a push_gid wake resolves via the route index and decrypts`() = runTest {
         val group = FakeThrowawayGroup(decode = { chat("routed hello") })
         val deps = FakeDeps(
-            // Legacy resolution would FAIL for the push_gid — the route
-            // index is the only way home.
+            // `account = null`: the route index is the only way home.
             account = null,
             group = group,
             rows = listOf(row(10, 1)),
@@ -464,10 +462,8 @@ class PushPreviewDecryptTest {
         val preview = decryptPushPreview(PushWake(pushGidHex, pointer = 11, accountIdB64 = accountId), deps)
 
         assertEquals("routed hello", preview?.body)
-        // The route hit skipped the legacy path entirely...
         assertEquals(1, deps.lookupCount)
         assertEquals(pushGidHex, deps.lastLookupGid)
-        assertEquals("legacy resolveAccount must not run on a hit", 0, deps.resolveCount)
         // ...and everything downstream used the REAL group_id.
         assertTrue(
             "DS fetch must use the real group_id bytes",
@@ -482,67 +478,52 @@ class PushPreviewDecryptTest {
     }
 
     @Test
-    fun `a route miss falls back to the legacy raw-group_id path`() = runTest {
-        val group = FakeThrowawayGroup(decode = { chat("legacy") })
-        val deps = FakeDeps(
-            account = okAccount(),
-            group = group,
-            rows = listOf(row(5, 1)),
-            route = null, // miss
-        )
-        val preview = decryptPushPreview(PushWake(groupHex, 6, accountIdB64 = accountId), deps)
-
-        assertEquals("legacy", preview?.body)
-        assertEquals(1, deps.lookupCount)
-        assertEquals("legacy path consulted on a miss", 1, deps.resolveCount)
-        assertEquals(groupHex, preview?.tag)
-    }
-
-    @Test
-    fun `a route lookup error degrades to the legacy path`() = runTest {
-        val group = FakeThrowawayGroup(decode = { chat("survived the store error") })
-        val deps = FakeDeps(
-            account = okAccount(),
-            group = group,
-            rows = listOf(row(5, 1)),
-            routeThrows = true,
-        )
-        assertEquals(
-            "survived the store error",
-            decryptPushPreview(PushWake(groupHex, 6, accountIdB64 = accountId), deps)?.body,
-        )
-        assertEquals(1, deps.resolveCount)
-    }
-
-    @Test
-    fun `a route lookup error with no legacy match yields generic`() = runTest {
-        val deps = FakeDeps(account = null, routeThrows = true)
+    fun `a route lookup error yields generic`() = runTest {
+        // ADR-0078 — the raw-group_id fallback of the pre-ADR-0042 wake is
+        // gone: a store error is the generic notification.
+        val deps = FakeDeps(account = okAccount(), group = FakeThrowawayGroup(decode = { chat("x") }), routeThrows = true)
         assertNull(decryptPushPreview(PushWake(pushGidHex, 6, accountIdB64 = accountId), deps))
         assertEquals("no group open on a dead end", 0, deps.openCount)
     }
 
     @Test
-    fun `a malformed route row falls back to the legacy path`() = runTest {
+    fun `a malformed route row yields generic`() = runTest {
         for (badGroupIdHex in listOf("zz", "Z".repeat(64), "a".repeat(63))) {
             val deps = FakeDeps(
                 account = okAccount(),
-                group = FakeThrowawayGroup(decode = { chat("legacy after bad row") }),
+                group = FakeThrowawayGroup(decode = { chat("never shown") }),
                 rows = listOf(row(5, 1)),
                 route = accountId to badGroupIdHex,
             )
-            assertEquals(
-                "malformed stored row '$badGroupIdHex' must fall back",
-                "legacy after bad row",
-                decryptPushPreview(PushWake(groupHex, 6, accountIdB64 = accountId), deps)?.body,
+            assertNull(
+                "malformed stored row '$badGroupIdHex' is refused",
+                decryptPushPreview(PushWake(groupHex, 6, accountIdB64 = accountId), deps),
             )
-            assertEquals(1, deps.resolveCount)
+            assertEquals(0, deps.openCount)
         }
+    }
+
+    /** ADR-0078 — the lookup is handed the wake's `s`, and a subscription
+     *  the account does not hold is a miss. */
+    @Test
+    fun `a wake for a subscription the account does not hold yields generic`() = runTest {
+        val sub = "5".repeat(32)
+        val deps = FakeDeps(
+            account = null,
+            group = FakeThrowawayGroup(decode = { chat("not yours") }),
+            rows = listOf(row(10, 1)),
+            route = accountId to groupHex,
+        )
+        deps.heldSub = "6".repeat(32)
+        assertNull(decryptPushPreview(PushWake(pushGidHex, 11, accountIdB64 = accountId, subscriptionIdHex = sub), deps))
+        assertEquals(sub, deps.lastLookupSub)
+        assertEquals(0, deps.openCount)
     }
 
     // -----------------------------------------------------------------
     // ADR-0042, amended 2026-09-30: the wake is decrypted as the bound
-    // account ONLY — the route index and the legacy fallback are both
-    // consulted for that account, and nothing downstream picks another.
+    // account ONLY — the route index is consulted for that account, and
+    // nothing downstream picks another.
     // -----------------------------------------------------------------
 
     private val otherAccount = "other-acct=="
@@ -569,8 +550,8 @@ class PushPreviewDecryptTest {
     @Test
     fun `another account's route row for the same push_gid is a miss`() = runTest {
         // Two accounts in one group derive the same push_gid. The row the
-        // other account filed must never route this wake, and with the
-        // bound account knowing no such group the wake yields nothing.
+        // other account filed must never route this wake: the wake yields
+        // nothing.
         val deps = FakeDeps(
             account = null,
             group = FakeThrowawayGroup(decode = { chat("the other account's text") }),
@@ -579,38 +560,9 @@ class PushPreviewDecryptTest {
         )
         assertNull(decryptPushPreview(PushWake(pushGidHex, 11, accountIdB64 = accountId), deps))
         assertEquals(accountId, deps.lastLookupAccount)
-        assertEquals("the fallback searched the bound account", accountId, deps.lastLegacyAccount)
         assertEquals("nothing is opened for another account", 0, deps.openCount)
         assertTrue(deps.seedAskedFor.isEmpty())
         assertTrue(deps.snapshotAskedFor.isEmpty())
-    }
-
-    @Test
-    fun `the legacy fallback searches only the bound account's groups`() = runTest {
-        // Only the OTHER account knows the raw group id: the old scan took
-        // the first account that matched; now it is a stray wake.
-        val deps = FakeDeps(
-            account = ResolvedPushAccount(accountIdB64 = otherAccount, groupIdBytes = groupIdBytes),
-            group = FakeThrowawayGroup(decode = { chat("the other account's text") }),
-            rows = listOf(row(5, 1)),
-        )
-        assertNull(decryptPushPreview(PushWake(groupHex, 6, accountIdB64 = accountId), deps))
-        assertEquals(accountId, deps.lastLegacyAccount)
-        assertEquals(0, deps.openCount)
-    }
-
-    @Test
-    fun `the legacy fallback decrypts as the bound account when it knows the group`() = runTest {
-        val deps = FakeDeps(
-            account = okAccount(),
-            group = FakeThrowawayGroup(decode = { chat("legacy mine") }),
-            rows = listOf(row(5, 1)),
-        )
-        assertEquals(
-            "legacy mine",
-            decryptPushPreview(PushWake(groupHex, 6, accountIdB64 = accountId), deps)?.body,
-        )
-        assertEquals(listOf(accountId), deps.seedAskedFor)
     }
 
     @Test
@@ -618,7 +570,6 @@ class PushPreviewDecryptTest {
         val deps = FakeDeps(okAccount(), route = accountId to groupHex)
         assertNull(decryptPushPreview(PushWake(groupHex, 5, accountIdB64 = ""), deps))
         assertEquals(0, deps.lookupCount)
-        assertEquals(0, deps.resolveCount)
     }
 
     @Test

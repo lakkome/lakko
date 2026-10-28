@@ -67,6 +67,9 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         /// The fragment is not a link secret, or the preview does not open
         /// under it. Fail-closed: no preview-less fallback.
         case damaged
+        /// The ledger could not be asked for the link (the network, a server
+        /// error): the link may be fine, the page offers it again.
+        case openFailed
         /// ADR-0053 — one of the shared failure states; the raw error is
         /// logged, never shown.
         case failed(JoinRequestFailure)
@@ -91,7 +94,7 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     /// The opened (plaintext) capability bytes + the ledger pointer they came from, kept
     /// from `run()` so `Request to join` and `Request again` post against the
     /// bytes the person was shown, not a second fetch.
-    private var resolved: (capabilityWire: Data, blobId: Data?)?
+    private var resolved: (capabilityWire: Data, blobId: Data)?
     /// In flight, so `Request again` cannot be double-tapped into two journal
     /// rows. Separate from `state`, which STAYS `.waiting` across a re-request:
     /// going back through `.requesting` would hide the wait copy and read as a
@@ -121,8 +124,8 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         await load()
     }
 
-    /// Resolve the slug (a pointer fetches the sealed blob from the ledger; an
-    /// inline link carries it), open it under the fragment's link secret
+    /// Resolve the slug (the sealed blob is fetched from the ledger; an inline
+    /// slug, the removed form, is invalid), open it under the fragment's link secret
     /// (ADR-0028 amendment 2026-09-28 — this also verifies the signature),
     /// check the expiry and open the preview under the same secret. Nothing is
     /// posted here.
@@ -133,7 +136,7 @@ public final class JoinGroupLandingViewModel: ObservableObject {
             state = .damaged
             return
         }
-        let located: (sealed: Data, blobId: Data?)
+        let located: (sealed: Data, blobId: Data)
         do {
             located = try await repository.resolveGroupInviteSlug(slug: slug)
         } catch let error as GroupInviteLinkError {
@@ -149,7 +152,10 @@ public final class JoinGroupLandingViewModel: ObservableObject {
                 return
             }
             NSLog("group join: resolving the invite link failed: %@", String(describing: error))
-            state = .failed(JoinRequestFailure.classify(error))
+            // A link that is not there was answered above; this is a failure
+            // to ask the ledger, which says nothing about the link.
+            let failure = JoinRequestFailure.classify(error)
+            state = failure == .generic ? .openFailed : .failed(failure)
             return
         }
         let cap: GroupInviteCapability
@@ -219,8 +225,7 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         pollTask?.cancel()
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         do {
-            // Request to join — consuming the ledger row when the link was a
-            // pointer (ADR-0028 OQ1).
+            // Request to join — consuming the ledger row (ADR-0028 OQ1).
             let result = try await repository.requestToJoinFromLink(
                 capabilityWire: resolved.capabilityWire,
                 nowMs: nowMs,
@@ -237,6 +242,11 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     /// "Try again" on the generic failure: re-run whatever failed — the link
     /// resolve when it never resolved, the request otherwise.
     public func retry() async {
+        if state == .openFailed {
+            state = .loading
+            await load()
+            return
+        }
         guard case .failed = state else { return }
         if resolved == nil {
             state = .loading
@@ -325,6 +335,20 @@ public struct JoinGroupLandingScreen: View {
                 Text(groupInviteInvalidMessage)
                     .foregroundStyle(Color.lakkoText)
                     .fixedSize(horizontal: false, vertical: true)
+                Button(l10n.t("common.close")) {
+                    viewModel.dismiss()
+                    onDone()
+                }
+                .tint(.lakkoAccent)
+            case .openFailed:
+                Text(inviteLinkOpenFailedMessage)
+                    .foregroundStyle(Color.lakkoText)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(joinTryAgain) {
+                    Task { await viewModel.retry() }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.lakkoAccent)
                 Button(l10n.t("common.close")) {
                     viewModel.dismiss()
                     onDone()

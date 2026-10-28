@@ -126,60 +126,54 @@ final class PushGwTripwireURLProtocol: URLProtocol {
 
 // MARK: - Tests
 
-/// ADR-0054 decision 1 — the group wake is a header on the signed DS publish.
+/// ADR-0054 decision 1 with ADR-0078 section 3 — the group wake is a header on
+/// the signed DS publish, and its value is a wake sealed to push-gw's key.
 ///
-/// The header is `x-lakko-wake: <push_gid base64url, no padding>;<kind>`; the
-/// DS refuses a malformed one with `400`, which would fail the publish itself,
-/// so the value is built in one place (``DsWake``) and pinned here byte for
-/// byte. The send path then carries it on the publish and makes no request to
-/// push-gw at all.
+/// The DS refuses a malformed header with `400`, which would fail the publish
+/// itself, so ``DsWake`` admits only the sealed shape (312 base64url
+/// characters). The send path then carries it on the publish and makes no
+/// request to push-gw at all.
 @MainActor
 final class DsWakeTests: XCTestCase {
 
+    /// A fixed X25519 public key standing in for push-gw's wake key.
+    private let gwKey = Data(base64Encoded: "5dE45bRTS2tbAaV6QXgp6HoA8XDaVWm9wJ/1h3Wp7h0=")!
+
     // MARK: The header helper
 
-    /// A fixed id covering every base64url alphabet position that differs from
-    /// standard base64 (`+` -> `-`, `/` -> `_`) and a length whose standard
-    /// encoding ends in one `=`, which must be stripped.
-    func testTheHeaderValueIsUnpaddedBase64UrlThenTheKind() throws {
-        var gid = Data((0..<30).map { UInt8($0) })
-        gid.append(contentsOf: [0xFB, 0xFF])
-        let wake = try XCTUnwrap(DsWake(pushGid: gid, kind: .message))
-        XCTAssertEqual(
-            wake.headerValue,
-            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwd-_8;message")
-        let call = try XCTUnwrap(DsWake(pushGid: gid, kind: .call))
-        XCTAssertEqual(
-            call.headerValue,
-            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwd-_8;call")
+    /// The sealed wake from the core is always exactly the shape the DS
+    /// accepts, a version-1 blob of 234 bytes, and never the same twice (a
+    /// fresh ephemeral key and nonce per wake).
+    func testTheSealedHeaderIsTheShapeTheDsAccepts() throws {
+        let secret = Data(repeating: 0x42, count: 32)
+        let first = try LakkoCore.pushWakeHeaderValue(
+            pushGwKey: gwKey, secret: secret, kind: .message, timestampMs: 1)
+        let second = try LakkoCore.pushWakeHeaderValue(
+            pushGwKey: gwKey, secret: secret, kind: .message, timestampMs: 1)
+        XCTAssertEqual(first.count, DsWake.headerValueLength)
+        XCTAssertNotEqual(first, second)
+        XCTAssertNotNil(DsWake(headerValue: first))
+        let raw = try XCTUnwrap(base64UrlDecodeNoPad(first))
+        XCTAssertEqual(raw.count, 234)
+        XCTAssertEqual(raw.first, 0x01)
+        XCTAssertFalse(first.contains(";"), "the kind is sealed inside, not appended")
     }
 
-    /// 32 bytes is always 43 unpadded characters, and nothing outside the
-    /// base64url alphabet ever appears, for any id.
-    func testEveryIdEncodesToFortyThreeUrlSafeCharacters() throws {
-        let allowed = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
-        for fill: UInt8 in [0x00, 0x3E, 0x3F, 0x7F, 0xF8, 0xFB, 0xFF] {
-            let wake = try XCTUnwrap(DsWake(pushGid: Data(repeating: fill, count: 32), kind: .message))
-            let parts = wake.headerValue.split(separator: ";", omittingEmptySubsequences: false)
-            XCTAssertEqual(parts.count, 2)
-            XCTAssertEqual(parts[0].count, 43, "fill \(fill)")
-            XCTAssertTrue(parts[0].allSatisfy { allowed.contains($0) }, "fill \(fill)")
-            XCTAssertEqual(parts[1], "message")
-        }
-    }
-
-    /// A wrong-length id can never become a header: the DS would refuse the
-    /// whole publish, not only the wake.
-    func testAWrongLengthIdIsRefused() {
-        XCTAssertNil(DsWake(pushGid: Data(), kind: .message))
-        XCTAssertNil(DsWake(pushGid: Data(repeating: 1, count: 31), kind: .message))
-        XCTAssertNil(DsWake(pushGid: Data(repeating: 1, count: 33), kind: .call))
+    /// Anything but the sealed shape can never become a header: the DS would
+    /// refuse the whole publish, not only the wake.
+    func testAMalformedHeaderIsRefused() {
+        XCTAssertNil(DsWake(headerValue: ""))
+        XCTAssertNil(DsWake(headerValue: String(repeating: "A", count: 311)))
+        XCTAssertNil(DsWake(headerValue: String(repeating: "A", count: 313)))
+        XCTAssertNil(DsWake(headerValue: String(repeating: "A", count: 311) + "="))
+        XCTAssertNil(DsWake(headerValue: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwd-_8;message"),
+                     "the pre-ADR-0078 clear header")
+        XCTAssertNotNil(DsWake(headerValue: String(repeating: "A", count: 312)))
     }
 
     func testTheWireSpellingsAreTheServers() {
         XCTAssertEqual(DsWake.headerName, "x-lakko-wake")
-        XCTAssertEqual(DsWake.Kind.message.rawValue, "message")
-        XCTAssertEqual(DsWake.Kind.call.rawValue, "call")
+        XCTAssertEqual(DsWake.headerName, LakkoCore.pushWakeHeaderName())
     }
 
     // MARK: The client
@@ -187,7 +181,7 @@ final class DsWakeTests: XCTestCase {
     func testAGroupPublishCarriesTheWakeHeaderOnlyWhenAsked() async throws {
         let scope = WakeRecordingDsURLProtocol.freshScope()
         let ds = WakeRecordingDsURLProtocol.client(scope)
-        let wake = try XCTUnwrap(DsWake(pushGid: Data(repeating: 0xAB, count: 32), kind: .call))
+        let wake = try XCTUnwrap(DsWake(headerValue: String(repeating: "B", count: 312)))
 
         _ = try await ds.publishGroup(groupId: Data([0x01, 0x02]), payload: Data([0x09]), wake: wake)
         _ = try await ds.publishGroup(groupId: Data([0x01, 0x02]), payload: Data([0x09]))
@@ -213,9 +207,9 @@ final class DsWakeTests: XCTestCase {
 
     // MARK: The send path
 
-    /// The whole send path through the repository: a chat message carries a
-    /// `message` wake named by the group's `push_gid`, a call offer a `call`
-    /// wake, a control envelope none — and nothing reaches push-gw.
+    /// The whole send path through the repository: a chat message and a call
+    /// offer each carry a sealed wake, a control envelope none — and nothing
+    /// reaches push-gw.
     func testTheSendPathWakesThroughThePublishAndNeverCallsPushGw() async throws {
         PushGwTripwireURLProtocol.reset()
         URLProtocol.registerClass(PushGwTripwireURLProtocol.self)
@@ -223,8 +217,6 @@ final class DsWakeTests: XCTestCase {
 
         let f = try makeOwnerRepo()
         defer { try? FileManager.default.removeItem(at: f.outboxDir) }
-        let expected = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: f.secret))
-
         try await f.repo.sendMessage(groupIdHex: f.groupIdHex, plaintext: "hello")
         try await f.repo.publishApplicationMessage(
             groupIdHex: f.groupIdHex,
@@ -235,11 +227,11 @@ final class DsWakeTests: XCTestCase {
             wake: .call)
 
         let wakes = WakeRecordingDsURLProtocol.publishes(f.dsScope).map(\.wake)
-        XCTAssertEqual(wakes, [
-            try XCTUnwrap(DsWake(pushGid: expected, kind: .message)).headerValue,
-            nil,
-            try XCTUnwrap(DsWake(pushGid: expected, kind: .call)).headerValue,
-        ])
+        XCTAssertEqual(wakes.count, 3)
+        XCTAssertEqual(wakes[0]?.count, DsWake.headerValueLength)
+        XCTAssertNil(wakes[1], "a control envelope wakes nobody")
+        XCTAssertEqual(wakes[2]?.count, DsWake.headerValueLength)
+        XCTAssertNotEqual(wakes[0], wakes[2])
         XCTAssertEqual(
             PushGwTripwireURLProtocol.seen(), [],
             "ADR-0054 — the send path must not make a push-gw request of its own")
@@ -247,12 +239,23 @@ final class DsWakeTests: XCTestCase {
 
     /// ADR-0042 defer: with no routing secret for the group, the answer is no
     /// wake at all, never a wake named by the group id.
-    func testAGroupWithNoRoutingSecretGetsNoWake() throws {
+    func testAGroupWithNoRoutingSecretGetsNoWake() async throws {
         let f = try makeOwnerRepo()
         defer { try? FileManager.default.removeItem(at: f.outboxDir) }
-        XCTAssertNotNil(f.repo.pushWake(groupIdHex: f.groupIdHex, kind: .message))
-        XCTAssertNil(f.repo.pushWake(
-            groupIdHex: DsClient.pseudonymHex(Data(repeating: 0x5A, count: 32)), kind: .message))
+        let held = await f.repo.pushWake(groupIdHex: f.groupIdHex, kind: .message)
+        XCTAssertNotNil(held)
+        let none = await f.repo.pushWake(
+            groupIdHex: DsClient.pseudonymHex(Data(repeating: 0x5A, count: 32)), kind: .message)
+        XCTAssertNil(none)
+    }
+
+    /// No push-gw key: the publish goes out with no wake rather than failing.
+    func testNoWakeKeyMeansNoWake() async throws {
+        let f = try makeOwnerRepo()
+        defer { try? FileManager.default.removeItem(at: f.outboxDir) }
+        f.repo.pushWakeKeyProvider = { nil }
+        let none = await f.repo.pushWake(groupIdHex: f.groupIdHex, kind: .call)
+        XCTAssertNil(none)
     }
 
     // MARK: - Fixture
@@ -326,6 +329,8 @@ final class DsWakeTests: XCTestCase {
             leaveRequestStore: LeaveRequestStore(
                 defaults: try XCTUnwrap(UserDefaults(suiteName: "ds-wake-l-\(suffix)"))))
         repo.deviceIdentityInstaller = { _, _ in nil }
+        let gwKey = self.gwKey
+        repo.pushWakeKeyProvider = { gwKey }
         repo.bootstrap(
             secrets: IdentitySecrets(
                 accountId: accountIdBytes,

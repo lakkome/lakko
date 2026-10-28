@@ -106,9 +106,9 @@ targets:
     # Asset catalog: `Lakko/Assets.xcassets` (picked up by the `Lakko`
     # source path above) carries `AccentColor` plus the light + dark colour
     # sets of the UX-spec token table (docs/ux/client-redesign.md section 4),
-    # read through `Lakko/UI/Theme/LakkoTheme.swift`. No app icon set yet:
-    # the default launcher icon still shows for `me.lakko.dev` debug
-    # installs until the brand tile is added.
+    # read through `Lakko/UI/Theme/LakkoTheme.swift`, and the `AppIcon` set
+    # (light, dark and tinted 1024 images rendered by
+    # `tools/brand/render-app-icons.swift`).
     info:
       path: Lakko/Info.plist
       properties:
@@ -125,8 +125,14 @@ targets:
         # under (`ApiEndpoints.webOrigin`): the host the same stack's web
         # client and app-link association live on. Debug: the test stack.
         LakkoWebOrigin: "$(LAKKO_WEB_ORIGIN)"
+        # Portrait in practice: the app delegate answers portrait everywhere
+        # except the call screen while a shared screen is on the large place
+        # (ADR-0083, `CallOrientation`). The landscape entries make that one
+        # exception possible.
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
         # KT-log S3d — transparency-log integration config (mirror of
         # the web `VITE_LAKKO_TRANSPARENCY_URL` /
         # `VITE_LAKKO_TRANSPARENCY_OPERATOR_KEY`). Both default to EMPTY
@@ -352,6 +358,11 @@ targets:
           # signing team's id; the test deploy writes it from
           # LAKKO_APPLE_TEAM_ID when that is set.
           - applinks:test.lakko.me
+          # On a device in developer mode, running a development-signed
+          # build, this makes iOS fetch the association straight from the
+          # test host instead of Apple's CDN, which caches a missing or
+          # earlier file. Ignored by any other build.
+          - applinks:test.lakko.me?mode=developer
         # 1.20c — Push Notifications entitlement. `development`
         # routes APNs requests through the sandbox endpoint
         # (`api.sandbox.push.apple.com`); production builds

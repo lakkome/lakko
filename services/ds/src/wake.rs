@@ -7,14 +7,18 @@
 //! devices to be woken by adding one header to the signed `POST`:
 //!
 //! ```text
-//! x-lakko-wake: <push_gid>;<kind>
+//! x-lakko-wake: <sealed wake, base64url without padding>
 //! ```
 //!
-//! `<push_gid>` is the 32-byte ADR-0042 routing id as base64url without
-//! padding (exactly 43 characters) and `<kind>` is `message` or `call`. No
-//! header, no wake: a committer beacon, a typing signal or a receipt stays
-//! silent exactly as before, because the DS sees ciphertext only and cannot
-//! tell them from a message - the client decides.
+//! Since ADR-0078 section 3 the value is a wake **sealed to push-gw's X25519
+//! key** (`lakko_contacts::push_wake`): the `push_gid`, the kind, a nonce, a
+//! timestamp, the group's unlock key and a signature by the group's wake
+//! key are all inside. The DS checks the shape only - exactly
+//! [`PUSH_WAKE_HEADER_LEN`] characters decoding to a [`PUSH_WAKE_LEN`]-byte
+//! blob whose first byte is the wake version - and forwards the blob
+//! unread. It no longer learns which group is woken, whether the wake is a
+//! call, or anything else about it. No header, no wake: a committer beacon,
+//! a typing signal or a receipt stays silent exactly as before.
 //!
 //! **Order.** The header is parsed before anything else is done with the
 //! request, so a malformed one is a `400` and the row is never appended. The
@@ -23,36 +27,32 @@
 //! there is no writer to hold to the rule "only a writer may wake"; its
 //! header is validated and dropped.
 //!
-//! **Forward.** The DS hands `(push_gid, message_id, kind)` to push-gw's
-//! internal listener over HTTP, authenticated by a shared secret presented in
+//! **No binding.** ADR-0057 dropped a wake whose `push_gid` was not the one
+//! bound to the publishing journal. The binding table, and the pepper it was
+//! keyed under, are gone (the pair was the push-gw <-> journal join at rest):
+//! push-gw now refuses a wake not signed by the group's wake key, which only
+//! members hold, and deduplicates nonces. A member of two groups can still
+//! carry one group's wake on the other group's journal; it could equally
+//! publish to the first group, so nothing is gained by it.
+//!
+//! **Forward.** The DS hands `(wake, message_id)` to push-gw's internal
+//! listener over HTTP, authenticated by a shared secret presented in
 //! `x-lakko-internal-secret` (the transparency append-secret pattern). The
 //! call is fire-and-forget: spawned, bounded by [`FORWARD_TIMEOUT`] and by
 //! [`MAX_IN_FLIGHT`] concurrent forwards, and never able to delay or fail the
-//! publish response. Nothing is stored, and no log line carries a `push_gid`
-//! or a group id - at most the kind and the outcome.
+//! publish response. Nothing is stored, and no log line carries the blob or
+//! a group id - at most the outcome.
 //!
-//! **Caps.** Two in-memory token buckets, both of which must admit a wake:
+//! **Cap.** An in-memory token bucket per **journal** (the group id the
+//! publish went to): a member who spams wakes through a journal is cut here.
+//! The per-target cap that used to sit beside it keyed on a `push_gid` the DS
+//! no longer sees; push-gw applies it after opening the wake. Over the cap
+//! the message is appended and answered normally; only the wake is dropped.
+//! A publish is never refused for its wake.
 //!
-//! - per **journal** (the group id the publish went to), which is what the
-//!   ADR names: a member who spams wakes through their own group is cut here;
-//! - per **target** (the `push_gid` being woken). Written when the DS could
-//!   not check that a `push_gid` belongs to the journal it arrived on (ADR-0054
-//!   decision 1). Since ADR-0057 it can: a journal wakes only the one
-//!   `push_gid` its root or an admin bound to it (`src/ownership.rs`), and
-//!   one `push_gid` is bound to at most one journal, so a caller can no longer
-//!   wake a group through journals of its own. The target cap stays as the
-//!   bound on how often one group is woken through its own journal.
-//!   Its cost, stated: someone who holds a group's `push_gid` can spend that
-//!   group's wake budget and delay its genuine wakes by up to a refill window -
-//!   a delayed notification, never a lost message, where the alternative is a
-//!   battery-drain flood.
-//!
-//! Over either cap the message is appended and answered normally; only the
-//! wake is dropped. A publish is never refused for its wake.
-//!
-//! Both maps are bounded ([`MAX_TRACKED`] keys each): an entry idle for longer
-//! than a full refill is indistinguishable from a fresh one and is swept first,
-//! then the least recently used goes.
+//! The map is bounded ([`MAX_TRACKED`] keys): an entry idle for longer than a
+//! full refill is indistinguishable from a fresh one and is swept first, then
+//! the least recently used goes.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -61,6 +61,7 @@ use std::time::{Duration, Instant};
 use axum::http::{HeaderMap, StatusCode};
 use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD as B64URL};
 use base64::Engine as _;
+use lakko_contacts::push_wake::{PUSH_WAKE_HEADER_LEN, PUSH_WAKE_LEN, PUSH_WAKE_VERSION_V1};
 use tokio::sync::Semaphore;
 
 use crate::journal::PSEUDONYM_LEN;
@@ -70,9 +71,6 @@ pub(crate) const WAKE_HEADER: &str = "x-lakko-wake";
 
 /// The header push-gw's internal listener checks the shared secret in.
 pub(crate) const INTERNAL_SECRET_HEADER: &str = "x-lakko-internal-secret";
-
-/// base64url-no-pad length of a 32-byte `push_gid`.
-const PUSH_GID_B64_LEN: usize = 43;
 
 /// Minimum decoded length of the shared secret; the transparency append
 /// secret uses the same floor.
@@ -86,10 +84,10 @@ pub(crate) const FORWARD_TIMEOUT: Duration = Duration::from_secs(5);
 /// drops the wake rather than queueing it behind a slow push-gw.
 pub(crate) const MAX_IN_FLIGHT: usize = 256;
 
-/// Most keys either bucket map tracks.
+/// Most keys the bucket map tracks.
 pub(crate) const MAX_TRACKED: usize = 65_536;
 
-/// Default burst: wakes a journal (and a target) may fire back to back.
+/// Default burst: wakes a journal may fire back to back.
 ///
 /// Chosen, not measured. A busy human chat sends a message every few seconds
 /// at its peak and a person typing quickly can send several in a row; 30
@@ -97,7 +95,7 @@ pub(crate) const MAX_TRACKED: usize = 65_536;
 /// coalesces wakes for one device anyway.
 pub(crate) const DEFAULT_BURST: u32 = 30;
 
-/// Default sustained rate, wakes per minute per journal (and per target).
+/// Default sustained rate, wakes per minute per journal.
 ///
 /// Chosen, not measured. One wake a second sustained is more than a group of
 /// people typing by hand produces over any minute, and far below what a
@@ -110,55 +108,31 @@ type HandlerError = (StatusCode, String);
 // The header
 // ============================================================================
 
-/// What the woken devices are told about.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum WakeKind {
-    /// An ordinary message.
-    Message,
-    /// A call signal: push-gw raises urgency and rings rather than notifies.
-    Call,
-}
-
-impl WakeKind {
-    /// Wire name, shared by the header and the push-gw request body.
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Message => "message",
-            Self::Call => "call",
-        }
-    }
-}
-
-/// A parsed `x-lakko-wake` header.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A parsed `x-lakko-wake` header: the sealed wake, unread.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WakeRequest {
-    /// The ADR-0042 routing id of the group to wake.
-    pub(crate) push_gid: [u8; PSEUDONYM_LEN],
-    /// Message or call.
-    pub(crate) kind: WakeKind,
+    /// The sealed wake bytes, exactly as the publisher sent them.
+    pub(crate) blob: Vec<u8>,
 }
 
 fn bad_wake() -> HandlerError {
     (StatusCode::BAD_REQUEST, format!("malformed {WAKE_HEADER}"))
 }
 
-/// Parse the one header value. Strict: exactly `<43 chars>;<kind>`, no
-/// whitespace, no padding, no extra `;` part, no other kind name.
+/// Parse the one header value. Strict: exactly [`PUSH_WAKE_HEADER_LEN`]
+/// base64url-no-pad characters decoding to [`PUSH_WAKE_LEN`] bytes whose
+/// first byte is the wake version. Nothing else is read.
 pub(crate) fn parse_wake_value(value: &str) -> Result<WakeRequest, HandlerError> {
-    let (gid, kind) = value.split_once(';').ok_or_else(bad_wake)?;
-    if gid.len() != PUSH_GID_B64_LEN {
+    if value.len() != PUSH_WAKE_HEADER_LEN {
         return Err(bad_wake());
     }
-    let kind = match kind {
-        "message" => WakeKind::Message,
-        "call" => WakeKind::Call,
-        _ => return Err(bad_wake()),
-    };
     // The no-pad engine refuses `=` and non-canonical trailing bits, so one
-    // push_gid has exactly one spelling.
-    let bytes = B64URL.decode(gid).map_err(|_| bad_wake())?;
-    let push_gid: [u8; PSEUDONYM_LEN] = bytes.try_into().map_err(|_| bad_wake())?;
-    Ok(WakeRequest { push_gid, kind })
+    // blob has exactly one spelling.
+    let blob = B64URL.decode(value).map_err(|_| bad_wake())?;
+    if blob.len() != PUSH_WAKE_LEN || blob[0] != PUSH_WAKE_VERSION_V1 {
+        return Err(bad_wake());
+    }
+    Ok(WakeRequest { blob })
 }
 
 /// Read the wake header off a request. `Ok(None)` when absent; a `400` when
@@ -212,7 +186,7 @@ pub(crate) struct ForwardConfig {
 pub(crate) struct WakeConfig {
     /// `None`: dormant - headers are validated, wakes are dropped.
     pub(crate) forward: Option<ForwardConfig>,
-    /// The per-journal and per-target cap.
+    /// The per-journal cap.
     pub(crate) cap: CapConfig,
 }
 
@@ -359,14 +333,6 @@ impl WakeCap {
         }
     }
 
-    /// Give back a token taken by [`Self::admit_at`] (the other cap refused).
-    fn refund(&self, key: &[u8; PSEUDONYM_LEN]) {
-        let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(bucket) = buckets.get_mut(key) {
-            bucket.tokens = (bucket.tokens + 1.0).min(self.burst);
-        }
-    }
-
     fn evict(&self, buckets: &mut HashMap<[u8; PSEUDONYM_LEN], Bucket>, now: Instant) {
         buckets.retain(|_, b| now.saturating_duration_since(b.last_seen) < self.idle_after);
         if buckets.len() >= self.max_entries {
@@ -400,26 +366,14 @@ struct Forwarder {
     slots: Arc<Semaphore>,
 }
 
-/// What [`Waker::admit_at`] decided.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Admission {
-    /// Both caps had a token.
-    Admitted,
-    /// The journal's cap was empty.
-    JournalCapped,
-    /// The target's cap was empty.
-    TargetCapped,
-}
-
-/// Holds the caps and, when configured, the forwarder to push-gw.
+/// Holds the cap and, when configured, the forwarder to push-gw.
 pub(crate) struct Waker {
     forward: Option<Forwarder>,
     per_journal: WakeCap,
-    per_target: WakeCap,
-    /// Every `push_gid` handed to [`Self::fire`], so a route test can tell a
-    /// fired wake from a dropped one without a push-gw.
+    /// Every blob handed to [`Self::fire`], so a route test can tell a fired
+    /// wake from a dropped one without a push-gw.
     #[cfg(test)]
-    fired: Mutex<Vec<[u8; PSEUDONYM_LEN]>>,
+    fired: Mutex<Vec<Vec<u8>>>,
 }
 
 impl Waker {
@@ -451,26 +405,24 @@ impl Waker {
         Ok(Self {
             forward,
             per_journal: WakeCap::new(config.cap, MAX_TRACKED),
-            per_target: WakeCap::new(config.cap, MAX_TRACKED),
             #[cfg(test)]
             fired: Mutex::new(Vec::new()),
         })
     }
 
-    /// A waker that forwards nothing, with the default caps.
+    /// A waker that forwards nothing, with the default cap.
     #[cfg(test)]
     pub(crate) fn dormant() -> Self {
         Self {
             forward: None,
             per_journal: WakeCap::new(CapConfig::default(), MAX_TRACKED),
-            per_target: WakeCap::new(CapConfig::default(), MAX_TRACKED),
             fired: Mutex::new(Vec::new()),
         }
     }
 
-    /// The `push_gid`s handed to [`Self::fire`] so far.
+    /// The blobs handed to [`Self::fire`] so far.
     #[cfg(test)]
-    pub(crate) fn fired_targets(&self) -> Vec<[u8; PSEUDONYM_LEN]> {
+    pub(crate) fn fired_targets(&self) -> Vec<Vec<u8>> {
         self.fired
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -482,52 +434,29 @@ impl Waker {
         self.forward.is_some()
     }
 
-    /// Charge both caps for one wake. A token taken from the journal's cap is
-    /// given back when the target's cap refuses, so a wake that did not fire
-    /// is not charged to the journal.
-    pub(crate) fn admit_at(
-        &self,
-        journal: &[u8; PSEUDONYM_LEN],
-        wake: &WakeRequest,
-        now: Instant,
-    ) -> Admission {
-        if !self.per_journal.admit_at(journal, now) {
-            return Admission::JournalCapped;
-        }
-        if !self.per_target.admit_at(&wake.push_gid, now) {
-            self.per_journal.refund(journal);
-            return Admission::TargetCapped;
-        }
-        Admission::Admitted
+    /// Charge the journal's cap for one wake; `true` when it had a token.
+    pub(crate) fn admit_at(&self, journal: &[u8; PSEUDONYM_LEN], now: Instant) -> bool {
+        self.per_journal.admit_at(journal, now)
     }
 
     /// Fire a wake for the row `message_id` just appended to `journal`.
     /// Returns at once; the forward (if any) runs on its own task.
     pub(crate) fn fire(&self, journal: &[u8; PSEUDONYM_LEN], wake: WakeRequest, message_id: u64) {
-        let kind = wake.kind.as_str();
         #[cfg(test)]
         self.fired
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(wake.push_gid);
-        match self.admit_at(journal, &wake, Instant::now()) {
-            Admission::Admitted => {},
-            Admission::JournalCapped => {
-                tracing::debug!(kind, outcome = "journal-capped", "wake dropped");
-                return;
-            },
-            Admission::TargetCapped => {
-                tracing::debug!(kind, outcome = "target-capped", "wake dropped");
-                return;
-            },
+            .push(wake.blob.clone());
+        if !self.admit_at(journal, Instant::now()) {
+            tracing::debug!(outcome = "journal-capped", "wake dropped");
+            return;
         }
         let Some(forward) = &self.forward else {
-            tracing::debug!(kind, outcome = "dormant", "wake dropped");
+            tracing::debug!(outcome = "dormant", "wake dropped");
             return;
         };
         let Ok(permit) = Arc::clone(&forward.slots).try_acquire_owned() else {
             tracing::warn!(
-                kind,
                 outcome = "busy",
                 "wake dropped: forwards in flight at limit"
             );
@@ -538,27 +467,24 @@ impl Waker {
             .post(&forward.notify_url)
             .header(INTERNAL_SECRET_HEADER, &forward.secret_b64)
             .json(&serde_json::json!({
-                "push_gid": hex::encode(wake.push_gid),
+                "wake": B64URL.encode(&wake.blob),
                 "envelope_pointer": message_id,
-                "kind": kind,
             }));
         tokio::spawn(async move {
             let _permit = permit;
             match request.send().await {
                 Ok(resp) if resp.status().is_success() => {
-                    tracing::debug!(kind, outcome = "forwarded", "wake forwarded");
+                    tracing::debug!(outcome = "forwarded", "wake forwarded");
                 },
                 Ok(resp) => {
-                    tracing::warn!(
-                        kind,
-                        status = resp.status().as_u16(),
-                        "wake refused by push-gw"
-                    );
+                    // push-gw refuses a wake it cannot open, an unsigned or
+                    // replayed one, or one over its per-group cap.
+                    tracing::debug!(status = resp.status().as_u16(), "wake refused by push-gw");
                 },
                 Err(e) => {
-                    // The error's own text can carry the URL, never the
-                    // push_gid (it rides in the body).
-                    tracing::warn!(kind, timeout = e.is_timeout(), "wake forward failed");
+                    // The error's own text can carry the URL, never the blob
+                    // (it rides in the body).
+                    tracing::warn!(timeout = e.is_timeout(), "wake forward failed");
                 },
             }
         });
@@ -570,8 +496,10 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
 
-    fn gid_b64(byte: u8) -> String {
-        B64URL.encode([byte; PSEUDONYM_LEN])
+    fn blob(fill: u8) -> Vec<u8> {
+        let mut b = vec![fill; PUSH_WAKE_LEN];
+        b[0] = PUSH_WAKE_VERSION_V1;
+        b
     }
 
     fn headers_with(values: &[&str]) -> HeaderMap {
@@ -583,17 +511,9 @@ mod tests {
     }
 
     #[test]
-    fn a_message_wake_parses() {
-        let w = parse_wake_value(&format!("{};message", gid_b64(7))).unwrap();
-        assert_eq!(w.push_gid, [7; PSEUDONYM_LEN]);
-        assert_eq!(w.kind, WakeKind::Message);
-    }
-
-    #[test]
-    fn a_call_wake_parses() {
-        let w = parse_wake_value(&format!("{};call", gid_b64(0xfe))).unwrap();
-        assert_eq!(w.push_gid, [0xfe; PSEUDONYM_LEN]);
-        assert_eq!(w.kind, WakeKind::Call);
+    fn a_sealed_wake_parses_to_its_bytes() {
+        let w = parse_wake_value(&B64URL.encode(blob(7))).unwrap();
+        assert_eq!(w.blob, blob(7));
     }
 
     #[test]
@@ -603,40 +523,27 @@ mod tests {
 
     #[test]
     fn a_present_header_is_read() {
-        let h = headers_with(&[&format!("{};call", gid_b64(1))]);
-        assert_eq!(parse_wake_header(&h).unwrap().unwrap().kind, WakeKind::Call);
+        let h = headers_with(&[&B64URL.encode(blob(1))]);
+        assert_eq!(parse_wake_header(&h).unwrap().unwrap().blob, blob(1));
     }
 
     #[test]
     fn every_malformed_class_is_a_400() {
-        let good = gid_b64(9);
-        let padded = B64URL.encode([9u8; 32]) + "=";
-        let std_alphabet = {
-            // 0xfb bytes produce '+' / '/' in the standard alphabet.
-            let s = B64.encode([0xfbu8; 32]);
-            s.trim_end_matches('=').to_string()
-        };
-        let mut non_canonical = good.clone();
-        // The last char of a 43-char encoding carries 2 unused bits; 'B' sets one.
-        non_canonical.pop();
-        non_canonical.push('B');
+        let good = B64URL.encode(blob(9));
+        let mut wrong_version = blob(9);
+        wrong_version[0] = 0x02;
+        // 0xfb bytes produce '+' and '/' in the standard alphabet.
+        let standard = B64.encode(blob(0xfb)).trim_end_matches('=').to_string();
         let cases = vec![
             String::new(),
-            good.clone(),                                  // no kind
-            format!("{good};"),                            // empty kind
-            format!("{good};Message"),                     // wrong case
-            format!("{good};ring"),                        // unknown kind
-            format!("{good};message;call"),                // extra part
-            format!("{good};message "),                    // trailing space
-            format!(" {good};message"),                    // leading space
-            format!("{good} ;message"),                    // space before separator
-            format!("{};message", &good[..42]),            // too short
-            format!("{good}A;message"),                    // too long
-            format!("{padded};message"),                   // padding
-            format!("{std_alphabet};message"),             // standard alphabet
-            format!("{non_canonical};message"),            // non-canonical tail
-            format!("{};message", "!".repeat(43)),         // not base64
-            format!("{};message", hex::encode([1u8; 32])), // hex, 64 chars
+            good[..good.len() - 1].to_string(),
+            format!("{good}A"),
+            B64URL.encode(&wrong_version),
+            format!("{}=", &good[..good.len() - 1]),
+            standard,
+            "!".repeat(PUSH_WAKE_HEADER_LEN),
+            format!("{};message", B64URL.encode([1u8; 32])),
+            format!(" {}", &good[1..]),
         ];
         for case in cases {
             let err = parse_wake_value(&case).unwrap_err();
@@ -646,7 +553,7 @@ mod tests {
 
     #[test]
     fn a_repeated_header_is_a_400() {
-        let v = format!("{};message", gid_b64(1));
+        let v = B64URL.encode(blob(1));
         let h = headers_with(&[&v, &v]);
         assert_eq!(
             parse_wake_header(&h).unwrap_err().0,
@@ -767,51 +674,19 @@ mod tests {
         .unwrap()
     }
 
-    fn wake(byte: u8) -> WakeRequest {
-        WakeRequest {
-            push_gid: [byte; PSEUDONYM_LEN],
-            kind: WakeKind::Message,
-        }
-    }
-
     #[test]
     fn a_journal_is_capped_after_its_burst_and_refills() {
         // 60/min = one token a second.
         let w = waker(3, 60);
         let t0 = Instant::now();
         let journal = [1u8; PSEUDONYM_LEN];
-        for i in 0..3u8 {
-            // Distinct targets, so only the journal cap is exercised.
-            assert_eq!(w.admit_at(&journal, &wake(i), t0), Admission::Admitted);
+        for _ in 0..3 {
+            assert!(w.admit_at(&journal, t0));
         }
-        assert_eq!(w.admit_at(&journal, &wake(9), t0), Admission::JournalCapped);
-        assert_eq!(
-            w.admit_at(&journal, &wake(10), t0 + Duration::from_millis(1100)),
-            Admission::Admitted
-        );
-    }
-
-    #[test]
-    fn a_target_is_capped_across_journals() {
-        let w = waker(2, 60);
-        let t0 = Instant::now();
-        let target = wake(5);
-        assert_eq!(w.admit_at(&[1; 32], &target, t0), Admission::Admitted);
-        assert_eq!(w.admit_at(&[2; 32], &target, t0), Admission::Admitted);
-        // A third fresh journal does not buy a third wake of the same group.
-        assert_eq!(w.admit_at(&[3; 32], &target, t0), Admission::TargetCapped);
-    }
-
-    #[test]
-    fn a_target_refusal_does_not_charge_the_journal() {
-        let w = waker(1, 1);
-        let t0 = Instant::now();
-        let journal = [1u8; PSEUDONYM_LEN];
-        // Spend target 5's only token through another journal.
-        assert_eq!(w.admit_at(&[2; 32], &wake(5), t0), Admission::Admitted);
-        assert_eq!(w.admit_at(&journal, &wake(5), t0), Admission::TargetCapped);
-        // The journal's single token was refunded.
-        assert_eq!(w.admit_at(&journal, &wake(6), t0), Admission::Admitted);
+        assert!(!w.admit_at(&journal, t0));
+        assert!(w.admit_at(&journal, t0 + Duration::from_millis(1100)));
+        // Another journal has its own budget.
+        assert!(w.admit_at(&[2u8; PSEUDONYM_LEN], t0));
     }
 
     #[test]
@@ -892,23 +767,19 @@ mod tests {
             cap: CapConfig::default(),
         })
         .unwrap();
-        let wake = WakeRequest {
-            push_gid: [0xab; PSEUDONYM_LEN],
-            kind: WakeKind::Call,
-        };
-        w.fire(&[1; 32], wake, 77);
+        w.fire(&[1; 32], WakeRequest { blob: blob(0xab) }, 77);
 
         let (secret, body) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("forward within 5 s")
             .expect("stub saw the request");
         assert_eq!(secret.as_deref(), Some(SECRET));
-        assert_eq!(body["push_gid"], hex::encode([0xab; PSEUDONYM_LEN]));
+        // The blob byte for byte, unread, beside the message id.
+        assert_eq!(body["wake"], B64URL.encode(blob(0xab)));
         assert_eq!(body["envelope_pointer"], 77);
-        assert_eq!(body["kind"], "call");
         assert_eq!(
             body.as_object().unwrap().len(),
-            3,
+            2,
             "nothing else rides along"
         );
     }
@@ -926,7 +797,7 @@ mod tests {
         })
         .unwrap();
         let started = Instant::now();
-        w.fire(&[1; 32], wake(1), 1);
+        w.fire(&[1; 32], WakeRequest { blob: blob(1) }, 1);
         assert!(started.elapsed() < Duration::from_millis(500));
     }
 
@@ -935,6 +806,6 @@ mod tests {
         // Nothing to assert beyond "does not panic and returns at once":
         // there is no forwarder to reach.
         let w = Waker::dormant();
-        w.fire(&[1; 32], wake(1), 42);
+        w.fire(&[1; 32], WakeRequest { blob: blob(1) }, 42);
     }
 }

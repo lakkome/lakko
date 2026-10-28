@@ -131,6 +131,35 @@ class SyncStatePersistenceTest {
         assertEquals(listOf(ACCOUNT to "v1"), writes)
     }
 
+    @Test
+    fun write_now_writes_without_waiting_for_the_debounce() {
+        // An invite link's record must be on disk before the link is handed
+        // out (2026-10-22): a process ended within the debounce forgot it.
+        persistence.start(ACCOUNT)
+        settle()
+        writes.clear()
+        versions.value = 1L
+        scope.runCurrent()
+        assertTrue(persistence.writeNow())
+        assertEquals(listOf(ACCOUNT to "v1"), writes)
+    }
+
+    @Test
+    fun write_now_says_when_nothing_was_written() {
+        assertFalse(persistence.writeNow()) // nothing bound
+        val failing = SyncStatePersistence(
+            scope = scope,
+            versions = versions,
+            debounceMs = DEBOUNCE,
+            encode = { "v${versions.value}".toByteArray() },
+            write = { _, _ -> error("disk full") },
+            onChanged = {},
+        )
+        failing.start(ACCOUNT)
+        assertFalse(failing.writeNow())
+        failing.stopAndFlush()
+    }
+
     private companion object {
         const val DEBOUNCE = 500L
         const val ACCOUNT = "account-A"

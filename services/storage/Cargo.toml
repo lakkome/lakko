@@ -22,8 +22,11 @@ path = "src/main.rs"
 [dependencies]
 tokio.workspace = true
 tracing.workspace = true
+# ADR-0078 section 11: the request span that records the route template.
+lakko-log-hygiene.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
@@ -53,7 +56,38 @@ tempfile = "3"
 futures = "0.3"
 bytes = "1"
 
+# ADR-0065 section 1: the blob index. MariaDB in deployment
+# (`LAKKO_STORAGE_DATABASE_URL`), the same sqlx pin and feature set as
+# `services/channels`; without a database URL the file-backed index is used.
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "mysql",
+    "migrate",
+    "macros",
+] }
+# Object-safe async dispatch for the `BlobIndex` trait, as `ChannelStore`
+# in `services/channels`.
+async-trait = "0.1"
+
+# ADR-0065 section 5: one anonymous token of `blob-upload` / `blob-read`
+# buys an hour's pass, through the shared spend gate.
+lakko-anon-token.workspace = true
+lakko-anon-token-server.workspace = true
+
+# The pass MAC (HMAC-SHA-256) and the random pass id. No new cryptography.
+lakko-crypto.workspace = true
+# Constant-time comparison of the pass tag (already in the tree).
+subtle = "2"
+# Base64url-no-pad for the pass and the delete-key header.
+base64 = "0.22"
+
+# ADR-0065 section 6: the `x-lakko-storage-proof` verifier for
+# `DELETE /blob/{hex}` (pure; depends on lakko-crypto, thiserror, base64).
+lakko-vault.workspace = true
+
 [dev-dependencies]
+lakko-anon-token-server = { workspace = true, features = ["testing"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"

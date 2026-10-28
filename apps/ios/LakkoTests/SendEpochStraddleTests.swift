@@ -165,7 +165,24 @@ final class SendEpochStraddleTests: XCTestCase {
                 client?.urlProtocolDidFinishLoading(self)
                 return
             }
-            let body = Self.bodyData(of: request) ?? Data()
+            // ADR-0081 — a commit reaches the journal through
+            // `POST .../commit` as `{"statement_b64", "row_b64"}`: the DS
+            // appends the ROW (and registers its epoch) in one step, so the
+            // journal records the row, not the request body. A body that is
+            // not such a request is answered 400 and records nothing.
+            var body = Self.bodyData(of: request) ?? Data()
+            if isPublish, request.url?.lastPathComponent == "commit" {
+                guard let row = Self.commitRow(of: body) else {
+                    let response = HTTPURLResponse(
+                        url: request.url!, statusCode: 400, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "text/plain"])!
+                    client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                    client?.urlProtocol(self, didLoad: Data("body must carry row_b64".utf8))
+                    client?.urlProtocolDidFinishLoading(self)
+                    return
+                }
+                body = row
+            }
             // Never park on `startLoading`'s own queue: `URLSession` may invoke
             // it on a shared internal queue, so blocking there would serialize
             // the requests itself and make the whole suite vacuous.
@@ -231,6 +248,16 @@ final class SendEpochStraddleTests: XCTestCase {
         }
 
         override func stopLoading() {}
+
+        /// The commit row of a `POST .../commit` body (ADR-0081).
+        private static func commitRow(of body: Data) -> Data? {
+            guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                  json["statement_b64"] is String,
+                  let rowB64 = json["row_b64"] as? String,
+                  let row = Data(base64Encoded: rowB64), !row.isEmpty
+            else { return nil }
+            return row
+        }
 
         /// `URLProtocol` strips `httpBody` when the request was built from a
         /// stream, so fall back to draining `httpBodyStream`.

@@ -19,8 +19,6 @@ private let keyA = Data(repeating: 0xA1, count: 32)
 private let keyB = Data(repeating: 0xB2, count: 32)
 private let accountA = Data(repeating: 0x0A, count: 16)
 private let accountB = Data(repeating: 0x0B, count: 16)
-/// A 16-byte call id, as lowercase hex.
-private let callIdHex = String(repeating: "c1", count: 16)
 
 private final class MemoryPersistence: ProfilePersistence {
     var blobs: [String: Data] = [:]
@@ -169,25 +167,32 @@ final class CallTileNameTests: XCTestCase {
         XCTAssertNotEqual(label, Localization.text("call.participant.numbered", texts: ["number": "1"]))
     }
 
-    // MARK: - Whose profile may be filed
+    // MARK: - Whose profile claim is kept
 
-    func testAClaimIsAcceptedOnlyForTheAccountTheSfuAdmitted() {
-        let tagOf: (String) -> String = { "tag-of-" + $0 }
-        let tagA = tagOf(hexEncode(accountA))
-        XCTAssertTrue(
-            CallTileName.profileClaimMatchesPeer(claimedAccountId: accountA, peerTag: tagA, tagOf: tagOf))
-        XCTAssertFalse(
-            CallTileName.profileClaimMatchesPeer(claimedAccountId: accountB, peerTag: tagA, tagOf: tagOf))
-        XCTAssertFalse(
-            CallTileName.profileClaimMatchesPeer(claimedAccountId: nil, peerTag: tagA, tagOf: tagOf))
-        XCTAssertFalse(
-            CallTileName.profileClaimMatchesPeer(claimedAccountId: accountA, peerTag: nil, tagOf: tagOf))
-        XCTAssertFalse(
-            CallTileName.profileClaimMatchesPeer(claimedAccountId: accountA, peerTag: "", tagOf: { _ in "" }))
-        XCTAssertFalse(
-            CallTileName.profileClaimMatchesPeer(
-                claimedAccountId: Data(repeating: 0x0A, count: 15), peerTag: tagA, tagOf: { _ in tagA }),
-            "only a whole 16-byte account id is a claim")
+    /// ADR-0078 section 2: the SFU knows no account, so the one account id a
+    /// link call knows independently is the owner's, in the signed
+    /// capability. Only a profile the owner sealed that names that account
+    /// keeps its account claim and username certificate.
+    func testOnlyTheOwnersClaimOfTheOwnersAccountIsKept() {
+        let cert = Data(repeating: 0x5C, count: 153)
+        let claim = ProfileClaim(
+            displayName: "Anna", username: "anna", updatedAtMs: 5,
+            accountId: accountA, usernameCertificate: cert)
+
+        let kept = CallTileName.boundProfileClaim(claim, fromOwner: true, ownerAccountId: accountA)
+        XCTAssertEqual(kept.accountId, accountA)
+        XCTAssertEqual(kept.usernameCertificate, cert)
+
+        for stripped in [
+            CallTileName.boundProfileClaim(claim, fromOwner: false, ownerAccountId: accountA),
+            CallTileName.boundProfileClaim(claim, fromOwner: true, ownerAccountId: accountB),
+        ] {
+            XCTAssertNil(stripped.accountId)
+            XCTAssertNil(stripped.usernameCertificate)
+            XCTAssertEqual(stripped.displayName, "Anna", "the announced name stays")
+            XCTAssertEqual(stripped.username, "anna", "the username stays, as a claim")
+            XCTAssertEqual(stripped.updatedAtMs, 5)
+        }
     }
 
     // MARK: - Early relays
@@ -225,8 +230,9 @@ final class CallTileNameTests: XCTestCase {
     }
 }
 
-/// The link call's per-peer naming, over the production ports (the real
-/// `sfuPeerTag` derivation, the one resolver, the profile store).
+/// The link call's per-peer naming, over the production ports (the one
+/// resolver, the profile store). Who a peer is comes from its verified
+/// announcement (ADR-0078 section 2), given here as `peerIdentified`.
 @MainActor
 final class LinkCallTileNamesTests: XCTestCase {
 
@@ -242,27 +248,25 @@ final class LinkCallTileNamesTests: XCTestCase {
         defaults.removePersistentDomain(forName: suite)
     }
 
-    private func tag(_ accountId: Data) -> String {
-        sfuPeerTag(callId: callIdHex, accountId: hexEncode(accountId))
-    }
-
     private func names(_ directory: ProfileDirectory) -> LinkCallTileNames {
-        LinkCallTileNames(ports: .live(callIdHex: callIdHex, directory: directory))
+        LinkCallTileNames(ports: .live(directory: directory))
     }
 
     /// The defect itself: a sealed profile WITHOUT a display name names the
     /// tile by the username, plain at once and with `@` once the store has
-    /// verified it. Never by the pseudonym.
+    /// verified it. Never by an identifier.
     func testAProfileWithoutADisplayNameNamesTheTileByTheUsername() async {
         let (directory, verifier) = makeDirectory(defaults: defaults) { _ in .signatureKey(keyA) }
         let names = names(directory)
         let ui = CallUiState()
-        let first = names.name(peerId: "p1", peerTag: tag(accountA))
+        let first = names.name(peerId: "p1")
         XCTAssertEqual(first, "", "nothing has arrived from this person yet")
         ui.setParticipants([remote("p1", first)])
 
+        names.peerIdentified("p1", person: base64Encode(keyA), memberKeyHex: "aa")
         names.memberProfile(
-            from: "p1", sender: base64Encode(keyA),
+            from: "p1", sender: base64Encode(keyA), senderLeafKeyHex: "aa",
+            fromOwner: true, ownerAccountId: accountA,
             profile: ProfileClaim(
                 displayName: nil, username: "valentin", updatedAtMs: 5,
                 accountId: accountA, usernameCertificate: Data(repeating: 0x5C, count: 153)))
@@ -277,59 +281,74 @@ final class LinkCallTileNamesTests: XCTestCase {
         XCTAssertEqual(ui.participants.first?.displayName, "@valentin")
     }
 
-    /// The viewer's own name for a contact applies to the person behind a
-    /// filed profile, and a later roster event for the peer answers it too.
-    func testAFiledProfileIsNamedByTheOneResolver() {
+    /// The viewer's own name for a contact applies to the person a peer was
+    /// verified as.
+    func testAnIdentifiedPersonIsNamedByTheOneResolver() {
         let (directory, _) = makeDirectory(defaults: defaults)
         let names = names(directory)
-        _ = names.name(peerId: "p1", peerTag: tag(accountA))
+        _ = names.name(peerId: "p1")
+        names.peerIdentified("p1", person: base64Encode(keyA), memberKeyHex: "aa")
         names.memberProfile(
-            from: "p1", sender: base64Encode(keyA),
+            from: "p1", sender: base64Encode(keyA), senderLeafKeyHex: "aa",
+            fromOwner: false, ownerAccountId: accountB,
             profile: ProfileClaim(displayName: "Elena", username: nil, updatedAtMs: 5, accountId: accountA))
-        XCTAssertEqual(names.name(peerId: "p1", peerTag: tag(accountA)), "Elena")
+        XCTAssertEqual(names.name(peerId: "p1"), "Elena")
         directory.setRenames(from: [contact(keyA, renamed: "Mum")])
-        XCTAssertEqual(names.name(peerId: "p1", peerTag: tag(accountA)), "Mum")
+        XCTAssertEqual(names.name(peerId: "p1"), "Mum")
     }
 
-    /// A profile claiming an account other than the one the SFU admitted the
-    /// relaying peer as is not filed and binds nobody; the tile still shows
-    /// what was announced.
-    func testAProfileClaimingAnotherAccountIsNotFiledAndBindsNobody() {
+    /// A profile that is not the owner's own keeps no account claim: it is
+    /// filed without one, and a username it carries is shown as plain text,
+    /// never filed where it could look verified.
+    func testAProfileFromAnotherMemberKeepsNoAccountClaim() {
         let (directory, _) = makeDirectory(defaults: defaults)
-        // The viewer has a name of their own for the person behind `keyA`.
-        directory.setRenames(from: [contact(keyA, renamed: "Mum")])
         let names = names(directory)
-        // The SFU admitted this peer as account B; the profile claims A.
-        _ = names.name(peerId: "p1", peerTag: tag(accountB))
+        _ = names.name(peerId: "p1")
+        names.peerIdentified("p1", person: base64Encode(keyA), memberKeyHex: "aa")
         names.memberProfile(
-            from: "p1", sender: base64Encode(keyA),
+            from: "p1", sender: base64Encode(keyA), senderLeafKeyHex: "aa",
+            fromOwner: false, ownerAccountId: accountA,
             profile: ProfileClaim(
                 displayName: "Anna", username: "anna", updatedAtMs: 5,
                 accountId: accountA, usernameCertificate: Data(repeating: 0x5C, count: 153)))
         XCTAssertNil(directory.storedProfile(signatureKeyB64: base64Encode(keyA)), "not filed")
-        XCTAssertEqual(
-            names.name(peerId: "p1", peerTag: tag(accountB)), "Anna",
-            "not bound to the person: the announced name, never the viewer's name for them")
+        XCTAssertEqual(names.name(peerId: "p1"), "Anna")
 
-        // The same with no account id at all, and with no display name.
-        _ = names.name(peerId: "p2", peerTag: tag(accountB))
         names.memberProfile(
-            from: "p2", sender: base64Encode(keyA),
-            profile: ProfileClaim(displayName: nil, username: "anna", updatedAtMs: 6))
-        XCTAssertNil(directory.storedProfile(signatureKeyB64: base64Encode(keyA)))
-        XCTAssertEqual(names.name(peerId: "p2", peerTag: tag(accountB)), "anna")
+            from: "p1", sender: base64Encode(keyA), senderLeafKeyHex: "aa",
+            fromOwner: false, ownerAccountId: accountA,
+            profile: ProfileClaim(displayName: "Anna", username: nil, updatedAtMs: 6, accountId: accountA))
+        let stored = directory.storedProfile(signatureKeyB64: base64Encode(keyA))
+        XCTAssertEqual(stored?.displayName, "Anna")
+        XCTAssertNil(stored?.accountId, "filed without the unbound account claim")
+    }
+
+    /// A profile relayed by a peer other than the one that sealed it names
+    /// nobody's tile: the relaying peer announced a different leaf.
+    func testARelayedProfileNamesNobody() {
+        let (directory, _) = makeDirectory(defaults: defaults)
+        let names = names(directory)
+        _ = names.name(peerId: "p1")
+        names.peerIdentified("p1", person: base64Encode(keyA), memberKeyHex: "aa")
+        names.memberProfile(
+            from: "p1", sender: base64Encode(keyB), senderLeafKeyHex: "bb",
+            fromOwner: false, ownerAccountId: accountA,
+            profile: ProfileClaim(displayName: "Boris", username: nil, updatedAtMs: 5))
+        XCTAssertEqual(names.name(peerId: "p1"), "", "Boris's profile does not name p1")
     }
 
     /// A sender the group could not resolve is nobody to file a profile under.
     func testAProfileWithoutAResolvedSenderIsNotFiled() {
         let (directory, _) = makeDirectory(defaults: defaults)
         let names = names(directory)
-        _ = names.name(peerId: "p1", peerTag: tag(accountA))
+        _ = names.name(peerId: "p1")
+        names.peerIdentified("p1", person: base64Encode(keyA), memberKeyHex: "aa")
         names.memberProfile(
-            from: "p1", sender: nil,
+            from: "p1", sender: nil, senderLeafKeyHex: "aa",
+            fromOwner: false, ownerAccountId: accountA,
             profile: ProfileClaim(displayName: "Anna", username: nil, updatedAtMs: 5, accountId: accountA))
         XCTAssertTrue(directory.receivedProfiles().isEmpty)
-        XCTAssertEqual(names.name(peerId: "p1", peerTag: tag(accountA)), "Anna")
+        XCTAssertEqual(names.name(peerId: "p1"), "Anna")
     }
 
     /// A username announced without its certificate names the tile but stays
@@ -338,46 +357,51 @@ final class LinkCallTileNamesTests: XCTestCase {
     func testAUsernameWithoutACertificateIsShownButNotFiled() {
         let (directory, _) = makeDirectory(defaults: defaults)
         let names = names(directory)
-        _ = names.name(peerId: "p1", peerTag: tag(accountA))
+        _ = names.name(peerId: "p1")
+        names.peerIdentified("p1", person: base64Encode(keyA), memberKeyHex: "aa")
         names.memberProfile(
-            from: "p1", sender: base64Encode(keyA),
+            from: "p1", sender: base64Encode(keyA), senderLeafKeyHex: "aa",
+            fromOwner: true, ownerAccountId: accountA,
             profile: ProfileClaim(displayName: nil, username: "valentin", updatedAtMs: 5, accountId: accountA))
         XCTAssertNil(directory.storedProfile(signatureKeyB64: base64Encode(keyA)))
-        XCTAssertEqual(names.name(peerId: "p1", peerTag: tag(accountA)), "valentin")
+        XCTAssertEqual(names.name(peerId: "p1"), "valentin")
     }
 
-    /// A person this device already knows is named before they announce
-    /// themselves: the group call's peer-tag lookup, over the same store.
-    func testAKnownPersonIsNamedBeforeTheyAnnounce() {
+    /// A person this device already knows is named as soon as their peer's
+    /// announcement verifies, and not before.
+    func testAKnownPersonIsNamedOnceIdentified() {
         let (directory, _) = makeDirectory(defaults: defaults)
         directory.acceptReceived(
             ProfileClaim(displayName: "Boris", username: nil, updatedAtMs: 3, accountId: accountB),
             signatureKeyB64: base64Encode(keyB), accountIdB64: directory.accountIdB64)
         let names = names(directory)
-        XCTAssertEqual(names.name(peerId: "p9", peerTag: tag(accountB)), "Boris")
-        XCTAssertEqual(names.name(peerId: "p8", peerTag: tag(accountA)), "")
+        XCTAssertEqual(names.name(peerId: "p9"), "")
+        names.peerIdentified("p9", person: base64Encode(keyB), memberKeyHex: "bb")
+        XCTAssertEqual(names.name(peerId: "p9"), "Boris")
     }
 
     /// Two people nothing has arrived from are both unnamed: an empty name,
-    /// no number, and nothing of the peer id or the account id.
+    /// no number, and nothing of the peer id.
     func testTheUnnamedAreNotNumbered() {
         let (directory, _) = makeDirectory(defaults: defaults)
         let names = names(directory)
-        XCTAssertEqual(names.name(peerId: "01a0a045-0000", peerTag: tag(accountA)), "")
-        XCTAssertEqual(names.name(peerId: "01a0a046-0000", peerTag: tag(accountB)), "")
+        XCTAssertEqual(names.name(peerId: "01a0a045-0000"), "")
+        XCTAssertEqual(names.name(peerId: "01a0a046-0000"), "")
     }
 
     /// A peer that leaves takes what it announced with it.
     func testAPeerThatLeftStartsUnnamedAgain() {
         let (directory, _) = makeDirectory(defaults: defaults)
         let names = names(directory)
-        _ = names.name(peerId: "p1", peerTag: tag(accountB))
+        _ = names.name(peerId: "p1")
+        names.peerIdentified("p1", person: base64Encode(keyB), memberKeyHex: "bb")
         names.memberProfile(
-            from: "p1", sender: nil,
+            from: "p1", sender: nil, senderLeafKeyHex: "bb",
+            fromOwner: false, ownerAccountId: accountA,
             profile: ProfileClaim(displayName: "Guest", username: nil, updatedAtMs: 1))
-        XCTAssertEqual(names.name(peerId: "p1", peerTag: tag(accountB)), "Guest")
+        XCTAssertEqual(names.name(peerId: "p1"), "Guest")
         names.peerLeft("p1")
-        XCTAssertEqual(names.name(peerId: "p1", peerTag: tag(accountB)), "")
+        XCTAssertEqual(names.name(peerId: "p1"), "")
     }
 
     /// The tiles are named again when the profile store changes, without a
@@ -386,11 +410,11 @@ final class LinkCallTileNamesTests: XCTestCase {
         let changes = PassthroughSubject<UInt64, Never>()
         var known: [MemberIdentity: String] = [:]
         let names = LinkCallTileNames(ports: LinkCallTileNames.Ports(
-            knownPerson: { _ in base64Encode(keyA) },
             personName: { known[$0] },
             changes: changes.eraseToAnyPublisher()))
         let ui = CallUiState()
-        ui.setParticipants([remote("p1", names.name(peerId: "p1", peerTag: "t"))])
+        ui.setParticipants([remote("p1", names.name(peerId: "p1"))])
+        names.peerIdentified("p1", person: base64Encode(keyA), memberKeyHex: "aa")
         names.follow(ui: ui)
         XCTAssertEqual(ui.participants.first?.displayName, "")
 
@@ -402,5 +426,47 @@ final class LinkCallTileNamesTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertEqual(ui.participants.first?.displayName, "@valentin")
+    }
+}
+
+/// ADR-0078 section 2 - the SFU group call's tile names: unnamed until a
+/// peer's announcement verifies, then the person's name, following the store.
+@MainActor
+final class GroupCallPeerNamesTests: XCTestCase {
+
+    func testATileIsUnnamedUntilItsPeerIsIdentified() {
+        let names = GroupCallPeerNames(name: { $0 == base64Encode(keyA) ? "Anna" : nil })
+        names.setRoster(["p1", "p2"])
+        XCTAssertEqual(names.name(participantId: "peer-p1"), "")
+        XCTAssertEqual(names.identify("p1", personKeyB64: base64Encode(keyA)), "Anna")
+        XCTAssertEqual(names.name(participantId: "peer-p1"), "Anna")
+        XCTAssertNil(
+            names.identify("p1", personKeyB64: base64Encode(keyA)),
+            "a re-announcement of the same person changes nothing")
+        XCTAssertEqual(
+            names.identify("p2", personKeyB64: base64Encode(keyB)), "",
+            "a person this device cannot name stays unnamed")
+    }
+
+    func testAPeerNotOnTheRosterIsNotNamed() {
+        let names = GroupCallPeerNames(name: { _ in "Anna" })
+        names.setRoster([])
+        XCTAssertNil(names.identify("ghost", personKeyB64: base64Encode(keyA)))
+        names.peerJoined("p3")
+        XCTAssertEqual(names.identify("p3", personKeyB64: base64Encode(keyA)), "Anna")
+        names.peerLeft("p3")
+        XCTAssertNil(names.identify("p3", personKeyB64: base64Encode(keyA)))
+    }
+
+    func testRelabelAppliesTheCurrentNames() {
+        var known: [String: String] = [:]
+        let names = GroupCallPeerNames(name: { known[$0] })
+        let ui = CallUiState()
+        names.setRoster(["p1"])
+        ui.setParticipants([remote("p1", "")])
+        _ = names.identify("p1", personKeyB64: base64Encode(keyA))
+        known[base64Encode(keyA)] = "Mum"
+        names.relabel(ui)
+        XCTAssertEqual(ui.participants.first?.displayName, "Mum")
     }
 }

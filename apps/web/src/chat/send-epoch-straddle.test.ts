@@ -22,14 +22,15 @@
  * **permanently undecryptable for every recipient** — dropped silently, with
  * the sender's own optimistic echo still on screen.
  *
- * Both directions are reachable, and the send path reaches them because it
- * holds no lock while the four `ContactsClient` commit regions, the poll's
- * apply and the ADR-0045 sweep all do:
+ * The send path takes the same per-group lock as the poll's apply and the
+ * ADR-0045 sweep. Two directions existed:
  *
- *   - **sealed AHEAD.** A commit region eager-merges N -> N+1 *inside* its
- *     create, then parks in `persist` + `publish`. A send firing in that window
- *     seals at N+1 and can reach the DS first, so peers still at N see a
- *     future-epoch message and drop it.
+ *   - **sealed AHEAD** (history). A direct commit region eager-merged N -> N+1
+ *     *inside* its create, then parked in `persist` + `publish`; a send in that
+ *     window sealed at N+1 and could reach the DS first. The ADR-0081
+ *     amendment (2026-10-19) deleted those regions: every membership change is
+ *     a proposal, which moves no epoch, so the two tests that pinned this
+ *     direction went with them.
  *   - **sealed BEHIND.** An ADR-0045 sweep STAGES (the group stays at N) and
  *     publishes the commit, then spends a second round-trip reading the journal
  *     verdict before merging. `MlsGroup::create_message` gates on `is_active()`,
@@ -51,12 +52,8 @@
  * verbatim — not predicted)
  *
  * Removing `withGroupMlsLock` from `broadcastControl` and `sendMessage`:
- *   - "a broadcast does not seal ahead of a commit still parked in its publish"
- *     FAILS with `expected [ 'app@6' ] to deeply equal []`;
  *   - "a broadcast does not seal behind a staged sweep's published commit"
  *     FAILS with `expected [ 'app@5' ] to deeply equal []`;
- *   - "a send does not seal ahead of a commit parked in its publish" FAILS with
- *     `expected [ 'app@6' ] to deeply equal []`;
  *   - "concurrent sends do not overlap their whole-provider persists" FAILS with
  *     `expected [ 'persist:enter', 'persist:enter', …(2) ] to deeply equal
  *     [ 'persist:enter', 'persist:exit', …(2) ]`.
@@ -64,7 +61,7 @@
  * blocked", which fails with `DEADLOCK` if the lock is re-keyed globally.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fakeAccessSigner } from "../ds/access-test-doubles";
+import { fakeAccessSigner, withCommitRoute, withStagedTwins } from "../ds/access-test-doubles";
 
 vi.mock("./commit-outbox", () => ({
   markAcked: async () => {},
@@ -72,11 +69,9 @@ vi.mock("./commit-outbox", () => ({
 }));
 
 import { ChatClient } from "./client";
-import { ContactsClient } from "../contacts/client";
 import { withGroupMlsLock } from "../mls/group-lock";
 import { base64Encode } from "../auth/account-id";
 import type { DsClient } from "../ds/client";
-import type { DiscoveryClient } from "../discovery/client";
 import type {
   Group as WasmGroup,
   Identity as WasmIdentity,
@@ -124,10 +119,9 @@ async function within<T>(ms: number, p: Promise<T>, what: string): Promise<T> {
  * A stand-in for an MLS group that STAMPS every artifact with the epoch it was
  * built on, so the journal can be replayed the way a recipient replays it.
  *
- * `removeMember` eager-merges N -> N+1 inside the create, exactly as the real
- * core does; `createApplicationMessage` seals at the live epoch and does NOT
- * move it, exactly as `MlsGroup::create_message` does. `stage`/`merge` model
- * the ADR-0045 staged pair: staging leaves the epoch alone, merging advances it.
+ * `createApplicationMessage` seals at the live epoch and does NOT move it,
+ * exactly as `MlsGroup::create_message` does. `stage`/`merge` model the
+ * ADR-0045 staged pair: staging leaves the epoch alone, merging advances it.
  */
 function stampingGroup(
   groupId: Uint8Array,
@@ -139,7 +133,7 @@ function stampingGroup(
   merge: () => void;
 } {
   let epoch = startEpoch;
-  const group = {
+  const group = withStagedTwins({
     get groupId(): Uint8Array {
       return groupId;
     },
@@ -147,17 +141,12 @@ function stampingGroup(
       return BigInt(epoch);
     },
     dsAccessSigner: fakeAccessSigner(() => BigInt(epoch)),
-    removeMember: vi.fn((_id: unknown, _leaf: number) => {
-      const builtOn = epoch;
-      epoch += 1; // the eager merge, inside the create
-      return new Uint8Array([TAG_COMMIT, builtOn]);
-    }),
     createApplicationMessage: vi.fn((_id: unknown, _plaintext: Uint8Array) => {
       // Seals at the live epoch and leaves it where it is — the real
       // `create_message` advances the sender ratchet, never the epoch.
       return new Uint8Array([TAG_APP, epoch]);
     }),
-  } as unknown as WasmGroup;
+  }) as unknown as WasmGroup;
   return {
     group,
     epoch: () => epoch,
@@ -174,13 +163,13 @@ function stampingGroup(
  *  real DS assigns ids in and therefore the order every peer replays. */
 function journalDs(): { ds: DsClient; journal: Uint8Array[] } {
   const journal: Uint8Array[] = [];
-  const ds = {
+  const ds = withCommitRoute({
     publishGroup: vi.fn(async (_gid: Uint8Array, bytes: Uint8Array) => {
       journal.push(bytes);
       return { id: journal.length, createdAt: "t" };
     }),
     registerGroupEpoch: vi.fn(async () => {}),
-  } as unknown as DsClient;
+  }) as unknown as DsClient;
   return { ds, journal };
 }
 
@@ -220,46 +209,6 @@ afterEach(() => {
 });
 
 describe("the send path never straddles an epoch change", () => {
-  it("a broadcast does not seal ahead of a commit still parked in its publish", async () => {
-    const g = stampingGroup(freshGid(), 5);
-    const { ds, journal } = journalDs();
-    const publishGate = deferred<void>();
-
-    const contacts = new ContactsClient(
-      {} as unknown as DiscoveryClient,
-      {
-        publishGroup: vi.fn(async (_gid: Uint8Array, bytes: Uint8Array) => {
-          // A slow DS round-trip: the commit is built and eager-merged, but has
-          // not reached the journal yet.
-          await publishGate.promise;
-          journal.push(bytes);
-          return { id: journal.length, createdAt: "t" };
-        }),
-        registerGroupEpoch: vi.fn(async () => {}),
-      } as unknown as DsClient,
-      {
-        identityProvider: () => IDENTITY_TOKEN,
-        onPersistWithCommit: async () => {},
-      },
-    );
-    const chat = new ChatClient(ds, { identityProvider: () => IDENTITY_TOKEN });
-
-    const commit = contacts.removeMemberFromGroup(null, g.group, 1);
-    await settle();
-    // The eager merge has already run: the group is at 6 while the commit that
-    // takes peers there is still on the wire.
-    expect(g.epoch()).toBe(6);
-
-    const beacon = chat.broadcastControl(null, g.group, new Uint8Array([1]));
-    await settle();
-
-    publishGate.resolve();
-    await commit;
-    await within(1000, beacon, "broadcast queued behind a commit");
-
-    expect(replayAsPeer(journal, 5)).toEqual([]);
-  });
-
   it("a broadcast does not seal behind a staged sweep's published commit", async () => {
     // The ADR-0045 sweep shape: stage (epoch stays N), publish the commit, then
     // spend a round-trip on the journal verdict before merging. A send in that
@@ -283,42 +232,6 @@ describe("the send path never straddles an epoch change", () => {
     verdictGate.resolve();
     await sweep;
     await within(1000, beacon, "broadcast queued behind a staged sweep");
-
-    expect(replayAsPeer(journal, 5)).toEqual([]);
-  });
-
-  it("a send does not seal ahead of a commit parked in its publish", async () => {
-    // Same hazard, the higher-severity payload: a user's chat message, which
-    // `broadcastControl` and `sendMessage` reach through identical code.
-    const g = stampingGroup(freshGid(), 5);
-    const { ds, journal } = journalDs();
-    const publishGate = deferred<void>();
-
-    const contacts = new ContactsClient(
-      {} as unknown as DiscoveryClient,
-      {
-        publishGroup: vi.fn(async (_gid: Uint8Array, bytes: Uint8Array) => {
-          await publishGate.promise;
-          journal.push(bytes);
-          return { id: journal.length, createdAt: "t" };
-        }),
-        registerGroupEpoch: vi.fn(async () => {}),
-      } as unknown as DsClient,
-      {
-        identityProvider: () => IDENTITY_TOKEN,
-        onPersistWithCommit: async () => {},
-      },
-    );
-    const chat = new ChatClient(ds, { identityProvider: () => IDENTITY_TOKEN });
-
-    const commit = contacts.removeMemberFromGroup(null, g.group, 1);
-    await settle();
-    const send = chat.sendMessage(null, g.group, new Uint8Array([7]));
-    await settle();
-
-    publishGate.resolve();
-    await commit;
-    await within(1000, send, "send queued behind a commit");
 
     expect(replayAsPeer(journal, 5)).toEqual([]);
   });

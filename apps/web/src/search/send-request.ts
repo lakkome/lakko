@@ -12,6 +12,10 @@
  * is sent (an unsigned-looking write to a closed mailbox would be answered as
  * stored and silently dropped, which is worse than saying so).
  *
+ * The request goes out at once, with no introduction text (UX section 6.1:
+ * no dialog, no form, no second field); it carries the sender's profile and
+ * grants exactly as every other request does.
+ *
  * Which send path:
  * - a person in Everyone with a verified username goes through the username
  *   path (`sendContactRequest`), which resolves the name again and runs the
@@ -58,6 +62,9 @@ export interface SendDeps {
   errorMessage(err: unknown): () => string;
 }
 
+/** The introduction a request from search carries: none. */
+export const NO_INTRO = new Uint8Array(0);
+
 function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
@@ -65,11 +72,7 @@ function hexToBytes(hex: string): Uint8Array {
 }
 
 /** Send the request. Never throws. */
-export async function sendFoundRequest(
-  person: PersonResult,
-  intro: Uint8Array,
-  deps: SendDeps,
-): Promise<SendOutcome> {
+export async function sendFoundRequest(person: PersonResult, deps: SendDeps): Promise<SendOutcome> {
   if (!canAddContact(person) || person.accountIdHex === null) return { kind: "refused" };
   const grant = person.reach === "grant" ? person.grantWireB64 : null;
   try {
@@ -78,7 +81,7 @@ export async function sendFoundRequest(
       if (grant === null || !(await deps.reachCheck(key, grant))) return { kind: "refused" };
     }
     if (person.reach === "open" && person.username !== null) {
-      await deps.sendByUsername(person.username, intro, grant);
+      await deps.sendByUsername(person.username, NO_INTRO, grant);
       return { kind: "sent" };
     }
     const accountId = hexToBytes(person.accountIdHex);
@@ -99,7 +102,7 @@ export async function sendFoundRequest(
       accountId,
       bundle.signaturePub,
       bundle.x25519Pub,
-      intro,
+      NO_INTRO,
       grant,
       person.reach === "open" ? (person.openBindingB64 ?? null) : null,
     );

@@ -54,13 +54,11 @@ public final class ChannelsUiState: ObservableObject {
     /// subscribers hold and keeps signing under the same Ed25519 key
     /// (invariant #7).
     ///
-    /// The content seed is persisted rather than re-derived because on iOS
-    /// the MLS PublisherGroup it came from is NOT durable: every channel path
-    /// builds a throwaway `Identity.fromSeed` whose OpenMLS provider is
-    /// in-memory and never snapshotted, so `publisherGroupOpenOrCreate` on a
-    /// fresh identity would mint a new group with a new random seed — one no
-    /// subscriber has an envelope for. The seed this device sealed posts and
-    /// envelopes under is the one that must come back.
+    /// The content seed is persisted here as well as re-derivable from the
+    /// PublisherGroup, which lives in the durable channel provider since G-50
+    /// (``ChannelPublisherIdentity``; before, every channel path built a
+    /// throwaway provider and a relaunch founded a fresh group). A commit's
+    /// steps write the N+1 seed back here (``ChannelPublisherCommits``).
     @Published public private(set) var keysByChannel: [String: ChannelPublisherKeys] = [:]
 
     /// Per-channel persisted publisher **signing** seed, restored from the

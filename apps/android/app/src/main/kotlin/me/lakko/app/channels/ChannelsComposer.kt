@@ -154,6 +154,10 @@ public object ChannelsComposer {
         identity: Identity,
         channelIdHex: String,
         existingSigningSeed: ByteArray? = null,
+        /** ADR-0078 section 6 — a co-published channel's group id (the
+         *  owner's derivation, which this account cannot compute): the group
+         *  is opened under it and never created. */
+        joinedGroupId: ByteArray? = null,
     ): ChannelPublisherKeys {
         val channelId = channelIdFromHex(channelIdHex)
 
@@ -171,7 +175,12 @@ public object ChannelsComposer {
         // `crates/lakko-mls/src/publisher_group.rs` for the
         // Rust-core invariant.
         val seed: ByteArray = try {
-            val publisher = uniffiPublisherGroupOpenOrCreate(identity, channelId)
+            val publisher = if (joinedGroupId != null) {
+                uniffi.lakko_ffi_uniffi.publisherGroupLoadJoined(identity, joinedGroupId, channelId)
+                    ?: throw ChannelsComposerException.Ffi("the co-published group is not in this provider")
+            } else {
+                uniffiPublisherGroupOpenOrCreate(identity, channelId)
+            }
             try {
                 publisher.channelSeed(identity)
             } finally {

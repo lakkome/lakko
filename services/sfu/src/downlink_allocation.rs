@@ -17,10 +17,12 @@
 //!
 //! ## The rule
 //!
-//! 1. Audio and every light track come first. Their measured rates are
-//!    taken off the budget before anything else and they are never given
-//!    up: the allocation has no answer below [`VideoQuality::Light`], and
-//!    the light track is sent at every quality.
+//! 1. Audio, every screen share and every light track come first, in that
+//!    order of importance (a screen before any camera, ADR-0083). Their
+//!    measured rates are taken off the budget before anything else and
+//!    they are never given up: the allocation has no answer below
+//!    [`VideoQuality::Light`], the light track is sent at every quality,
+//!    and a screen share is sent always.
 //! 2. Then the publishers are walked **in the order given**, which is the
 //!    subscriber's order of importance. Each gets the heavy track it asked
 //!    for if what is left of the budget covers that track's measured rate
@@ -115,6 +117,25 @@ pub struct Publisher<K> {
     pub light_bps: Option<u64>,
     /// The publisher's audio; zero when it has none.
     pub audio_bps: u64,
+    /// The publisher's screen share (ADR-0083), the video and the sound of
+    /// it; zero when it shares nothing or the subscriber has no screen
+    /// track of it. Never given up.
+    pub screen_bps: u64,
+}
+
+impl<K> Publisher<K> {
+    /// What this publisher costs whatever it is given: its audio, its
+    /// screen share and its light track.
+    #[must_use]
+    pub const fn fixed_bps(&self) -> u64 {
+        let light = match self.light_bps {
+            Some(bps) => bps,
+            None => 0,
+        };
+        self.audio_bps
+            .saturating_add(self.screen_bps)
+            .saturating_add(light)
+    }
 }
 
 /// What one publisher is given.
@@ -203,7 +224,7 @@ pub fn targets<K>(budget_bps: Option<u64>, publishers: &[Publisher<K>]) -> Vec<V
     };
     let first: u64 = publishers
         .iter()
-        .map(|p| p.audio_bps.saturating_add(p.light_bps.unwrap_or(0)))
+        .map(Publisher::fixed_bps)
         .fold(0, u64::saturating_add);
     let mut left = budget.saturating_sub(first);
     publishers
@@ -245,15 +266,14 @@ pub fn demand_bps<K>(publishers: &[Publisher<K>]) -> u64 {
                 VideoQuality::Middle => p.middle_bps,
                 VideoQuality::Light => None,
             };
-            p.audio_bps
-                .saturating_add(p.light_bps.unwrap_or(0))
+            p.fixed_bps()
                 .saturating_add(with_headroom(heavy.unwrap_or(0)))
         })
         .fold(0, u64::saturating_add)
 }
 
 /// The bits per second the tracks of a set put on the wire: every
-/// publisher's audio and light track, and the heavy track `given` names
+/// publisher's audio, screen share and light track, and the heavy track `given` names
 /// for it, **without** headroom. `given` is in the order of `publishers`;
 /// a publisher beyond its end counts as on its light track.
 #[must_use]
@@ -284,9 +304,7 @@ fn set_bps<K>(publishers: &[Publisher<K>], given: &[VideoQuality], headroom: boo
             } else {
                 heavy
             };
-            p.audio_bps
-                .saturating_add(p.light_bps.unwrap_or(0))
-                .saturating_add(heavy)
+            p.fixed_bps().saturating_add(heavy)
         })
         .fold(0, u64::saturating_add)
 }
@@ -619,6 +637,7 @@ mod tests {
             middle_bps: Some(MIDDLE),
             light_bps: Some(LIGHT),
             audio_bps: AUDIO,
+            screen_bps: 0,
         }
     }
 
@@ -820,6 +839,7 @@ mod tests {
             middle_bps: None,
             light_bps: None,
             audio_bps: AUDIO,
+            screen_bps: 0,
         };
         assert_eq!(
             targets(Some(0), std::slice::from_ref(&audio_only)),
@@ -1200,7 +1220,55 @@ mod tests {
         assert_eq!(demand_bps(std::slice::from_ref(&huge)), u64::MAX);
         assert_eq!(wire_bps(std::slice::from_ref(&huge), &[Main]), u64::MAX);
         // Audio and light alone take the whole budget.
-        assert_eq!(targets(Some(u64::MAX), &[huge]), vec![Light]);
+        assert_eq!(targets(Some(u64::MAX), &[huge.clone()]), vec![Light]);
         assert_eq!(with_headroom(u64::MAX), u64::MAX);
+        huge.screen_bps = u64::MAX;
+        assert_eq!(demand_bps(std::slice::from_ref(&huge)), u64::MAX);
+    }
+
+    #[test]
+    fn a_screen_share_is_given_the_link_before_any_camera() {
+        // Two publishers asking for main; the second shares its screen.
+        // The budget holds both main pictures without the share, and one
+        // main picture beside it.
+        const SCREEN: u64 = 1_500_000;
+        let camera = publisher("a", Main);
+        let mut sharer = publisher("b", Main);
+        sharer.screen_bps = SCREEN;
+        let budget = first(2) + 2 * with_headroom(MAIN);
+        assert_eq!(
+            targets(Some(budget), &[camera.clone(), publisher("b", Main)]),
+            vec![Main, Main]
+        );
+        // With the share, the screen is taken off first: the first camera
+        // in the order of importance keeps its main picture, the second
+        // falls back.
+        assert_eq!(
+            targets(Some(budget), &[camera.clone(), sharer.clone()]),
+            vec![Main, Middle]
+        );
+        // A link that holds the share and nothing heavy: both cameras at
+        // their light tracks, the share still sent.
+        let tight = first(2) + SCREEN;
+        assert_eq!(
+            targets(Some(tight), &[camera.clone(), sharer.clone()]),
+            vec![Light, Light]
+        );
+        // Even below the share's own rate nothing is given up below
+        // light, and the share is not a heavy track to fall back from.
+        assert_eq!(
+            targets(Some(0), &[camera.clone(), sharer.clone()]),
+            vec![Light, Light]
+        );
+        // The share counts in what the set puts on the wire and in the
+        // demand.
+        assert_eq!(
+            wire_bps(&[sharer.clone()], &[Light]),
+            AUDIO + LIGHT + SCREEN
+        );
+        assert_eq!(
+            demand_bps(&[sharer]),
+            AUDIO + LIGHT + SCREEN + with_headroom(MAIN)
+        );
     }
 }

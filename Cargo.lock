@@ -2374,6 +2374,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
+name = "ipnetwork"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf370abdafd54d13e54a620e8c3e1145f28e46cc9d704bc6d94414559df41763"
+
+[[package]]
 name = "iri-string"
 version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2605,6 +2611,7 @@ version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
  "lakko-crypto",
+ "lakko-sfu-proto",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -2641,6 +2648,7 @@ name = "lakko-contacts"
 version = "0.0.0"
 dependencies = [
  "lakko-crypto",
+ "proptest",
  "thiserror 1.0.69",
  "tracing",
 ]
@@ -2834,6 +2842,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-log-hygiene"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lakko-mls"
 version = "0.0.0"
 dependencies = [
@@ -2975,8 +2993,10 @@ dependencies = [
  "lakko-call-jwt",
  "lakko-crypto",
  "lakko-device-link",
+ "lakko-log-hygiene",
  "lakko-mnemonic",
  "lakko-pow-server",
+ "lakko-sfu-proto",
  "lakko-transparency",
  "lettre",
  "opaque-ke",
@@ -3044,8 +3064,10 @@ dependencies = [
  "lakko-contacts",
  "lakko-crypto",
  "lakko-discovery-client",
+ "lakko-log-hygiene",
  "lakko-mls",
  "lakko-transparency",
+ "maxminddb",
  "rand 0.8.6",
  "reqwest",
  "serde",
@@ -3072,8 +3094,9 @@ dependencies = [
  "http-body-util",
  "lakko-anon-token",
  "lakko-anon-token-server",
- "lakko-attest",
+ "lakko-contacts",
  "lakko-ds-proof",
+ "lakko-log-hygiene",
  "reqwest",
  "serde",
  "serde_json",
@@ -3153,6 +3176,9 @@ dependencies = [
  "jsonwebtoken",
  "lakko-anon-token",
  "lakko-anon-token-server",
+ "lakko-contacts",
+ "lakko-crypto",
+ "lakko-log-hygiene",
  "p256",
  "parking_lot",
  "rand 0.8.6",
@@ -3183,6 +3209,7 @@ dependencies = [
  "futures",
  "lakko-call-jwt",
  "lakko-calls",
+ "lakko-log-hygiene",
  "lakko-sfu-proto",
  "metrics",
  "metrics-exporter-prometheus",
@@ -3205,17 +3232,27 @@ name = "lakko-svc-storage"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "dotenvy",
  "futures",
  "hex",
  "http-body-util",
+ "lakko-anon-token",
+ "lakko-anon-token-server",
  "lakko-auth-token",
+ "lakko-crypto",
+ "lakko-log-hygiene",
+ "lakko-vault",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sqlx",
+ "subtle",
  "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "tower",
  "tower-http",
@@ -3235,6 +3272,7 @@ dependencies = [
  "http-body-util",
  "lakko-attest",
  "lakko-crypto",
+ "lakko-log-hygiene",
  "lakko-transparency",
  "rand 0.8.6",
  "reqwest",
@@ -3270,6 +3308,7 @@ dependencies = [
  "dotenvy",
  "http-body-util",
  "lakko-crypto",
+ "lakko-log-hygiene",
  "lakko-transparency",
  "rand 0.8.6",
  "serde",
@@ -3758,6 +3797,18 @@ name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
+name = "maxminddb"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b43d2458d977b610b04a3858e6504f06133663d303a1a0606601b530bfc9bc6"
+dependencies = [
+ "ipnetwork",
+ "memchr",
+ "serde",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "md-5"

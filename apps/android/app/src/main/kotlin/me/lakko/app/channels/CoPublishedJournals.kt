@@ -37,11 +37,25 @@ public interface CoPublishedJournalMarks {
 
     /** Whether this device joined [journalIdHex] as a co-publisher. */
     public fun contains(journalIdHex: String): Boolean
+
+    /**
+     * ADR-0078 section 6 — [mark] that also remembers which channel the
+     * journal is. A PublisherGroup id is the OWNER's derivation over its
+     * account seed and the channel id, which a co-publisher cannot compute,
+     * so this is how it opens the group it joined ([journalIdOf]).
+     */
+    public fun markChannel(journalIdHex: String, channelIdHex: String)
+
+    /** The PublisherGroup id hex of [channelIdHex] when this account
+     *  co-publishes it, else `null` (it owns the channel, or does not
+     *  publish). */
+    public fun journalIdOf(channelIdHex: String): String?
 }
 
 /** A process-local [CoPublishedJournalMarks], for tests. */
 public class InMemoryCoPublishedJournalMarks : CoPublishedJournalMarks {
     private val marks = mutableSetOf<String>()
+    private val channels = mutableMapOf<String, String>()
 
     override fun mark(journalIdHex: String) {
         synchronized(marks) { marks += journalIdHex.lowercase() }
@@ -49,6 +63,16 @@ public class InMemoryCoPublishedJournalMarks : CoPublishedJournalMarks {
 
     override fun contains(journalIdHex: String): Boolean =
         synchronized(marks) { journalIdHex.lowercase() in marks }
+
+    override fun markChannel(journalIdHex: String, channelIdHex: String) {
+        synchronized(marks) {
+            marks += journalIdHex.lowercase()
+            channels[channelIdHex.lowercase()] = journalIdHex.lowercase()
+        }
+    }
+
+    override fun journalIdOf(channelIdHex: String): String? =
+        synchronized(marks) { channels[channelIdHex.lowercase()] }
 }
 
 /**
@@ -81,20 +105,51 @@ public class SharedPreferencesCoPublishedJournalMarks(
         return journalIdHex.lowercase() in prefs.getStringSet(keyOf(acct), emptySet()).orEmpty()
     }
 
+    override fun markChannel(journalIdHex: String, channelIdHex: String) {
+        mark(journalIdHex)
+        val acct = account() ?: return
+        me.lakko.app.account.AccountStoreGate.write(acct) {
+            synchronized(LOCK) {
+                val key = channelsKeyOf(acct)
+                val channel = channelIdHex.lowercase()
+                val current = prefs.getStringSet(key, emptySet()).orEmpty()
+                val next = current.filterNot { it.substringBefore(':') == channel }.toSet() +
+                    "$channel:${journalIdHex.lowercase()}"
+                prefs.edit().putStringSet(key, next).apply()
+            }
+        }
+    }
+
+    override fun journalIdOf(channelIdHex: String): String? {
+        val acct = account() ?: return null
+        val channel = channelIdHex.lowercase()
+        return prefs.getStringSet(channelsKeyOf(acct), emptySet()).orEmpty()
+            .firstOrNull { it.substringBefore(':') == channel }
+            ?.substringAfter(':')
+    }
+
     /** Forget device: drop [accountIdB64]'s marks and the retired set. */
     public fun deleteAccount(accountIdB64: String) {
         synchronized(LOCK) {
-            prefs.edit().remove(keyOf(accountIdB64)).remove(RETIRED_KEY).apply()
+            prefs.edit()
+                .remove(keyOf(accountIdB64))
+                .remove(channelsKeyOf(accountIdB64))
+                .remove(RETIRED_KEY)
+                .apply()
         }
     }
 
     private companion object {
         const val KEY_PREFIX: String = "co-published.v2:"
+        const val CHANNELS_KEY_PREFIX: String = "co-published-channels.v1:"
         const val RETIRED_KEY: String = "co-published.v1"
         val LOCK: Any = Any()
 
         fun keyOf(accountIdB64: String): String =
             KEY_PREFIX + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+
+        fun channelsKeyOf(accountIdB64: String): String =
+            CHANNELS_KEY_PREFIX + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
     }
 }
 

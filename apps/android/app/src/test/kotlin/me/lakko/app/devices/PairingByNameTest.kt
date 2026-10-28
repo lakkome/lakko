@@ -169,13 +169,11 @@ class PairingByNameTest {
         val accountId = ByteArray(16) { 3 }
         val sent = mutableListOf<String>()
         val result = completeJoinByName(
-            joinedGroupId = groupIdOf(accountId),
             grantToken = grant,
             redeem = { grantB64 ->
                 sent += grantB64
                 DeviceAuthorizeRedeemResult(accountId, pair("tok", 99L))
             },
-            groupIdFor = ::groupIdOf,
         )
         assertEquals(listOf(base64UrlEncodeNoPad(grant)), sent)
         assertTrue(result is JoinByNameResult.Joined)
@@ -186,23 +184,10 @@ class PairingByNameTest {
     }
 
     @Test
-    fun aRedeemNamingAnotherAccountsGroupIsRefused() = runTest {
-        val result = completeJoinByName(
-            joinedGroupId = groupIdOf(ByteArray(16) { 1 }),
-            grantToken = ByteArray(32),
-            redeem = { DeviceAuthorizeRedeemResult(ByteArray(16) { 2 }, pair("tok", 1L)) },
-            groupIdFor = ::groupIdOf,
-        )
-        assertEquals(JoinByNameResult.WrongGroup, result)
-    }
-
-    @Test
     fun aFailedRedeemLeavesTheAccountUnknown() = runTest {
         val result = completeJoinByName(
-            joinedGroupId = ByteArray(32),
             grantToken = ByteArray(32),
             redeem = { throw AuthHttpError(status = 401, endpoint = "/device/authorize/redeem", body = "") },
-            groupIdFor = ::groupIdOf,
         )
         assertEquals(JoinByNameResult.RedeemFailed, result)
     }
@@ -244,13 +229,14 @@ class PairingByNameTest {
 
     // ---------------------------------------------------------------
     // Ordering: nothing is persisted before the redeem names the account
-    // and its DeviceGroup is the joined group
+    // and the joined group is bound to it (ADR-0078 section 6: by its own id)
     // ---------------------------------------------------------------
 
     private class FakeSteps(
         private val joinedAccount: ByteArray,
         private val redeemedAccount: ByteArray?,
         private val row: Boolean = true,
+        private val groupInStorage: Boolean = true,
     ) : JoinByNameSteps {
         val calls = mutableListOf<String>()
         val grant = ByteArray(RecoveryPayload.RECOVERY_GRANT_TOKEN_LENGTH) { 6 }
@@ -276,10 +262,9 @@ class PairingByNameTest {
             return DeviceAuthorizeRedeemResult(account, pair("tok", 5L))
         }
 
-        override fun groupIdFor(accountId: ByteArray): ByteArray = groupIdOf(accountId)
-
         override suspend fun bindAs(accountId: ByteArray): PendingJoin {
             calls += "bind"
+            if (!groupInStorage) throw JoinWrongAccount()
             return object : PendingJoin {
                 override suspend fun persist() {
                     calls += "persist"
@@ -308,16 +293,17 @@ class PairingByNameTest {
     }
 
     @Test
-    fun aWelcomeForAnotherAccountIsRefusedAfterTheRedeemWithNothingPersisted() = runTest {
+    fun aJoinedGroupMissingFromStorageIsRefusedAfterTheRedeemWithNothingPersisted() = runTest {
         val steps = FakeSteps(
             joinedAccount = ByteArray(16) { 1 },
             redeemedAccount = ByteArray(16) { 2 },
+            groupInStorage = false,
         )
         val err = assertThrows(JoinWrongAccount::class.java) {
             kotlinx.coroutines.runBlocking { runJoinByName(steps) }
         }
         assertEquals(JOIN_WRONG_ACCOUNT_COPY, err.message)
-        assertTrue(steps.calls.none { it == "persist" || it == "bind" })
+        assertTrue(steps.calls.none { it == "persist" })
         assertTrue(steps.calls.any { it.startsWith("redeem:") })
         assertTrue(steps.seed.all { it == 0.toByte() })
         assertTrue(steps.grant.all { it == 0.toByte() })

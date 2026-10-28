@@ -67,6 +67,11 @@ public class ChannelsUiState(
     /** ADR-0073 phase 2 / UX 16.6 — the channels a key reset orphaned on this
      *  device; `null` when none can be recorded (tests). */
     private val orphanStore: OrphanedChannelsStore? = null,
+    /** ADR-0078 section 6 — the channels this account co-publishes, with the
+     *  group id each link conveyed; `null` in tests. */
+    public val coPublished: CoPublishedJournalMarks? = null,
+    /** G-50 — the recorded PublisherGroup commits; `null` in tests. */
+    public val commitStore: PublisherCommitStore? = null,
 ) {
 
     private val _orphaned = MutableStateFlow<Set<String>>(emptySet())
@@ -311,8 +316,64 @@ public class ChannelsUiState(
             // the set runs between two binds of the same account.
             _orphaned.value = orphanStore?.load(accountIdB64) ?: emptySet()
             reopenPublisherKeys()
+            replayPublisherCommits(accountIdB64)
         }
     }
+
+    /** G-50 — resume the PublisherGroup commits whose steps had not all
+     *  landed before the app was closed, on the bound [publisher]; a channel
+     *  whose commit finished gets its content seed re-derived. Best effort:
+     *  an entry that does not finish stays for the next bind. */
+    private suspend fun replayPublisherCommits(accountIdB64: String) {
+        val pub = publisher ?: return
+        val store = commitStore ?: return
+        val finished = try {
+            pub.withIdentity { identity ->
+                me.lakko.app.ds.DsClient().use { ds ->
+                    ChannelsClient().use { client ->
+                        CoPublisher.replayPublisherCommits(ds, client, identity, accountIdB64, store, coPublished)
+                    }
+                }
+            }
+        } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
+            Log.w(TAG, "recorded publisher commits not replayed", e)
+            return
+        }
+        for (channelId in finished) refreshPublisherKey(channelId)
+    }
+
+    /** Re-derive [channelId]'s content seed from its PublisherGroup (the
+     *  signing seed kept), after a commit of the group finished. */
+    public suspend fun refreshPublisherKey(channelId: String) {
+        val pub = publisher ?: return
+        if (channelId !in _keysByChannel.value) return
+        try {
+            val keys = pub.withIdentity(persist = false) { identity ->
+                ChannelsComposer.freshPublisherKeys(
+                    identity = identity,
+                    channelIdHex = channelId,
+                    existingSigningSeed = persistedPublisherSigningSeed(channelId),
+                    joinedGroupId = joinedGroupIdOf(channelId),
+                )
+            }
+            setKeys(channelId, keys)
+        } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
+            Log.w(TAG, "publisher key not refreshed for a channel", e)
+        }
+    }
+
+    /** ADR-0078 section 6 — the group id a co-published channel's link
+     *  conveyed, or `null` for a channel this account owns. */
+    public fun joinedGroupIdOf(channelId: String): ByteArray? =
+        coPublished?.journalIdOf(channelId)?.let { hex ->
+            if (hex.length % 2 != 0) {
+                null
+            } else {
+                ByteArray(hex.length / 2) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+            }
+        }
 
     /** Re-open the publisher keys ([channelsToReopen]) on the bound
      *  [publisher]. A channel whose open fails is skipped and logged; the
@@ -336,6 +397,7 @@ public class ChannelsUiState(
                         identity = identity,
                         channelIdHex = channel.id,
                         existingSigningSeed = persistedPublisherSigningSeed(channel.id),
+                        joinedGroupId = joinedGroupIdOf(channel.id),
                     )
                 }
                 setKeys(channel.id, keys)

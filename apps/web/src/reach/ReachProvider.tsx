@@ -14,6 +14,7 @@
  * queues another sync; a failed one is retried when the device comes back
  * online.
  */
+import { readIsActive } from "../chat/membership-ended";
 import { createEffect, onCleanup, untrack, type JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
@@ -106,7 +107,13 @@ export function ReachProvider(props: { children: JSX.Element }): JSX.Element {
         if (session === null) return;
         session.setSettingProvider(() => visibilitySetting());
         session.setScopeProvider(() => ({
-          groupIdsHex: chats.groups().map((g) => journalHex(base64Decode(g.groupIdB64))),
+          // ADR-0078 section 9: the groups the account is still IN. A group
+          // it left (or was removed from) drops out here, and the sync then
+          // rotates the account's one `group` / `member` key.
+          groupIdsHex: chats
+            .groups()
+            .filter((g) => readIsActive(g.group) !== false)
+            .map((g) => journalHex(base64Decode(g.groupIdB64))),
           channels: channelsState.channels().map((c) => ({
             idHex: c.id,
             epoch: channelsState.epochByChannel().get(c.id) ?? 0,
@@ -131,6 +138,12 @@ export function ReachProvider(props: { children: JSX.Element }): JSX.Element {
     visibilitySetting();
     untrack(() => reachSession()?.requestSync());
   });
+
+  // A departure (leaving a group, being removed) is a change inside a group
+  // handle, not of the group list, so nothing above re-runs on it: a sync
+  // once a minute picks it up (cheap when nothing changed: no request).
+  const periodic = setInterval(() => reachSession()?.requestSync(), 60_000);
+  onCleanup(() => clearInterval(periodic));
 
   const onOnline = (): void => reachSession()?.requestSync();
   if (typeof window !== "undefined") window.addEventListener("online", onOnline);

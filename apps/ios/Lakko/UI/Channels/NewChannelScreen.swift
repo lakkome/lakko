@@ -133,17 +133,14 @@ struct NewChannelScreen: View {
                 }
             }
 
-            // G-27: build a transient `Identity` from the canonical
-            // AccountIdentity (phrase) seed (ADR-0017), hand it to the
-            // composer so the channel content-key seed comes from a real MLS
-            // PublisherGroup exporter. The identity is throwaway —
-            // `freshPublisherKeys` builds a throwaway `Group` from it for the
-            // duration of the call. `Identity` releases its handle via ARC at
-            // scope-exit — UniFFI's Swift surface has no explicit `close()`.
-            // The same identity derives the channel's owner key, which the
-            // channel is registered under (ADR-0059 section 1).
-            let identity = try Identity.fromSeed(seed: accountIdentitySeed)
-            _ = try await client.createChannel(channelIdHex: id, accountIdentity: identity)
+            // ADR-0059 section 1 — the channel is registered under the owner
+            // key the CURRENT seed's identity derives for it (`owner`). The
+            // PublisherGroup is founded in the durable channel provider
+            // (``ChannelPublisherIdentity``, G-50), so the content seed comes
+            // from a real MLS exporter and survives a relaunch.
+            let owner = try Identity.fromSeed(seed: accountIdentitySeed)
+            _ = try await client.createChannel(channelIdHex: id, accountIdentity: owner)
+            let identity = try ChannelPublisherIdentity.shared.identity(currentSeed: accountIdentitySeed)
             let keys = try ChannelsComposer.freshPublisherKeys(
                 identity: identity,
                 accountIdB64: accountIdB64,
@@ -157,6 +154,9 @@ struct NewChannelScreen: View {
             // could not be claimed is not added.
             let publisherGroup = try CoPublisher.openPublisherGroup(
                 identity: identity, accountIdB64: accountIdB64, channelIdHex: id)
+            // The founded group is on disk before the channel is announced:
+            // a channel whose group a relaunch would not find is not added.
+            try ChannelPublisherIdentity.shared.persistOrThrow()
             let signer = try publisherGroup.dsAccessSigner(identity: identity)
             let groupId = try publisherGroup.groupId()
             do {
@@ -194,7 +194,7 @@ struct NewChannelScreen: View {
                 do {
                     try await ChannelMetaRecord.post(
                         state: state, client: client, channelId: id, meta: meta,
-                        accountIdentity: identity)
+                        accountIdentity: owner)
                 } catch {
                     NSLog("Channels: metadata record post failed: %@", String(describing: error))
                 }

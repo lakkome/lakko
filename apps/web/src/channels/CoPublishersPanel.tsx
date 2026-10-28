@@ -29,6 +29,9 @@ import type { PublisherGroupHandle } from "./publisher-group-handle";
 import { membershipRefusalOf } from "../chat/membership-refusal";
 import { membershipRefusalRetryMaySucceed } from "../../wasm/lakko_ffi_wasm";
 import { DsClient } from "../ds/client";
+import { DiscoveryClient } from "../discovery/client";
+import { useAuth } from "../auth/AuthContext";
+import { base64Encode } from "../auth/account-id";
 import { channelsActions } from "../state/channels-state";
 import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
@@ -52,6 +55,7 @@ export function CoPublishersPanel(props: {
 
   // `ds` is a stateless HTTP client, so a per-panel instance is fine.
   const ds = new DsClient();
+  const auth = useAuth();
   let stopped = false;
 
   function hexOf(b: Uint8Array): string {
@@ -77,8 +81,20 @@ export function CoPublishersPanel(props: {
     setError(null);
     setBusy(true);
     try {
+      // The link is uploaded to the group-invite ledger (no inline form since
+      // 2026-10-19): any failed upload, a network one included, mints nothing
+      // and shows the error; the button stays for another try.
+      const secrets = auth.identitySecrets();
+      const discovery = new DiscoveryClient();
+      discovery.setSessionToken(secrets?.sessionToken ?? null);
       setLink(
-        await createCoPublisherLink(props.identity, props.publisherGroup, publicOrigin()),
+        await createCoPublisherLink(
+          props.identity,
+          props.publisherGroup,
+          publicOrigin(),
+          discovery,
+          secrets === null ? null : base64Encode(secrets.accountId),
+        ),
       );
     } catch (err) {
       console.warn("[channels] co-publisher link failed", err);

@@ -473,7 +473,8 @@ public interface KeyRotationPorts : RotationAnnouncePort {
 
     public suspend fun publishKeyPackage(): Boolean
 
-    public suspend fun moveDeviceGroupRoot(attestationB64: String?, keyGeneration: Long?): Boolean
+    /** A plain root transfer of the DeviceGroup journal (ADR-0078 phase 6). */
+    public suspend fun moveDeviceGroupRoot(): Boolean
 
     public suspend fun moveOwnedJournals(): Boolean
 
@@ -821,12 +822,10 @@ public class KeyRotationRunner(
                 continue
             }
             onStep(rotationUiStep(step))
-            val attestation = owed.attestationB64
-            val generation = owed.keyGeneration
             val ok = attempt(step) {
                 when (step) {
                     RotationStep.PublishKeyPackage -> ports.publishKeyPackage()
-                    RotationStep.MoveDeviceGroupRoot -> ports.moveDeviceGroupRoot(attestation, generation)
+                    RotationStep.MoveDeviceGroupRoot -> ports.moveDeviceGroupRoot()
                     RotationStep.MoveJournals -> ports.moveOwnedJournals()
                     RotationStep.MoveChannels -> ports.moveOwnedChannels()
                     RotationStep.RekeyReach -> ports.rekeyReach()

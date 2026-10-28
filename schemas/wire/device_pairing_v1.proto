@@ -80,6 +80,16 @@ message PairingQr {
     // driving `DeviceGroup::add_device_from_wire`.
     bytes login_handle = 5;
 
+    // ADR-0081 amendment — set only on a DeviceGroup REJOIN knock: the
+    // device's self-removal proof (137 bytes, `lakko_mls::self_removal`),
+    // signed with its old leaf key, asking that its previous leaf be
+    // replaced by `key_package`. Empty on a pairing QR and on a rejoin of a
+    // device that no longer holds its old leaf key. The decoder refuses any
+    // other non-empty length; the proof itself is verified by every peer's
+    // removal gate, not here.
+    // Field 16: 6..15 stay reserved for the fingerprint-attestation slot.
+    bytes self_removal_proof = 16;
+
     // Reserved for future use — never re-purpose. Slot for the
     // optional fingerprint-attestation extension landing in
     // 2a3b's safety-number follow-up.

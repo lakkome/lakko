@@ -60,7 +60,7 @@ fn build_state(
         turn: None,
         totp_enc_key: None,
         vault_enc_key: None,
-        throttle: crate::throttle::ThrottleConfig::disabled(),
+        room_cap: std::sync::Arc::new(crate::room_cap::RoomAdmissionCap::disabled()),
         backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
         anon_tokens: anon.map(Arc::new),
         handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
@@ -190,6 +190,10 @@ fn quota_variables_are_named_after_the_contexts() {
         quota_var(TokenContext::MailboxWrite),
         "LAKKO_ANON_TOKEN_QUOTA_MAILBOX_WRITE"
     );
+    assert_eq!(
+        quota_var(TokenContext::CallJoin),
+        "LAKKO_ANON_TOKEN_QUOTA_CALL_JOIN"
+    );
     // Every context has exactly one default, in wire order.
     let listed: Vec<TokenContext> = DEFAULT_QUOTAS.iter().map(|(c, _)| *c).collect();
     assert_eq!(listed, TokenContext::ALL);
@@ -205,17 +209,18 @@ fn default_quota(context: TokenContext) -> u32 {
 
 #[test]
 fn the_default_quotas_are_the_documented_ones() {
-    assert_eq!(default_quota(TokenContext::DiscoveryLookup), 100);
+    assert_eq!(default_quota(TokenContext::DiscoveryLookup), 300);
     assert_eq!(default_quota(TokenContext::DiscoveryRegister), 10);
     assert_eq!(default_quota(TokenContext::InviteConsume), 30);
     assert_eq!(default_quota(TokenContext::DsKnock), 200);
-    assert_eq!(default_quota(TokenContext::PushRegister), 100);
+    assert_eq!(default_quota(TokenContext::PushRegister), 400);
     assert_eq!(default_quota(TokenContext::ChannelSubscribe), 20);
     assert_eq!(default_quota(TokenContext::DirectorySearch), 30);
     assert_eq!(default_quota(TokenContext::VaultClaim), 100);
     assert_eq!(default_quota(TokenContext::BlobUpload), 96);
     assert_eq!(default_quota(TokenContext::BlobRead), 96);
     assert_eq!(default_quota(TokenContext::MailboxWrite), 50);
+    assert_eq!(default_quota(TokenContext::CallJoin), 100);
 }
 
 #[test]
@@ -514,4 +519,60 @@ async fn over_quota_is_a_429_with_retry_after_and_counts_nothing() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+}
+
+/// ADR-0078 section 2 (decision 2): a young account draws the small
+/// `call-join` quota, an old account the full one, and the young quota
+/// touches no other context.
+#[tokio::test]
+async fn a_young_account_draws_the_young_call_join_quota() {
+    let Some(pool) = test_pool("a_young_account_draws_the_young_call_join_quota").await else {
+        return;
+    };
+    let issuer = issuer_with(DEFAULT_QUOTAS).with_young(2, 3_600);
+    let window = issuer.server.window_secs;
+    let young: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+    insert_account(&pool, young).await;
+    let old: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+    sqlx::query("INSERT INTO accounts (id, created_at) VALUES (?, NOW() - INTERVAL 2 HOUR)")
+        .bind(&old[..])
+        .execute(&pool)
+        .await
+        .expect("insert old account");
+    let (state, secret) = build_state(pool, Some(issuer));
+    let epoch = lakko_anon_token_server::current_epoch(window);
+    let ask = |context: TokenContext, n: usize| {
+        let req = TokenRequest::new(context, epoch, n).unwrap();
+        serde_json::json!({"context": context.name(), "blinded_elements": blinded_json(&req)})
+    };
+
+    let (status, _, body) = send(
+        &state,
+        issue_req(&bearer(&secret, young), &ask(TokenContext::CallJoin, 2)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", json(&body));
+    assert_eq!(json(&body)["remaining"], 0);
+    let (status, _, _) = send(
+        &state,
+        issue_req(&bearer(&secret, young), &ask(TokenContext::CallJoin, 1)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    // Another context of the same young account keeps its full quota.
+    let (status, _, body) = send(
+        &state,
+        issue_req(&bearer(&secret, young), &ask(TokenContext::DsKnock, 3)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json(&body)["remaining"], 197);
+
+    let (status, _, body) = send(
+        &state,
+        issue_req(&bearer(&secret, old), &ask(TokenContext::CallJoin, 3)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json(&body)["remaining"], 97);
 }

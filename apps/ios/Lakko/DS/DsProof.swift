@@ -73,69 +73,28 @@ public struct DsAuth {
     }
 }
 
-/// ADR-0053 client contract point 3, ADR-0057 obligation 5 — the shape of
-/// every direct (eager-merge) commit: take the epoch-N signer BEFORE the
-/// create, create (the group is now at N+1), take the N+1 signer, register its
-/// key with this device's root or registrar key, and only then record the
-/// ADR-0040 outbox entry and publish the commit signed under N. A failed
-/// registration is handled exactly like a failed outbox write: roll back,
-/// publish nothing.
-///
-/// So a commit is never on the wire before the server knows its epoch, and no
-/// peer that applies it holds an epoch the server refuses.
-public struct DirectCommitSteps<Created, Prepared, Published> {
-    /// The group's signer at its CURRENT epoch.
-    public var currentSigner: () throws -> DsGroupSigner
-    /// Build the commit. Eager-merges N -> N+1 in memory.
-    public var create: () throws -> Created
-    /// Register `next`'s epoch key (ADR-0057 `PUT .../access`, signed by the
-    /// root or a registrar).
-    public var register: (_ next: DsGroupSigner) async throws -> Void
-    /// Everything that must be durable before the publish (the second-artifact
-    /// compute + the ADR-0040 entry + the N+1 snapshot). Runs only after a
-    /// successful registration.
-    public var prepare: (Created) throws -> Prepared
-    /// Undo the eager merge (reset to the durable epoch-N snapshot). Called when
-    /// the registration or the prepare throws.
-    public var rollback: () throws -> Void
-    /// Publish the commit (and whatever else), signed under the epoch-N signer.
-    public var publish: (Prepared, DsGroupSigner) async throws -> Published
-
-    public init(
-        currentSigner: @escaping () throws -> DsGroupSigner,
-        create: @escaping () throws -> Created,
-        register: @escaping (_ next: DsGroupSigner) async throws -> Void,
-        prepare: @escaping (Created) throws -> Prepared,
-        rollback: @escaping () throws -> Void,
-        publish: @escaping (Prepared, DsGroupSigner) async throws -> Published
-    ) {
-        self.currentSigner = currentSigner
-        self.create = create
-        self.register = register
-        self.prepare = prepare
-        self.rollback = rollback
-        self.publish = publish
-    }
-
-    /// On the main actor: the steps are closures of main-actor owners (the
-    /// chat repository), and the synchronous ones (`create`, `prepare`,
-    /// `rollback`) read and write their state. Run from a non-isolated
-    /// executor they would do so beside the main actor, and a sign-out could
-    /// run between a step's binding check and its write.
-    @MainActor
-    public func run() async throws -> Published {
-        let signerN = try currentSigner()
-        let created = try create()
-        let prepared: Prepared
-        do {
-            let signerN1 = try currentSigner()
-            try await register(signerN1)
-            prepared = try prepare(created)
-        } catch {
-            try rollback()
-            throw error
+/// ADR-0081 — what a failed commit request means.
+public enum DsCommitFailure {
+    /// `true` for a lost commit (`409`) and a definitive refusal (`400`,
+    /// `401`, `403`): nothing of the commit is or will be on the DS.
+    public static func isLost(_ error: Error) -> Bool {
+        if (error as? DsStatementError) == .conflict { return true }
+        if let chat = error as? ChatError, case .wrapped(_, let underlying) = chat {
+            return isLost(underlying)
         }
-        return try await publish(prepared, signerN)
+        return SweepRegistrationBackoff.appliesTo(error)
+    }
+}
+
+/// Whether a DS request failed before it reached the DS (the caller cannot
+/// tell whether it took effect).
+public enum DsTransientFailure {
+    public static func isNetwork(_ error: Error) -> Bool {
+        if let ds = error as? DsClientError, case .network = ds { return true }
+        if let chat = error as? ChatError, case .wrapped(_, let underlying) = chat {
+            return isNetwork(underlying)
+        }
+        return false
     }
 }
 

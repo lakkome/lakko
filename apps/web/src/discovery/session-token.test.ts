@@ -52,11 +52,20 @@ describe("DiscoveryClient session token", () => {
     const client = new DiscoveryClient("/api/discovery", { sessionToken: () => "tok" });
     await client.groupInviteUpload({
       sealed: "",
-      issuer_pubkey: "",
+      revocation_pubkey: "",
       expiry_ms: 0,
       max_uses: 0,
     });
     expect(authHeaders).toEqual(["Bearer tok"]);
+  });
+
+  it("the contact and call invite revokes carry the provider's token", async () => {
+    // The ledger-row deletions of a link revoked elsewhere went out on a
+    // client built with no token, and every one was a 401 (2026-10-27).
+    const client = new DiscoveryClient("/api/discovery", { sessionToken: () => "tok" });
+    await client.inviteRevoke("slug", REVOKE);
+    await client.callInviteRevoke("slug", REVOKE);
+    expect(authHeaders).toEqual(["Bearer tok", "Bearer tok"]);
   });
 
   it("without a provider, `setSessionToken` still sets the header", async () => {

@@ -38,6 +38,13 @@ public data class OwnProfile(
      * the account's devices with.
      */
     val nameUpdatedAtMs: Long = if (displayName != null) updatedAtMs else 0L,
+    /**
+     * ADR-0084 — the profile photo (and video) this account publishes, or
+     * `null` for none. Travels with the name: a change moves
+     * [nameUpdatedAtMs] too, so the account's other devices adopt the name
+     * and the photo as one.
+     */
+    val avatar: AvatarRefs? = null,
 )
 
 /**
@@ -64,12 +71,10 @@ public fun withSessionUsername(current: OwnProfile?, username: String?, nowMs: L
     if (current == null) {
         return OwnProfile(displayName = null, username = canonical, updatedAtMs = 0L, nameUpdatedAtMs = 0L)
     }
-    return OwnProfile(
-        displayName = current.displayName,
+    return current.copy(
         username = canonical,
         updatedAtMs = nextProfileStamp(current.updatedAtMs, nowMs),
         // The name did not change: its stamp stays (ADR-0048 section 4a).
-        nameUpdatedAtMs = current.nameUpdatedAtMs,
     )
 }
 
@@ -85,35 +90,36 @@ public fun applyOwnNameChange(
     newName: String?,
     username: String?,
     nowMs: Long,
+): OwnProfile? = applyOwnProfileChange(current, newName, current?.avatar, username, nowMs)
+
+/**
+ * ADR-0084 — apply a name and photo change at once: `null` when nothing
+ * changed, else the new profile with a fresh stamp. A new or removed photo
+ * is a change like a new name (a strictly newer stamp, the republish path).
+ */
+public fun applyOwnProfileChange(
+    current: OwnProfile?,
+    newName: String?,
+    newAvatar: AvatarRefs?,
+    username: String?,
+    nowMs: Long,
 ): OwnProfile? {
-    if (current != null && current.displayName == newName && current.username == username) return null
+    if (current != null && current.displayName == newName && current.username == username &&
+        current.avatar == newAvatar
+    ) {
+        return null
+    }
     val stamp = nextProfileStamp(current?.let { maxOf(it.updatedAtMs, it.nameUpdatedAtMs) }, nowMs)
-    val nameChanged = current == null || current.displayName != newName
+    val contentChanged = current == null || current.displayName != newName || current.avatar != newAvatar
     return OwnProfile(
         displayName = newName,
         username = username,
         updatedAtMs = stamp,
-        nameUpdatedAtMs = if (nameChanged) stamp else current?.nameUpdatedAtMs ?: 0L,
+        nameUpdatedAtMs = if (contentChanged) stamp else current?.nameUpdatedAtMs ?: 0L,
+        avatar = newAvatar,
     )
 }
 
-/**
- * The Settings -> Profile live preview of how others see this account
- * (UX §4): `Alice Petrova · @alice`, `@alice` with no name, the name alone for
- * a guest. A name the rule refuses previews as no name — it will not be sent.
- * `null` when there is neither: the screen then shows the catalog's
- * `settings.profile.preview.no_name` (ADR-0061).
- */
-public fun ownProfilePreview(nameCheck: DisplayNameCheck, username: String?): String? {
-    val name = (nameCheck as? DisplayNameCheck.Valid)?.normalized
-    val user = username?.takeIf { it.isNotBlank() }
-    return when {
-        name != null && user != null -> "$name · @$user"
-        name != null -> name
-        user != null -> "@$user"
-        else -> null
-    }
-}
 
 /**
  * The wire form of this profile for the core's composer (profile v3,
@@ -146,6 +152,7 @@ public fun OwnProfile.toFfi(
         accountId = accountId?.takeIf { it.size == ACCOUNT_ID_BYTES },
         usernameCertificate = usernameCertificate?.takeIf { stated != null && it.size == USERNAME_CERTIFICATE_BYTES },
         grants = grants,
+        avatar = avatar?.toFfi(),
     )
 }
 
@@ -171,6 +178,9 @@ public object OwnProfileStore {
         val updatedAtMs: Long = 0L,
         /** Absent in a profile written before ADR-0048 section 4a. */
         val nameUpdatedAtMs: Long? = null,
+        /** ADR-0084 — sealed under the device's avatar key (the refs carry
+         *  the AEAD keys); absent before the profile photo. */
+        val avatarSealed: String? = null,
     )
 
     private fun key(accountId: ByteArray): String =
@@ -186,6 +196,7 @@ public object OwnProfileStore {
                 username = s.username,
                 updatedAtMs = s.updatedAtMs,
                 nameUpdatedAtMs = s.nameUpdatedAtMs ?: if (s.displayName != null) s.updatedAtMs else 0L,
+                avatar = me.lakko.app.avatar.openAvatarRefs(me.lakko.app.avatar.KeystoreAvatarSeal, s.avatarSealed),
             )
         } catch (_: Exception) {
             null
@@ -197,7 +208,8 @@ public object OwnProfileStore {
         // Not for an account whose session has ended (forget device removes
         // the row; nothing writes it back).
         me.lakko.app.account.AccountStoreGate.write(me.lakko.app.auth.base64Encode(accountId)) {
-            val stored = Stored(profile.displayName, profile.username, profile.updatedAtMs, profile.nameUpdatedAtMs)
+            val stored = Stored(profile.displayName, profile.username, profile.updatedAtMs, profile.nameUpdatedAtMs,
+                me.lakko.app.avatar.sealAvatarRefs(me.lakko.app.avatar.KeystoreAvatarSeal, profile.avatar))
             prefs(context).edit().putString(key(accountId), json.encodeToString(stored)).apply()
             mutableRevision.update { it + 1 }
         }

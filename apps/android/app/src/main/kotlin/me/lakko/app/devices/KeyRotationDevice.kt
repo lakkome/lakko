@@ -104,8 +104,8 @@ internal object KeyRotationDevice {
                 return outcome == KeyPackageRepublishOutcome.UPLOADED || outcome == KeyPackageRepublishOutcome.COVERED
             }
 
-            override suspend fun moveDeviceGroupRoot(attestationB64: String?, keyGeneration: Long?): Boolean =
-                authRepository.rotationMoveDeviceGroupRoot(attestationB64, keyGeneration)
+            override suspend fun moveDeviceGroupRoot(): Boolean =
+                authRepository.rotationMoveDeviceGroupRoot()
 
             override suspend fun moveOwnedJournals(): Boolean {
                 // ADR section 3.5, "DS": every journal this account roots

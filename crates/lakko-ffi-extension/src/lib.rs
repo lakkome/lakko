@@ -105,10 +105,13 @@ use lakko_mls::{Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncom
 pub mod attachments;
 pub mod call_signaling;
 pub mod committer_beacon;
+pub mod device_card;
 pub mod ds_proof;
 pub mod group_closed;
 pub mod group_name;
 pub mod key_rotation;
+pub mod link_claim;
+pub mod link_founded;
 pub mod pin;
 pub mod profile;
 pub mod profile_request;

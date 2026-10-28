@@ -21,3 +21,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 base64 = "0.22"
 lakko-crypto.workspace = true
+
+[dev-dependencies]
+# The `mint_test_jwt` example derives the room claim from a call id
+# (ADR-0078 section 2).
+lakko-sfu-proto.workspace = true

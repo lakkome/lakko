@@ -126,7 +126,10 @@ class JoinCallViewModelTest {
         isOwner = false,
     )
 
-    private fun TestScope.harness(): Harness {
+    private fun TestScope.harness(
+        decodeLink: suspend (String, me.lakko.app.auth.IdentitySecrets?) -> CallLinkDecode =
+            { _, _ -> CallLinkDecode.Opened(call) },
+    ): Harness {
         val auth = FakeAuth()
         val port = HostedCallsTest.FakeLinkPort()
         val host = LinkCallHost(
@@ -142,7 +145,7 @@ class JoinCallViewModelTest {
             slug = "slug#secret",
             host = host,
             endCurrentCallAction = {},
-            decodeLink = { _, _ -> CallLinkDecode.Opened(call) },
+            decodeLink = decodeLink,
             saveGuestName = { _, name -> savedNames += name },
         )
         advanceUntilIdle()
@@ -153,6 +156,22 @@ class JoinCallViewModelTest {
     private fun TestScope.landSession(h: Harness) {
         h.model.onSessionLanded()
         advanceUntilIdle()
+    }
+
+    @Test
+    fun `a link that could not be fetched is offered again, and Try again opens it`() = runTest(dispatcher) {
+        var answers = listOf<CallLinkDecode>(CallLinkDecode.OpenFailed, CallLinkDecode.Opened(call))
+        val h = harness(decodeLink = { _, _ -> answers.first().also { answers = answers.drop(1) } })
+        val failed = h.model.uiState.value
+        assertTrue(failed.openFailed)
+        assertFalse(failed.loading)
+        assertEquals(null, failed.decoded)
+
+        h.model.retryDecode()
+        advanceUntilIdle()
+        val opened = h.model.uiState.value
+        assertFalse(opened.openFailed)
+        assertEquals(call, opened.decoded)
     }
 
     @Test

@@ -5,7 +5,14 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0021: SFU peer-identity exposure for group-call roster names
 
-- **Status:** Accepted
+- **Status:** Accepted. **Superseded by
+  [ADR-0078](0078-servers-cannot-link-accounts.md) section 2 (built
+  2026-10-16):** the SFU no longer knows an account, so it derives and sends
+  no `peer_tag`; each participant announces its own SFU peer id, signed with
+  its MLS leaf key and sealed under a key derived from the call seed, and
+  receivers verify it against the call's roster. `peer_tag`, `sfuPeerTag` and
+  the clients' peer-tag resolvers are deleted. The text below records the
+  decision as taken.
 - **Date:** 2026-06-15
 - **Context:** Phase 3 (Rust SFU group calls)
 

@@ -2,9 +2,11 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
-/// The two APNs tokens an iOS Lakko device holds, and which push-gateway
-/// provider each is registered under.
+/// The two APNs tokens an iOS Lakko device holds, and which push provider each
+/// is sealed under in a subscription (ADR-0078: both ride every subscription,
+/// see `PushDeviceTokens`).
 ///
 /// ## Why there are two
 ///
@@ -26,43 +28,13 @@ public enum PushTokenKind: String, Equatable, CaseIterable, Sendable {
     case alert
     case voip
 
-    /// The `services/push-gw` provider this token is registered under. The two
-    /// are distinct rows for one device, so a fresh token of one kind never
-    /// overwrites the other's.
-    public var provider: PushClient.Provider {
+    /// The provider this token is sealed under. The two are distinct entries
+    /// of one subscription, so a fresh token of one kind never overwrites the
+    /// other's.
+    public var provider: FfiPushProvider {
         switch self {
         case .alert: return .apns
         case .voip: return .apnsVoip
         }
-    }
-}
-
-/// When an arriving token is worth sending to the gateway.
-public enum PushTokenRegistration {
-
-    /// `true` when this token should be uploaded.
-    ///
-    /// iOS re-delivers the same token on every launch, and a registration costs
-    /// an anonymous token plus a round trip, so an unchanged token is
-    /// skipped. An empty token is never sent: the gateway rejects it, and a
-    /// device that reports one has no working push either way — the failure
-    /// belongs in a log, not in a request.
-    public static func shouldRegister(token: Data, lastRegistered: Data?) -> Bool {
-        guard !token.isEmpty else { return false }
-        return token != lastRegistered
-    }
-
-    /// Lowercase-hex form of a token, as APNs and every provider console shows
-    /// it. Used for logging a token's identity without logging its bytes
-    /// verbatim in some other shape.
-    public static func hex(_ token: Data) -> String {
-        let alphabet = Array("0123456789abcdef")
-        var out = String()
-        out.reserveCapacity(token.count * 2)
-        for byte in token {
-            out.append(alphabet[Int(byte >> 4)])
-            out.append(alphabet[Int(byte & 0x0F)])
-        }
-        return out
     }
 }

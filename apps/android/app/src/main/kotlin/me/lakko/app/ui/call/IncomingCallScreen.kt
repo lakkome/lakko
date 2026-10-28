@@ -68,6 +68,8 @@ internal fun IncomingCallContent(
     video: Boolean,
     avatarSeed: String,
     pendingAnswer: Boolean?,
+    /** ADR-0084 — the caller's signature key, for their profile photo. */
+    personKey: ByteArray? = null,
     onAnswerConsumed: () -> Unit,
     onAccept: (withVideo: Boolean) -> Unit,
     onDecline: () -> Unit,
@@ -103,7 +105,7 @@ internal fun IncomingCallContent(
                     .padding(top = 48.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                LakkoAvatar(name = content.title, seed = avatarSeed, size = 96.dp)
+                LakkoAvatar(name = content.title, seed = avatarSeed, size = 96.dp, personKey = personKey)
                 Spacer(Modifier.height(20.dp))
                 Text(
                     text = content.title,

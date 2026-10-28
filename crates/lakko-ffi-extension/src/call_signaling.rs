@@ -139,7 +139,9 @@ pub fn parse_call_signal(plaintext: Vec<u8>) -> Result<CallSignal, FfiError> {
         SignalingBody::Answer { .. }
         | SignalingBody::IceCandidate { .. }
         | SignalingBody::GroupLeave { .. }
-        | SignalingBody::GroupJoin { .. } => CallSignal::Other { call_id },
+        | SignalingBody::GroupJoin { .. }
+        // A one-to-one screen-share state (ADR-0083) never rings.
+        | SignalingBody::ScreenShare { .. } => CallSignal::Other { call_id },
     })
 }
 
@@ -448,7 +450,7 @@ mod tests {
     /// first-byte rule for every kind.
     #[test]
     fn golden_pins_every_body_tag_the_ios_peek_tabulates() {
-        let cases: [(&str, &[u8], SignalingBody); 7] = [
+        let cases: [(&str, &[u8], SignalingBody); 8] = [
             (
                 "offer",
                 &[0x52],
@@ -511,6 +513,14 @@ mod tests {
                     call_id: call_id(),
                     leaf_index: 0,
                     reason: EndReason::HungUp,
+                },
+            ),
+            (
+                "screen_share",
+                &[0x8a, 0x01],
+                SignalingBody::ScreenShare {
+                    call_id: call_id(),
+                    state: vec![1],
                 },
             ),
         ];

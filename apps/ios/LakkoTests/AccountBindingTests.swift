@@ -406,165 +406,77 @@ final class FreshIdentityLandingTests: XCTestCase {
     }
 }
 
-// MARK: - The VoIP registration across a sign-out and the next sign-in
+// MARK: - The VoIP token across a sign-out and the next sign-in
 
-/// push-gw as the VoIP registration sees it: records every call in arrival
-/// order and can hold an unregister open.
-@MainActor
-private final class GatedVoipGateway {
-    private(set) var calls: [String] = []
-    private(set) var registered: [Data: Data] = [:]
-    var holdUnregister = false
-    private var waiting: [CheckedContinuation<Void, Never>] = []
-
-    func release() {
-        let parked = waiting
-        waiting = []
-        parked.forEach { $0.resume() }
-    }
-
-    var gateway: VoipPushGateway {
-        VoipPushGateway(
-            register: { [self] pseudonym, token in
-                calls.append("register \(pseudonym.first ?? 0)")
-                registered[pseudonym] = token
-            },
-            unregister: { [self] pseudonym in
-                calls.append("unregister \(pseudonym.first ?? 0)")
-                if holdUnregister { await withCheckedContinuation { waiting.append($0) } }
-                registered[pseudonym] = nil
-            })
-    }
-}
-
+/// ADR-0078 section 3 — the VoIP token is device state, sealed into every
+/// subscription of the bound account. A token that changes while an account
+/// is bound re-sends the subscriptions; with nobody bound it is only stored.
 @MainActor
 final class VoipTokenRegistrationTests: XCTestCase {
 
     private var suiteName = ""
     private var store: PushAccountBindingStore!
-    private var pseudonym: Data?
-    private let first = Data(repeating: 1, count: 32)
-    private let second = Data(repeating: 2, count: 32)
+    private var tokens: PushDeviceTokens!
+    private var changes = 0
     private let token = Data([0xAA, 0xBB])
 
     override func setUp() {
         super.setUp()
         suiteName = "voip-registration-\(UUID().uuidString)"
         store = PushAccountBindingStore(defaults: UserDefaults(suiteName: suiteName))
-        pseudonym = nil
+        tokens = PushDeviceTokens(defaults: UserDefaults(suiteName: "\(suiteName)-tokens")!)
+        changes = 0
     }
 
     override func tearDown() {
         UserDefaults().removePersistentDomain(forName: suiteName)
+        UserDefaults().removePersistentDomain(forName: "\(suiteName)-tokens")
         super.tearDown()
     }
 
-    private func registration(_ gateway: GatedVoipGateway) -> VoipTokenRegistration {
+    private func registration() -> VoipTokenRegistration {
         VoipTokenRegistration(
-            gateway: gateway.gateway, bindingStore: store,
-            devicePseudonym: { [unowned self] in self.pseudonym })
+            store: tokens, bindingStore: store,
+            onChange: { [unowned self] in self.changes += 1 })
     }
 
-    /// What a sign-in does to the push state before it registers.
-    private func signIn(_ devicePseudonym: Data, account: String) {
-        pseudonym = devicePseudonym
-        store.bind(devicePseudonym: devicePseudonym, accountIdB64: account)
+    func testATokenDeliveredWithNobodySignedInIsOnlyStored() async {
+        let registration = registration()
+        XCTAssertNil(registration.tokenDelivered(token), "nothing is sent for nobody")
+        XCTAssertEqual(tokens.voip, token)
+        XCTAssertEqual(changes, 0)
     }
 
-    private func settle() async {
-        for _ in 0..<20 { await Task.yield() }
-    }
-
-    func testATokenDeliveredWithNobodySignedInIsHeldForTheSignIn() async {
-        let gateway = GatedVoipGateway()
-        let registration = registration(gateway)
-
-        XCTAssertNil(registration.tokenDelivered(token), "nothing is registered for nobody")
-        XCTAssertEqual(gateway.calls, [])
-
-        signIn(first, account: "alice")
-        await registration.registerForSignIn(devicePseudonym: first)
-        XCTAssertEqual(gateway.calls, ["register 1"])
-        XCTAssertEqual(gateway.registered[first], token)
-    }
-
-    func testARestoredSessionRegistersWhenTheTokenArrives() async {
-        let gateway = GatedVoipGateway()
-        let registration = registration(gateway)
-        signIn(first, account: "alice")
+    func testAChangedTokenWhileBoundResendsTheSubscriptions() async {
+        let registration = registration()
+        store.bind(accountIdB64: "alice")
 
         await registration.tokenDelivered(token)?.value
-        XCTAssertEqual(gateway.calls, ["register 1"])
+        XCTAssertEqual(changes, 1)
 
-        // The same token again, for the same sign-in: not sent twice.
-        await registration.tokenDelivered(token)?.value
-        await registration.registerForSignIn(devicePseudonym: first)
-        XCTAssertEqual(gateway.calls, ["register 1"])
-    }
-
-    /// The race: Log out's unregister is still in flight when the next
-    /// account signs in and registers. It names the old pseudonym, and the
-    /// new registration is made after it, under the new one.
-    func testALateUnregisterDoesNotRemoveTheNextSignInsRegistration() async {
-        let gateway = GatedVoipGateway()
-        let registration = registration(gateway)
-        signIn(first, account: "alice")
-        await registration.tokenDelivered(token)?.value
-
-        // Log out: the binding goes first, the unregister is held open.
-        gateway.holdUnregister = true
-        store.clear()
-        let leaving = Task { await registration.unregister(devicePseudonym: self.first) }
-        await settle()
-        XCTAssertEqual(gateway.calls, ["register 1", "unregister 1"])
-
-        // The next account signs in while it is still out.
-        signIn(second, account: "bob")
-        let arriving = Task { await registration.registerForSignIn(devicePseudonym: self.second) }
-        await settle()
+        // The same token again: nothing changed, nothing is sent.
+        XCTAssertNil(registration.tokenDelivered(token))
+        XCTAssertEqual(changes, 1)
         XCTAssertEqual(
-            gateway.calls, ["register 1", "unregister 1"],
-            "the registration waits for the unregister ahead of it")
-
-        gateway.release()
-        await leaving.value
-        await arriving.value
-        XCTAssertEqual(gateway.calls, ["register 1", "unregister 1", "register 2"])
-        XCTAssertNil(gateway.registered[first])
-        XCTAssertEqual(gateway.registered[second], token, "the same token, under the new pseudonym")
+            tokens.entries().map(\.provider), [.apnsVoip],
+            "the call token rides the subscription under its own provider")
     }
 
-    /// A registration whose sign-in ended while it waited its turn is never
-    /// sent.
-    func testARegistrationWhoseSignInEndedIsNotSent() async {
-        let gateway = GatedVoipGateway()
-        let registration = registration(gateway)
-        signIn(first, account: "alice")
+    func testAnInvalidatedTokenIsDroppedAndResent() async {
+        let registration = registration()
+        store.bind(accountIdB64: "alice")
         await registration.tokenDelivered(token)?.value
-
-        gateway.holdUnregister = true
-        store.clear()
-        let leaving = Task { await registration.unregister(devicePseudonym: self.first) }
-        await settle()
-        signIn(second, account: "bob")
-        let arriving = Task { await registration.registerForSignIn(devicePseudonym: self.second) }
-        await settle()
-        // ...and that account signs out again before the queue reaches it.
-        store.clear()
-
-        gateway.release()
-        await leaving.value
-        await arriving.value
-        XCTAssertEqual(gateway.calls, ["register 1", "unregister 1"])
-        XCTAssertTrue(gateway.registered.isEmpty)
+        await registration.tokenInvalidated()?.value
+        XCTAssertNil(tokens.voip)
+        XCTAssertEqual(changes, 2)
     }
 
-    func testOnlyTheBoundPseudonymIsRegisteredUnder() {
-        let binding = PushAccountBinding(
-            devicePseudonymHex: PushAccountBinding.hex(first), accountIdB64: "alice")
-        XCTAssertTrue(VoipPushRegistration.isBound(devicePseudonym: first, binding: binding))
-        XCTAssertFalse(VoipPushRegistration.isBound(devicePseudonym: second, binding: binding))
-        XCTAssertFalse(VoipPushRegistration.isBound(devicePseudonym: first, binding: nil))
+    func testAfterLogOutATokenIsOnlyStored() async {
+        let registration = registration()
+        store.bind(accountIdB64: "alice")
+        store.clear()
+        XCTAssertNil(registration.tokenDelivered(token))
+        XCTAssertEqual(changes, 0)
     }
 }
 

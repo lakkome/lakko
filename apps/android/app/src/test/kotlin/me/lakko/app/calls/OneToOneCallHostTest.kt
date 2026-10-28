@@ -55,6 +55,7 @@ class OneToOneCallHostTest {
         val mutableState = MutableStateFlow(CallSession.WebCallState.Idle)
         override val state: StateFlow<CallSession.WebCallState> = mutableState
         val applied = mutableListOf<FfiCallSignalingBody>()
+        val shares = mutableListOf<uniffi.lakko_ffi_uniffi.VerifiedCallScreenShare>()
         val hangUps = mutableListOf<CallSession.WebCallEndReason>()
         var keySeed: ByteArray? = null
         var acceptedWithVideo: Boolean? = null
@@ -75,6 +76,10 @@ class OneToOneCallHostTest {
                 is FfiCallSignalingBody.End -> mutableState.value = CallSession.WebCallState.Done
                 else -> Unit
             }
+        }
+
+        override fun applyScreenShare(share: uniffi.lakko_ffi_uniffi.VerifiedCallScreenShare) {
+            shares += share
         }
 
         override fun dial(audio: Boolean, video: Boolean) {
@@ -116,11 +121,14 @@ class OneToOneCallHostTest {
 
         /** docs/ux/calls.md section 6 — the transcript rows the host wrote. */
         val recorded = mutableListOf<Pair<String, CallTranscriptEntry>>()
+        /** When each recorded call started, in the order of [recorded]. */
+        val recordedStarts = mutableListOf<Long?>()
         var keyDelayMs = 0L
         var keyAvailable = true
 
-        override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry) {
+        override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?) {
             recorded += groupIdHex to entry
+            recordedStarts += startedAtMs
         }
 
         override fun createSession(
@@ -355,6 +363,39 @@ class OneToOneCallHostTest {
         fresh.host.deliver(groupB, 1, FfiCallSignalingBody.GroupStart(call2, 1u, 1uL, media), iso(t0))
         runCurrent()
         assertNull(fresh.host.active.value)
+    }
+
+    private fun share() = uniffi.lakko_ffi_uniffi.VerifiedCallScreenShare(
+        seq = 1uL,
+        signerKey = ByteArray(32) { 3 },
+        peerId = "p2p",
+        sharing = true,
+        withSound = false,
+        accountKey = ByteArray(32),
+    )
+
+    @Test
+    fun `a verified share reaches the call it names, on its own group, once`() = runTest {
+        val h = harness()
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        h.host.deliverScreenShare(groupA, 2, callIdHexOf(call1), share())
+        // Re-fetched: not applied twice.
+        h.host.deliverScreenShare(groupA, 2, callIdHexOf(call1), share())
+        // Another call, and this call's id on another group: not this call.
+        h.host.deliverScreenShare(groupA, 3, callIdHexOf(call2), share())
+        h.host.deliverScreenShare(groupB, 4, callIdHexOf(call1), share())
+        runCurrent()
+        assertEquals(1, h.session()!!.shares.size)
+    }
+
+    @Test
+    fun `a raw share body never reaches the session`() = runTest {
+        val h = harness()
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        h.host.deliver(groupA, 2, FfiCallSignalingBody.ScreenShare(call1, ByteArray(8)), iso(t0))
+        runCurrent()
+        assertEquals(1, h.session()!!.applied.size)
+        assertTrue(h.session()!!.shares.isEmpty())
     }
 
     @Test
@@ -875,6 +916,36 @@ class OneToOneCallHostTest {
             listOf(groupA to CallTranscriptEntry(CallOutcome.INCOMING, video = false, durationSecs = 724)),
             h.port.recorded,
         )
+    }
+
+    @Test
+    fun `an incoming call is filed under when it began to ring, not when it ended`() = runTest {
+        val h = harness()
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        h.now = t0 + 5_000L
+        h.host.accept(withVideo = false)
+        runCurrent()
+        h.session()!!.mutableState.value = CallSession.WebCallState.Connected
+        runCurrent()
+        h.now = t0 + 60_000L
+        h.host.hangUp()
+        runCurrent()
+
+        assertEquals(listOf<Long?>(t0), h.port.recordedStarts)
+    }
+
+    @Test
+    fun `an outgoing call is filed under when it was dialled`() = runTest {
+        val h = harness()
+        h.now = t0 + 1_000L
+        assertTrue(h.host.startOutgoing(groupA, RequestedCallKind.VOICE))
+        runCurrent()
+        h.now = t0 + 30_000L
+        h.host.hangUp()
+        runCurrent()
+
+        assertEquals(listOf<Long?>(t0 + 1_000L), h.port.recordedStarts)
     }
 
     @Test

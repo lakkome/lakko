@@ -87,6 +87,7 @@ class FakeStream {
 
 interface FakeSender {
   track: FakeTrack | null;
+  receiver: { track: FakeTrack };
   replaceTrack(t: FakeTrack): Promise<void>;
 }
 
@@ -102,8 +103,16 @@ class FakePeerConnection {
   private senders: FakeSender[] = [];
   constructor(_config?: unknown) {}
   addTrack(track: FakeTrack, _stream: FakeStream): FakeSender {
+    // A browser reuses a transceiver of the same kind that is not sending
+    // yet (one a remote offer created), and hands back its sender.
+    const idle = this.senders.find((s) => s.track === null && s.receiver.track.kind === track.kind);
+    if (idle !== undefined) {
+      idle.track = track;
+      return idle;
+    }
     const sender: FakeSender = {
       track,
+      receiver: { track: new FakeTrack(track.kind) },
       replaceTrack: async (t: FakeTrack): Promise<void> => {
         sender.track = t;
       },
@@ -119,7 +128,8 @@ class FakePeerConnection {
    *  honest answer for a fake that models senders and not transceivers: the
    *  arming is a no-op here and the answer path is what these tests are for. */
   getTransceivers(): unknown[] {
-    return [];
+    if (!modelTransceivers) return [];
+    return this.senders.map((sender) => ({ sender, receiver: sender.receiver }));
   }
   closed = false;
   async createOffer(): Promise<{ type: string; sdp: string }> {
@@ -135,13 +145,25 @@ class FakePeerConnection {
     return { type: "answer", sdp: "v=0 fake-answer" };
   }
   async setLocalDescription(desc?: { type: string; sdp: string }): Promise<void> {
+    descriptionLog.push("local");
     const type =
       desc?.type ?? (this.signalingState === "have-remote-offer" ? "answer" : "offer");
     this.localDescription = desc ?? { type, sdp: "v=0 fake-local" };
     this.signalingState = type === "offer" ? "have-local-offer" : "stable";
   }
   async setRemoteDescription(desc: { type: string; sdp: string }): Promise<void> {
+    descriptionLog.push(`remote:${desc.type}`);
     this.remoteDescription = desc;
+    if (desc.type === "offer" && offerCreatesVideoTransceiver && !this.senders.some((s) => s.receiver.track.kind === "video")) {
+      const sender: FakeSender = {
+        track: null,
+        receiver: { track: new FakeTrack("video") },
+        replaceTrack: async (t: FakeTrack): Promise<void> => {
+          sender.track = t;
+        },
+      };
+      this.senders.push(sender);
+    }
     this.signalingState = desc.type === "offer" ? "have-remote-offer" : "stable";
   }
   addedCandidates: unknown[] = [];
@@ -163,6 +185,16 @@ class FakePeerConnection {
 
 let pcs: FakePeerConnection[] = [];
 
+/** When set, the fake reports one transceiver per sender, each with its
+ *  receiver, the way a browser does after `addTrack`. Off by default: the
+ *  other tests model senders only. */
+let modelTransceivers = false;
+/** When set, an applied remote offer creates a video transceiver whose
+ *  sender has no track, as the caller's video offer does on the answerer. */
+let offerCreatesVideoTransceiver = false;
+/** Descriptions applied and receive transforms attached, in order. */
+let descriptionLog: string[] = [];
+
 let gumCalls: MediaStreamConstraints[] = [];
 let gumStreams: FakeStream[] = [];
 
@@ -179,6 +211,9 @@ async function fakeGetUserMedia(
 }
 
 beforeEach(() => {
+  modelTransceivers = false;
+  offerCreatesVideoTransceiver = false;
+  descriptionLog = [];
   gumCalls = [];
   gumStreams = [];
   pcs = [];
@@ -723,3 +758,95 @@ describe("offerer: ICE that connects while the answer is still being applied", (
     expect(published.filter((p) => p.startsWith("end:"))).toEqual([]);
   });
 });
+
+describe("1x1 receive transform is attached before the description", () => {
+  // Chromium bypasses a receive transform set from `ontrack` on a transceiver
+  // this side created with `addTrack`; it has to be on the receiver before
+  // the description that creates the receive stream is applied.
+  function sessionLoggingReceivers(): CallSession {
+    const session = new CallSession(
+      new Uint8Array(16),
+      {
+        onRemoteStream: () => {},
+        onLocalStream: () => {},
+        onOutboundSignaling: () => {},
+        onStateChange: () => {},
+      },
+      { ringTimeoutMs: TEST_RING_WINDOW_MS },
+      {
+        supported: () => true,
+        attachSender: () => {},
+        attachReceiver: (receiver) => descriptionLog.push(`receiver:${receiver.track.kind}`),
+      },
+    );
+    session.setCallKey(new Uint8Array(32), 3);
+    return session;
+  }
+
+  it("answerer: the receiver is sealed before the remote offer is applied", async () => {
+    modelTransceivers = true;
+    const session = sessionLoggingReceivers();
+    await session.applyIncomingSignaling(fakeOffer(false));
+    await session.accept();
+    expect(descriptionLog.slice(0, 2)).toEqual(["receiver:audio", "remote:offer"]);
+  });
+
+  it("offerer: the receiver is sealed before the local offer", async () => {
+    modelTransceivers = true;
+    const session = sessionLoggingReceivers();
+    await session.dial({ audio: true, video: false });
+    expect(descriptionLog.slice(0, 2)).toEqual(["receiver:audio", "local"]);
+  });
+
+  it("a receiver sealed before the description is not sealed again from ontrack", async () => {
+    modelTransceivers = true;
+    const session = sessionLoggingReceivers();
+    await session.dial({ audio: true, video: false });
+    const pc = at(pcs, 0);
+    const receiver = (pc.getTransceivers()[0] as { receiver: unknown }).receiver;
+    pc.ontrack?.({ receiver, streams: [] });
+    expect(descriptionLog.filter((e) => e.startsWith("receiver:"))).toEqual(["receiver:audio"]);
+  });
+});
+
+describe("1x1 answerer's camera on the transceiver the caller's offer made", () => {
+  // Chromium does not run a send transform set on the sender `addTrack` hands
+  // back when it reuses such a transceiver (seen 2026-10-24: the caller
+  // dropped every frame of the answerer's camera). The sender is sealed when
+  // the offer is applied, before the answer, and never sealed again.
+  it("seals that sender before the answer and does not seal it again when the camera goes on", async () => {
+    modelTransceivers = true;
+    offerCreatesVideoTransceiver = true;
+    const session = new CallSession(
+      new Uint8Array(16),
+      {
+        onRemoteStream: () => {},
+        onLocalStream: () => {},
+        onOutboundSignaling: () => {},
+        onStateChange: () => {},
+      },
+      { ringTimeoutMs: TEST_RING_WINDOW_MS },
+      {
+        supported: () => true,
+        attachSender: (sender, opts) =>
+          descriptionLog.push(`sender:${opts.kind ?? sender.track?.kind ?? "?"}`),
+        attachReceiver: () => {},
+      },
+    );
+    session.setCallKey(new Uint8Array(32), 3);
+    await session.applyIncomingSignaling(fakeOffer(true));
+    await session.accept();
+    const remote = descriptionLog.indexOf("remote:offer");
+    const video = descriptionLog.indexOf("sender:video");
+    const local = descriptionLog.indexOf("local");
+    expect(remote).toBeGreaterThanOrEqual(0);
+    expect(video).toBeGreaterThan(remote);
+    expect(local).toBeGreaterThan(video);
+    await session.addLocalVideo();
+    await settle();
+    expect(descriptionLog.filter((e) => e === "sender:video")).toHaveLength(1);
+    const pc = at(pcs, 0);
+    expect(pc.getSenders().filter((s) => s.track?.kind === "video")).toHaveLength(1);
+  });
+});
+

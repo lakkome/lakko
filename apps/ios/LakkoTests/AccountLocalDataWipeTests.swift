@@ -68,8 +68,8 @@ final class AccountLocalDataWipeTests: XCTestCase {
         wipeQuietly(a)
         wipeQuietly(b)
         if let savedSession { SessionStore().save(savedSession) }
-        if let savedBinding, let pseudonym = CoPublisher.hexToData(savedBinding.devicePseudonymHex) {
-            PushAccountBindingStore.live.bind(devicePseudonym: pseudonym, accountIdB64: savedBinding.accountIdB64)
+        if let savedBinding {
+            PushAccountBindingStore.live.bind(accountIdB64: savedBinding.accountIdB64)
         }
         UserDefaults.standard.set(savedFolderTab, forKey: AccountLocalDataWipe.selectedFolderTabKey)
         UserDefaults.standard.set(savedAnswers, forKey: DeviceLinkAnswerLimit.defaultKey)
@@ -84,7 +84,7 @@ final class AccountLocalDataWipeTests: XCTestCase {
         try seed(accountId: accountIdB, channelId: channelB)
         // The signed-in account's device-wide rows.
         SessionStore().save(PersistedSession(accountIdB64: a, username: "alice"))
-        PushAccountBindingStore.live.bind(devicePseudonym: Data(repeating: 0x11, count: 32), accountIdB64: a)
+        PushAccountBindingStore.live.bind(accountIdB64: a)
 
         let beforeA = AccountDataInventory.remaining(accountIdB64: a)
         let beforeB = AccountDataInventory.remaining(accountIdB64: b)
@@ -223,10 +223,14 @@ final class AccountLocalDataWipeTests: XCTestCase {
     func testFoundingMarksOfTheAccountsOwnJournalsGoAndOthersStay() throws {
         try seed(accountId: accountIdA, channelId: channelA)
         try seed(accountId: accountIdB, channelId: channelB)
-        let deviceGroupA = DsClient.pseudonymHex(try deviceGroupIdFor(accountId: accountIdA))
-        let deviceGroupB = DsClient.pseudonymHex(try deviceGroupIdFor(accountId: accountIdB))
-        let channelGroupA = DsClient.pseudonymHex(try publisherGroupId(channelA))
-        let channelGroupB = DsClient.pseudonymHex(try publisherGroupId(channelB))
+        // ADR-0078 section 6 — both ids are derived from the lineage seed:
+        // the oldest own predecessor when one is held, as `seed` stores one.
+        let ownerA = try Identity.fromSeed(seed: predecessorSeed(accountIdA))
+        let ownerB = try Identity.fromSeed(seed: predecessorSeed(accountIdB))
+        let deviceGroupA = DsClient.pseudonymHex(deviceGroupIdFor(accountIdentity: ownerA))
+        let deviceGroupB = DsClient.pseudonymHex(deviceGroupIdFor(accountIdentity: ownerB))
+        let channelGroupA = DsClient.pseudonymHex(try publisherGroupIdFor(ownerIdentity: ownerA, channelId: channelA))
+        let channelGroupB = DsClient.pseudonymHex(try publisherGroupIdFor(ownerIdentity: ownerB, channelId: channelB))
         for mark in [deviceGroupA, deviceGroupB, channelGroupA, channelGroupB] {
             JournalFoundingMarks.shared.mark(journalIdHex: mark)
         }
@@ -315,7 +319,7 @@ final class AccountLocalDataWipeTests: XCTestCase {
         try ExportKeyStore.putExportKey(
             accountIdB64: x, exportKey: Data(repeating: 3, count: ExportKeyStore.exportKeyLength))
         try AccountIdentitySeedStore.putAccountIdentitySeed(
-            accountIdB64: x, seed: Data(repeating: 4, count: AccountIdentitySeedStore.seedLength))
+            accountIdB64: x, seed: accountSeed(accountId))
         // ADR-0074 section 1.1 — the recall record of a reset elsewhere.
         try KeychainRecallRecordStore().put(RecallRecord(
             accountIdB64: x, oldSeed: Data(repeating: 9, count: RecallRecord.seedLength),
@@ -331,8 +335,7 @@ final class AccountLocalDataWipeTests: XCTestCase {
         // ADR-0074 part 3 — the account's own predecessor seed (key material
         // a pairing state bundle may have brought) with its adoption time,
         // and the unanswered outgoing contact requests with their intro.
-        try KeychainOwnPredecessorStore().add(
-            Data(repeating: 0x0C, count: AccountIdentitySeedStore.seedLength), accountIdB64: x)
+        try KeychainOwnPredecessorStore().add(predecessorSeed(accountId), accountIdB64: x)
         PredecessorMailbox.AdoptionStore().recordIfAbsent(accountIdB64: x, keyB64: "old-key", nowMs: 1)
         try KeychainSentRequestsStore().save(
             [SentContactRequest(
@@ -431,12 +434,19 @@ final class AccountLocalDataWipeTests: XCTestCase {
             [x, group], forKey: AccountLocalDataWipe.legacyPushRoutePrefix + "gid-" + group)
     }
 
-    /// `b"lakko/pubgrp/v2/" || channel_id`, checked against the core's own
-    /// inverse so the test cannot drift from the derivation.
-    private func publisherGroupId(_ channelId: Data) throws -> Data {
-        let groupId = Data("lakko/pubgrp/v2/".utf8) + channelId
-        XCTAssertEqual(channelIdFromPublisherGroupId(groupId: groupId), channelId)
-        return groupId
+    /// A distinct account seed per account, so the seed-derived ids of two
+    /// accounts differ.
+    /// The account's own predecessor seed, distinct per account so two
+    /// seeded accounts never share a lineage.
+    private func predecessorSeed(_ accountId: Data) -> Data {
+        Data(accountSeed(accountId).map { $0 ^ 0x0C })
+    }
+
+    private func accountSeed(_ accountId: Data) -> Data {
+        let first = accountId.first ?? 0
+        return Data((0..<AccountIdentitySeedStore.seedLength).map {
+            UInt8(truncatingIfNeeded: Int(first) &+ $0)
+        })
     }
 
     private func wipeQuietly(_ accountIdB64: String) {

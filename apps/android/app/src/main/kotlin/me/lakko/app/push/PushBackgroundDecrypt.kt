@@ -7,7 +7,6 @@ import android.app.ActivityManager
 import android.content.Context
 import android.os.Process
 import me.lakko.app.chat.IdentitySnapshotStore
-import me.lakko.app.chat.KnownGroupsStore
 import me.lakko.app.chat.MessageLogStore
 import me.lakko.app.ds.DsClient
 import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
@@ -79,7 +78,6 @@ internal fun buildBackgroundDecryptDeps(
     ds: DsClient,
 ): PushDecryptDeps {
     val appContext = context.applicationContext
-    val knownGroups = KnownGroupsStore(appContext)
     val pushRoutes = PushRouteStore(appContext)
     // ADR-0048 — READ-ONLY names for the notification title: loaded from what
     // the app already stored, for the account the wake belongs to (the
@@ -97,25 +95,15 @@ internal fun buildBackgroundDecryptDeps(
             }
         }
     return object : PushDecryptDeps {
-        override fun lookupRoute(accountIdB64: String, pushGidHex: String): String? =
+        override fun lookupRoute(accountIdB64: String, pushGidHex: String, subscriptionIdHex: String?): String? =
             try {
-                // ADR-0042: the plaintext reverse index, for the bound
-                // account only — a READ, deliberately without the device
-                // key (the FMS runs in the background).
-                pushRoutes.lookup(accountIdB64, pushGidHex)
+                // ADR-0042 with ADR-0078: the plaintext reverse index, for
+                // the bound account only and only for a subscription it
+                // holds — a READ, deliberately without the device key (the
+                // FMS runs in the background).
+                pushRoutes.lookup(accountIdB64, pushGidHex, subscriptionIdHex)
             } catch (_: Throwable) {
                 null
-            }
-
-        // Legacy fallback, searching only the bound account's groups (the
-        // first-match scan over every account is gone: ADR-0042, amended
-        // 2026-09-30).
-        override fun accountKnowsGroup(accountIdB64: String, groupHex: String): Boolean =
-            try {
-                val needle = groupHex.lowercase()
-                knownGroups.load(accountIdB64).any { it.lowercase() == needle }
-            } catch (_: Throwable) {
-                false
             }
 
         // ADR-0050 — the MLS snapshot is written under this device's
@@ -349,7 +337,7 @@ private class RealThrowawayGroup(
         ) {
             BackgroundPayloadKind.SERVICE_ENVELOPE -> return null
             BackgroundPayloadKind.CALL_SIGNALING ->
-                return callSignalingRow(app.data, senderNameOf(app.senderLeaf))
+                return callSignalingRow(app.data, senderNameOf(app.senderLeaf), senderKeyOf(app.senderLeaf))
                     ?.copy(senderAccountB64 = senderAccountOf(app))
             BackgroundPayloadKind.MESSAGE -> Unit
         }
@@ -398,6 +386,19 @@ private class RealThrowawayGroup(
      * epoch the message was sealed at, C-68), then looked up in the read-only
      * snapshot. A fingerprint-only result is not a name worth a title.
      */
+    /** ADR-0084 — the sender's signature key (standard base64), resolved at
+     *  the same point as [senderNameOf]. Carried to the ring only; nothing
+     *  here downloads a photo (the ring screen does, in the foreground). */
+    private fun senderKeyOf(senderLeaf: UInt?): String? {
+        val leaf = senderLeaf ?: return null
+        return try {
+            group.members().firstOrNull { it.leafIndex == leaf }
+                ?.let { java.util.Base64.getEncoder().encodeToString(it.signaturePublicKey) }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     private fun senderNameOf(senderLeaf: UInt?): String? {
         val lookup = names ?: return null
         val leaf = senderLeaf ?: return null
@@ -443,7 +444,7 @@ private class RealThrowawayGroup(
  * in the pure core; a frame that will not parse is dropped (fail-closed,
  * invariant #4), never guessed at.
  */
-private fun callSignalingRow(payload: ByteArray, senderName: String?): ProcessedRow? {
+private fun callSignalingRow(payload: ByteArray, senderName: String?, senderKeyB64: String? = null): ProcessedRow? {
     val body = try {
         parseCallSignaling(payload)
     } catch (_: Throwable) {
@@ -457,6 +458,7 @@ private fun callSignalingRow(payload: ByteArray, senderName: String?): Processed
             // the caller started ringing, not from when this device woke up.
             offeredAtMs = body.createdAtMs.toLong(),
             callerName = senderName,
+            callerKeyB64 = senderKeyB64,
         )
         is FfiCallSignalingBody.End ->
             me.lakko.app.calls.CallRingSignal.End(me.lakko.app.calls.callIdHexOf(body.callId))

@@ -207,28 +207,24 @@ import type {
   Group as WasmGroup,
   Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
-import { base64Decode, base64Encode } from "../auth/account-id";
-import { dsAccess } from "../ds/access";
-import { DsClient } from "../ds/client";
-import {
-  bindPushRouting,
-  releaseAuthority,
-  type PushBindingOutcome,
-  type StatementSender,
-} from "../ds/ownership";
+import { base64Encode } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { loadWasm } from "../wasm";
 import { PushClient } from "./client";
-import { getOrCreateDevicePushId } from "./device-id";
+import { getDevicePushToken } from "./device-token";
 import {
   deleteRoute,
+  ensureRouteSubId,
   getGroupRoutingRecord,
   getGroupRoutingSecret,
   getGroupRoutingState,
+  getRouteSubId,
+  listRoutesForAccount,
   markGroupRoutingDistributed,
   markGroupRoutingPending,
   putGroupRouting,
 } from "./group-routing-store";
+import { pushWakeKey } from "./wake-key";
 
 /** `push_routing_secret` length (bytes) — mirrors the Rust
  *  `PUSH_ROUTING_SECRET_LEN`. */
@@ -421,27 +417,131 @@ export async function pushGidForGroup(
 }
 
 /**
- * Subscribe this device to push wakes for a group UNDER ITS `push_gid`.
- * A member that does not hold the secret **defers** (returns `"deferred"`)
- * — it never subscribes under the leaky `group_id`. Returns `"subscribed"`
- * once the wake registration lands.
+ * ADR-0078 section 3 — the `x-lakko-wake` header value for a publish to a
+ * group: a wake sealed to push-gw's key, signed by the group's wake key and
+ * carrying its unlock key, all derived from the group's routing secret inside
+ * the wasm core. `null` when this device holds no secret for the group (the
+ * ADR-0042 defer: no header, never the `group_id`) or push-gw's key cannot be
+ * had right now.
+ */
+export async function sealedWakeForGroup(
+  accountId: string,
+  groupIdB64: string,
+  kind: "message" | "call",
+): Promise<string | null> {
+  const deviceKey = await getDeviceKey(accountId);
+  if (deviceKey === null) return null;
+  const secret = await getGroupRoutingSecret(accountId, groupIdB64, deviceKey);
+  if (secret === null) return null;
+  const gwKey = await pushWakeKey();
+  if (gwKey === null) return null;
+  const wasm = await loadWasm();
+  return wasm.pushWakeHeaderValue(
+    gwKey,
+    secret,
+    kind === "call" ? wasm.PushWakeKind.Call : wasm.PushWakeKind.Message,
+    Date.now(),
+  );
+}
+
+/**
+ * Subscribe this device to push wakes for a group UNDER ITS `push_gid`
+ * (ADR-0078 section 3): this browser's Web Push token sealed under the
+ * group's unlock key, as the subscription row this device keeps the id of.
+ *
+ * Returns `"deferred"` — and sends nothing — when this device holds no
+ * secret for the group (never under the leaky `group_id`), or holds no Web
+ * Push token yet (`subscribeToPush` sends every subscription once it has
+ * one). Returns `"subscribed"` once the row landed.
  */
 export async function subscribeGroupUnderPushGid(
   accountId: string,
   groupIdB64: string,
 ): Promise<"subscribed" | "deferred"> {
-  const pushGid = await pushGidForGroup(accountId, groupIdB64);
-  if (pushGid === null) return "deferred";
-  const devicePseudonym = getOrCreateDevicePushId();
+  const deviceKey = await getDeviceKey(accountId);
+  if (deviceKey === null) return "deferred";
+  const secret = await getGroupRoutingSecret(accountId, groupIdB64, deviceKey);
+  if (secret === null) return "deferred";
+  const token = getDevicePushToken();
+  if (token === null) return "deferred";
+  const wasm = await loadWasm();
+  const pushGid = wasm.derivePushGid(secret);
+  const subId = await ensureRouteSubId(accountId, toHex(pushGid), groupIdB64);
+  const tokens = new wasm.PushTokenList();
+  tokens.add("web_push", token);
+  const sealed = wasm.sealPushSubscription(secret, subId, tokens);
+  const wakePk = wasm.derivePushWakePublicKey(secret);
   // Bounded: `rotatePushRoutingSecret` awaits this WHILE HOLDING the routing-row
   // lock, so a hung POST here would wedge the row (and with it every later
   // envelope) permanently. A timeout leaves this device unsubscribed under the
   // current id — repaired by the next provisioning pass, which re-subscribes
   // unconditionally.
   await withNetworkTimeout("subscribe", () =>
-    new PushClient().subscribeGroup(devicePseudonym, pushGid),
+    new PushClient().subscribe({ subId, pushGid, wakePk, sealed }),
   );
   return "subscribed";
+}
+
+/**
+ * ADR-0078 — send every subscription of `accountId` again, sealing the
+ * current token. Called when this browser's Web Push token was taken or
+ * changed: each row at push-gw holds the token sealed, so a new token reaches
+ * push-gw only by re-sending each one (same ids, so each row is replaced).
+ * Best-effort per group; never throws.
+ */
+export async function resubscribeAllForAccount(accountId: string): Promise<void> {
+  let routes: Awaited<ReturnType<typeof listRoutesForAccount>>;
+  try {
+    routes = await listRoutesForAccount(accountId);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("push re-subscribe: routes unreadable", err);
+    return;
+  }
+  const groups = new Set(routes.map((r) => r.groupIdB64));
+  for (const groupIdB64 of groups) {
+    try {
+      await subscribeGroupUnderPushGid(accountId, groupIdB64);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("push re-subscribe failed for one group", err);
+    }
+  }
+}
+
+/**
+ * ADR-0078 — remove every push-gw subscription `accountId` holds on this
+ * browser (sign-out, Forget device, another account signing in). Must run
+ * BEFORE the account's route rows are wiped: the ids live there. Best-effort
+ * per row; never throws.
+ */
+export async function unsubscribeAllForAccount(accountId: string): Promise<void> {
+  let routes: Awaited<ReturnType<typeof listRoutesForAccount>>;
+  try {
+    routes = await listRoutesForAccount(accountId);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("push unsubscribe-all: routes unreadable", err);
+    return;
+  }
+  for (const route of routes) {
+    if (route.subIdHex === undefined || !/^[0-9a-f]{32}$/.test(route.subIdHex)) continue;
+    const subId = fromHex(route.subIdHex);
+    try {
+      await withNetworkTimeout("unsubscribe", () => new PushClient().unsubscribe(subId));
+    } catch (err) {
+      // A row left behind holds a token sealed under a key push-gw only sees
+      // inside a wake; it goes when the provider reports the token invalid.
+      // eslint-disable-next-line no-console
+      console.warn("push unsubscribe failed for one subscription", err);
+    }
+  }
+}
+
+function fromHex(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(hex.slice(2 * i, 2 * i + 2), 16);
+  return out;
 }
 
 /** Fire-and-forget wrapper for the subscribe — failures are logged and
@@ -464,9 +564,9 @@ export function subscribeGroupUnderPushGidBestEffort(
  * Called on BOTH sides of a rotation with the OLD secret — by the rotator
  * after it re-arms under the new id, and by every remaining member when the
  * gated receive path applies a CHANGED secret. Both must, and for the same
- * reason: `POST /push/group/unsubscribe` deletes exactly the
- * `(device, group)` row named in the request, and a client knows only its OWN
- * device pseudonym, so nobody can tear down anyone else's row. If only the
+ * reason: `POST /push/unsubscribe` deletes exactly the row named by its
+ * subscription id (ADR-0078), and a client knows only its OWN ids, so nobody
+ * can tear down anyone else's row. If only the
  * rotator unsubscribed, every OTHER member would leave a live row under the
  * old id — one dead subscription per member per rotation, which is the
  * "versioned cluster archive" ADR-0043 § Context calls strictly worse than
@@ -486,11 +586,9 @@ export async function retireOldPushGid(
   accountId: string,
   oldSecret: Uint8Array,
 ): Promise<void> {
-  let oldGid: Uint8Array;
   let oldGidHex: string;
   try {
-    oldGid = await derivePushGid(oldSecret);
-    oldGidHex = toHex(oldGid);
+    oldGidHex = toHex(await derivePushGid(oldSecret));
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn("push-routing old push_gid derivation failed", err);
@@ -500,9 +598,12 @@ export async function retireOldPushGid(
     // Bounded for the same reason as the subscribe above: this runs under the
     // routing-row lock on both the rotate and the receive path. A timeout
     // lands in the existing catch, i.e. a stale row nothing notifies again.
-    await withNetworkTimeout("unsubscribe", () =>
-      new PushClient().unsubscribeGroup(getOrCreateDevicePushId(), oldGid),
-    );
+    // ADR-0078: the row is named by this device's subscription id for the
+    // old push_gid; none held means this device never subscribed under it.
+    const subId = await getRouteSubId(accountId, oldGidHex);
+    if (subId !== null) {
+      await withNetworkTimeout("unsubscribe", () => new PushClient().unsubscribe(subId));
+    }
   } catch (err) {
     // The new id is already armed; a failed unsubscribe leaves a row that
     // nothing notifies again, not a broken group.
@@ -1242,13 +1343,7 @@ async function broadcastAndMarkDistributed(
   secret: Uint8Array,
   mintEpoch: bigint,
   broadcast: (envelopeBytes: Uint8Array) => Promise<void>,
-  alreadyBound = false,
 ): Promise<void> {
-  // ADR-0057 obligation 8 (the second security pass, finding 5): the journal
-  // is bound to the routing id BEFORE the secret goes on the wire. A mint or
-  // a rotation has bound already (`mintAndBindSecret`); a re-broadcast binds
-  // here first (a 204 when it is bound already; a member sends nothing).
-  if (!alreadyBound) await bindBounded(groupIdB64, secret);
   try {
     // Compose (wasm, local) OUTSIDE the race; only the send is bounded. A
     // timeout skips `markGroupRoutingDistributed`, so the row stays `pending`
@@ -1261,100 +1356,6 @@ async function broadcastAndMarkDistributed(
     // eslint-disable-next-line no-console
     console.warn("push-routing secret broadcast failed", err);
     return;
-  }
-}
-
-/** The statement sender the binding uses; `null` = a fresh `DsClient`.
- *  Replaced by the host tests. */
-let bindingSender: StatementSender | null = null;
-
-/** Install the sender the push binding uses (tests), or `null` for the
- *  default. */
-export function setPushBindingSender(sender: StatementSender | null): void {
-  bindingSender = sender;
-}
-
-/** Groups whose last bind did not land (503 disabled, offline): the next
- *  provisioning pass binds again. Session-scoped. */
-const bindRetry = new Set<string>();
-
-/** Bind with the network bounded (it runs under the routing row lock). Never
- *  throws; a timeout counts as `failed`. */
-async function bindBounded(groupIdB64: string, secret: Uint8Array): Promise<PushBindingOutcome> {
-  let outcome: PushBindingOutcome;
-  try {
-    outcome = await withNetworkTimeout("bind", () =>
-      bindJournalToPushGid(groupIdB64, secret, bindingSender ?? new DsClient()),
-    );
-  } catch {
-    outcome = "failed";
-  }
-  if (outcome === "disabled" || outcome === "failed") bindRetry.add(groupIdB64);
-  else bindRetry.delete(groupIdB64);
-  return outcome;
-}
-
-/**
- * ADR-0057 obligation 8, the second security pass (finding 5) - mint a fresh
- * secret and bind the journal to its routing id BEFORE the caller persists
- * and broadcasts it:
- *
- *   - 204: bound; broadcast.
- *   - 503 (binding disabled) or a failure: logged; broadcast anyway (wakes
- *     are dropped until bound) and the bind is retried on the next
- *     provisioning pass.
- *   - 409 (the id is bound to another journal): mint a fresh secret once and
- *     bind again; if that also fails, log and broadcast it.
- *   - a member (no admin or root authority) binds nothing (only an owner or
- *     an admin mints or rotates).
- *
- * `mint` and `bind` are injectable for the host tests.
- */
-export async function mintAndBindSecret(
-  groupIdB64: string,
-  deps: {
-    readonly mint?: () => Uint8Array;
-    readonly bind?: (groupIdB64: string, secret: Uint8Array) => Promise<PushBindingOutcome>;
-  } = {},
-): Promise<Uint8Array> {
-  const mint = deps.mint ?? mintPushRoutingSecret;
-  const bind = deps.bind ?? bindBounded;
-  let secret = mint();
-  let outcome = await bind(groupIdB64, secret);
-  if (outcome === "conflict") {
-    // eslint-disable-next-line no-console
-    console.warn("push-routing: the minted routing id is bound elsewhere; minting another once");
-    secret.fill(0);
-    secret = mint();
-    outcome = await bind(groupIdB64, secret);
-    if (outcome === "conflict") {
-      // eslint-disable-next-line no-console
-      console.warn("push-routing: the second routing id is bound elsewhere too; broadcasting unbound");
-    }
-  }
-  return secret;
-}
-
-/** ADR-0057 obligation 8 — bind the group's journal to `derivePushGid(secret)`
- *  with this device's authority (root or admin registrar). Never throws. */
-export async function bindJournalToPushGid(
-  groupIdB64: string,
-  secret: Uint8Array,
-  sender: StatementSender = new DsClient(),
-): Promise<PushBindingOutcome> {
-  let groupId: Uint8Array;
-  let pushGid: Uint8Array;
-  try {
-    groupId = base64Decode(groupIdB64);
-    pushGid = await derivePushGid(secret);
-  } catch {
-    return "failed";
-  }
-  const authority = dsAccess.journalAuthority(groupId);
-  try {
-    return await bindPushRouting(sender, groupId, authority, pushGid);
-  } finally {
-    releaseAuthority(authority);
   }
 }
 
@@ -1452,8 +1453,7 @@ export function ensureGroupPushRouting(
           // eslint-disable-next-line no-console
           console.warn("push-routing mint skipped: group epoch unreadable");
         } else {
-          // Bind BEFORE broadcasting (finding 5 of the second security pass).
-          const secret = await mintAndBindSecret(groupIdB64);
+          const secret = mintPushRoutingSecret();
           // Persist BEFORE broadcasting — minting twice (two divergent random
           // secrets) is worse than broadcasting twice (byte-identical, hence
           // idempotent). The `distributed: false` flag is what makes the
@@ -1475,7 +1475,6 @@ export function ensureGroupPushRouting(
               secret,
               mintEpoch,
               broadcast,
-              true,
             );
           }
         }
@@ -1525,19 +1524,6 @@ export function ensureGroupPushRouting(
           record.mintEpoch,
           broadcast,
         );
-      }
-    }
-
-    // A bind that did not land (503 disabled, offline) is retried here, on
-    // the next provisioning pass (finding 5: wakes are dropped until bound).
-    if (state === "distributed" && bindRetry.has(groupIdB64)) {
-      try {
-        const deviceKey = await getDeviceKey(accountId);
-        const held =
-          deviceKey === null ? null : await getGroupRoutingSecret(accountId, groupIdB64, deviceKey);
-        if (held !== null) await bindBounded(groupIdB64, held);
-      } catch {
-        /* retried on the next pass */
       }
     }
 
@@ -1661,9 +1647,9 @@ export async function redistributeSecretToGroup(
 // evicted from. The leak is not storage hygiene: an ex-member learns "this
 // group was active at time T" on every send, indefinitely.
 //
-// It cannot be closed by unsubscribing, because `POST /push/group/unsubscribe`
-// deletes exactly the `(device, group)` row named in the request and a client
-// knows only its OWN device pseudonym — no remaining member can reach the
+// It cannot be closed by unsubscribing, because `POST /push/unsubscribe`
+// deletes exactly the row named by its subscription id (ADR-0078) and a
+// client knows only its OWN ids — no remaining member can reach the
 // ex-member's row, and the ex-member's client has no "you were removed"
 // handling to do it itself. Re-keying is the only mechanism the GROUP has:
 // after a rotation nobody ever notifies the old id again, so that row goes
@@ -1905,9 +1891,9 @@ export function membershipRotationDecision(args: {
  * the order wrong and the stamp is the pre-removal epoch, which TIES with a
  * stale secret minted at the same epoch — the tie falls to the byte
  * comparison and the rotation may simply lose. The guarantee degrades from
- * "always wins" to "coin flip", silently. Use
- * {@link publishRemoveThenRotate} at the call site, which is where that
- * ordering is pinned by a test.
+ * "always wins" to "coin flip", silently. Since the ADR-0081 amendment
+ * (2026-10-19) every removal is a sweep, and the rotation is started from the
+ * sweep's tail, after the merged commit.
  *
  * The steps, in the one order that works:
  *
@@ -1997,8 +1983,7 @@ export function rotatePushRoutingSecret(
       // (4) — mint + persist PENDING. Persist before broadcasting for the
       // same reason the mint path does: two divergent random secrets are worse
       // than two identical envelopes.
-      // Bind BEFORE broadcasting (finding 5 of the second security pass).
-      const next = await mintAndBindSecret(groupIdB64);
+      const next = mintPushRoutingSecret();
       const pushGid = await persistGroupRoutingSecret(
         accountId,
         groupIdB64,
@@ -2017,7 +2002,6 @@ export function rotatePushRoutingSecret(
         next,
         mintEpoch,
         broadcast,
-        true,
       );
 
       // (6) — arm the NEW id first, so a failure between the two never leaves
@@ -2035,59 +2019,6 @@ export function rotatePushRoutingSecret(
       return "rotated";
     },
   );
-}
-
-/**
- * **C-61 — publish the Remove commit, THEN rotate.** The single call site for
- * this device's own removal path, and the reason that ordering is testable at
- * all rather than being two adjacent statements anyone can reorder.
- *
- * Both halves of what C-61 buys depend on `publishRemove` having RESOLVED
- * before `rotate` is even started:
- *
- *   - **Forward secrecy (ADR-0043).** The rotation envelope is an MLS
- *     application message. Sealed before the Remove commit it is sealed at
- *     the pre-removal epoch, where the evicted member is still a member and
- *     can open it — learning the very secret the rotation exists to deny it.
- *   - **Recency (ADR-0044).** {@link rotatePushRoutingSecret} stamps the new
- *     secret with `group.epoch` read at mint time. After the commit that is
- *     the post-removal epoch, so the rotation strictly out-ranks the secret
- *     it replaces and a stale re-broadcast of that older secret is refused
- *     `reject-stale` by every member. Before the commit it is the PRE-removal
- *     epoch — the same epoch the stale secret carries — so the two TIE, the
- *     tie falls to the 32 secret bytes, and the rotation wins or loses by a
- *     coin flip with no signal either way.
- *
- * ADR-0043 required this ordering but enforced it only structurally, by call-
- * site sequencing, with no test on any client. ADR-0044 promotes it from a
- * property that protects one guarantee to a precondition of two, so it is
- * pinned here — where a test can drive both callbacks and observe which epoch
- * the emitted envelope was stamped at.
- *
- * The rotation is deliberately fire-and-forget: push is best-effort and a
- * rotation failure must never unwind the membership change that triggered it.
- * "Ordered" means the rotation is not STARTED until the removal has landed,
- * not that the caller waits for it.
- *
- * @returns whatever `publishRemove` resolved to, so the caller keeps its
- *          commit id (echo suppression, notices).
- */
-export async function publishRemoveThenRotate<T>(args: {
-  /** Applies + publishes the Remove commit, advancing the local MLS epoch.
-   *  Its rejection propagates — a removal that failed must not rotate. */
-  publishRemove: () => Promise<T>;
-  /** Started ONLY after `publishRemove` resolved. `undefined` skips the
-   *  rotation entirely (no session — nothing to rotate for). */
-  rotate?: (() => Promise<PushRotationOutcome>) | undefined;
-  /** Receives a rotation failure. The removal itself is already durable. */
-  onRotationError?: ((err: unknown) => void) | undefined;
-}): Promise<T> {
-  const result = await args.publishRemove();
-  const rotate = args.rotate;
-  if (rotate !== undefined) {
-    void rotate().catch((err: unknown) => args.onRotationError?.(err));
-  }
-  return result;
 }
 
 /**

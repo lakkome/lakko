@@ -117,6 +117,8 @@ public enum AttachmentBridge {
                 ciphertext: enc.ciphertext,
                 progress: onProgress
             )
+        } catch StorageClientError.limited {
+            throw AttachmentBridgeError.uploadLimited
         } catch {
             throw AttachmentBridgeError.upload(error)
         }
@@ -236,6 +238,8 @@ public enum AttachmentBridge {
             ciphertext = body
         } catch let err as AttachmentBridgeError {
             throw err
+        } catch StorageClientError.limited {
+            throw AttachmentBridgeError.readLimited
         } catch {
             throw AttachmentBridgeError.download(error)
         }
@@ -510,6 +514,10 @@ public enum AttachmentBridgeError: Error {
     case download(Error)
     /// Storage returned 404 — the blob is no longer there.
     case missing(blobId: Data)
+    /// ADR-0065 / UX 4.2 — the allowance for sending files is used up.
+    case uploadLimited
+    /// ADR-0065 / UX 4.2 — the allowance for opening files is used up.
+    case readLimited
 }
 
 extension AttachmentBridgeError {
@@ -535,7 +543,11 @@ extension AttachmentBridgeError {
         case .decryption, .download:
             return .key("chat.attachment.error.download")
         case .missing:
-            return .key("chat.attachment.error.gone")
+            return .key("chat.attachment.gone.title")
+        case .uploadLimited:
+            return .key("chat.attachment.limit.send")
+        case .readLimited:
+            return .key("chat.attachment.limit.open")
         }
     }
 }
@@ -555,6 +567,10 @@ extension AttachmentBridgeError: LocalizedError {
             return "attachment download failed: \(err)"
         case .missing:
             return "the attachment is no longer available on the server"
+        case .uploadLimited:
+            return "the upload allowance is used up"
+        case .readLimited:
+            return "the download allowance is used up"
         }
     }
 }

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0054 S3 - the four registration routes spend one `push-register`
-//! anonymous token each.
+//! ADR-0054 S3 - the two subscription routes (ADR-0078) spend one
+//! `push-register` anonymous token each.
 //!
 //! The migration pin and the dormant (503) case run without a database; the
 //! spend cases are gated on `LAKKO_PUSH_GW_TEST_DATABASE_URL` and skip (do not
@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use base64::engine::general_purpose::STANDARD as B64;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
 use http_body_util::BodyExt as _;
 use lakko_anon_token::{MasterSecret, TokenContext, DEFAULT_WINDOW_SECS, TOKEN_HEADER};
@@ -44,15 +44,19 @@ fn state(db: MySqlPool, enabled: bool) -> AppState {
         db,
         providers: Arc::new(HashMap::new()),
         internal_secret: None,
+        wake_key: Arc::new(lakko_contacts::push_wake::PushGwKey::from_secret_bytes(
+            [0x77; 32],
+        )),
+        wake_guard: Arc::new(crate::wake_guard::WakeGuard::new(30, 60)),
     }
 }
 
-/// A fresh random 32-byte pseudonym, lowercase hex, so reruns never collide.
-fn fresh_hex() -> String {
+/// Fresh random bytes, so reruns never collide.
+fn fresh<const N: usize>() -> [u8; N] {
     use rand::RngCore as _;
-    let mut b = [0u8; 32];
+    let mut b = [0u8; N];
     rand::rngs::OsRng.fill_bytes(&mut b);
-    hex::encode(b)
+    b
 }
 
 fn post(uri: &str, token: Option<&str>, body: String) -> Request<Body> {
@@ -80,31 +84,33 @@ fn error_code(body: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Each route with a well-formed body for a fresh device (and group).
+/// Each route with a well-formed body for a fresh subscription.
 fn routes() -> Vec<(&'static str, String)> {
-    let device = fresh_hex();
-    let group = fresh_hex();
+    let sub_id = fresh::<16>();
+    let secret = fresh::<32>();
+    let sealed = lakko_contacts::push_wake::seal_push_subscription_for_secret(
+        &secret,
+        &sub_id,
+        &[lakko_contacts::push_wake::PushTokenEntry {
+            provider: lakko_contacts::push_wake::PushProvider::Fcm,
+            token: vec![7; 32],
+        }],
+    )
+    .unwrap();
     vec![
         (
-            "/push/register",
+            "/push/subscribe",
             serde_json::json!({
-                "device_pseudonym": device,
-                "provider": "fcm",
-                "token": B64.encode([7u8; 32]),
+                "sub_id": B64URL.encode(sub_id),
+                "push_gid": B64URL.encode(lakko_contacts::derive_push_gid(&secret)),
+                "wake_pk": B64URL.encode(lakko_contacts::derive_push_wake_public_key(&secret)),
+                "sealed": B64URL.encode(sealed),
             })
             .to_string(),
         ),
         (
-            "/push/unregister",
-            serde_json::json!({ "device_pseudonym": device, "provider": "fcm" }).to_string(),
-        ),
-        (
-            "/push/group/subscribe",
-            serde_json::json!({ "device_pseudonym": device, "group_pseudonym": group }).to_string(),
-        ),
-        (
-            "/push/group/unsubscribe",
-            serde_json::json!({ "device_pseudonym": device, "group_pseudonym": group }).to_string(),
+            "/push/unsubscribe",
+            serde_json::json!({ "sub_id": B64URL.encode(sub_id) }).to_string(),
         ),
     ]
 }
@@ -119,7 +125,11 @@ async fn test_pool(name: &str) -> Option<MySqlPool> {
         .connect(&url)
         .await
         .expect("connect test DB");
-    crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+    crate::tests::MIGRATED
+        .get_or_init(|| async {
+            crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+        })
+        .await;
     Some(pool)
 }
 

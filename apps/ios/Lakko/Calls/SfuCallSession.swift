@@ -121,12 +121,31 @@ final class SfuCallSession {
         /// posture (invariant #4). Defaults to `false` (publish immediately, the
         /// normal in-chat path — byte-unchanged).
         var deferPublish: Bool = false
+        /// ADR-0078 section 2: composes this device's signed peer announcement
+        /// and verifies everyone else's against the call's MLS roster. The
+        /// session seals it under the call seed's relay key and broadcasts it
+        /// (after the Welcome, after every rekey, when someone joins, and every
+        /// ``SfuCallSession/peerAnnounceIntervalMs``); a verified one fires
+        /// ``Callbacks/onPeerIdentified``. `nil`: nobody is named (tests).
+        var peerAnnouncer: CallPeerAnnouncer? = nil
     }
+
+    /// How often a device re-announces who it is to the call (ADR-0078
+    /// section 2). Chosen, not measured: an announcement sealed under a relay
+    /// key a peer did not hold yet is lost to that peer, and the next one
+    /// names the tile. Same value as web and Android.
+    static let peerAnnounceIntervalMs: Int64 = 15_000
 
     struct Callbacks {
         var onStateChange: ((State) -> Void)?
         var onWelcome: ((_ selfPeerId: String, _ roster: [SfuPeerSnapshot]) -> Void)?
-        var onPeerJoined: ((_ peerId: String, _ accountPseudonym: String, _ peerTag: String) -> Void)?
+        /// A participant joined. The SFU says nothing about who it is;
+        /// ``onPeerIdentified`` does, once its announcement verifies.
+        var onPeerJoined: ((_ peerId: String) -> Void)?
+        /// A peer's sealed announcement verified against the call's roster
+        /// (ADR-0078 section 2). Fired again on every re-announcement.
+        /// Defaulted so existing memberwise callers keep their initialiser.
+        var onPeerIdentified: ((_ peerId: String, _ identity: VerifiedPeerIdentity) -> Void)? = nil
         var onPeerLeft: ((_ peerId: String) -> Void)?
         /// A remote video track (with its MSID stream id = source peer
         /// id) arrived or was removed (`nil`).
@@ -191,6 +210,14 @@ final class SfuCallSession {
         /// peer id (ADR-0070 step 6): the whole set. Empty before the first
         /// `video-given` frame and with downlink control off.
         var onVideoGiven: (([String: TileVideoQuality]) -> Void)? = nil
+        /// The call's current screen share changed (ADR-0083): the fold's
+        /// answer after a verified share state or a sharer leaving, `nil`
+        /// when no share is live.
+        var onScreenShareChanged: ((CallCurrentScreenShare?) -> Void)? = nil
+        /// The shared screen of `peerId` arrived (or, `nil`, went): a remote
+        /// video track under `<peer>~screen`. Its own tile, never a picture
+        /// of the person's camera, and never in `video-wants`.
+        var onRemoteScreenVideoTrack: ((RTCVideoTrack?, _ peerId: String) -> Void)? = nil
     }
 
     private let config: Config
@@ -224,6 +251,13 @@ final class SfuCallSession {
     /// `layer=middle` for their receivers.
     private var lightTrackIds: Set<String> = []
     private var middleTrackIds: Set<String> = []
+    /// The leaf signature key each peer's verified announcement named, by SFU
+    /// peer id: what a screen-share state from that peer must be signed by
+    /// (ADR-0083 section 1), and whose share ends when the peer leaves.
+    private var peerSignerKeys: [String: Data] = [:]
+    /// The call's one-share-at-a-time fold (C-87).
+    private lazy var screenShares = ScreenShareFold(
+        ownKey: config.peerAnnouncer?.ownSignatureKey ?? Data())
     /// When the last media reading was taken, on a clock that never goes
     /// back; for the senders' bitrate over the interval.
     private var mediaLogLastAtMs: UInt64?
@@ -272,6 +306,12 @@ final class SfuCallSession {
     ]
     private let rules: TileQualityRules
 
+    // ---- Who this device is to the others (ADR-0078 section 2) ----
+    /// The relay keys of the current and previous call epoch.
+    private let relay = CallRelay()
+    /// The periodic peer re-announcement.
+    private var announceTask: Task<Void, Never>?
+
     // ---- What this device shows of each person (ADR-0070 steps 5 and 6) ----
     /// The SFU's id for this device, from the Welcome.
     private var selfPeerId: String?
@@ -294,6 +334,9 @@ final class SfuCallSession {
     /// The last reading, for the next interval's difference and for the
     /// total at the end.
     private var mediaLogLast: CallMediaReading?
+    /// Which network path the media takes to the SFU, logged when it is
+    /// first known and when it changes (``CallPath``).
+    private var callPathLog = CallPathLog()
     /// Local camera capturer — held for the call's lifetime so it
     /// outlives `openPeerConnectionAndPublish` and is torn down in
     /// `hangUp`. `nil` for an audio-only call (or when no camera exists).
@@ -361,6 +404,7 @@ final class SfuCallSession {
         self.config = config
         self.callbacks = callbacks
         self.activeSeed = config.seed
+        if let seed = config.seed { relay.setSeed(seed) }
         self.publishLeaf = config.localLeaf ?? 0
         self.localCameraOn = config.video
         self.nowMs = nowMs
@@ -375,7 +419,33 @@ final class SfuCallSession {
     /// new peer joins (so a newcomer is initial-synced deterministically).
     private func broadcastMediaState() {
         guard signaling != nil else { return }
-        sendSignalRelayToCall(payload: composeMediaState(cameraOn: localCameraOn))
+        // Sealed under the call's relay key (ADR-0078 section 2): the SFU
+        // relays ciphertext only. No key yet (a link joiner before its
+        // Welcome) means nothing is said.
+        guard let sealed = relay.seal(composeMediaState(cameraOn: localCameraOn)) else { return }
+        sendSignalRelayToCall(payload: sealed)
+    }
+
+    /// Broadcast this device's sealed peer announcement (ADR-0078 section 2).
+    /// Best-effort: without an announcer, a self peer id, a relay key or an
+    /// open socket nothing is sent.
+    private func announceSelf() {
+        guard signaling != nil, let announcer = config.peerAnnouncer, let selfPeerId,
+              let announcement = announcer.compose(selfPeerId),
+              let sealed = relay.seal(announcement)
+        else { return }
+        sendSignalRelayToCall(payload: sealed)
+    }
+
+    private func startAnnouncing() {
+        announceTask?.cancel()
+        announceTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(Self.peerAnnounceIntervalMs) * 1_000_000)
+                if Task.isCancelled { return }
+                self?.announceSelf()
+            }
+        }
     }
 
     // MARK: - What this device shows, and what the SFU gives
@@ -549,6 +619,9 @@ final class SfuCallSession {
         if let current = activeSeed, current == newSeed { return }
         activeSeed = newSeed
         pc?.rekeySFrame(seed: newSeed)
+        // The relay key follows the seed; announce under the new one.
+        relay.setSeed(newSeed)
+        announceSelf()
     }
 
     /// Open the SFU connection, publish the local audio (SFrame-sealed),
@@ -576,6 +649,7 @@ final class SfuCallSession {
             throw error
         }
         startKeepalive()
+        startAnnouncing()
 
         // 2. Build the peer connection + publish — UNLESS the caller asked to
         //    defer (ADR-0032 link joiner: stay signaling-only until it holds a
@@ -605,7 +679,11 @@ final class SfuCallSession {
         // already reported through the state.
         guard isLive else { return }
         guard pc == nil, !openingPeerConnection else { return }
-        if let seed { activeSeed = seed }
+        if let seed {
+            activeSeed = seed
+            relay.setSeed(seed)
+            announceSelf()
+        }
         if let localLeaf { publishLeaf = localLeaf }
         guard activeSeed != nil else { throw SfuCallError.sframeUnavailable }
         do {
@@ -676,6 +754,9 @@ final class SfuCallSession {
     func hangUp() {
         keepaliveTask?.cancel()
         keepaliveTask = nil
+        announceTask?.cancel()
+        announceTask = nil
+        relay.dispose()
         stopMediaLog()
         // Stop the camera first (fire-and-forget — `LocalCameraCapture`
         // also stops in its deinit, but the explicit stop releases the
@@ -702,6 +783,7 @@ final class SfuCallSession {
         audioTrackPeers.removeAll()
         lightTrackIds.removeAll()
         middleTrackIds.removeAll()
+        peerSignerKeys.removeAll()
         avAlign.clear()
         avReceivers.removeAll()
         offerQueue.removeAll()
@@ -731,25 +813,23 @@ final class SfuCallSession {
     // MARK: - Peer connection + publish
 
     /// TURN-credential client, injected by the call-UI layer. `nil` means
-    /// STUN-only ICE.
+    /// host candidates only.
     ///
-    /// The SFU has a public address, so most clients reach it on a
-    /// server-reflexive candidate - but one behind a symmetric NAT has none,
-    /// and for it the relay is the only way into the room.
+    /// The SFU has a public address and learns a client's outside address from
+    /// its own packets, so most clients reach it without any server-reflexive
+    /// candidate - but for one whose network blocks that path the relay is the
+    /// only way into the room.
     private var turnClient: TurnCredentialClient?
 
     public func setTurnClient(_ client: TurnCredentialClient?) {
         self.turnClient = client
     }
 
-    /// STUN always, plus TURN when one can be minted. Fail-soft: a client that
-    /// answers `nil` leaves the call on STUN rather than refusing it.
+    /// Lakko's own servers only (``IceServers``): the minted TURN row and
+    /// STUN on its host, or none. Fail-soft: a client that answers `nil`
+    /// leaves the call on host candidates rather than refusing it.
     private func resolveIceServers() async -> [RTCIceServer] {
-        var servers = WebRTCPeerConnection.defaultIceServers()
-        if let turn = turnClient, let row = await turn.fetchOrNil() {
-            servers.append(row)
-        }
-        return servers
+        await IceServers.resolve(turnClient)
     }
 
     private func openPeerConnectionAndPublish() async throws {
@@ -1067,22 +1147,22 @@ final class SfuCallSession {
         cb.onPong = { [weak self] _ in
             Task { @MainActor in self?.noteSignalingInbound() }
         }
-        cb.onWelcome = { [weak self] selfPeerId, callId, roster in
+        cb.onWelcome = { [weak self] selfPeerId, _, roster in
             Task { @MainActor in self?.noteSignalingInbound() }
             // The joiner learns about everyone already in the call HERE, not
             // from peer-joined — a second joiner gets no peer-joined for the
             // peers that preceded it. `rosterCount` is therefore the whole
-            // answer to "did this device learn who else is on the call".
-            NSLog(
-                "SfuCallSession: welcome self=%@ call=%@ rosterCount=%d peers=%@",
-                selfPeerId, callId, roster.count,
-                roster.map(\.peerId).joined(separator: ","))
+            // answer to "did this device learn who else is on the call". No
+            // identifier in the line: not the room, not a peer id.
+            NSLog("SfuCallSession: welcome rosterCount=%d", roster.count)
             Task { @MainActor in
                 guard let self else { return }
                 self.selfPeerId = selfPeerId
                 self.wantsBook.setPeers(roster.map(\.peerId).filter { $0 != selfPeerId })
                 self.onRosterChanged(joined: false)
                 self.callbacks.onWelcome?(selfPeerId, roster)
+                // Say who this device is (ADR-0078 section 2).
+                self.announceSelf()
             }
         }
         cb.onVideoGiven = { [weak self] given in
@@ -1101,23 +1181,24 @@ final class SfuCallSession {
             }
             Task { @MainActor in self?.onPublishBudgetFrame(budget) }
         }
-        cb.onPeerJoined = { [weak self] peerId, pseudonym, peerTag in
-            NSLog("SfuCallSession: peer joined peer=%@", peerId)
+        cb.onPeerJoined = { [weak self] peerId in
+            NSLog("SfuCallSession: peer joined")
             Task { @MainActor in
                 guard let self else { return }
                 if peerId != self.selfPeerId {
                     self.wantsBook.addPeer(peerId)
                     self.onRosterChanged(joined: true)
                 }
-                self.callbacks.onPeerJoined?(peerId, pseudonym, peerTag)
+                self.callbacks.onPeerJoined?(peerId)
                 // Camera-off-cleanup: re-announce our current camera state so
                 // the newcomer (which was not in our Welcome-roster broadcast)
-                // is initial-synced deterministically.
+                // is initial-synced deterministically; and who we are.
                 self.broadcastMediaState()
+                self.announceSelf()
             }
         }
         cb.onPeerLeft = { [weak self] peerId in
-            NSLog("SfuCallSession: peer left peer=%@", peerId)
+            NSLog("SfuCallSession: peer left")
             Task { @MainActor in
                 guard let self else { return }
                 self.wantsBook.removePeer(peerId)
@@ -1131,6 +1212,12 @@ final class SfuCallSession {
                     self.callbacks.onVideoGiven?(self.givenBook.snapshot)
                 }
                 self.onRosterChanged(joined: false)
+                // A participant that leaves ends their share (ADR-0083
+                // section 2).
+                if let signer = self.peerSignerKeys.removeValue(forKey: peerId),
+                    self.screenShares.participantLeft(signerKey: signer) {
+                    self.callbacks.onScreenShareChanged?(self.screenShares.current)
+                }
                 self.callbacks.onPeerLeft?(peerId)
             }
         }
@@ -1180,12 +1267,46 @@ final class SfuCallSession {
     /// which uses the same `sfuDecodePayload`).
     private func dispatchSignalRelay(from: String, payloadB64: String) {
         guard let payload = try? sfuDecodePayload(payloadB64: payloadB64) else { return }
-        if let env = try? dispatchIncomingEnvelope(plaintext: payload),
-            env.kind == .mediaState, let cameraOn = env.cameraOn {
-            callbacks.onRemoteMediaState?(from, cameraOn)
+        // ADR-0078 section 2: a payload sealed under the call's relay key is
+        // consumed here (the camera media state, a peer announcement); an
+        // unsealed media state is not accepted. Everything else passes through
+        // to `onSignalRelay` unchanged.
+        if let opened = relay.open(payload) {
+            switch opened {
+            case .mediaState(let cameraOn):
+                callbacks.onRemoteMediaState?(from, cameraOn)
+            case .announcement(let announcement):
+                if let identity = config.peerAnnouncer?.verify(from, announcement) {
+                    if !identity.signatureKey.isEmpty { peerSignerKeys[from] = identity.signatureKey }
+                    callbacks.onPeerIdentified?(from, identity)
+                }
+            case .screenShare(let state):
+                receiveScreenShare(from: from, state: state)
+            case .unknown:
+                break
+            }
             return
         }
         callbacks.onSignalRelay?(from, payload)
+    }
+
+    /// A sealed screen-share state from `from` (ADR-0083 section 1). It is
+    /// accepted only once `from` has a verified announcement, and only when it
+    /// verifies against the call's group with that announcement's leaf key and
+    /// `from` as its peer id; anything else is dropped.
+    private func receiveScreenShare(from: String, state: Data) {
+        guard let signer = peerSignerKeys[from],
+            let verified = config.peerAnnouncer?.verifyScreenShare(from, signer, state)
+        else {
+            NSLog("SfuCallSession: screen-share state dropped (unverified)")
+            return
+        }
+        if screenShares.observe(verified) {
+            NSLog(
+                "SfuCallSession: current screen share changed: live=%@",
+                screenShares.current != nil ? "true" : "false")
+            callbacks.onScreenShareChanged?(screenShares.current)
+        }
     }
 
     private func applyRemoteAnswer(_ sdp: String) async {
@@ -1298,14 +1419,18 @@ final class SfuCallSession {
     }
 
     private func sampleMediaLog() async {
-        guard let connection = pc, let entries = await connection.sampleVideoStatEntries() else {
+        guard let connection = pc, let entries = await connection.sampleMediaStatEntries() else {
             return
         }
         // What each sender's encoding holds, read behind every write queued
         // so far.
         let ceilings = await connection.cameraSenderCeilings()
+        let pathEntries = await connection.samplePathStatEntries()
         // The call may have ended while the report was read.
         guard pc === connection, mediaLogTask != nil else { return }
+        if let pathEntries, let line = callPathLog.note(pathEntries) {
+            NSLog("%@", line)
+        }
         // A sender the binding refused to start is asked again, and a flag a
         // renegotiation reset is put back.
         syncSenderActivity()
@@ -1434,6 +1559,7 @@ final class SfuCallSession {
         for line in lines { NSLog("%@", line) }
         mediaLogLast = nil
         mediaLogLastAtMs = nil
+        callPathLog = CallPathLog()
         LayerDisplayLedger.shared.reset()
     }
 
@@ -1463,6 +1589,11 @@ final class SfuCallSession {
                     guard let track else { return }
                     NSLog("SfuCallSession: middle track attached peer=%@", peerId)
                     self.callbacks.onRemoteMiddleVideoTrack?(track, peerId)
+                case .screen(let peerId):
+                    NSLog(
+                        "SfuCallSession: screen track %@ peer=%@",
+                        track != nil ? "attached" : "removed", peerId)
+                    self.callbacks.onRemoteScreenVideoTrack?(track, peerId)
                 }
             },
             onRemoteReceiver: { [weak self] receiver, streamId in
@@ -1494,7 +1625,10 @@ final class SfuCallSession {
                     switch role {
                     case .light: self.lightTrackIds.insert(trackId)
                     case .middle: self.middleTrackIds.insert(trackId)
-                    case .main: break
+                    // A screen's picture and sound (stream indices 2 and 5)
+                    // are decrypted by the same decryptor as any receiver,
+                    // below; its sound plays with the call.
+                    case .main, .screen: break
                     }
                     // Which of the person's receivers this is, for the rule
                     // that keeps their sound and picture together. A track

@@ -35,6 +35,8 @@ export const paths = {
   recover: "/recover",
   /** Authenticated home / inbox. */
   home: "/",
+  /** ADR-0065 — the account's saved messages. */
+  saved: "/saved",
   /** Group conversations — the second primary destination. */
   groups: "/groups",
   /** New group: name it, pick the first members from your contacts. */
@@ -116,6 +118,15 @@ export const paths = {
     return `/groups/${groupIdB64Url}`;
   },
   /**
+   * ADR-0079 — the chat with a person added through their invite link whose
+   * app has not answered yet. `accountIdHex` is the inviter's 16-byte account
+   * id as 32 lower-case hex characters (the pending record's key). Once the
+   * one-to-one exists, the view follows to `chat(...)`.
+   */
+  pendingChat(accountIdHex: string): string {
+    return `/invited/${accountIdHex}`;
+  },
+  /**
    * Build the path of an invite link for a slug (1.18c): the
    * 8-character ledger id of the sealed capability, or the sealed
    * blob itself. The link secret is NOT part of the path: it rides
@@ -142,9 +153,8 @@ export const paths = {
   },
   /**
    * Multi-joiner call-invite landing (ADR-0032, G-21/G-22). `slug` is the
-   * base64url-no-pad of a `CallInviteCapability` blob_id (pointer form) or
-   * the inline capability bytes — the same `/c/<slug>` link
-   * `calls/invite.ts::composeCallInviteUrl` mints. The landing screen
+   * base64url-no-pad of a `CallInviteCapability` blob_id — the same
+   * `/c/<slug>` link `calls/invite.ts::composePointerCallInviteUrl` mints. The landing screen
    * decodes + verifies the capability and drives the joiner (or, when the
    * visitor is the owner, the host) flow.
    */
@@ -203,6 +213,12 @@ export const contactRoutePattern = "/contacts/:key?" as const;
 export const groupChatRoutePattern = "/:id" as const;
 
 /**
+ * The matchable pattern for the pending chat (ADR-0079) — must stay in sync
+ * with `paths.pendingChat(...)`. Relative to the Chats layout.
+ */
+export const pendingChatRoutePattern = "/invited/:hex" as const;
+
+/**
  * The matchable pattern for the dynamic invite-link route — must
  * stay in sync with `paths.invite(...)`. Used in the route table.
  */
@@ -211,9 +227,8 @@ export const inviteRoutePattern = "/i/:slug" as const;
 /**
  * The matchable pattern for the group join-ticket route (ADR-0028, G-3) — the
  * `/g/<slug>#<secret>` link an owner mints for a non-member to request to
- * join. `slug` is the 8-character ledger id of the sealed capability, or the
- * sealed blob itself (inline); the fragment is the link secret it opens
- * under (2026-09-28 security pass).
+ * join. `slug` is the 8-character ledger id of the sealed capability; the
+ * fragment is the link secret it opens under (2026-09-28 security pass).
  */
 export const groupJoinRoutePattern = "/g/:slug" as const;
 
@@ -227,8 +242,8 @@ export const callRoutePattern = "/call/:id" as const;
 /**
  * The matchable pattern for the multi-joiner call-invite landing route
  * (ADR-0032, G-21/G-22) — must stay in sync with `paths.joinCall(...)`.
- * `slug` is the 8-character ledger id of a sealed `CallInviteCapability`, or
- * the sealed blob itself (inline); the fragment is the link secret.
+ * `slug` is the 8-character ledger id of a sealed `CallInviteCapability`;
+ * the fragment is the link secret.
  */
 export const callJoinRoutePattern = "/c/:slug" as const;
 

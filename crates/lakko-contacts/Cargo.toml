@@ -22,3 +22,6 @@ tracing.workspace = true
 # Crypto building blocks: Ed25519 sign / verify, X25519 ECDH, HKDF,
 # ChaCha20-Poly1305 AEAD, BLAKE3.
 lakko-crypto.workspace = true
+
+[dev-dependencies]
+proptest = "1"

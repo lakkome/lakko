@@ -29,11 +29,11 @@ import LakkoCoreExtension
 /// anywhere in this file.
 
 /// Builds the real, read-only ``NsePushDecryptDeps`` from the shared stores +
-/// the slim FFI. `boundAccount` reads the `(device pseudonym, account)`
-/// binding the app wrote (``PushAccountBindingStore``) and is the only source
-/// of the account a wake is decrypted as; `accountKnowsGroup` checks that
-/// account's own ``KnownGroupsStore`` row (the NSE has no live
-/// `ChatRepository`); `openThrowawayGroup` reconstructs a FRESH throwaway
+/// the slim FFI. `boundAccount` reads the account binding the app wrote
+/// (``PushAccountBindingStore``) and is the only source of the account a wake
+/// is decrypted as; `lookupRoute` checks that account's route row holds the
+/// wake's subscription id (the NSE has no live `ChatRepository`);
+/// `openThrowawayGroup` reconstructs a FRESH throwaway
 /// `Identity` + `Group` — never the app's handles (the NSE is a separate
 /// process anyway); `dsFetch` is a slim `URLSession` GET (``NseDsFetch``, no
 /// anti-censorship transport pulled in); `startCursor` reads the per-group
@@ -52,14 +52,14 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
         self.session = session
     }
 
-    /// ADR-0042 (amended 2026-09-30) — the account the app bound this
-    /// device's push pseudonym to, when the wake's `d` equals that pseudonym.
-    /// The rule is ``PushAccountBinding/boundAccount(wakeDevicePseudonymHex:binding:)``,
+    /// ADR-0042 (amended 2026-09-30, with ADR-0078) — the account the app
+    /// bound push to, when the wake carries a well-formed `s`. The rule is
+    /// ``PushAccountBinding/boundAccount(wakeSubscriptionIdHex:binding:)``,
     /// shared with the app's VoIP handler; this only reads the App Group row
     /// the app writes. READ-ONLY.
-    func boundAccount(wakeDevicePseudonymHex: String?) -> String? {
+    func boundAccount(wakeSubscriptionIdHex: String?) -> String? {
         PushAccountBinding.boundAccount(
-            wakeDevicePseudonymHex: wakeDevicePseudonymHex,
+            wakeSubscriptionIdHex: wakeSubscriptionIdHex,
             binding: PushAccountBindingStore.live.current()
         )
     }
@@ -73,17 +73,10 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
     /// Keychain-touching secret paths exist on the store but are never called
     /// from the NSE), so the one key-shape definition is shared with the app
     /// instead of duplicated here. READ-ONLY.
-    func lookupRoute(accountIdB64: String, pushGidHex: String) -> String? {
-        pushRoutes.lookupRoute(accountIdB64: accountIdB64, pushGidHex: pushGidHex)
-    }
-
-    /// The legacy raw-group_id wake: does the BOUND account know the group?
-    /// Only that account's known-groups row is read; another account's is
-    /// never consulted. READ-ONLY.
-    func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool {
-        let needle = groupHex.lowercased()
-        return knownGroups.load(accountIdB64: accountIdB64)
-            .contains { $0.lowercased() == needle }
+    func lookupRoute(accountIdB64: String, pushGidHex: String, subscriptionIdHex: String?) -> String? {
+        pushRoutes.lookupRoute(
+            accountIdB64: accountIdB64, pushGidHex: pushGidHex,
+            subscriptionIdHex: subscriptionIdHex)
     }
 
     /// ADR-0073 R.8 — a key an accepted reset retired, from the App Group
@@ -339,7 +332,18 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             // from the slim FFI, never a decode (it carries the account's
             // next seed and this process has no use for it).
             isKeyRotation: { isKeyRotationEnvelope(plaintext: $0) },
-            keyRotationEnvelopeLen: Int(keyRotationEnvelopeLen())
+            keyRotationEnvelopeLen: Int(keyRotationEnvelopeLen()),
+            // ADR-0080 — a device card: a yes / no from the slim FFI.
+            isDeviceCard: { isDeviceCardEnvelope(plaintext: $0) },
+            deviceCardEnvelopeLens: Int(deviceCardEnvelopeMinLen())...Int(deviceCardEnvelopeMaxLen()),
+            // ADR-0079 (reworked 2026-10-17) — a link-request claim: a yes /
+            // no from the slim FFI.
+            isLinkClaim: { isLinkClaimEnvelope(plaintext: $0) },
+            linkClaimEnvelopeLen: Int(linkClaimEnvelopeLen()),
+            // ADR-0079 (order of 2026-10-17) — a link-founded note: a yes /
+            // no from the slim FFI.
+            isLinkFounded: { isLinkFoundedEnvelope(plaintext: $0) },
+            linkFoundedEnvelopeLens: Int(linkFoundedEnvelopeMinLen())...Int(linkFoundedEnvelopeMaxLen())
         ) {
             return nil
         }

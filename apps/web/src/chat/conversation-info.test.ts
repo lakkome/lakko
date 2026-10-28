@@ -127,9 +127,11 @@ describe("the vocabulary that crosses the boundary", () => {
   // addition in Rust fails here rather than silently un-rendering a control.
   it("nothing the core emits is dropped on the way in", () => {
     for (const membershipEnded of [true, false]) {
-      const caps = { membershipEnded };
-      const raw = wasm.personInfoSections(new wasm.PersonInfoCapabilities(membershipEnded));
-      expect(personInfoSections(rules, caps)).toHaveLength(raw.length);
+      for (const isContact of [true, false]) {
+        const caps = { membershipEnded, isContact };
+        const raw = wasm.personInfoSections(new wasm.PersonInfoCapabilities(membershipEnded, isContact));
+        expect(personInfoSections(rules, caps)).toHaveLength(raw.length);
+      }
     }
     for (const caps of everyGroupCapability()) {
       const raw = wasm.groupInfoSections(
@@ -169,7 +171,9 @@ describe("the vocabulary that crosses the boundary", () => {
   it("every name a view branches on is one the core actually produces", () => {
     const produced = new Set<InfoSection>();
     for (const membershipEnded of [true, false]) {
-      for (const s of personInfoSections(rules, { membershipEnded })) produced.add(s);
+      for (const isContact of [true, false]) {
+        for (const s of personInfoSections(rules, { membershipEnded, isContact })) produced.add(s);
+      }
     }
     for (const caps of everyGroupCapability()) {
       for (const s of groupInfoSections(rules, caps)) produced.add(s);
@@ -189,6 +193,7 @@ describe("the vocabulary that crosses the boundary", () => {
       "safety-number",
       "rename-contact",
       "remove-contact",
+      "add-contact",
       "delete-chat",
       // routes/Chat.tsx
       "rename-group",
@@ -219,19 +224,27 @@ describe("the vocabulary that crosses the boundary", () => {
 
 describe("personInfoSections", () => {
   it("renders nothing until the shared rules have loaded", () => {
-    expect(personInfoSections(null, { membershipEnded: false })).toEqual([]);
+    expect(personInfoSections(null, { membershipEnded: false, isContact: true })).toEqual([]);
   });
 
-  // The other person in a one-to-one IS a contact by construction
-  // (`contacts/adopt-one-to-one.ts`), so there is no `isContact` flag any
-  // more and the contact-list blocks are always there. Until 2026-09-26 the
-  // rule took one and a "stranger" got a card with these three withheld.
-  it("always offers the contact-list blocks", () => {
-    const contact = personInfoSections(rules, { membershipEnded: false });
+  it("offers a contact the contact-list blocks", () => {
+    const contact = personInfoSections(rules, { membershipEnded: false, isContact: true });
     expect(contact).toContain("safety-number");
     expect(contact).toContain("rename-contact");
     expect(contact).toContain("remove-contact");
     expect(contact).toContain("call");
+    expect(contact).not.toContain("add-contact");
+  });
+
+  // Amended 2026-10-24: a person the viewer removed keeps the conversation,
+  // and its card puts them back.
+  it("offers a removed person Add to contacts instead of rename and remove", () => {
+    const removed = personInfoSections(rules, { membershipEnded: false, isContact: false });
+    expect(removed).toContain("add-contact");
+    expect(removed).toContain("safety-number");
+    expect(removed).toContain("call");
+    expect(removed).not.toContain("rename-contact");
+    expect(removed).not.toContain("remove-contact");
   });
 
   // Spec section 2.1 (2026-09-26): Message, wherever the card was opened
@@ -240,7 +253,7 @@ describe("personInfoSections", () => {
   // gave one person two cards; the origin is gone and there is no argument
   // left to withhold it on.
   it("offers Message whoever is looking, unless the conversation is over", () => {
-    expect(personInfoSections(rules, { membershipEnded: false })).toContain("message");
+    expect(personInfoSections(rules, { membershipEnded: false, isContact: true })).toContain("message");
   });
 
   // The defect of 2026-09-23: tapping a person's name showed `Group name`,
@@ -250,7 +263,7 @@ describe("personInfoSections", () => {
   // what the core decides and what this client receives are two claims.
   it("never shows anything that only makes sense for a group", () => {
     for (const membershipEnded of [true, false]) {
-      const sections = personInfoSections(rules, { membershipEnded });
+      const sections = personInfoSections(rules, { membershipEnded, isContact: membershipEnded });
       expect(holdsGroupOnlySection(sections)).toBe(false);
       for (const groupOnly of GROUP_ONLY_SECTIONS) {
         expect(sections).not.toContain(groupOnly);
@@ -263,14 +276,14 @@ describe("personInfoSections", () => {
   // routing by what the conversation IS — so ending a one-to-one left a
   // conversation that could never be closed on this client at all.
   it("an ended one-to-one can be closed, and no longer offers a call", () => {
-    const sections = personInfoSections(rules, { membershipEnded: true });
+    const sections = personInfoSections(rules, { membershipEnded: true, isContact: true });
     expect(sections).toContain("delete-chat");
     expect(sections).not.toContain("call");
   });
 
   it("an ended one-to-one still says everything about the person", () => {
     // The conversation ended; they did not.
-    const sections = personInfoSections(rules, { membershipEnded: true });
+    const sections = personInfoSections(rules, { membershipEnded: true, isContact: true });
     expect(sections).toContain("safety-number");
     expect(sections).toContain("rename-contact");
     expect(sections).toContain("remove-contact");

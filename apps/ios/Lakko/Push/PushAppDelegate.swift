@@ -46,10 +46,22 @@ public final class PushAppDelegate: NSObject, UIApplicationDelegate,
         // launch, not at sign-in: the token is device state, and the app has to
         // be able to take a call push before it knows whether one is coming.
         // iOS delivers the current token to the registrar's delegate on
-        // every launch; it is registered then for a restored session, and at
-        // sign-in otherwise (``VoipPushRegistrar/registerForSignIn(devicePseudonym:)``).
+        // every launch; it is stored, and sealed into every subscription of
+        // the signed-in account (ADR-0078, ``PushDeviceTokens``).
         VoipPushRegistrar.shared.start()
         return true
+    }
+
+    // MARK: - Orientation
+
+    /// Portrait everywhere, except the call screen while a shared screen is on
+    /// the large place (ADR-0083, ``CallOrientation``). Info.plist lists the
+    /// landscape orientations so that one exception is possible at all.
+    public func application(
+        _ application: UIApplication,
+        supportedInterfaceOrientationsFor window: UIWindow?
+    ) -> UIInterfaceOrientationMask {
+        CallOrientation.mask
     }
 
     // MARK: - APNs registration callbacks

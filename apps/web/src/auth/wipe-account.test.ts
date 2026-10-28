@@ -43,7 +43,7 @@ import {
 } from "./protect/account-protection";
 import { markOwnAction, startNoticeCursor } from "./protect/notices";
 import { markFirstPasswordOwed } from "./username-claim";
-import { writeRenamedAt, writeRenameOwed } from "./username-change";
+import { writeRenameOwed } from "./username-change";
 import { markThreeWordsSuspended, saveBudget } from "./recover/three-words";
 import { writeKeyResetOwed } from "./key-reset-owed";
 import { writeGenesisRecorded, writeKnownDeviceId } from "./session-device";
@@ -138,6 +138,8 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     { db: "lakko-discover", store: "rows", row: { key: `${acct}|prefs`, ciphertext: ct } },
     { db: "lakko-discover", store: "rows", row: { key: `${acct}|shared`, ciphertext: ct } },
     byId("lakko-profiles", "rows"),
+    // ADR-0084: the decrypted-avatar cache, one row per blob.
+    { db: "lakko-avatars", store: "blobs", row: { id: `${acct}|blob1`, ciphertext: ct } },
     byId("lakko-group-names", "rows"),
     byId("lakko-group-closed", "rows"),
     byId("lakko-registrar-seeds", "rows"),
@@ -151,6 +153,7 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     { db: "lakko-minted-links", store: "rows", row: { key: `${acct}|contact|slug1`, ciphertext: ct } },
     { db: "lakko-minted-links", store: "rows", row: { key: `${acct}|call|slug2`, ciphertext: ct } },
     byId("lakko-sent-request-intros", "rows"),
+    byId("lakko-pending-contacts", "rows"),
     // ADR-0073 R.8: the service worker's plaintext copy of the retired keys.
     { db: "lakko-superseded-keys", store: "rows", row: { accountId: acct, keys: ["a2V5"] } },
     {
@@ -243,10 +246,17 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.last-observed-owner.v1.${acct}.${G}`, "\"owner\"");
   put(`lakko.leave-requested.v1.${acct}.${G}`, "5");
   put(`lakko.lineage.unsent.v1.${acct}`, "1");
+  put(`lakko.device-cards.v1.${acct}`, "{}");
+  put(`lakko.device-city.v1.${acct}`, "{}");
+  put(`lakko.device-city-shown.v1.${acct}`, "0");
   put(`lakko.recovery-email.unsent.v1.${acct}`, "1");
   markFirstPasswordOwed(local, acct);
   put(`lakko.own-username.unsent.v1.${acct}`, "1");
-  writeRenamedAt(local, acct, 5);
+  put(`lakko.link-records.unsent.v1.${acct}`, "1");
+  put(`lakko.link-claims.v1.${acct}`, JSON.stringify({ v: 1, seen: {}, own: {} }));
+  put(`lakko.blob-deletes-owed.v1.${acct}`, JSON.stringify(["00".repeat(32)]));
+  put(`lakko.blob-keeps.v1.${acct}`, JSON.stringify({ v: 1, last: {} }));
+  put(`lakko.link-row-deletions-owed.v1.${acct}`, JSON.stringify(["00"]));
   writeRenameOwed(local, acct, { v: 1, oldUsername: "alice", newUsername: "alicia", phase: "binding" });
   put(
     `lakko.contacts.verified-bindings.v1.${acct}`,
@@ -287,7 +297,7 @@ function seedAccount(acct: string, acctUrl: string): void {
 function seedDeviceSettings(): void {
   local.setItem("lakko.theme", "dark");
   local.setItem("lakko.transparency.last-seen-root.v1", "{\"size\":3}");
-  local.setItem("lakko.push.device.v1", "cHNldWRv");
+  local.setItem("lakko.push.token.v1", "cHNldWRv");
   local.setItem("lakko.composer.recordMode", "voice");
   local.setItem("lakko.media.autoplayVideoNotes", "1");
   local.setItem("lakko.gif.privacyNoteDismissed", "1");
@@ -370,7 +380,7 @@ describe("wipeAccountLocalData", () => {
     for (const k of [
       "lakko.theme",
       "lakko.transparency.last-seen-root.v1",
-      "lakko.push.device.v1",
+      "lakko.push.token.v1",
       "lakko.composer.recordMode",
       "lakko.media.autoplayVideoNotes",
       "lakko.gif.privacyNoteDismissed",
@@ -434,6 +444,10 @@ describe("wipeAccountLocalData", () => {
     expect(session.entries().filter(([k]) => namesA(k))).toEqual([]);
   });
 
+  // One full wipe per step left out, each on freshly seeded stores: about a
+  // hundred wipes. It took most of the suite's 20 s timeout on a quiet
+  // machine and ran past it on a loaded one, and the run it left behind then
+  // failed the next tests on the shared stores. Its own budget is generous.
   it("needs every step: leaving any one out leaves the account behind", async () => {
     await createSchemas();
     const steps = accountWipeSteps(A);
@@ -453,7 +467,7 @@ describe("wipeAccountLocalData", () => {
       if (!left) notLoadBearing.push(skipped);
     }
     expect(notLoadBearing).toEqual([]);
-  });
+  }, 180_000);
 
   // ADR-0074 section 1.1 (UX 18.4): the staged wipe of a device whose
   // account keys were reset on another device.
@@ -544,6 +558,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko-feed-marks": "account",
   "lakko-discover": "account",
   "lakko-profiles": "account",
+  "lakko-avatars": "account",
   "lakko-group-names": "account",
   "lakko-group-closed": "account",
   "lakko-registrar-seeds": "account",
@@ -555,6 +570,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko-device-sync": "account",
   "lakko-minted-links": "account",
   "lakko-sent-request-intros": "account",
+  "lakko-pending-contacts": "account",
   "lakko-superseded-keys": "account",
   "lakko-push-routing": "account",
   "lakko-anon-tokens": "account",
@@ -599,10 +615,17 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.last-observed-owner.v1": "account",
   "lakko.leave-requested.v1": "account",
   "lakko.lineage.unsent.v1.": "account",
+  "lakko.device-cards.v1.": "account",
+  "lakko.device-city.v1.": "account",
+  "lakko.device-city-shown.v1.": "account",
   "lakko.recovery-email.unsent.v1.": "account",
   "lakko:first-password-owed:": "account",
   "lakko.own-username.unsent.v1.": "account",
-  "lakko:username-changed-at:": "account",
+  "lakko.link-records.unsent.v1.": "account",
+  "lakko.link-claims.v1.": "account",
+  "lakko.blob-deletes-owed.v1.": "account",
+  "lakko.blob-keeps.v1.": "account",
+  "lakko.link-row-deletions-owed.v1.": "account",
   "lakko:username-change-owed:": "account",
   "lakko.contacts.verified-bindings.v1.": "account",
   "lakko.reset-continuity.v1.": "account",
@@ -651,7 +674,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   // The store gate's cross-tab marker: digests of the accounts wiped in the
   // last minute, never an account id; it prunes itself.
   "lakko.account-store-gate.wiped.v1": "device",
-  "lakko.push.device.v1": "device",
+  "lakko.push.token.v1": "device",
   "lakko.composer.recordMode": "device",
   "lakko.media.autoplayVideoNotes": "device",
   "lakko.feed.device-banner-dismissed": "device",

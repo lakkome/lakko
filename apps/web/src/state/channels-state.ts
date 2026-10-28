@@ -59,6 +59,7 @@ import {
 import { base64Encode } from "../auth/account-id";
 import { registerAccountMemory } from "../auth/account-memory";
 import { loadWasm } from "../wasm";
+import type { PublisherCommitEntry } from "../channels/publisher-commit-outbox";
 
 interface ChannelsStateInternal {
   /** User's local channel list, ordered by `addedAtMs`
@@ -173,6 +174,19 @@ const [metaByChannel, setMetaByChannel] = createSignal<
   ReadonlyMap<string, ChannelSharedMeta>
 >(new Map());
 const [hydrated, setHydrated] = createSignal(false);
+/** ADR-0078 section 6 — co-published channel id -> PublisherGroup id hex. */
+const [coPublisherGroupIds, setCoPublisherGroupIds] = createSignal<ReadonlyMap<string, string>>(new Map());
+/** G-50 — the PublisherGroup commits whose steps are still owed. */
+const [publisherCommits, setPublisherCommits] = createSignal<readonly PublisherCommitEntry[]>([]);
+/**
+ * G-50 — a durable write of a PublisherGroup commit was refused, so the
+ * account identity's provider holds an N+1 that is not on disk with its
+ * record. Every later channel-log write is refused for the rest of the
+ * session: a debounced flush must never make that N+1 durable WITHOUT its
+ * record (the device-ahead case). A reload rehydrates the durable N. Set
+ * only by {@link channelsActions.recordPublisherCommit}.
+ */
+let poisoned = false;
 
 export const channelsState: ChannelsStateInternal = {
   channels,
@@ -237,6 +251,8 @@ function currentSnapshot(
     channelMeta: metaByChannel(),
     publisherProviderSnapshot: lastProviderSnapshot,
     publisherLeafKeyB64: lastProviderSnapshot === null ? null : lastProviderLeafKeyB64,
+    coPublisherGroupIds: coPublisherGroupIds(),
+    publisherCommits: publisherCommits(),
   };
 }
 
@@ -244,7 +260,7 @@ function currentSnapshot(
  *  The snapshot is taken synchronously at call time. */
 function flushNow(): Promise<void> {
   const s = sink;
-  if (s === null) return Promise.resolve();
+  if (s === null || poisoned) return Promise.resolve();
   const payload = encodeChannelLog(currentSnapshot(s));
   const run = flushChain.then(() => saveChannelLog(s.accountIdB64, s.deviceKey, payload));
   flushChain = run.catch((err: unknown) => {
@@ -287,6 +303,9 @@ export class ChannelLogUnavailableError extends Error {
 function flushDurable(): Promise<void> {
   const s = sink;
   if (s === null) return Promise.reject(new ChannelLogUnavailableError("no session"));
+  if (poisoned) {
+    return Promise.reject(new ChannelLogUnavailableError("a PublisherGroup commit was not recorded; reload"));
+  }
   const provider = s.snapshotProvider();
   if (provider === null) {
     return Promise.reject(new ChannelLogUnavailableError("no account identity"));
@@ -464,6 +483,13 @@ export async function hydrateChannelsState(args: HydrateChannelsArgs): Promise<v
     }
     return next;
   });
+  setCoPublisherGroupIds((map) => new Map([...stored.coPublisherGroupIds, ...map]));
+  // G-50 — the stored entries belong to the restored provider; one already
+  // in memory (recorded before this settled) wins on its id.
+  setPublisherCommits((mem) => {
+    const ids = new Set(mem.map((e) => e.id));
+    return [...mem, ...stored.publisherCommits.filter((e) => !ids.has(e.id))];
+  });
 
   // The account's publish counters. A value that landed in memory before
   // this settled is at least the floor it was seeded from; the larger of
@@ -487,7 +513,13 @@ export async function hydrateChannelsState(args: HydrateChannelsArgs): Promise<v
         if (isStale(args)) break;
         if (keysByChannel().has(id)) continue;
         try {
-          const group = wasm.PublisherGroup.load(args.identity, channelIdFromHex(id));
+          // ADR-0078 section 6: a co-published channel's group is opened
+          // under the id its link conveyed (the owner's derivation).
+          const joinedId = coPublisherGroupIds().get(id);
+          const group =
+            joinedId === undefined
+              ? wasm.PublisherGroup.load(args.identity, channelIdFromHex(id))
+              : wasm.PublisherGroup.loadJoined(args.identity, hexBytes(joinedId), channelIdFromHex(id));
           if (group === undefined) {
             // eslint-disable-next-line no-console
             console.warn(`channel ${id}: publisher group missing from the restored provider`);
@@ -576,8 +608,17 @@ function dropChannelsMemory(): void {
   setSubscriberKeysByChannel(new Map());
   setSubscribedSeedsByChannel(new Map());
   setMetaByChannel(new Map());
+  setCoPublisherGroupIds(new Map());
+  setPublisherCommits([]);
+  poisoned = false;
   setOrphanedByKeyReset(new Set<string>());
   setHydrated(false);
+}
+
+function hexBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
 }
 
 // Forget device. The hydration MERGES what is in memory into the stored row
@@ -858,5 +899,51 @@ export const channelsActions = {
    *  nothing was published. */
   persistPublisherGroupDurable(): Promise<void> {
     return flushDurable();
+  },
+  /** ADR-0078 section 6 — remember the PublisherGroup id of a channel this
+   *  account co-publishes (from its `/g/` capability). Written with the next
+   *  flush; the co-publisher request writes durably before its knock. */
+  setCoPublisherGroupId(channelIdHex: string, groupIdHex: string): void {
+    setCoPublisherGroupIds((map) => new Map(map).set(channelIdHex, groupIdHex.toLowerCase()));
+    schedulePersist();
+  },
+  /** The PublisherGroup id hex of a co-published channel, or `undefined`
+   *  when this account owns it (or does not publish to it). */
+  coPublisherGroupIdOf(channelIdHex: string): string | undefined {
+    return coPublisherGroupIds().get(channelIdHex);
+  },
+  /** G-50 — the owed PublisherGroup commits, oldest first. */
+  pendingPublisherCommits(): readonly PublisherCommitEntry[] {
+    return publisherCommits();
+  },
+  /**
+   * G-50 — record a PublisherGroup commit together with the provider
+   * snapshot that holds its N+1, in ONE durable write, BEFORE any of its
+   * steps runs. Rejects when the write did not land; the caller then runs
+   * no step, and the store refuses every later write this session so the
+   * unrecorded N+1 never becomes durable (a reload rehydrates N).
+   */
+  async recordPublisherCommit(entry: PublisherCommitEntry): Promise<void> {
+    setPublisherCommits((list) => [...list.filter((e) => e.id !== entry.id), entry]);
+    try {
+      await flushDurable();
+    } catch (err) {
+      setPublisherCommits((list) => list.filter((e) => e.id !== entry.id));
+      poisoned = true;
+      // eslint-disable-next-line no-console
+      console.error("G-50: a PublisherGroup commit could not be recorded; channel writes are refused until reload");
+      throw err;
+    }
+  },
+  /** G-50 — a step of `entry` landed: write the updated record durably. */
+  async savePublisherCommit(entry: PublisherCommitEntry): Promise<void> {
+    setPublisherCommits((list) => list.map((e) => (e.id === entry.id ? entry : e)));
+    await flushDurable();
+  },
+  /** G-50 — every step of entry `id` landed (or a restart found it torn):
+   *  drop the record durably. */
+  async finishPublisherCommit(id: string): Promise<void> {
+    setPublisherCommits((list) => list.filter((e) => e.id !== id));
+    await flushDurable();
   },
 };

@@ -42,6 +42,13 @@
  *     re-minted on the next open. The leaf key is what lets a restore
  *     refuse a snapshot taken under a different account identity —
  *     the same guard `chat/rehydrate.ts` applies to the chat provider.
+ *   * `coPublisherGroupIds` — ADR-0078 section 6: for a channel this
+ *     account co-publishes, the PublisherGroup id its `/g/` capability
+ *     conveyed. The id is derived from the OWNER's seed, so a co-publisher
+ *     cannot compute it and opens the group it joined under this id.
+ *   * `publisherCommits` — G-50: the durable record of each PublisherGroup
+ *     commit whose steps have not all landed (`publisher-commit-outbox.ts`),
+ *     written in the same row as the provider snapshot it belongs to.
  *
  * Decoding is lenient PER ENTRY and strict on the envelope: an
  * unknown version yields `null` (caller starts empty), a malformed
@@ -52,6 +59,7 @@
 
 import type { ChannelHandle } from "./api";
 import type { ChannelSubscriberKeys } from "./composer";
+import { parsePublisherCommitEntry, type PublisherCommitEntry } from "./publisher-commit-outbox";
 
 /** Payload schema version this client writes. */
 export const CHANNEL_LOG_VERSION = 1;
@@ -136,6 +144,11 @@ export interface ChannelLogPayload {
   /** Base64 of the account identity's signature public key at snapshot
    *  time. A restore under a different key is refused. */
   readonly publisherLeafKeyB64?: string | null;
+  /** ADR-0078 section 6 — co-published channel id -> PublisherGroup id
+   *  (64-char hex). */
+  readonly coPublisherGroupIds?: readonly { readonly channelId: string; readonly groupIdHex: string }[];
+  /** G-50 — the PublisherGroup commits whose steps are still owed. */
+  readonly publisherCommits?: readonly PublisherCommitEntry[];
 }
 
 // ----- Decoded shape ---------------------------------------------------
@@ -150,6 +163,10 @@ export interface ChannelLogSnapshot {
   readonly channelMeta: ReadonlyMap<string, ChannelSharedMeta>;
   readonly publisherProviderSnapshot: Uint8Array | null;
   readonly publisherLeafKeyB64: string | null;
+  /** ADR-0078 section 6 — co-published channel id -> PublisherGroup id hex. */
+  readonly coPublisherGroupIds: ReadonlyMap<string, string>;
+  /** G-50 — owed PublisherGroup commits. */
+  readonly publisherCommits: readonly PublisherCommitEntry[];
 }
 
 /** An empty snapshot — what a fresh account starts from. */
@@ -162,6 +179,8 @@ export function emptyChannelLogSnapshot(): ChannelLogSnapshot {
     channelMeta: new Map(),
     publisherProviderSnapshot: null,
     publisherLeafKeyB64: null,
+    coPublisherGroupIds: new Map(),
+    publisherCommits: [],
   };
 }
 
@@ -262,6 +281,11 @@ export function encodeChannelLog(snapshot: ChannelLogSnapshot): ChannelLogPayloa
         ? null
         : bytesToBase64(snapshot.publisherProviderSnapshot),
     publisherLeafKeyB64: snapshot.publisherLeafKeyB64,
+    coPublisherGroupIds: [...snapshot.coPublisherGroupIds].map(([channelId, groupIdHex]) => ({
+      channelId,
+      groupIdHex,
+    })),
+    publisherCommits: [...snapshot.publisherCommits],
   };
 }
 
@@ -352,6 +376,21 @@ export function decodeChannelLog(payload: unknown): ChannelLogSnapshot | null {
     });
   }
 
+  const coPublisherGroupIds = new Map<string, string>();
+  for (const raw of asArray(p.coPublisherGroupIds)) {
+    const c = raw as Record<string, unknown>;
+    if (typeof c !== "object" || c === null) continue;
+    if (!isChannelIdHex(c.channelId)) continue;
+    if (hexToBytesExact(c.groupIdHex, KEY_HEX_LEN) === null) continue;
+    coPublisherGroupIds.set(c.channelId, (c.groupIdHex as string).toLowerCase());
+  }
+
+  const publisherCommits: PublisherCommitEntry[] = [];
+  for (const raw of asArray(p.publisherCommits)) {
+    const entry = parsePublisherCommitEntry(raw);
+    if (entry !== null && !publisherCommits.some((e) => e.id === entry.id)) publisherCommits.push(entry);
+  }
+
   const snapshotB64 = p.publisherProviderSnapshotB64;
   const leafKey = p.publisherLeafKeyB64;
   const publisherProviderSnapshot =
@@ -367,6 +406,8 @@ export function decodeChannelLog(payload: unknown): ChannelLogSnapshot | null {
     // A snapshot with no key to check it against is unusable: drop both.
     publisherProviderSnapshot: publisherLeafKeyB64 === null ? null : publisherProviderSnapshot,
     publisherLeafKeyB64: publisherProviderSnapshot === null ? null : publisherLeafKeyB64,
+    coPublisherGroupIds,
+    publisherCommits,
   };
 }
 

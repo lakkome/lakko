@@ -3,11 +3,16 @@
 
 /**
  * The Contacts list pane (docs/ux/client-redesign.md section 5.3): the pane
- * head with search and the add menu, then Requests (incoming rows with
+ * head with the add menu and the search field, then Requests (incoming rows with
  * Accept and Decline; sent requests under a collapsed "Sent" group), then
  * the alphabetical contacts under letter headers. Names come from the one
  * profile resolver and never show a key fingerprint; the rules for grouping,
  * matching and ordering live in `contact-list-model.ts`.
+ *
+ * The search field is the one of `docs/ux/who-can-find-me.md` section 6.1:
+ * it filters the contacts below and, through the route's `people` slot
+ * (`search/PeopleSearch.tsx`), finds people this device does not hold as
+ * contacts, asking the network by itself as the person types.
  *
  * Markup only: the route owns the state and every mutation.
  */
@@ -27,10 +32,12 @@ import {
   type SentRequestRecord,
 } from "./contact-list-model";
 import type { AcceptedContact } from "./local-store";
+import { pendingNameOf, type PendingContact } from "./pending-contacts";
 
 /** What the add menu offers. Web has no contact QR flow, so there is no
- *  "Show my QR code" / "Scan QR code" here. */
-export type AddMode = "username" | "invite";
+ *  "Show my QR code" / "Scan QR code" here, and "Add by username" is gone:
+ *  the search field finds people (`docs/ux/who-can-find-me.md` section 6.1). */
+export type AddMode = "invite";
 
 /**
  * Contacts is about people. Finding a channel is not here, and neither is
@@ -43,13 +50,15 @@ export type AddMode = "username" | "invite";
  * inside a call that is already happening.
  */
 const ADD_ITEMS: ReadonlyArray<{ mode: AddMode; labelKey: string; icon: IconName }> = [
-  { mode: "username", labelKey: "contacts.add.by_username", icon: "user" },
   { mode: "invite", labelKey: "contacts.add.share_invite", icon: "link" },
 ];
 
 export interface ContactListPaneProps {
   readonly filter: () => string;
   readonly onFilter: (value: string) => void;
+  /** The people half of the search field, rendered under the contacts while
+   *  something is typed. */
+  readonly people: () => JSX.Element;
   readonly onAdd: (mode: AddMode) => void;
   readonly pending: () => readonly IncomingContactRequest[];
   readonly pendingBusy: () => boolean;
@@ -58,6 +67,11 @@ export interface ContactListPaneProps {
   readonly onDecline: (request: IncomingContactRequest) => void;
   readonly sent: () => readonly SentRequestRecord[];
   readonly onDismissSent: (record: SentRequestRecord) => void;
+  /** ADR-0079 — inviters added through their link whose app has not
+   *  answered yet. Listed among the contacts under their name, with no
+   *  badge (UX section 4); a tap opens the chat with them. */
+  readonly invited: () => readonly PendingContact[];
+  readonly onOpenInvited: (contact: PendingContact) => void;
   readonly contacts: () => readonly AcceptedContact[];
   readonly selectedKey: () => string | null;
   readonly onSelect: (signaturePubkeyB64: string) => void;
@@ -73,13 +87,39 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
   const usernameOf = (c: AcceptedContact): string | null =>
     profiles.resolve(c.signaturePubkeyB64).username;
 
-  const matching = (): AcceptedContact[] =>
-    props.contacts().filter((c) => matchesContactQuery(props.filter(), nameOf(c), usernameOf(c)));
-  const groups = (): ReturnType<typeof groupByLetter<AcceptedContact>> =>
-    groupByLetter(matching(), nameOf);
+  /** One row of the alphabetical list: a contact, or an inviter added
+   *  through their link (ADR-0079) who is shown exactly like one. */
+  type ListRow =
+    | { readonly kind: "contact"; readonly c: AcceptedContact; readonly name: string; readonly username: string | null }
+    | { readonly kind: "invited"; readonly p: PendingContact; readonly name: string; readonly username: string | null };
+  const invitedName = (p: PendingContact): string =>
+    pendingNameOf(p) ?? t("invite.contact.page.unnamed");
+  const rows = (): ListRow[] => [
+    ...props.contacts().map(
+      (c): ListRow => ({ kind: "contact", c, name: nameOf(c), username: usernameOf(c) }),
+    ),
+    ...props.invited().map(
+      (p): ListRow => ({
+        kind: "invited",
+        p,
+        name: invitedName(p),
+        username: p.username.length > 0 ? p.username : null,
+      }),
+    ),
+  ];
+  const matching = (): ListRow[] =>
+    rows().filter((r) => matchesContactQuery(props.filter(), r.name, r.username));
+  const groups = (): ReturnType<typeof groupByLetter<ListRow>> =>
+    groupByLetter(matching(), (r) => r.name);
   const requests = (): IncomingContactRequest[] => sortIncomingRequests(props.pending());
   const nothingAtAll = (): boolean =>
-    props.contacts().length === 0 && props.pending().length === 0 && props.sent().length === 0;
+    props.contacts().length === 0 &&
+    props.invited().length === 0 &&
+    props.pending().length === 0 &&
+    props.sent().length === 0;
+
+  const searching = (): boolean => props.filter().trim().length > 0;
+  let searchInput: HTMLInputElement | undefined;
 
   function select(key: string): void {
     props.onSelect(key);
@@ -126,6 +166,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
       <div class="lk-search">
         <Icon name="search" size={18} />
         <input
+          ref={searchInput}
           type="search"
           placeholder={t("chats.search.placeholder")}
           aria-label={t("contacts.list.search")}
@@ -150,7 +191,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
               const r = (): ReturnType<typeof profiles.resolve> => profiles.resolve(req.fromPubkey);
               return (
                 <div class="lk-row lk-request-row">
-                  <Avatar label={memberNameOf(r())} id={base64Encode(req.fromPubkey)} />
+                  <Avatar label={memberNameOf(r())} id={base64Encode(req.fromPubkey)} personKey={base64Encode(req.fromPubkey)} />
                   <div class="lk-row-body">
                     <span class="lk-row-title">{memberNameOf(r())}</span>
                     <Show when={r().username}>{(u) => <span class="lk-row-sub">{u()}</span>}</Show>
@@ -189,7 +230,11 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
               <For each={props.sent()}>
                 {(record) => (
                   <div class="lk-row">
-                    <Avatar label={record.recipientUsername} id={record.recipientAccountIdHex} />
+                    <Avatar
+                      label={record.recipientUsername}
+                      id={record.recipientAccountIdHex}
+                      personKey={record.recipientKeyB64}
+                    />
                     <div class="lk-row-body">
                       <span class="lk-row-title">@{record.recipientUsername}</span>
                       <span class="lk-row-sub">{t("contacts.list.sent_waiting")}</span>
@@ -210,14 +255,16 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
         </Show>
 
         <Show
-          when={!nothingAtAll()}
+          when={!nothingAtAll() || searching()}
           fallback={
             <div class="lk-empty">
               <Icon name="contacts" size={40} strokeWidth={1.4} />
               <strong>{t("contacts.list.empty.title")}</strong>
               <span>{t("contacts.list.empty.body")}</span>
-              <button type="button" class="primary" onClick={() => props.onAdd("username")}>
-                {t("contacts.list.empty.action")}
+              {/* Finding someone is the search field above (UX who-can-find-me
+                  6.1); the button is the other way in, the invite link. */}
+              <button type="button" class="primary" onClick={() => props.onAdd("invite")}>
+                {t("contacts.add.share_invite")}
               </button>
             </div>
           }
@@ -225,7 +272,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
           <Show
             when={groups().length > 0}
             fallback={
-              <Show when={props.contacts().length > 0}>
+              <Show when={rows().length > 0}>
                 <p class="lk-pane-nomatch">{t("contacts.list.no_match")}</p>
               </Show>
             }
@@ -237,35 +284,43 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                     {group.letter}
                   </div>
                   <For each={group.items}>
-                    {(c) => (
-                      <div
-                        class="lk-row"
-                        role="button"
-                        tabIndex={0}
-                        classList={{ selected: props.selectedKey() === c.signaturePubkeyB64 }}
-                        onClick={() => select(c.signaturePubkeyB64)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            select(c.signaturePubkeyB64);
-                          }
-                        }}
-                      >
-                        <Avatar label={nameOf(c)} id={c.signaturePubkeyB64} />
-                        <div class="lk-row-body">
-                          <span class="lk-row-title">{nameOf(c)}</span>
-                          <Show when={usernameOf(c)}>
-                            {(u) => <span class="lk-row-sub">{u()}</span>}
-                          </Show>
+                    {(row) => {
+                      const key = row.kind === "contact" ? row.c.signaturePubkeyB64 : row.p.signaturePubkeyB64;
+                      const open = (): void => {
+                        if (row.kind === "contact") select(row.c.signaturePubkeyB64);
+                        else props.onOpenInvited(row.p);
+                      };
+                      return (
+                        <div
+                          class="lk-row"
+                          role="button"
+                          tabIndex={0}
+                          classList={{ selected: props.selectedKey() === key }}
+                          onClick={open}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              open();
+                            }
+                          }}
+                        >
+                          <Avatar label={row.name} id={key} personKey={key} />
+                          <div class="lk-row-body">
+                            <span class="lk-row-title">{row.name}</span>
+                            <Show when={row.username}>
+                              {(u) => <span class="lk-row-sub">{u()}</span>}
+                            </Show>
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      );
+                    }}
                   </For>
                 </>
               )}
             </For>
           </Show>
         </Show>
+        <Show when={searching()}>{props.people()}</Show>
       </div>
     </aside>
   );

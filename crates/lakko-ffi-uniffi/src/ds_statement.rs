@@ -346,33 +346,6 @@ impl DsStatementSigner {
         )
     }
 
-    /// `PUT .../access` in **append** mode: register `epoch_key` at `epoch`,
-    /// which must be the journal's next epoch (`409` otherwise; re-sending
-    /// the key already there is a `204`), revoking the registrar keys in
-    /// `revoke` in the same transaction. A member registrar may append only
-    /// one epoch past the last admin or root registration (`403`). Never
-    /// drops an epoch: a lagging device gets a `409`, not a truncation.
-    ///
-    /// # Errors
-    ///
-    /// [`FfiError::Codec`] on a wrong-length input, an invalid key, a
-    /// repeated key or more than 256 revocations.
-    pub fn register_epoch(
-        &self,
-        journal_id: Vec<u8>,
-        epoch: u64,
-        epoch_key: Vec<u8>,
-        revoke: Vec<Vec<u8>>,
-    ) -> Result<DsStatementRequest, FfiError> {
-        self.register(
-            &journal_id,
-            epoch,
-            &epoch_key,
-            RegisterMode::Append,
-            &revoke,
-        )
-    }
-
     /// `PUT .../access` in **replace** mode: write `epoch_key` at `epoch`
     /// and drop every epoch above it. Allowed when everything above `epoch`
     /// was registered by a strictly lower rank than this signer's and the
@@ -400,6 +373,49 @@ impl DsStatementSigner {
             RegisterMode::Replace,
             &revoke,
         )
+    }
+
+    /// ADR-0081 - `POST .../commit`: register `epoch_key` at `epoch` in
+    /// **append** mode (it must be the journal's next epoch; a member
+    /// registrar may append only one epoch past the last admin or root
+    /// registration; `revoke` is revoked in the same step) and append `row` - the commit, in the journal's
+    /// envelope - in ONE step. The returned request's `path` ends in
+    /// `/commit` and `body_json` is the exact body; the caller sends it as a
+    /// `POST` with the request proof signed over those bytes by the key of
+    /// epoch `epoch - 1` (`DsProofSigner.sign("POST", path, "", body)`).
+    /// Re-sending the same row under the same key answers the original
+    /// message id (`200`); any other commit at a registered epoch is `409`.
+    /// Sign a new request for every attempt: the statement's nonce is spent.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Codec`] on a wrong-length input, an invalid key, a
+    /// repeated key, more than 256 revocations, or an empty row.
+    pub fn commit(
+        &self,
+        journal_id: Vec<u8>,
+        epoch: u64,
+        epoch_key: Vec<u8>,
+        revoke: Vec<Vec<u8>>,
+        row: Vec<u8>,
+    ) -> Result<DsStatementRequest, FfiError> {
+        let journal = journal32(&journal_id)?;
+        let epoch_key = key32(&epoch_key, "epoch key")?;
+        let revoke = keys32(&revoke, "revoked key")?;
+        let statement = self
+            .inner
+            .sign_commit_at(&journal, epoch, epoch_key, revoke, now_ms(), fresh_nonce())
+            .map_err(|e| FfiError::Codec(e.to_string()))?;
+        let body_json = lakko_ds_proof::commit_body_json(&statement, &row)
+            .map_err(|e| FfiError::Codec(e.to_string()))?;
+        Ok(DsStatementRequest {
+            path: format!(
+                "/ds/group/{}/{}",
+                lower_hex(&journal),
+                lakko_ds_proof::COMMIT_PATH_SEGMENT
+            ),
+            body_json,
+        })
     }
 
     /// `PUT .../registrars-set`: the root replaces the journal's WHOLE
@@ -460,21 +476,6 @@ impl DsStatementSigner {
     ) -> Result<DsStatementRequest, FfiError> {
         let new_root = key32(&new_root, "new root key")?;
         self.request(&journal_id, StatementBody::RootTransfer { new_root })
-    }
-
-    /// `PUT .../push-binding`: the root or an admin binds the journal to one
-    /// ADR-0042 `push_gid` (replacing its previous binding).
-    ///
-    /// # Errors
-    ///
-    /// [`FfiError::Codec`] on a wrong-length input.
-    pub fn push_binding(
-        &self,
-        journal_id: Vec<u8>,
-        push_gid: Vec<u8>,
-    ) -> Result<DsStatementRequest, FfiError> {
-        let push_gid = key32(&push_gid, "push_gid")?;
-        self.request(&journal_id, StatementBody::PushBinding { push_gid })
     }
 }
 
@@ -626,9 +627,64 @@ mod tests {
         assert_eq!(s.body.kind(), StatementKind::Claim);
         assert_eq!(s.signer.to_vec(), signer.public_key());
         s.verify(now_ms()).unwrap();
-        let bind = signer.push_binding(journal, vec![9; 32]).unwrap();
-        assert!(bind.path.ends_with("/push-binding"));
-        assert!(signer.push_binding(vec![1; 31], vec![9; 32]).is_err());
+        let transfer = signer
+            .root_transfer(
+                journal,
+                lakko_ds_proof::SigningKey::from_seed(&[8; 32])
+                    .verifying_key()
+                    .to_bytes()
+                    .to_vec(),
+            )
+            .unwrap();
+        assert!(transfer.path.ends_with("/root"));
+        assert!(signer
+            .root_transfer(
+                vec![1; 31],
+                lakko_ds_proof::SigningKey::from_seed(&[8; 32])
+                    .verifying_key()
+                    .to_bytes()
+                    .to_vec()
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn a_commit_request_carries_an_append_registration_and_the_row() {
+        let signer = ds_statement_signer(vec![0x24; 32]).unwrap();
+        let journal = vec![0x47; 32];
+        let epoch_key = lakko_ds_proof::SigningKey::from_seed(&[9; 32])
+            .verifying_key()
+            .to_bytes()
+            .to_vec();
+        let req = signer
+            .commit(
+                journal.clone(),
+                7,
+                epoch_key.clone(),
+                vec![vec![0x0B; 32]],
+                b"journal row".to_vec(),
+            )
+            .unwrap();
+        assert_eq!(req.path, format!("/ds/group/{}/commit", "47".repeat(32)));
+        let s = statement_of(&req);
+        s.verify(now_ms()).unwrap();
+        assert_eq!(
+            s.body,
+            StatementBody::RegisterEpoch {
+                epoch: 7,
+                epoch_key: epoch_key.clone().try_into().unwrap(),
+                mode: RegisterMode::Append,
+                revoke: vec![[0x0B; 32]],
+            }
+        );
+        let v: serde_json::Value = serde_json::from_str(&req.body_json).unwrap();
+        assert_eq!(
+            B64.decode(v["row_b64"].as_str().unwrap()).unwrap(),
+            b"journal row"
+        );
+        assert!(signer
+            .commit(journal, 7, epoch_key, vec![], Vec::new())
+            .is_err());
     }
 
     #[test]
@@ -640,20 +696,12 @@ mod tests {
             .to_bytes()
             .to_vec();
         let revoked = vec![vec![0x09; 32]];
-        for (req, mode) in [
-            (
-                signer
-                    .register_epoch(journal.clone(), 6, epoch_key.clone(), revoked.clone())
-                    .unwrap(),
-                RegisterMode::Append,
-            ),
-            (
-                signer
-                    .replace_epoch(journal.clone(), 6, epoch_key.clone(), revoked.clone())
-                    .unwrap(),
-                RegisterMode::Replace,
-            ),
-        ] {
+        // ADR-0081 (open question 1, decided 2026-10-18): an Append is sent
+        // only through `commit`; `/access` takes the Replace.
+        {
+            let req = signer
+                .replace_epoch(journal.clone(), 6, epoch_key.clone(), revoked.clone())
+                .unwrap();
             assert_eq!(req.path, format!("/ds/group/{}/access", "45".repeat(32)));
             let s = statement_of(&req);
             s.verify(now_ms()).unwrap();
@@ -662,7 +710,7 @@ mod tests {
                 StatementBody::RegisterEpoch {
                     epoch: 6,
                     epoch_key: epoch_key.clone().try_into().unwrap(),
-                    mode,
+                    mode: RegisterMode::Replace,
                     revoke: vec![[0x09; 32]],
                 }
             );

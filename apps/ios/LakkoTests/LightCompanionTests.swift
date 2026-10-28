@@ -291,6 +291,55 @@ final class CallMediaCountersTests: XCTestCase {
             reading.inbound.map(\.counters.layer), [.main, .light, .unknown, .middle])
     }
 
+    private func inboundAudio(
+        _ id: String, packets: Int, samples: Int, concealed: Int
+    ) -> CallMediaStatEntry {
+        CallMediaStatEntry(
+            id: id, type: "inbound-rtp",
+            values: [
+                "kind": "audio" as NSString,
+                "packetsReceived": NSNumber(value: packets),
+                "totalSamplesReceived": NSNumber(value: samples),
+                "concealedSamples": NSNumber(value: concealed),
+            ])
+    }
+
+    func testAnAudioReceiverHasItsOwnLineWithTheConcealedShare() {
+        let reading = CallMediaCounters.read(
+            [
+                inbound("IT1", track: "main-track", packets: 500, decoded: 60),
+                inboundAudio("IA1", packets: 50, samples: 96_000, concealed: 960),
+            ],
+            lightTrackIds: [])
+
+        XCTAssertEqual(
+            CallMediaCounters.describeInbound("call media total", before: nil, now: reading),
+            [
+                "call media total audio#1 pkts=50 lost=0 nack=0 jb_ms=- concealed=1.0%",
+                "call media total video#1 pkts=500 lost=2 nack=1 jb_ms=50 pli=1 freezes=1"
+                    + " freeze_s=0.25 decoded=60 dropped=0 layer=main",
+            ])
+    }
+
+    func testTheOneToOneLogWritesEachIntervalAndTheWholeCallOnce() {
+        var log = InboundCounterLog()
+        XCTAssertEqual(
+            log.interval([inboundAudio("IA1", packets: 50, samples: 96_000, concealed: 960)]),
+            ["call media interval audio#1 pkts=50 lost=0 nack=0 jb_ms=- concealed=1.0%"])
+        XCTAssertEqual(
+            log.interval([inboundAudio("IA1", packets: 150, samples: 192_000, concealed: 5_760)]),
+            ["call media interval audio#1 pkts=100 lost=0 nack=0 jb_ms=- concealed=5.0%"])
+        XCTAssertEqual(
+            log.total(),
+            ["call media total audio#1 pkts=150 lost=0 nack=0 jb_ms=- concealed=3.0%"])
+        XCTAssertEqual(log.total(), [])
+    }
+
+    func testTheOneToOneLogSaysNothingForACallThatWasNeverRead() {
+        var log = InboundCounterLog()
+        XCTAssertEqual(log.total(), [])
+    }
+
     func testTheReceiverLineEndsWithItsLayer() {
         let reading = CallMediaCounters.read(
             [

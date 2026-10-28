@@ -31,17 +31,20 @@
 //!
 //! [`PublisherGroup`] is a thin wrapper around [`Group`] that:
 //!
-//! * Derives a **deterministic** MLS group id from the
-//!   16-byte channel id (`b"lakko/pubgrp/v2/" || channel_id`,
-//!   [`GROUP_ID_LEN`] bytes exactly — see
-//!   [`PUBLISHER_GROUP_ID_PREFIX`] for why the width is
-//!   load-bearing). That gives [`Group::load`] something
-//!   stable to look up, and [`channel_id_from_group_id`]
-//!   inverts it for the ADR-0028 OQ3 co-publisher joiner.
-//!   The channel id therefore rides the group id in the
-//!   clear; that was true of v1 too and is not a new
-//!   disclosure — the same channel id is the addressing key
-//!   on `services/channels`.
+//! * Derives a **deterministic** MLS group id from a secret of the
+//!   channel owner and the 16-byte channel id
+//!   ([`publisher_group_id_for`], ADR-0078 section 6):
+//!   `BLAKE3-derive-key("lakko/pubgrp/id/v3", owner_account_seed ||
+//!   channel_id)`. The owner's account seed is the Ed25519 seed of the
+//!   identity whose provider holds the group, so the owner recomputes the id
+//!   from what it already holds and [`Group::load`] has something stable to
+//!   look up. Until ADR-0078 the id was `b"lakko/pubgrp/v2/" || channel_id`:
+//!   `services/channels` knows every channel id, so the PublisherGroup
+//!   journal on the Delivery Service was attributable to its channel. No
+//!   server can compute the id now, and nothing inverts it: a co-publisher
+//!   learns the channel id from the sealed preview of its `/g/` link and the
+//!   group id from the capability, keeps both, and opens the group it joined
+//!   with [`PublisherGroup::load_joined`].
 //! * Exposes [`PublisherGroup::open_or_create`] — the
 //!   load-or-create dance every composer needs. Reuses the
 //!   already-persisted state when it exists; otherwise
@@ -141,47 +144,13 @@ impl ChannelId {
     }
 }
 
-/// Width of the domain-separation prefix on a PublisherGroup MLS group id.
-///
-/// **Derived, never chosen.** The id is `prefix || channel_id` and must come
-/// out at exactly [`GROUP_ID_LEN`], because a PublisherGroup id is a Delivery
-/// Service journal routing key (see [`PUBLISHER_GROUP_ID_PREFIX`]). So the
-/// prefix width is whatever is left over, and the subtraction underflows at
-/// const-eval — a compile error — if [`CHANNEL_ID_LEN`] ever exceeds
-/// [`GROUP_ID_LEN`].
-const PUBLISHER_GROUP_ID_PREFIX_LEN: usize = GROUP_ID_LEN - CHANNEL_ID_LEN;
+/// Domain-separation context of the PublisherGroup id derivation (ADR-0078
+/// section 6). Pinned; a change re-addresses every channel's PublisherGroup.
+const PUBLISHER_GROUP_ID_DOMAIN: &str = "lakko/pubgrp/id/v3";
 
-/// Domain-separation prefix for the deterministic PublisherGroup MLS group id.
-///
-/// **v2 — the width is load-bearing.** The v1 prefix was
-/// `b"lakko/publisher-group/v1/"` (25 bytes), making the id 41 bytes. That
-/// could never be published: a PublisherGroup id reaches the DS journal on the
-/// ADR-0028 OQ3 co-publisher path (`apps/web/src/channels/copublisher.ts`,
-/// `apps/ios/Lakko/Channels/CoPublisher.swift`,
-/// `apps/android/.../channels/CoPublisher.kt` all hand it to
-/// `fetchGroup` / `publishGroup` verbatim), and `services/ds` accepts exactly
-/// `PSEUDONYM_LEN = 32` bytes — 41 becomes 82 hex chars and `decode_pseudonym`
-/// answers 400. v2 narrows the prefix to [`PUBLISHER_GROUP_ID_PREFIX_LEN`] so
-/// the id lands on [`GROUP_ID_LEN`] exactly.
-///
-/// The type is `&[u8; PUBLISHER_GROUP_ID_PREFIX_LEN]`, not `&[u8]`, on purpose:
-/// a literal of any other length does not coerce, so a later edit that reaches
-/// for a longer label fails to compile instead of silently re-breaking the DS
-/// width.
-///
-/// **Why an ASCII literal rather than a truncated hash.** The prefix's whole
-/// job is that bytes minted for this role cannot be mistaken for bytes minted
-/// for another, and against every other id in the tree — a random 32-byte
-/// [`crate::Group::create`] id, a `BLAKE3`-derived `DeviceGroup` id — a fixed
-/// 16-byte tag collides with probability 2^-128 whether it is ASCII or a hash
-/// digest. A digest would buy no separation strength and would cost the one
-/// property that is actually useful here: the prefix is visible in a DS access
-/// log and in any hex dump of a journal key, so a readable label makes a
-/// mis-routed id self-identifying during debugging. Opacity would also buy no
-/// privacy — the constant is in AGPL source, so anyone can recognise it either
-/// way, and the trailing 16 bytes are the channel id in the clear regardless
-/// (unchanged from v1; see the module docs).
-const PUBLISHER_GROUP_ID_PREFIX: &[u8; PUBLISHER_GROUP_ID_PREFIX_LEN] = b"lakko/pubgrp/v2/";
+// A PublisherGroup id is a Delivery Service journal routing key, which is
+// exactly 32 bytes; the derivation's output width is that.
+const _: () = assert!(GROUP_ID_LEN == 32);
 
 /// The retired v1 prefix. Kept for exactly one purpose: letting
 /// [`PublisherGroup::load`] *recognise* state persisted under the old
@@ -190,19 +159,25 @@ const PUBLISHER_GROUP_ID_PREFIX: &[u8; PUBLISHER_GROUP_ID_PREFIX_LEN] = b"lakko/
 /// [`PublisherGroup::load`] for why re-keying is impossible).
 const PUBLISHER_GROUP_ID_PREFIX_V1: &[u8] = b"lakko/publisher-group/v1/";
 
-/// Build the deterministic MLS group id for `channel_id`.
-/// Shape: `b"lakko/pubgrp/v2/" || channel_id`, exactly [`GROUP_ID_LEN`] bytes.
-///
-/// The prefix domain-separates this byte string from any
-/// other channel-id-derived value (the channel-exporter
-/// label, the subscriber-envelope AAD, etc.) so a future
-/// confusion attack cannot reinterpret bytes minted in one
-/// role as a valid input to another.
-fn publisher_group_id_bytes(channel_id: &ChannelId) -> [u8; GROUP_ID_LEN] {
-    let mut id = [0u8; GROUP_ID_LEN];
-    id[..PUBLISHER_GROUP_ID_PREFIX_LEN].copy_from_slice(PUBLISHER_GROUP_ID_PREFIX);
-    id[PUBLISHER_GROUP_ID_PREFIX_LEN..].copy_from_slice(channel_id.as_bytes());
-    id
+/// The PublisherGroup id of the channel `channel_id` owned by the account
+/// whose Ed25519 seed is `owner_account_seed`:
+/// `BLAKE3-derive-key("lakko/pubgrp/id/v3", owner_account_seed ||
+/// channel_id)`, exactly [`GROUP_ID_LEN`] bytes. Not computable from the
+/// channel id alone.
+#[must_use]
+pub fn publisher_group_id_for(
+    owner_account_seed: &[u8; 32],
+    channel_id: &ChannelId,
+) -> [u8; GROUP_ID_LEN] {
+    let mut material = [0u8; 32 + CHANNEL_ID_LEN];
+    material[..32].copy_from_slice(owner_account_seed);
+    material[32..].copy_from_slice(channel_id.as_bytes());
+    lakko_crypto::hash::blake3_derive_key_from_material(PUBLISHER_GROUP_ID_DOMAIN, &material)
+}
+
+/// The id of the PublisherGroup `identity` owns for `channel_id`.
+fn publisher_group_id_bytes(identity: &Identity, channel_id: &ChannelId) -> [u8; GROUP_ID_LEN] {
+    publisher_group_id_for(&identity.ed25519_seed_bytes(), channel_id)
 }
 
 /// The v1 id `channel_id` *would* have been persisted under. Used only by
@@ -243,33 +218,6 @@ fn refuse_if_legacy_v1_present(identity: &Identity, channel_id: &ChannelId) -> R
     Ok(())
 }
 
-/// Recover the [`ChannelId`] from a PublisherGroup `group_id` — the inverse of
-/// [`publisher_group_id_bytes`]. Returns `None` unless the bytes carry the
-/// publisher-group prefix followed by exactly a [`CHANNEL_ID_LEN`]-byte channel
-/// id.
-///
-/// Narrowing the prefix to reach [`GROUP_ID_LEN`] deliberately preserves this
-/// inverse: the channel id is still carried verbatim in the trailing bytes, so
-/// nothing has to convey it out of band. Deriving the id by hashing the channel
-/// id would have hit the same width and destroyed it.
-///
-/// ADR-0028 OQ3: a co-publisher learns a PublisherGroup's `group_id` from a
-/// `/g/` ticket (the capability conveys only the `group_id`), so after the
-/// external join completes it uses this to recover the channel id and
-/// reconstruct the [`PublisherGroup`] / derive the channel content-key seed.
-///
-/// v1 ids are **not** accepted: they are a different width, so they fail the
-/// length check. That is intended — a v1 id cannot be published to the DS at
-/// all, so a co-publisher can never legitimately hold one.
-#[must_use]
-pub fn channel_id_from_group_id(group_id: &[u8]) -> Option<ChannelId> {
-    let prefix: &[u8] = PUBLISHER_GROUP_ID_PREFIX;
-    if group_id.len() != GROUP_ID_LEN || &group_id[..PUBLISHER_GROUP_ID_PREFIX_LEN] != prefix {
-        return None;
-    }
-    ChannelId::try_from_slice(&group_id[PUBLISHER_GROUP_ID_PREFIX_LEN..]).ok()
-}
-
 /// Persistent MLS-group wrapper for one Lakko channel's
 /// publisher tier (G4-2-mls-persistence).
 pub struct PublisherGroup {
@@ -308,7 +256,7 @@ impl PublisherGroup {
     /// Propagates [`Group::load`] errors, and returns [`Error::Group`] when no
     /// v2 group exists but v1 state for this channel does.
     pub fn load(identity: &Identity, channel_id: &ChannelId) -> Result<Option<Self>> {
-        let id = publisher_group_id_bytes(channel_id);
+        let id = publisher_group_id_bytes(identity, channel_id);
         if let Some(inner) = Group::load(identity, &id)? {
             return Ok(Some(Self {
                 inner,
@@ -317,6 +265,72 @@ impl PublisherGroup {
         }
         refuse_if_legacy_v1_present(identity, channel_id)?;
         Ok(None)
+    }
+
+    /// Load a PublisherGroup this identity JOINED as a co-publisher (ADR-0028
+    /// OQ3): its id is the owner's derivation, which a co-publisher cannot
+    /// compute, so the caller passes the `group_id` it learned from the `/g/`
+    /// capability and the `channel_id` from that link's sealed preview.
+    /// Returns `Ok(None)` when nothing is stored under `group_id`. Never
+    /// creates: minting under an id the owner derived would fork the
+    /// channel.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Codec`] when `group_id` is not [`GROUP_ID_LEN`] bytes;
+    /// propagates [`Group::load`] errors.
+    pub fn load_joined(
+        identity: &Identity,
+        group_id: &[u8],
+        channel_id: &ChannelId,
+    ) -> Result<Option<Self>> {
+        if group_id.len() != GROUP_ID_LEN {
+            return Err(Error::Codec(format!(
+                "publisher group id length {} != {GROUP_ID_LEN}",
+                group_id.len()
+            )));
+        }
+        Ok(Group::load(identity, group_id)?.map(|inner| Self {
+            inner,
+            channel_id: *channel_id,
+        }))
+    }
+
+    /// Join a PublisherGroup as a co-publisher from the owner's Welcome
+    /// (ADR-0028 OQ3; [ADR-0081] amendment of 2026-10-19). A PublisherGroup
+    /// carries no role table, so [`Group::join_from_welcome`] refuses its
+    /// Welcome; this is its entry point. `group_id` is the id the `/g/`
+    /// capability conveyed and `channel_id` the one its sealed preview
+    /// carried: a Welcome for any other group is refused before anything is
+    /// written, and so is a conversation's Welcome. The joined state is
+    /// persisted in `identity`'s provider; [`PublisherGroup::load_joined`]
+    /// reopens it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Codec`] when `group_id` is not [`GROUP_ID_LEN`] bytes or the
+    /// Welcome does not decode; [`Error::Group`] for a Welcome of another
+    /// group, a conversation's Welcome, or an OpenMLS failure (no KeyPackage
+    /// of this identity matches, for one).
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+    pub fn join_from_welcome(
+        identity: &Identity,
+        welcome_bytes: &[u8],
+        group_id: &[u8],
+        channel_id: &ChannelId,
+    ) -> Result<Self> {
+        if group_id.len() != GROUP_ID_LEN {
+            return Err(Error::Codec(format!(
+                "publisher group id length {} != {GROUP_ID_LEN}",
+                group_id.len()
+            )));
+        }
+        let inner = Group::join_table_less_from_welcome(welcome_bytes, identity, Some(group_id))?;
+        Ok(Self {
+            inner,
+            channel_id: *channel_id,
+        })
     }
 
     /// Create a fresh PublisherGroup for `channel_id` with
@@ -336,7 +350,7 @@ impl PublisherGroup {
     /// (e.g. ciphersuite mismatch), or when v1 state for this channel exists.
     pub fn create(identity: &Identity, channel_id: &ChannelId) -> Result<Self> {
         refuse_if_legacy_v1_present(identity, channel_id)?;
-        let id = publisher_group_id_bytes(channel_id);
+        let id = publisher_group_id_bytes(identity, channel_id);
         let inner = Group::create_with_id(identity, &id)?;
         Ok(Self {
             inner,
@@ -403,8 +417,8 @@ impl PublisherGroup {
         &self.channel_id
     }
 
-    /// The underlying MLS `group_id` — deterministically derived from the
-    /// channel id ([`publisher_group_id_bytes`]). ADR-0028 OQ3: a co-publisher
+    /// The underlying MLS `group_id` — derived from the owner's account seed
+    /// and the channel id ([`publisher_group_id_for`]). ADR-0028 OQ3: a co-publisher
     /// invite-link is minted over this, and the joiner targets it when crafting
     /// an external-join proposal (ADR-0027) — the channel join-ticket works for
     /// a PublisherGroup verbatim because it is a vanilla MLS group. Stable
@@ -515,6 +529,61 @@ impl PublisherGroup {
 mod tests {
     use super::*;
 
+    /// ADR-0081 amendment — a co-publisher's Welcome joins through
+    /// `PublisherGroup::join_from_welcome` only: the conversation rule of
+    /// `Group::join_from_welcome` refuses it (no role table), and the
+    /// refusal leaves nothing, so the dedicated entry point still opens it.
+    #[test]
+    fn a_publisher_group_welcome_joins_only_through_its_own_entry_point() {
+        let alice = Identity::generate("alice-pg-entry").unwrap();
+        let bob = Identity::generate("bob-pg-entry").unwrap();
+        let cid = ChannelId([0x5a; CHANNEL_ID_LEN]);
+        let mut alice_pg = PublisherGroup::create(&alice, &cid).expect("create");
+        let gid = alice_pg.group_id();
+        let addition = alice_pg
+            .inner_mut()
+            .add_member(&alice, bob.create_key_package().unwrap())
+            .expect("add");
+        let welcome = crate::group::encode_message(&addition.welcome).expect("encode");
+
+        let err = Group::join_from_welcome(&welcome, &bob)
+            .err()
+            .expect("refused as a chat");
+        assert!(
+            matches!(
+                err,
+                Error::MembershipRefused {
+                    reason: crate::RefusalReason::NoRoleTable,
+                    ..
+                }
+            ),
+            "typed refusal, got {err}"
+        );
+        assert!(
+            PublisherGroup::load_joined(&bob, &gid, &cid)
+                .unwrap()
+                .is_none(),
+            "nothing written"
+        );
+
+        // Another id than the link conveyed: refused, nothing written.
+        let wrong = vec![0x01; GROUP_ID_LEN];
+        assert!(PublisherGroup::join_from_welcome(&bob, &welcome, &wrong, &cid).is_err());
+        assert!(PublisherGroup::load_joined(&bob, &gid, &cid)
+            .unwrap()
+            .is_none());
+
+        let bob_pg = PublisherGroup::join_from_welcome(&bob, &welcome, &gid, &cid).expect("joins");
+        assert_eq!(bob_pg.group_id(), gid);
+        assert_eq!(
+            bob_pg.channel_seed(&bob).expect("seed"),
+            alice_pg.channel_seed(&alice).expect("seed"),
+        );
+        assert!(PublisherGroup::load_joined(&bob, &gid, &cid)
+            .unwrap()
+            .is_some());
+    }
+
     fn test_identity() -> Identity {
         Identity::generate("publisher-group-test").expect("Identity::generate")
     }
@@ -545,47 +614,93 @@ mod tests {
         assert!(ChannelId::try_from_slice(&[0u8; 17]).is_err());
     }
 
-    #[test]
-    fn group_id_bytes_are_deterministic() {
-        let cid = ChannelId([0x01; CHANNEL_ID_LEN]);
-        let id1 = publisher_group_id_bytes(&cid);
-        let id2 = publisher_group_id_bytes(&cid);
-        assert_eq!(id1, id2);
-        assert!(id1.starts_with(PUBLISHER_GROUP_ID_PREFIX));
-        assert_eq!(id1.len(), PUBLISHER_GROUP_ID_PREFIX_LEN + CHANNEL_ID_LEN);
-        assert_eq!(id1.len(), GROUP_ID_LEN);
+    /// The retired derivation, `b"lakko/pubgrp/v2/" || channel_id`,
+    /// recomputed here only to show the new id is not it.
+    fn retired_v2_group_id(channel_id: &ChannelId) -> [u8; GROUP_ID_LEN] {
+        let mut id = [0u8; GROUP_ID_LEN];
+        id[..16].copy_from_slice(b"lakko/pubgrp/v2/");
+        id[16..].copy_from_slice(channel_id.as_bytes());
+        id
     }
 
-    /// The prefix width is not free to choose — it is exactly what is left of
-    /// [`GROUP_ID_LEN`] after the channel id. Pinning the literal's own length
-    /// here means a hand-edit that widens it fails a test as well as failing to
-    /// compile.
     #[test]
-    fn prefix_width_is_exactly_the_ds_leftover() {
+    fn group_id_is_deterministic_and_golden() {
+        let cid = ChannelId([0x01; CHANNEL_ID_LEN]);
+        let seed = [0x42u8; 32];
         assert_eq!(
-            PUBLISHER_GROUP_ID_PREFIX.len(),
-            PUBLISHER_GROUP_ID_PREFIX_LEN
+            publisher_group_id_for(&seed, &cid),
+            publisher_group_id_for(&seed, &cid)
         );
+        let mut material = [0u8; 48];
+        material[..32].copy_from_slice(&seed);
+        material[32..].copy_from_slice(cid.as_bytes());
         assert_eq!(
-            PUBLISHER_GROUP_ID_PREFIX_LEN + CHANNEL_ID_LEN,
-            GROUP_ID_LEN,
-            "prefix + channel id must land on the DS-accepted group-id width"
-        );
-        // v1 is retired: it did not, which is the whole reason for the bump.
-        assert_ne!(
-            PUBLISHER_GROUP_ID_PREFIX_V1.len() + CHANNEL_ID_LEN,
-            GROUP_ID_LEN
+            publisher_group_id_for(&seed, &cid),
+            lakko_crypto::hash::blake3_derive_key_from_material("lakko/pubgrp/id/v3", &material)
         );
     }
 
     #[test]
     fn distinct_channels_get_distinct_group_ids() {
+        let seed = [0x42u8; 32];
         let cid_a = ChannelId([0x01; CHANNEL_ID_LEN]);
         let cid_b = ChannelId([0x02; CHANNEL_ID_LEN]);
         assert_ne!(
-            publisher_group_id_bytes(&cid_a),
-            publisher_group_id_bytes(&cid_b)
+            publisher_group_id_for(&seed, &cid_a),
+            publisher_group_id_for(&seed, &cid_b)
         );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        /// ADR-0078 phase 6: the id is not computable from the channel id
+        /// alone. One channel id under two owner seeds gives two ids (so no
+        /// function of the channel id yields it), the retired
+        /// `prefix || channel_id` id is never produced, and the channel id is
+        /// not readable from the id.
+        #[test]
+        fn group_id_is_not_computable_from_the_channel_id(
+            channel in proptest::prelude::any::<[u8; CHANNEL_ID_LEN]>(),
+            seed_a in proptest::prelude::any::<[u8; 32]>(),
+            seed_b in proptest::prelude::any::<[u8; 32]>(),
+        ) {
+            let cid = ChannelId(channel);
+            let id_a = publisher_group_id_for(&seed_a, &cid);
+            let id_b = publisher_group_id_for(&seed_b, &cid);
+            if seed_a == seed_b {
+                proptest::prop_assert_eq!(id_a, id_b);
+            } else {
+                proptest::prop_assert_ne!(id_a, id_b);
+            }
+            proptest::prop_assert_ne!(id_a, retired_v2_group_id(&cid));
+            proptest::prop_assert!(!id_a.windows(CHANNEL_ID_LEN).any(|w| w == channel));
+        }
+
+        /// The owner's identity recomputes the same id on every open.
+        #[test]
+        fn group_id_is_a_pure_function_of_seed_and_channel(
+            channel in proptest::prelude::any::<[u8; CHANNEL_ID_LEN]>(),
+            seed in proptest::prelude::any::<[u8; 32]>(),
+        ) {
+            let cid = ChannelId(channel);
+            proptest::prop_assert_eq!(
+                publisher_group_id_for(&seed, &cid),
+                publisher_group_id_for(&seed, &cid)
+            );
+        }
+    }
+
+    #[test]
+    fn create_uses_the_owner_seed_derived_id() {
+        let identity = test_identity();
+        let cid = test_channel_id();
+        let pg = PublisherGroup::create(&identity, &cid).expect("create");
+        assert_eq!(
+            pg.group_id(),
+            publisher_group_id_for(&identity.ed25519_seed_bytes(), &cid).to_vec()
+        );
+        assert_ne!(pg.group_id(), retired_v2_group_id(&cid).to_vec());
     }
 
     #[test]
@@ -726,17 +841,15 @@ mod tests {
             .add_member(&alice, bob_kp)
             .expect("alice adds bob");
 
-        // Encode the welcome to bytes, give Bob a fresh
-        // Group::join_from_welcome handle. Bob's PublisherGroup
-        // is constructed by hand from that handle since we
-        // don't expose a "join PublisherGroup from welcome"
-        // shortcut yet (would be the natural next API; for
-        // step 6 the test goes through Group::from_mls_group
-        // analogue isn't accessible publicly, so we use the
-        // standard Group::join_from_welcome + a custom assemble).
+        // Bob joins through the PublisherGroup entry point (ADR-0081
+        // amendment): the conversation rule of `Group::join_from_welcome`
+        // refuses a Welcome with no role table.
         let welcome_bytes =
             crate::group::encode_message(&addition.welcome).expect("welcome encode");
-        let bob_group = crate::Group::join_from_welcome(&welcome_bytes, &bob).expect("bob join");
+        let alice_gid = alice_pg.group_id();
+        let bob_group = PublisherGroup::join_from_welcome(&bob, &welcome_bytes, &alice_gid, &cid)
+            .expect("bob join")
+            .inner;
 
         // Alice rotates AFTER adding Bob. Both sides advance.
         // (Note: Alice's `add_member` already merged a commit
@@ -804,7 +917,7 @@ mod tests {
         // Bob joins from the Welcome and reconstructs the PublisherGroup under
         // the deterministic id — and BOTH derive the same channel content-key
         // seed at the shared post-add epoch, so Bob can now publish.
-        use crate::group::{encode_message, Group, Incoming};
+        use crate::group::{encode_message, Incoming};
 
         let alice = Identity::from_seed(&[0xA7u8; 64]).expect("alice");
         let bob = Identity::from_seed(&[0xB7u8; 64]).expect("bob");
@@ -838,11 +951,18 @@ mod tests {
             .expect("approve");
         let welcome_bytes = encode_message(&addition.welcome).expect("encode welcome");
 
-        // Bob joins from the Welcome → his group is persisted under the
-        // PublisherGroup's deterministic id, so he reconstructs the
-        // PublisherGroup for the same channel.
-        let _bob_group = Group::join_from_welcome(&welcome_bytes, &bob).expect("bob joins");
-        let bob_pg = PublisherGroup::load(&bob, &cid)
+        // Bob joins from the Welcome. He cannot derive the owner's id (it
+        // needs Alice's seed); he opens the group under the id the ticket
+        // conveyed, with the channel id the link's sealed preview carried.
+        let _bob_group = PublisherGroup::join_from_welcome(&bob, &welcome_bytes, &group_id, &cid)
+            .expect("bob joins");
+        assert!(
+            PublisherGroup::load(&bob, &cid)
+                .expect("own load")
+                .is_none(),
+            "a co-publisher's own derivation names another group"
+        );
+        let bob_pg = PublisherGroup::load_joined(&bob, &group_id, &cid)
             .expect("bob publisher load")
             .expect("bob publisher group present");
 
@@ -857,51 +977,13 @@ mod tests {
     }
 
     #[test]
-    fn channel_id_from_group_id_round_trips_and_rejects_junk() {
-        let cid = ChannelId([0x9Au8; CHANNEL_ID_LEN]);
-        let gid = publisher_group_id_bytes(&cid);
-        assert_eq!(channel_id_from_group_id(&gid), Some(cid));
-        // Wrong length.
-        assert_eq!(channel_id_from_group_id(&gid[..gid.len() - 1]), None);
-        assert_eq!(channel_id_from_group_id(&[]), None);
-        // Right length, wrong prefix — a chat group_id must not decode.
-        let mut wrong_prefix = gid;
-        wrong_prefix[0] ^= 0xFF;
-        assert_eq!(channel_id_from_group_id(&wrong_prefix), None);
-        // A retired v1 id must not decode either: it is the wrong width, and a
-        // co-publisher can never legitimately hold one (the DS refuses it).
-        assert_eq!(
-            channel_id_from_group_id(&publisher_group_id_bytes_v1(&cid)),
-            None
-        );
-    }
-
-    /// The inverse must survive the width narrowing for EVERY channel id, not
-    /// just a hand-picked one — that round-trip is the property the v2 prefix
-    /// was chosen to preserve (hashing the channel id to 32 bytes would have
-    /// hit the same width and destroyed it).
-    #[test]
-    fn channel_id_round_trips_through_the_group_id_for_every_byte_pattern() {
-        for byte in 0u8..=255 {
-            let cid = ChannelId([byte; CHANNEL_ID_LEN]);
-            let gid = publisher_group_id_bytes(&cid);
-            assert_eq!(gid.len(), GROUP_ID_LEN, "id width at fill byte {byte}");
-            assert_eq!(
-                channel_id_from_group_id(&gid),
-                Some(cid),
-                "inverse lost at fill byte {byte}"
-            );
-        }
-        // Also a non-uniform id, so a "all bytes equal" derivation bug cannot
-        // hide behind the sweep above.
-        let mixed = ChannelId([
-            0x00, 0x01, 0x7F, 0x80, 0xFF, 0x2F, 0x6C, 0x61, 0x6B, 0x6B, 0x6F, 0xAA, 0x55, 0x10,
-            0xEE, 0x99,
-        ]);
-        assert_eq!(
-            channel_id_from_group_id(&publisher_group_id_bytes(&mixed)),
-            Some(mixed)
-        );
+    fn load_joined_refuses_a_wrong_width_id_and_finds_nothing_unknown() {
+        let identity = test_identity();
+        let cid = test_channel_id();
+        assert!(PublisherGroup::load_joined(&identity, &[0u8; 31], &cid).is_err());
+        assert!(PublisherGroup::load_joined(&identity, &[0u8; 32], &cid)
+            .expect("load")
+            .is_none());
     }
 
     /// Legacy v1 state must produce a loud refusal, never a silent fresh mint.

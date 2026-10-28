@@ -58,6 +58,7 @@ import { joinList, t } from "../l10n";
 import { callActions, callState, type Participant } from "../state/call-state";
 import { uiRules } from "../chat/ui-rules";
 import { showsEncryptionChip } from "./encryption-chip";
+import { screenShareState } from "./screen-share-store";
 import { callPeerLabel, callSurfaceKind } from "./call-screen-model";
 import {
   callBarMuteControl,
@@ -78,6 +79,9 @@ export interface CallBarProps {
   readonly peerName: string | null;
   /** A group or link call: the group label rather than a person's name. */
   readonly groupCall: boolean;
+  /** The group's shared name on a group call placed in a conversation, the
+   *  name the call screen shows; `null` otherwise. */
+  readonly groupName?: string | null;
   /** A 1x1 call is ringing and unanswered — the one phase the store does not
    *  carry, because such a call takes the whole screen instead (§2.2). */
   readonly ringing: boolean;
@@ -132,6 +136,7 @@ export function CallBar(props: CallBarProps): JSX.Element {
       peerName: props.peerName,
       participantCount: callState.participants().length,
       soleRemoteName: remotes()[0]?.displayName,
+      groupName: props.groupName,
     }),
   );
 
@@ -143,6 +148,7 @@ export function CallBar(props: CallBarProps): JSX.Element {
       phase: p,
       connectedAtMs: callState.connectedAt(),
       nowMs: now(),
+      sharingScreen: screenShareState.current()?.isOwn === true,
     });
   });
 

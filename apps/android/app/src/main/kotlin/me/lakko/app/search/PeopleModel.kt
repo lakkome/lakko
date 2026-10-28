@@ -213,7 +213,7 @@ public fun mergePeople(lists: List<List<PersonResult>>, ownKeyHex: String?): Lis
 }
 
 // -----------------------------------------------------------------------------
-// The states of **Search people** (web `search-state.ts`)
+// The states of the network half of the search field (web `search-state.ts`)
 // -----------------------------------------------------------------------------
 
 /** Not found - identical whether the person does not exist or does not let
@@ -222,6 +222,10 @@ public val SEARCH_NOT_FOUND: UiText = UiText("search.people.not_found")
 
 /** Network failure. Never "not found". */
 public val SEARCH_FAILED: UiText = UiText("search.people.failed")
+
+/** The anonymous lookup tokens ran out. Never "not found", never the network
+ *  failure. */
+public val SEARCH_OUT_OF_SEARCHES: UiText = UiText("search.people.out_of_searches")
 
 /** The person changed their setting after they were found. */
 public val REQUEST_REFUSED: UiText = UiText("search.people.request_refused")
@@ -244,12 +248,12 @@ public fun foldSearch(foundCount: Int, legs: Collection<LegOutcome>): PeopleSear
     else -> PeopleSearchState.NOT_FOUND
 }
 
-/** The line under the row for a state; `null` when the state says nothing in
+/** The line under the People part for a state; `null` when it says nothing in
  *  words (idle, searching - the spinner says it - and found). */
 public fun searchStateMessage(state: PeopleSearchState): UiText? = when (state) {
     PeopleSearchState.NOT_FOUND -> SEARCH_NOT_FOUND
     PeopleSearchState.FAILED -> SEARCH_FAILED
-    PeopleSearchState.ALLOWANCE_USED -> UiText("tokens.lookup_allowance_used")
+    PeopleSearchState.ALLOWANCE_USED -> SEARCH_OUT_OF_SEARCHES
     else -> null
 }
 

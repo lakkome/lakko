@@ -19,9 +19,9 @@
 //! So the rule the product wants — **a call ends
 //! [`CALL_EMPTY_GRACE`] after the last person in it leaves or drops** — is
 //! decided here, once, and the members learn it two ways: a join to an ended
-//! call is refused with `ErrorCode::CallEnded`, and the `/v1/calls/{id}` state
-//! route answers `ended`, so the member that learns it closes the record for
-//! the chat by publishing the End signal itself.
+//! call is refused with `ErrorCode::CallEnded`, and the `/v1/rooms/{room}`
+//! state route answers `ended`, so the member that learns it closes the record
+//! for the chat by publishing the End signal itself.
 //!
 //! The grace is for a bad connection: a participant whose socket blips and
 //! reconnects inside it finds the call still there. Anyone who joins inside
@@ -30,11 +30,13 @@
 //!
 //! ## What the server does not learn
 //!
-//! Nothing new: the call id and the connected peers are what the signaling
-//! layer already holds (invariant #2). The state route is gated by the same
-//! call-admission JWT as the socket and answers only for the call the token
-//! names, so a member learns whether a call it could join is still there and
-//! nothing about any other call.
+//! Nothing new: the room id and the connected peers are what the signaling
+//! layer already holds (invariant #2). The table is keyed on the room
+//! (`BLAKE3_derive_key("lakko/sfu/room/v1", call_id)`, ADR-0078 section 2),
+//! never the call id and never an account. The state route takes no token:
+//! knowing the room id is the capability, and only the call's members can
+//! compute it, so no admission token is minted just to probe and the issuer
+//! no longer learns who probes.
 //!
 //! Pure over an injected `Instant`, so the rule is unit-tested without a
 //! socket; the signaling layer feeds it joins and leaves.
@@ -54,7 +56,7 @@ pub const CALL_EMPTY_GRACE: Duration = Duration::from_secs(5);
 /// old cannot be offered to anyone.
 pub const ENDED_CALL_RETENTION: Duration = Duration::from_secs(4 * 60 * 60);
 
-/// What the server knows about one call id.
+/// What the server knows about one room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallStatus {
     /// Never seen, or seen so long ago it was forgotten: a first join founds
@@ -113,34 +115,34 @@ impl CallLifetimes {
         Self::default()
     }
 
-    /// A socket for `call_id` was admitted at `now`. Counts it in unless the
+    /// A socket for `room` was admitted at `now`. Counts it in unless the
     /// call ended, in which case the caller refuses the socket.
-    pub fn admit(&self, call_id: &str, now: Instant) -> Admission {
+    pub fn admit(&self, room: &str, now: Instant) -> Admission {
         let mut guard = self.lock();
-        let settled = Self::settle(guard.get(call_id).copied(), now);
+        let settled = Self::settle(guard.get(room).copied(), now);
         match settled {
             Some(Entry::Ended { .. }) => Admission::Ended,
             Some(Entry::Live { peers }) => {
-                guard.insert(call_id.to_owned(), Entry::Live { peers: peers + 1 });
+                guard.insert(room.to_owned(), Entry::Live { peers: peers + 1 });
                 Admission::Admitted
             },
             Some(Entry::Closing { .. }) | None => {
-                guard.insert(call_id.to_owned(), Entry::Live { peers: 1 });
+                guard.insert(room.to_owned(), Entry::Live { peers: 1 });
                 Admission::Admitted
             },
         }
     }
 
-    /// A socket for `call_id` closed at `now`. The last one out starts the
+    /// A socket for `room` closed at `now`. The last one out starts the
     /// grace.
-    pub fn depart(&self, call_id: &str, now: Instant) {
+    pub fn depart(&self, room: &str, now: Instant) {
         let mut guard = self.lock();
-        match Self::settle(guard.get(call_id).copied(), now) {
+        match Self::settle(guard.get(room).copied(), now) {
             Some(Entry::Live { peers }) if peers > 1 => {
-                guard.insert(call_id.to_owned(), Entry::Live { peers: peers - 1 });
+                guard.insert(room.to_owned(), Entry::Live { peers: peers - 1 });
             },
             Some(Entry::Live { .. }) => {
-                guard.insert(call_id.to_owned(), Entry::Closing { since: now });
+                guard.insert(room.to_owned(), Entry::Closing { since: now });
             },
             // A depart for a call that is already closing, ended or unknown
             // is a bookkeeping mismatch; nothing to move.
@@ -148,10 +150,10 @@ impl CallLifetimes {
         }
     }
 
-    /// What the server knows about `call_id` at `now`.
-    pub fn status(&self, call_id: &str, now: Instant) -> CallStatus {
+    /// What the server knows about `room` at `now`.
+    pub fn status(&self, room: &str, now: Instant) -> CallStatus {
         let guard = self.lock();
-        match Self::settle(guard.get(call_id).copied(), now) {
+        match Self::settle(guard.get(room).copied(), now) {
             None => CallStatus::Unknown,
             Some(Entry::Live { peers }) => CallStatus::Live { peers },
             Some(Entry::Closing { .. }) => CallStatus::Closing,
@@ -173,7 +175,7 @@ impl CallLifetimes {
         });
     }
 
-    /// How many call ids the table holds (tests and diagnostics).
+    /// How many rooms the table holds (tests and diagnostics).
     #[must_use]
     pub fn len(&self) -> usize {
         self.lock().len()

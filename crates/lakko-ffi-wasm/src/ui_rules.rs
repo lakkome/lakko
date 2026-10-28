@@ -342,6 +342,15 @@ pub fn looks_like_a_name(typed: &str) -> bool {
     rust_looks_like_a_name(typed)
 }
 
+/// The name prefilled for a guest joining a call from a link:
+/// "<adjective> <animal>". `random` is any random 32-bit value from the
+/// caller (`crypto.getRandomValues`), enough to reach every pair.
+#[wasm_bindgen(js_name = guestName)]
+#[must_use]
+pub fn guest_name(random: u32) -> String {
+    lakko_ui_rules::guest_name::guest_name(u64::from(random))
+}
+
 /// Which info a conversation's name opens — `docs/ux/conversation-info.md`
 /// section 1.
 #[wasm_bindgen(js_name = InfoTarget)]
@@ -374,17 +383,29 @@ impl From<RustInfoTarget> for InfoTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PersonInfoCapabilities {
     membership_ended: bool,
+    is_contact: bool,
 }
 
 #[wasm_bindgen]
 impl PersonInfoCapabilities {
     /// `membershipEnded`: this device's membership in the conversation is
-    /// over (ADR-0045 UX 6.2). A person's card is the contact card; there is
-    /// no `isContact`.
+    /// over (ADR-0045 UX 6.2). `isContact`: the person is on this device's
+    /// contact list - `false` only for a person the viewer removed, whose
+    /// one-to-one remains, and whose card then offers `add-contact`.
     #[wasm_bindgen(constructor)]
     #[must_use]
-    pub fn new(membership_ended: bool) -> Self {
-        Self { membership_ended }
+    pub fn new(membership_ended: bool, is_contact: bool) -> Self {
+        Self {
+            membership_ended,
+            is_contact,
+        }
+    }
+
+    /// The person is on this device's contact list.
+    #[wasm_bindgen(getter, js_name = isContact)]
+    #[must_use]
+    pub fn is_contact(&self) -> bool {
+        self.is_contact
     }
 
     /// This device's membership in the conversation is over.
@@ -547,6 +568,7 @@ pub fn info_target(kind: ConversationKind) -> InfoTarget {
 pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<String> {
     rust_person_info_sections(RustPersonInfoCapabilities {
         membership_ended: caps.membership_ended,
+        is_contact: caps.is_contact,
     })
     .into_iter()
     .map(|s| s.name().to_string())
@@ -921,12 +943,14 @@ pub const STAGE_FLAG_LOCAL: u8 = 1;
 pub const STAGE_FLAG_CAMERA: u8 = 2;
 /// Flag bit of {@link callStage}: the person is the active speaker now.
 pub const STAGE_FLAG_SPEAKING: u8 = 4;
+/// Flag bit of {@link callStage}: the tile is a shared screen (ADR-0083).
+pub const STAGE_FLAG_SCREEN: u8 = 8;
 
 /// Who is on the stage in the layout with one large tile: an index into the
 /// roster, or `undefined` when the call is empty.
 ///
-/// `flags` carries one byte per person (bit 1: this device's own tile, bit 2:
-/// camera on, bit 4: speaking now) and `lastSpokeAtMs` one number per person
+/// `flags` carries one byte per tile (bit 1: this device's own tile, bit 2:
+/// camera on, bit 4: speaking now, bit 8: a shared screen) and `lastSpokeAtMs` one number per person
 /// (0 for never), both in roster order. A `lastSpokeAtMs` shorter than
 /// `flags` reads as "never" for the people it does not cover.
 #[wasm_bindgen(js_name = callStage)]
@@ -939,6 +963,7 @@ pub fn call_stage(flags: &[u8], last_spoke_at_ms: &[f64], pinned: Option<u32>) -
             is_local: bits & STAGE_FLAG_LOCAL != 0,
             camera_on: bits & STAGE_FLAG_CAMERA != 0,
             speaking: bits & STAGE_FLAG_SPEAKING != 0,
+            is_screen: bits & STAGE_FLAG_SCREEN != 0,
             last_spoke_at_ms: last_spoke_at_ms
                 .get(index)
                 .copied()
@@ -2027,9 +2052,12 @@ mod tests {
 
     #[test]
     fn the_sections_cross_the_boundary_as_the_names_web_already_uses() {
-        let ended = person_info_sections(PersonInfoCapabilities::new(true));
+        let ended = person_info_sections(PersonInfoCapabilities::new(true, true));
         assert!(ended.contains(&"delete-chat".to_string()));
         assert!(!ended.contains(&"call".to_string()));
+        let removed = person_info_sections(PersonInfoCapabilities::new(false, false));
+        assert!(removed.contains(&"add-contact".to_string()));
+        assert!(!removed.contains(&"remove-contact".to_string()));
         assert!(
             channel_info_sections(ChannelInfoCapabilities::new(false, true, false))
                 .contains(&"unsubscribe".to_string())

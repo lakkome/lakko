@@ -118,10 +118,7 @@ pub(crate) async fn register(
 
     match result {
         Ok(_) => {
-            tracing::info!(
-                channel_id = %B64.encode(channel_id),
-                "channel name registered",
-            );
+            tracing::info!("channel name registered",);
             Ok(Json(RegisterChannelResponse { ok: true }))
         },
         Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => Err((

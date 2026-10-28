@@ -685,7 +685,7 @@
     },
     "call.guest.default_name": {
       "text": "Guest",
-      "comment": "Name prefilled for a visitor without an account who joins a call from a link; it becomes the new account's profile name."
+      "comment": "Fallback name prefilled for a visitor without an account who joins a call from a link, used only when the generated adjective-and-animal name is unavailable; it becomes the new account's profile name."
     },
     "call.guest.note": {
       "text": "You join as a guest. No account is needed.",
@@ -1158,6 +1158,86 @@
     "call.quality.up": {
       "text": "Up",
       "comment": "Connection details: label of the outgoing bitrate."
+    },
+    "call.screen_share.bar_status": {
+      "text": "Sharing your screen",
+      "comment": "Status line of the collapsed call bar while this device shares its screen."
+    },
+    "call.screen_share.button": {
+      "text": "Share screen",
+      "comment": "The call-row button that starts sharing this device's screen (docs/ux/screen-share.md)."
+    },
+    "call.screen_share.button_stop": {
+      "text": "Stop sharing",
+      "comment": "The same call-row button while this device is sharing its screen."
+    },
+    "call.screen_share.not_sealed": {
+      "text": "Can't share your screen securely right now. Try again.",
+      "comment": "Shown when the share could not be protected, so it was not sent."
+    },
+    "call.screen_share.own_strip": {
+      "text": "You're sharing your screen",
+      "comment": "The strip across the top of the call while this device shares its screen."
+    },
+    "call.screen_share.own_strip_sound": {
+      "text": "You're sharing your screen and its sound",
+      "comment": "The same strip when the share also carries the shared tab's or system's sound."
+    },
+    "call.screen_share.own_tile": {
+      "text": "You're sharing your screen",
+      "comment": "Text on this device's own share tile, which shows no picture of the share."
+    },
+    "call.screen_share.pinned_chip": {
+      "text": "{name} is sharing their screen",
+      "comment": "Chip on the stage when someone shares while the viewer has pinned another person; {name} is the person sharing."
+    },
+    "call.screen_share.refused": {
+      "text": "Can't share your screen. Allow screen sharing for this site in your browser settings.",
+      "comment": "Shown when the browser refused screen sharing."
+    },
+    "call.screen_share.refused_macos": {
+      "text": "Can't share your screen. Allow screen recording for your browser in System Settings.",
+      "comment": "Shown on macOS when the system refused screen recording for the browser."
+    },
+    "call.screen_share.started": {
+      "text": "{name} started sharing their screen",
+      "comment": "Screen-reader announcement when someone starts sharing."
+    },
+    "call.screen_share.stop": {
+      "text": "Stop",
+      "comment": "The button in the sharing strip that stops the share."
+    },
+    "call.screen_share.stopped": {
+      "text": "{name} stopped sharing",
+      "comment": "Screen-reader announcement when someone stops sharing."
+    },
+    "call.screen_share.superseded": {
+      "text": "{name} is sharing now, so your share stopped.",
+      "comment": "Shown for a few seconds when another person started sharing and this device's share was stopped; {name} is that person."
+    },
+    "call.screen_share.tile": {
+      "text": "{name}'s screen",
+      "comment": "Label of a tile showing someone's shared screen; {name} is the person."
+    },
+    "call.screen_share.view": {
+      "text": "View",
+      "comment": "Button on that chip that puts the shared screen on the stage."
+    },
+    "call.screen_share.waiting": {
+      "text": "Waiting for {name}'s screen",
+      "comment": "Shown on a share tile until the first picture arrives; {name} is the person sharing."
+    },
+    "call.screen_share.zoom_in": {
+      "text": "Zoom in",
+      "comment": "Button that enlarges a shared screen."
+    },
+    "call.screen_share.zoom_out": {
+      "text": "Zoom out",
+      "comment": "Button that shrinks a shared screen."
+    },
+    "call.screen_share.zoom_reset": {
+      "text": "Fit to screen",
+      "comment": "Button that shows the whole shared screen again."
     },
     "call.self.camera_a11y": {
       "text": "Your camera",
@@ -1850,10 +1930,6 @@
       "text": "Could not download the attachment. Try again.",
       "comment": "Downloading or decrypting an attachment failed."
     },
-    "chat.attachment.error.gone": {
-      "text": "The attachment is no longer available on the server.",
-      "comment": "Downloading an attachment failed because the server no longer holds it."
-    },
     "chat.attachment.error.open_photo": {
       "text": "Couldn't open this photo. Try again.",
       "comment": "A photo picked from the library to send could not be read."
@@ -1882,6 +1958,14 @@
       "text": "Could not upload \"{name}\". Try again.",
       "comment": "Encrypting or uploading an attached file failed; {name} is the file."
     },
+    "chat.attachment.gone.body": {
+      "text": "Files nobody opens for a year are removed. Save or pin a message to keep its files.",
+      "comment": "Second line under a no-longer-available attachment, secondary style."
+    },
+    "chat.attachment.gone.title": {
+      "text": "This file is no longer available.",
+      "comment": "Shown in place of an attachment the server no longer holds. First line."
+    },
     "chat.attachment.hide": {
       "text": "Hide",
       "comment": "Button on an attached picture shown inside the message: stop showing it."
@@ -1889,6 +1973,14 @@
     "chat.attachment.image_alt": {
       "text": "image attachment",
       "comment": "Alternative text of an attached picture that has no file name."
+    },
+    "chat.attachment.limit.open": {
+      "text": "Too many files opened. Try again later.",
+      "comment": "Shown in place of media whose download was refused for the limit, with Try again."
+    },
+    "chat.attachment.limit.send": {
+      "text": "You have reached the limit for sending files. Try again later.",
+      "comment": "Composer note when an upload was refused for the limit; the message text stays."
     },
     "chat.attachment.open": {
       "text": "Open",
@@ -2221,6 +2313,10 @@
       "text": "Could not revoke the invite link. Try again.",
       "comment": "Revoking a group invite link failed."
     },
+    "chat.error.save": {
+      "text": "Couldn't save the message. Try again.",
+      "comment": "Saving or removing a saved message failed."
+    },
     "chat.error.transfer": {
       "text": "Could not transfer ownership. Try again.",
       "comment": "Handing a group's ownership to another member failed."
@@ -2363,8 +2459,8 @@
       "comment": "Button in the conversation header and title of the layer it opens: the group's details and members."
     },
     "chat.invite_link.cleared": {
-      "text": "Link cleared (an inline link has nothing to revoke).",
-      "comment": "Notice after clearing an invite link that has no server record to revoke."
+      "text": "Link cleared. This device holds no key to revoke it, so it works until it expires.",
+      "comment": "Notice after clearing a group invite link this device cannot revoke at the server (it keeps no revocation key for it)."
     },
     "chat.invite_link.copy": {
       "text": "Copy link",
@@ -2750,6 +2846,14 @@
       "text": "Reply",
       "comment": "Message menu item: answer this message with a quote of it."
     },
+    "chat.message.save": {
+      "text": "Save",
+      "comment": "Message menu row under Pin: add the message to the account's saved list."
+    },
+    "chat.message.saved_mark": {
+      "text": "Saved",
+      "comment": "Accessibility label of the small mark beside the time of a saved message."
+    },
     "chat.message.select": {
       "text": "Select",
       "comment": "Message menu item: start selecting several messages, this one first."
@@ -2765,6 +2869,10 @@
     "chat.message.unpin": {
       "text": "Unpin",
       "comment": "Message menu item: remove the pin from the message."
+    },
+    "chat.message.unsave": {
+      "text": "Remove from saved",
+      "comment": "Message menu row on a saved message; also the long-press action on a Saved screen row."
     },
     "chat.message.unsupported": {
       "text": "This message needs a newer version of Lakko.",
@@ -2785,6 +2893,18 @@
     "chat.peer.fallback_name": {
       "text": "Peer",
       "comment": "Name shown for the other person in a one-to-one chat when nothing better is known."
+    },
+    "chat.pending.call_disabled": {
+      "text": "Available once {name} is connected.",
+      "comment": "Tooltip or long-press hint of the disabled call buttons in a chat whose other side has not answered yet."
+    },
+    "chat.pending.stale": {
+      "text": "{name} has not answered yet. You can ask them for a new link.",
+      "comment": "The same line after 7 days without an answer from the inviter's app."
+    },
+    "chat.pending.waiting": {
+      "text": "{name} will get your messages when their app is next online.",
+      "comment": "One line at the top of a chat opened from an invite link, before the inviter's app has answered (ADR-0079). Messages written now are kept and sent later."
     },
     "chat.photo.load_failed": {
       "text": "Couldn't load photo",
@@ -3175,6 +3295,10 @@
       "text": "Forwarded {done} of {total}.",
       "comment": "Shown when forwarding several selected messages stopped at a failure; the rest stay selected."
     },
+    "chat.select.save": {
+      "text": "Save",
+      "comment": "Select mode action beside Delete and Forward: save every selected message."
+    },
     "chat.select.state_not_selected": {
       "text": "Not selected",
       "comment": "Screen reader value of a message's selection mark while selecting messages."
@@ -3496,14 +3620,6 @@
     "chats.empty.title": {
       "text": "No conversations yet",
       "comment": "Conversation list with nothing in it."
-    },
-    "chats.lookup.action": {
-      "text": "Look up {name}",
-      "comment": "Button under a search with no local match: look the exact name up on the server. {name} is the typed name with an @ in front."
-    },
-    "chats.lookup.nothing": {
-      "text": "Nothing found for {name}.",
-      "comment": "Search in the chat list found no person or channel with this exact name; {name} is the name as typed, with an @ in front."
     },
     "chats.lookup.unreachable": {
       "text": "Could not look that up. Check your connection and try again.",
@@ -3909,42 +4025,21 @@
       "text": "This request came from an older version of Lakko. Ask them to update and send it again.",
       "comment": "An accepted contact request cannot open a chat because the sender's app is too old."
     },
-    "contacts.add.by_username": {
-      "text": "Add by username",
-      "comment": "Card heading and add-menu item: send a contact request to a username."
-    },
-    "contacts.add.intro_label": {
-      "text": "Message (optional)",
-      "comment": "Label of the optional introduction sent with a contact request."
-    },
-    "contacts.add.intro_placeholder": {
-      "text": "Hi, this is Alice from the conference.",
-      "comment": "Example text in the empty introduction field."
-    },
-    "contacts.add.send": {
-      "text": "Send",
-      "comment": "Button that sends the contact request."
-    },
     "contacts.add.share_invite": {
       "text": "Share invite link",
       "comment": "Add-menu item on the contacts list: open the invite links."
     },
-    "contacts.add.subtitle": {
-      "text": "Requests are end-to-end encrypted. Lakko's servers cannot read them.",
-      "comment": "Line under \"Add a contact\". A claim about encryption; must stay accurate.",
-      "security_critical": true
+    "contacts.add_back.action": {
+      "text": "Add",
+      "comment": "Button on the \"Add to contacts\" card."
     },
-    "contacts.add.title": {
-      "text": "Add a contact",
-      "comment": "Heading of the pane for sending a contact request."
+    "contacts.add_back.control": {
+      "text": "Add to contacts",
+      "comment": "Title of the card on the page of a person the viewer removed from their contacts while their one-to-one remains. Puts them back on the list."
     },
-    "contacts.add.username_label": {
-      "text": "Username",
-      "comment": "Label of the username field when adding a contact."
-    },
-    "contacts.add.username_placeholder": {
-      "text": "@alice",
-      "comment": "Example in the empty username field. Keep the @ and a short Latin-letter name (usernames are Latin letters, digits and _)."
+    "contacts.add_back.sub": {
+      "text": "Puts {name} back on your contact list on this account.",
+      "comment": "Line under \"Add to contacts\": what it does. Local; nothing is sent. {name} is the person's name."
     },
     "contacts.detail.actions": {
       "text": "Contact actions",
@@ -4019,12 +4114,8 @@
       "text": "Add",
       "comment": "Tooltip and accessible name of the + button on the contacts list that opens the add menu."
     },
-    "contacts.list.empty.action": {
-      "text": "Add contact",
-      "comment": "Button on the empty contacts list."
-    },
     "contacts.list.empty.body": {
-      "text": "Add someone by username, or share your invite link.",
+      "text": "Find someone by name or username in the search field above, or share your invite link.",
       "comment": "Empty contacts list, line under the heading."
     },
     "contacts.list.empty.title": {
@@ -4178,18 +4269,6 @@
       "text": "Verify safety number",
       "comment": "Title of the card on a contact's page that shows the safety number to compare.",
       "security_critical": true
-    },
-    "contacts.send.done": {
-      "text": "Request sent to {name}. It waits under Sent until they accept.",
-      "comment": "Shown after a contact request was sent. {name} is the recipient's @username, with the @. \"Sent\" is the name of the section in the contacts list (contacts.list.sent)."
-    },
-    "desktop.quit_call.confirm": {
-      "text": "End call and quit",
-      "comment": "Desktop app: confirm button of the quit-during-a-call question."
-    },
-    "desktop.quit_call.title": {
-      "text": "End the call and quit?",
-      "comment": "Desktop app: question shown when the person quits Lakko during a call."
     },
     "device_link.code.enter_six_digits": {
       "text": "Enter the six digits your other device shows.",
@@ -4629,6 +4708,34 @@
       "text": "Removing...",
       "comment": "Line on a device row whose removal was accepted by the server and is still finishing."
     },
+    "devices.remove_all": {
+      "text": "Remove all other devices",
+      "comment": "Destructive button on Settings > Devices under the This device row; shown when the account has other devices."
+    },
+    "devices.remove_all.body": {
+      "text": "They will be signed out and lose access to your messages. This device stays signed in.",
+      "comment": "Body of the confirmation before removing every other device of the account.",
+      "security_critical": true
+    },
+    "devices.remove_all.confirm": {
+      "text": "Remove all",
+      "comment": "Destructive button of the Remove all other devices confirmation."
+    },
+    "devices.remove_all.row_failed": {
+      "text": "Could not remove. Try again.",
+      "comment": "Line on a device row when Remove all other devices could not remove that device; the row keeps its own Remove button.",
+      "security_critical": true
+    },
+    "devices.remove_all.sub": {
+      "text": "Signs out every device except this one.",
+      "comment": "Line under the Remove all other devices button.",
+      "security_critical": true
+    },
+    "devices.remove_all.title": {
+      "text": "Remove all other devices?",
+      "comment": "Title of the confirmation before removing every device of the account except this one.",
+      "security_critical": true
+    },
     "devices.removed.body": {
       "text": "It was removed from your account on another device. New messages no longer reach it. Sign out, then sign in again if you want to use it.",
       "comment": "Body of the This device was removed screen.",
@@ -4736,6 +4843,26 @@
       "text": "Updating keys...",
       "comment": "Shown on the account's other devices after the account keys were changed (UX identity-recovery 18.3)."
     },
+    "devices.row.app": {
+      "text": "Lakko {version}",
+      "comment": "First half of the second line of a device row: the app and its version. {version} is a version number like 1.4, or the word web for the web app; keep Lakko untranslated."
+    },
+    "devices.row.app_name": {
+      "text": "Lakko",
+      "comment": "Second line of a device row when the app version is not known. The app name; keep it untranslated."
+    },
+    "devices.row.device": {
+      "text": "Device",
+      "comment": "Title of a device row before that device has said what it is (no model known yet)."
+    },
+    "devices.row.online": {
+      "text": "online",
+      "comment": "Right side of the row of the device the person is using: it is active now. Lower case, like a status."
+    },
+    "devices.row.place": {
+      "text": "{city}, {country}",
+      "comment": "Third line of a device row: the city and country the device's internet address belongs to, e.g. Almere, Netherlands. {city} is a city name, {country} a country name, both already in the right language."
+    },
     "devices.scan.confirm.body": {
       "text": "This gives the scanned device full access to your account: your messages, your contacts and your identity. Continue only if the code is on your own new device.",
       "comment": "Warning before the scanned device is let into the account.",
@@ -4778,6 +4905,14 @@
     "devices.scan.open_camera": {
       "text": "Open camera",
       "comment": "Button that starts the camera to scan a pairing code."
+    },
+    "devices.section.other_devices": {
+      "text": "Other devices",
+      "comment": "Section heading on Settings > Devices above the account's other devices, newest activity first."
+    },
+    "devices.section.this_device": {
+      "text": "This device",
+      "comment": "Section heading on Settings > Devices above the one row of the device the person is using (docs/ux/second-device.md section 3)."
     },
     "devices.signed_out.body_mismatch": {
       "text": "This device's keys do not match the account's published identity.",
@@ -6088,6 +6223,50 @@
       "text": "This link is no longer valid. Ask the person for a new one.",
       "comment": "Contact invite page: the link was revoked or expired since the page loaded."
     },
+    "invite.contact.page.add": {
+      "text": "Add",
+      "comment": "Primary button on the contact invite page: makes the inviter a contact."
+    },
+    "invite.contact.page.add_failed": {
+      "text": "Could not add {name}. Check your connection and try again.",
+      "comment": "Line under the Add button when adding through an invite link failed for a network reason. {name} as in the heading."
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} is already in your contacts",
+      "comment": "Contact invite page when the inviter is already a contact. Nothing is sent."
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "Could not reach {name}. Check your connection and try again.",
+      "comment": "Line under Open chat on the invite page of a person already in the contacts, when the answer to the link could not be sent for a network reason. {name} as in the heading."
+    },
+    "invite.contact.page.done": {
+      "text": "Done",
+      "comment": "Button that closes the contact invite page."
+    },
+    "invite.contact.page.not_now": {
+      "text": "Not now",
+      "comment": "Secondary button on the contact invite page: closes it, nothing is sent."
+    },
+    "invite.contact.page.open_chat": {
+      "text": "Open chat",
+      "comment": "Button on the contact invite page when the inviter is already a contact."
+    },
+    "invite.contact.page.own_body": {
+      "text": "Share it with the person you want to add.",
+      "comment": "Line under 'This is your own invite link'."
+    },
+    "invite.contact.page.own_title": {
+      "text": "This is your own invite link",
+      "comment": "Contact invite page opened by the person who made the link."
+    },
+    "invite.contact.page.title": {
+      "text": "Add {name} to your contacts?",
+      "comment": "Heading of the contact invite page (ADR-0079). {name} is the inviter's display name as the link states it, else their @username."
+    },
+    "invite.contact.page.unnamed": {
+      "text": "this person",
+      "comment": "Stands in for {name} in the contact invite page and the pending chat when the link states neither a name nor a username."
+    },
     "invite.contact.page_title": {
       "text": "Invite",
       "comment": "Title bar of the page a contact invite link opens on a phone."
@@ -6245,7 +6424,7 @@
     },
     "invite.links.created": {
       "text": "Created {date}",
-      "comment": "One of the facts under a link in your list of invite links. {date} is a short date formatted for the interface language, such as \"16 Sep\"."
+      "comment": "One of the facts under a link in your list of invite links. {date} is a short date and time formatted for the interface language, such as \"16 Sep, 14:32\"."
     },
     "invite.links.desc": {
       "text": "Anyone who opens one of your links can send you a contact request until it expires or is used up.",
@@ -6304,15 +6483,6 @@
       "text": "Never",
       "comment": "Option of the Expires field: the link never expires."
     },
-    "invite.links.for_new_user": {
-      "text": "For someone new to Lakko",
-      "comment": "Fact under an invite link made for someone without an account yet (a referral link)."
-    },
-    "invite.links.inline_note": {
-      "text": "Lakko could not shorten this link, so it is long. It works the same way and cannot be revoked.",
-      "comment": "Fact under an invite link that could not be registered with the server: it cannot be withdrawn later. Keep \"cannot be revoked\".",
-      "security_critical": true
-    },
     "invite.links.label_field": {
       "text": "Label (optional)",
       "comment": "Field of the new-invite-link form: a name for the link."
@@ -6340,10 +6510,6 @@
     "invite.links.new_badge": {
       "text": "New",
       "comment": "Small badge on the invite link you just created, in your list of invite links."
-    },
-    "invite.links.referral_option": {
-      "text": "For someone without a Lakko account yet",
-      "comment": "Checkbox of the new-invite-link form: the link is for someone who will sign up first."
     },
     "invite.links.revoked": {
       "text": "Link revoked.",
@@ -6402,7 +6568,7 @@
       "comment": "iOS name of the .lakkofeed file type (Info.plist document type), shown in Files and share sheets."
     },
     "ios.permission.camera": {
-      "text": "Lakko uses the camera to scan QR codes from devices you want to link to your account, to capture video for in-call streams, and to record video messages you choose to send. Everything the camera captures is end-to-end encrypted on your device before it is sent.",
+      "text": "Lakko uses the camera to scan QR codes of devices you want to link to your account and of Lakko links, to capture video for in-call streams, and to record video messages you choose to send. Everything the camera captures is end-to-end encrypted on your device before it is sent.",
       "comment": "iOS system permission prompt for camera access (Info.plist usage description). iOS shows it in its own alert, in the language iOS uses for Lakko, the first time Lakko asks. It must say why Lakko needs the access. No placeholders."
     },
     "ios.permission.face_id": {
@@ -6599,6 +6765,126 @@
     "notification.message.new": {
       "text": "New message",
       "comment": "Notification text when a new message arrived but its content could not be shown on this device."
+    },
+    "profile.avatar.change": {
+      "text": "Change photo",
+      "comment": "Accessible label of the pencil button on the profile photo in Settings > Profile."
+    },
+    "profile.avatar.menu.camera": {
+      "text": "Camera",
+      "comment": "Menu item under the profile photo: take a photo or video with Lakko's camera."
+    },
+    "profile.avatar.menu.library": {
+      "text": "Photo or video",
+      "comment": "Menu item under the profile photo: pick a photo or video from the device's library."
+    },
+    "profile.avatar.menu.remove": {
+      "text": "Remove photo",
+      "comment": "Destructive menu item under the profile photo: go back to initials."
+    },
+    "profile.camera.close": {
+      "text": "Close",
+      "comment": "Close button of the profile camera screen."
+    },
+    "profile.camera.denied": {
+      "text": "Lakko can't use the camera. Allow it in your settings.",
+      "comment": "Shown on the profile camera screen when camera permission is denied."
+    },
+    "profile.camera.photo": {
+      "text": "Photo",
+      "comment": "Mode toggle on Lakko's camera screen for the profile photo."
+    },
+    "profile.camera.shutter": {
+      "text": "Take",
+      "comment": "Accessible label of the shutter button on the profile camera screen."
+    },
+    "profile.camera.switch": {
+      "text": "Switch camera",
+      "comment": "Accessible label of the switch-camera button on the profile camera screen."
+    },
+    "profile.camera.video": {
+      "text": "Video",
+      "comment": "Mode toggle on Lakko's camera screen for the profile photo."
+    },
+    "profile.crop.cancel": {
+      "text": "Cancel",
+      "comment": "Cancel button of the crop screen."
+    },
+    "profile.crop.start": {
+      "text": "Start",
+      "comment": "Accessible label of the strip that chooses where the 10-second profile video starts."
+    },
+    "profile.crop.title": {
+      "text": "Choose the square",
+      "comment": "Title of the screen where the person moves and zooms a picked photo or video inside the circle."
+    },
+    "profile.crop.use": {
+      "text": "Use",
+      "comment": "Confirm button of the crop screen."
+    },
+    "profile.crop.zoom": {
+      "text": "Zoom",
+      "comment": "Accessible label of the zoom slider on the crop screen."
+    },
+    "profile.name.add": {
+      "text": "Add your name",
+      "comment": "Shown in place of the name in Settings > Profile when the person has none."
+    },
+    "profile.name.change": {
+      "text": "Change name",
+      "comment": "Accessible label of the pencil button beside the name in Settings > Profile."
+    },
+    "profile.save.done": {
+      "text": "Saved. Your contacts will see the change.",
+      "comment": "Shown under Save in Settings > Profile after a successful save."
+    },
+    "profile.save.error.generic": {
+      "text": "Couldn't save. Try again.",
+      "comment": "Saving the profile failed for another reason."
+    },
+    "profile.save.error.upload": {
+      "text": "Couldn't upload the photo. Check your connection and try again.",
+      "comment": "Saving the profile failed while uploading the photo."
+    },
+    "profile.save.saving": {
+      "text": "Saving…",
+      "comment": "The Save button of Settings > Profile while it saves."
+    },
+    "profile.unsaved.body": {
+      "text": "Your changes to your profile will be lost if you don't save them.",
+      "comment": "Body of the unsaved-changes dialog of Settings > Profile."
+    },
+    "profile.unsaved.cancel": {
+      "text": "Cancel",
+      "comment": "Button of the unsaved-changes dialog: stay on the screen."
+    },
+    "profile.unsaved.discard": {
+      "text": "Don't save",
+      "comment": "Button of the unsaved-changes dialog: drop the changes and leave."
+    },
+    "profile.unsaved.save": {
+      "text": "Save",
+      "comment": "Button of the unsaved-changes dialog: save, then leave."
+    },
+    "profile.unsaved.title": {
+      "text": "Save changes?",
+      "comment": "Title of the dialog shown when leaving Settings > Profile with unsaved changes."
+    },
+    "profile.username.change": {
+      "text": "Change username",
+      "comment": "Accessible label of the pencil button beside the username in Settings > Profile."
+    },
+    "profile.username.none": {
+      "text": "No username",
+      "comment": "Shown in place of the username in Settings > Profile when this device does not know it."
+    },
+    "profile.username.taken": {
+      "text": "{username} is taken. Choose another username.",
+      "comment": "Save failed because the new username is taken; {username} includes the leading @."
+    },
+    "profile.video.unusable": {
+      "text": "This video can't be used as a profile video. Try a shorter MP4 or a photo.",
+      "comment": "The picked video cannot be turned into a profile video on this device."
     },
     "proof.add_device.help": {
       "text": "Enter your password to add the device.",
@@ -7610,13 +7896,41 @@
       "comment": "Title of the screen shown when the person is signed in on a device that does not have the account's keys.",
       "security_critical": true
     },
+    "saved.empty": {
+      "text": "Messages you save appear here.",
+      "comment": "Empty state of the Saved screen."
+    },
+    "saved.kind.file": {
+      "text": "File: {name}",
+      "comment": "Saved row: the message is a file; {name} is its file name."
+    },
+    "saved.kind.gif": {
+      "text": "GIF",
+      "comment": "Saved row: the message is a GIF."
+    },
+    "saved.kind.photo": {
+      "text": "Photo",
+      "comment": "Saved row: the message is a photo."
+    },
+    "saved.kind.video": {
+      "text": "Video",
+      "comment": "Saved row: the message is a video."
+    },
+    "saved.kind.video_note": {
+      "text": "Video message",
+      "comment": "Saved row: the message is a round video message."
+    },
+    "saved.kind.voice": {
+      "text": "Voice message",
+      "comment": "Saved row: the message is a voice message."
+    },
+    "saved.title": {
+      "text": "Saved",
+      "comment": "Title of the Saved screen, and its row in the Chats screen menu."
+    },
     "search.people.add_contact": {
       "text": "Add contact",
-      "comment": "Button on a person found by search: opens a short form to send them a contact request."
-    },
-    "search.people.add_contact_title": {
-      "text": "Add {name}",
-      "comment": "Title of the dialog that sends a contact request to a person found by Search people (Android). {name} is the person's display name."
+      "comment": "Button on a person found by search: sends them a contact request at once."
     },
     "search.people.channel_result": {
       "text": "Channel {handle}",
@@ -7634,21 +7948,29 @@
       "text": "No one found. Check the spelling, or ask them for an invite link.",
       "comment": "Shown when Search people found nobody. Must read the same whether the person does not exist or does not let the searcher find them."
     },
+    "search.people.out_of_searches": {
+      "text": "Too many searches for now. Try again later.",
+      "comment": "Shown under People in the search field when the device has no search allowance left for now. Local results stay."
+    },
+    "search.people.request_failed": {
+      "text": "Couldn't send the request. Try again.",
+      "comment": "Shown on a found person's row when sending the contact request failed for a reason other than their setting."
+    },
     "search.people.request_refused": {
       "text": "Couldn't send the request. They may have changed who can find them.",
       "comment": "Shown when a contact request to a person found by search was refused because they changed who can find them since."
     },
-    "search.people.search": {
-      "text": "Search people",
-      "comment": "Row at the end of the Chats search results that asks Lakko's servers for people by username or name."
+    "search.people.request_sent": {
+      "text": "Request sent",
+      "comment": "Shown on a found person's row in place of Add contact after the contact request was sent."
     },
     "search.people.searching_a11y": {
       "text": "Searching",
       "comment": "Accessible name of the spinner on the Search people row while the search runs."
     },
-    "search.people.send_request": {
-      "text": "Send request",
-      "comment": "Button that sends a contact request to a person found by search."
+    "settings.about.city_data": {
+      "text": "City data: DB-IP.com, CC BY 4.0",
+      "comment": "Settings > About: attribution for the city database the Devices screen uses. Keep DB-IP.com and CC BY 4.0 untranslated."
     },
     "settings.about.lede_web": {
       "text": "Lakko on the web.",
@@ -7671,54 +7993,6 @@
       "text": "How Lakko protects you",
       "comment": "Row title in About.",
       "security_critical": true
-    },
-    "settings.about.shortcuts.close_window": {
-      "text": "Close the window",
-      "comment": "Keyboard shortcut list entry."
-    },
-    "settings.about.shortcuts.destinations": {
-      "text": "Chats, Feed, Contacts, Calls, Settings",
-      "comment": "Keyboard shortcut list entry for Mod+Shift+1 to Mod+Shift+5, which open these five destinations in this order."
-    },
-    "settings.about.shortcuts.edit_last": {
-      "text": "Edit my last message (in an empty message field)",
-      "comment": "Keyboard shortcut list entry for the Up arrow."
-    },
-    "settings.about.shortcuts.escape": {
-      "text": "Close a menu, dialog or sheet; leave a search",
-      "comment": "Keyboard shortcut list entry for Esc."
-    },
-    "settings.about.shortcuts.folders": {
-      "text": "Switch chat folder",
-      "comment": "Keyboard shortcut list entry: selects a chat folder tab."
-    },
-    "settings.about.shortcuts.new_chat": {
-      "text": "New chat",
-      "comment": "Keyboard shortcut list entry: opens the create menu."
-    },
-    "settings.about.shortcuts.previous_next": {
-      "text": "Previous or next conversation",
-      "comment": "Keyboard shortcut list entry."
-    },
-    "settings.about.shortcuts.quit": {
-      "text": "Quit Lakko",
-      "comment": "Keyboard shortcut list entry (macOS)."
-    },
-    "settings.about.shortcuts.search": {
-      "text": "Search conversations and people",
-      "comment": "Keyboard shortcut list entry."
-    },
-    "settings.about.shortcuts.send": {
-      "text": "Send or start a new line",
-      "comment": "Keyboard shortcut list entry for Enter / Shift+Enter in the composer."
-    },
-    "settings.about.shortcuts.settings": {
-      "text": "Settings",
-      "comment": "Keyboard shortcut list entry."
-    },
-    "settings.about.shortcuts.title": {
-      "text": "Keyboard shortcuts",
-      "comment": "Card title in Settings > About, desktop app."
     },
     "settings.about.translations_updated": {
       "text": "Translations updated {date}",
@@ -7924,30 +8198,6 @@
       "text": "Your data",
       "comment": "Card heading in Settings > Account: the data export."
     },
-    "settings.desktop.keep_running.sub": {
-      "text": "You'll get messages and calls while the window is closed.",
-      "comment": "Subtitle of the keep-running switch."
-    },
-    "settings.desktop.keep_running.title": {
-      "text": "Keep running when the window is closed",
-      "comment": "Switch row in Settings > Notifications, desktop app. Off: closing the window quits."
-    },
-    "settings.desktop.lede": {
-      "text": "How Lakko runs on this computer.",
-      "comment": "Line under the Notifications title in Settings, desktop app."
-    },
-    "settings.desktop.open_at_login.title": {
-      "text": "Open Lakko when I sign in to this computer",
-      "comment": "Switch row in Settings > Notifications, desktop app. On: Lakko starts hidden at login."
-    },
-    "settings.desktop.read_failed": {
-      "text": "These settings could not be read. Open Settings again to retry.",
-      "comment": "Shown in Settings > Notifications, desktop app, when the current values could not be read."
-    },
-    "settings.desktop.save_failed": {
-      "text": "This setting could not be changed. Try again.",
-      "comment": "Shown under a desktop switch when the change was not saved; the switch keeps its old state."
-    },
     "settings.devices.add.lede": {
       "text": "Sign in to Lakko on the new device first. Then pick which of the two is showing a code.",
       "comment": "Text of the Add a device panel before choosing a side."
@@ -7997,12 +8247,12 @@
       "comment": "Small label on a row of Settings > Devices for a device that joined the account recently and that the person has not yet acknowledged. Refers to a device."
     },
     "settings.devices.remove.body": {
-      "text": "It is signed out now. The next time it connects, everything this account kept on it is deleted: chats, contacts, keys and the recovery phrase.",
+      "text": "It will be signed out and lose access to your messages.",
       "comment": "Body of the confirmation before removing one of the account's devices.",
       "security_critical": true
     },
     "settings.devices.remove.confirm": {
-      "text": "Remove device",
+      "text": "Remove",
       "comment": "The remove-device sheet in Settings > Devices (UX identity-recovery 18.1)."
     },
     "settings.devices.remove.confirm_named": {
@@ -8019,8 +8269,8 @@
       "comment": "The remove-device sheet in Settings > Devices (UX identity-recovery 18.1)."
     },
     "settings.devices.remove.title": {
-      "text": "Remove {device}?",
-      "comment": "Title of the confirmation before removing one of the account's devices; {device} is the row label, e.g. Device 2.",
+      "text": "Remove \"{device}\"?",
+      "comment": "Title of the confirmation before removing one of the account's devices; {device} is the row's title, e.g. iPhone 16 Pro (docs/ux/second-device.md section 3).",
       "security_critical": true
     },
     "settings.devices.remove.working": {
@@ -8349,37 +8599,18 @@
       "text": "Password",
       "comment": "Card heading in Settings > Security."
     },
-    "settings.profile.error.generic": {
-      "text": "Could not save your name. Try again.",
-      "comment": "Saving the display name failed."
+    "settings.privacy.show_city": {
+      "text": "Show my city to my other devices",
+      "comment": "Switch in Settings > Privacy, on by default. When on, this device tells the person's other devices which city it is in, shown on their Devices screen."
     },
-    "settings.profile.lede": {
-      "text": "How you appear to your contacts.",
-      "comment": "Line under the Profile title in Settings."
-    },
-    "settings.profile.name.hint": {
-      "text": "Shown to the people you talk to. Not unique, at most {count, plural, one {# character} other {# characters}}.",
-      "comment": "Note under the name field in Settings, Profile."
+    "settings.privacy.show_city.sub": {
+      "text": "Your other devices show the city this one is in. Lakko's servers keep no record of it.",
+      "comment": "Line under the Show my city to my other devices switch.",
+      "security_critical": true
     },
     "settings.profile.name.label": {
       "text": "Your name",
       "comment": "Label of the display-name field in Settings > Profile."
-    },
-    "settings.profile.preview.label": {
-      "text": "How others see you",
-      "comment": "Caption above the live preview of the name and username as contacts see them."
-    },
-    "settings.profile.preview.no_name": {
-      "text": "Others see your key fingerprint until you set a name.",
-      "comment": "Preview text when the person has neither a name nor a username."
-    },
-    "settings.profile.saved": {
-      "text": "Your name will update for your contacts.",
-      "comment": "Confirmation after the name is saved; contacts see it on their next message."
-    },
-    "settings.profile.username.none": {
-      "text": "None",
-      "comment": "Shown in place of the username when the account has none."
     },
     "settings.recovery.devices.title": {
       "text": "Other devices",
@@ -8646,30 +8877,9 @@
       "text": "Username: {message}",
       "comment": "Spoken by the screen reader for the reason under a username field. {message} is the reason, like 'At least 3 characters'."
     },
-    "username.change.body": {
-      "text": "People will no longer find you by {old}. Nobody else can take it for 30 days.",
-      "comment": "Warning on the change-username screen; {old} is the current username with its leading @.",
-      "security_critical": true
-    },
-    "username.change.next_change": {
-      "text": "After this you can change it again in 30 days.",
-      "comment": "Second warning line on the change-username screen."
-    },
-    "username.change.other_devices": {
-      "text": "Your other devices pick up the new username the next time they are online.",
-      "comment": "Note under the done line after a change."
-    },
-    "username.change.save": {
-      "text": "Change",
-      "comment": "Main button of the change-username screen."
-    },
     "username.change.title": {
       "text": "Change username",
       "comment": "Title of the screen where a person changes their username, and label of the button that opens it."
-    },
-    "username.change.too_soon": {
-      "text": "You can change your username again on {date}.",
-      "comment": "Shown instead of the form when the last change was under 30 days ago; {date} is a localized date."
     },
     "username.claim.body": {
       "text": "With a username and a password you can sign in on another device, add a recovery email, and people can find you.",
@@ -8862,6 +9072,194 @@
       "text": "Who can find me",
       "comment": "Title of the Settings > Privacy screen that decides who can find the person by username or name and ask to be their contact.",
       "security_critical": true
+    },
+    "invite.links.show_qr": {
+      "text": "Show QR code",
+      "comment": "Button on a link in your list of invite links: shows the link as a QR code to scan."
+    },
+    "invite.links.qr_hint": {
+      "text": "Whoever scans this code can send you a contact request.",
+      "comment": "Under the QR code of an invite link."
+    },
+    "contacts.scan_qr": {
+      "text": "Scan QR code",
+      "comment": "Contacts action: opens the camera to scan a Lakko link shown as a QR code, such as someone's invite link."
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "This code is not a Lakko link. Try another code.",
+      "comment": "Shown on the scanner when the scanned QR code is not a Lakko invite, group or call link."
+    },
+    "desktop.quit_call.confirm": {
+      "text": "End call and quit",
+      "comment": "Desktop app: confirm button of the quit-during-a-call question."
+    },
+    "desktop.quit_call.title": {
+      "text": "End the call and quit?",
+      "comment": "Desktop app: question shown when the person quits Lakko during a call."
+    },
+    "invite.links.expires_option_custom": {
+      "text": "Custom",
+      "comment": "Option of the Expires field of the new-invite-link form: opens a number field and a unit choice."
+    },
+    "invite.links.uses_option_custom": {
+      "text": "Custom",
+      "comment": "Option of the Uses field of the new-invite-link form: opens a number field."
+    },
+    "invite.links.custom_expiry_amount": {
+      "text": "Period",
+      "comment": "Number field shown when Expires is Custom: how many hours or days the link works."
+    },
+    "invite.links.unit_hours": {
+      "text": "Hours",
+      "comment": "Unit choice beside the custom period of a new invite link."
+    },
+    "invite.links.unit_days": {
+      "text": "Days",
+      "comment": "Unit choice beside the custom period of a new invite link."
+    },
+    "invite.links.custom_uses_count": {
+      "text": "Number of people",
+      "comment": "Number field shown when Uses is Custom: how many people may use the link."
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "Enter a period from 1 hour to 365 days.",
+      "comment": "Shown under the custom period of a new invite link when the value is out of range."
+    },
+    "invite.links.error.custom_uses": {
+      "text": "Enter a number of people from 1 to {max}.",
+      "comment": "Shown under the custom number of people of a new invite link when the value is out of range. {max} is the largest allowed number, formatted for the interface language."
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} invites you to Lakko",
+      "comment": "Title of the contact invite page for a visitor who is not signed in. {name} is the inviter's display name, else @username, else the invite.contact.page.unnamed text."
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko is a messenger where every chat and call is end-to-end encrypted.",
+      "comment": "One line under the inviter on the contact invite page for a visitor who is not signed in, saying what Lakko is."
+    },
+    "invite.contact.page.create_account": {
+      "text": "Create an account",
+      "comment": "Primary button on the contact invite page for a visitor who is not signed in."
+    },
+    "invite.contact.page.have_account": {
+      "text": "I already have an account",
+      "comment": "Secondary button on the contact invite page for a visitor who is not signed in: goes to sign-in."
+    },
+    "invite.contact.page.dead_title": {
+      "text": "This invite link no longer works",
+      "comment": "Contact invite page, visitor not signed in, when the link was revoked, expired, used up, is unknown or is damaged. The inviter's name is not shown."
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Ask the person who sent it for a new one.",
+      "comment": "Line under 'This invite link no longer works'."
+    },
+    "invite.links.edit": {
+      "text": "Edit link",
+      "comment": "Accessible name of the pencil button on an invite link nobody can hold yet (never copied, never used): opens its terms."
+    },
+    "invite.links.edit_title": {
+      "text": "Link terms",
+      "comment": "Heading of the form that changes an invite link's label, expiry and number of people. Saving makes a new link and removes the old one."
+    },
+    "invite.links.edit_note": {
+      "text": "Saving makes a new link. The old one stops working.",
+      "comment": "One line on the invite link terms form."
+    },
+    "invite.links.delete": {
+      "text": "Delete link",
+      "comment": "Accessible name of the trash button on an invite link."
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "Delete this link?",
+      "comment": "Confirmation before deleting an invite link that was copied or used."
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Anyone who already has it will no longer be able to use it.",
+      "comment": "Body of the confirmation before deleting an invite link that was copied or used."
+    },
+    "invite.links.deleted": {
+      "text": "Link deleted.",
+      "comment": "Notice after an invite link was deleted."
+    },
+    "invite.links.error.delete": {
+      "text": "Could not delete the link. Check your connection and try again.",
+      "comment": "Shown when deleting an invite link failed."
+    },
+    "invite.links.error.edit": {
+      "text": "Could not save the link. Check your connection and try again.",
+      "comment": "Shown when saving new terms for an invite link failed; the old link still works."
+    },
+    "settings.about.shortcuts.close_window": {
+      "text": "Close the window",
+      "comment": "Keyboard shortcut list entry."
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "Chats, Feed, Contacts, Calls, Settings",
+      "comment": "Keyboard shortcut list entry for Mod+Shift+1 to Mod+Shift+5, which open these five destinations in this order."
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "Edit my last message (in an empty message field)",
+      "comment": "Keyboard shortcut list entry for the Up arrow."
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "Close a menu, dialog or sheet; leave a search",
+      "comment": "Keyboard shortcut list entry for Esc."
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "Switch chat folder",
+      "comment": "Keyboard shortcut list entry: selects a chat folder tab."
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "New chat",
+      "comment": "Keyboard shortcut list entry: opens the create menu."
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "Previous or next conversation",
+      "comment": "Keyboard shortcut list entry."
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Quit Lakko",
+      "comment": "Keyboard shortcut list entry (macOS)."
+    },
+    "settings.about.shortcuts.search": {
+      "text": "Search conversations and people",
+      "comment": "Keyboard shortcut list entry."
+    },
+    "settings.about.shortcuts.send": {
+      "text": "Send or start a new line",
+      "comment": "Keyboard shortcut list entry for Enter / Shift+Enter in the composer."
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "Settings",
+      "comment": "Keyboard shortcut list entry."
+    },
+    "settings.about.shortcuts.title": {
+      "text": "Keyboard shortcuts",
+      "comment": "Card title in Settings > About, desktop app."
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "You'll get messages and calls while the window is closed.",
+      "comment": "Subtitle of the keep-running switch."
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "Keep running when the window is closed",
+      "comment": "Switch row in Settings > Notifications, desktop app. Off: closing the window quits."
+    },
+    "settings.desktop.lede": {
+      "text": "How Lakko runs on this computer.",
+      "comment": "Line under the Notifications title in Settings, desktop app."
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "Open Lakko when I sign in to this computer",
+      "comment": "Switch row in Settings > Notifications, desktop app. On: Lakko starts hidden at login."
+    },
+    "settings.desktop.read_failed": {
+      "text": "These settings could not be read. Open Settings again to retry.",
+      "comment": "Shown in Settings > Notifications, desktop app, when the current values could not be read."
+    },
+    "settings.desktop.save_failed": {
+      "text": "This setting could not be changed. Try again.",
+      "comment": "Shown under a desktop switch when the change was not saved; the switch keeps its old state."
     }
   }
 }

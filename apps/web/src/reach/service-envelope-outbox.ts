@@ -25,8 +25,9 @@
 
 /** The envelopes that ride the DeviceGroup `ServiceEnvelope` body: the
  *  setting, the reach key versions, and (ADR-0048 section 4a) the own
- *  display name (`profile/own-profile-sync.ts`). */
-export type ServiceEnvelopeKind = "visibility" | "reachState" | "profile";
+ *  display name (`profile/own-profile-sync.ts`), and (ADR-0080) this
+ *  device's own card (`devices/device-card-runtime.ts`). */
+export type ServiceEnvelopeKind = "visibility" | "reachState" | "profile" | "deviceCard";
 
 /** Returns the current envelope, or `null` while the state is not loaded. */
 export type ServiceEnvelopeComposer = () => Promise<Uint8Array | null>;
@@ -34,7 +35,7 @@ export type ServiceEnvelopeComposer = () => Promise<Uint8Array | null>;
 /** Publishes one `lakko-contacts` envelope over the DeviceGroup. */
 export type ServiceEnvelopeSender = (envelope: Uint8Array) => Promise<void>;
 
-const KINDS: readonly ServiceEnvelopeKind[] = ["visibility", "reachState", "profile"];
+const KINDS: readonly ServiceEnvelopeKind[] = ["visibility", "reachState", "profile", "deviceCard"];
 
 const composers = new Map<ServiceEnvelopeKind, ServiceEnvelopeComposer>();
 /** Kind -> generation of its latest mark. A send clears the kind only when

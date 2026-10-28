@@ -12,7 +12,11 @@
 //! (`lakko_contacts::link_seal`); the joiner opens it and verifies the
 //! Ed25519 signature inside, and the server can neither read nor substitute
 //! it. The upload helpers that check the sealed blob's outer frame and the
-//! clear issuer key live here too, shared by the three ledgers.
+//! per-link revocation key live here too, shared by the three ledgers.
+//!
+//! Since ADR-0078 section 10 a row names neither an owner nor an issuer: the
+//! only key it holds is a revocation key minted for the one link
+//! (`lakko_contacts::invite::revocation_public_key`).
 //!
 //! A fresh id can collide with a live row (the space is 2^48). The insert is a
 //! plain `INSERT` - never an upsert, so a collision can never overwrite another
@@ -149,16 +153,16 @@ pub(crate) fn parse_sealed_upload(
     Ok(bytes)
 }
 
-/// Decode the clear `issuer_pubkey` upload field (standard base64 of a
-/// 32-byte Ed25519 verifying key) — the key a later revoke must be signed
-/// by. The server cannot check it against the sealed capability; an uploader
-/// who names someone else's key only gives that person, not themselves, the
-/// power to revoke the row.
+/// Decode the clear `revocation_pubkey` upload field (standard base64 of a
+/// 32-byte Ed25519 verifying key) — the per-link key a later revoke must be
+/// signed by (ADR-0078 section 10). It is minted for the one link, so it
+/// names nobody and links no two rows; an uploader who names a key it does
+/// not hold only makes its own row unrevocable.
 ///
 /// # Errors
 ///
 /// 400 for bad base64 or a value that is not a valid Ed25519 key.
-pub(crate) fn parse_issuer_pubkey(
+pub(crate) fn parse_revocation_pubkey(
     b64: &str,
 ) -> Result<[u8; lakko_crypto::signing::PUBLIC_KEY_LEN], (StatusCode, String)> {
     use base64::engine::general_purpose::STANDARD as B64;
@@ -166,26 +170,26 @@ pub(crate) fn parse_issuer_pubkey(
     let bytes = B64.decode(b64).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
-            format!("invalid issuer_pubkey base64: {e}"),
+            format!("invalid revocation_pubkey base64: {e}"),
         )
     })?;
     lakko_crypto::signing::VerifyingKey::from_bytes(&bytes).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
-            "issuer_pubkey is not an Ed25519 verifying key".to_string(),
+            "revocation_pubkey is not an Ed25519 verifying key".to_string(),
         )
     })?;
     <[u8; lakko_crypto::signing::PUBLIC_KEY_LEN]>::try_from(bytes.as_slice()).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
-            "issuer_pubkey must be 32 bytes".to_string(),
+            "revocation_pubkey must be 32 bytes".to_string(),
         )
     })
 }
 
-/// Recover the stored issuer key of a row for a revoke. A malformed stored
+/// Recover the stored revocation key of a row for a revoke. A malformed stored
 /// key folds into `None` (the caller answers 404, like a missing row).
-pub(crate) fn stored_issuer_key(bytes: &[u8]) -> Option<lakko_crypto::signing::VerifyingKey> {
+pub(crate) fn stored_revocation_key(bytes: &[u8]) -> Option<lakko_crypto::signing::VerifyingKey> {
     lakko_crypto::signing::VerifyingKey::from_bytes(bytes).ok()
 }
 
@@ -229,7 +233,7 @@ mod tests {
         ) -> Result<sqlx::mysql::MySqlQueryResult, sqlx::Error> {
             sqlx::query(
                 "INSERT INTO group_invites \
-                    (blob_id, sealed_capability, issuer_pubkey, expiry_ms, max_uses) \
+                    (blob_id, sealed_capability, revocation_pk, expiry_ms, max_uses) \
                  VALUES (?, ?, ?, 0, 0)",
             )
             .bind(id.to_vec())
@@ -294,7 +298,7 @@ mod tests {
         assert!(
             sqlx::query(
                 "INSERT INTO group_invites \
-                    (blob_id, sealed_capability, issuer_pubkey, expiry_ms, max_uses) \
+                    (blob_id, sealed_capability, revocation_pk, expiry_ms, max_uses) \
                  VALUES (?, ?, ?, 0, 0)",
             )
             .bind(vec![0x33u8; 32])
@@ -347,17 +351,17 @@ mod tests {
     }
 
     #[test]
-    fn an_issuer_key_must_be_a_verifying_key() {
+    fn a_revocation_key_must_be_a_verifying_key() {
         use base64::engine::general_purpose::STANDARD as B64;
         let key = lakko_crypto::signing::SigningKey::generate()
             .verifying_key()
             .to_bytes();
-        assert_eq!(parse_issuer_pubkey(&B64.encode(key)).unwrap(), key);
-        assert!(parse_issuer_pubkey(&B64.encode([1u8; 31])).is_err());
-        assert!(parse_issuer_pubkey(&B64.encode([1u8; 33])).is_err());
-        assert!(parse_issuer_pubkey("%%").is_err());
-        assert!(stored_issuer_key(&key).is_some());
-        assert!(stored_issuer_key(&[0u8; 3]).is_none());
+        assert_eq!(parse_revocation_pubkey(&B64.encode(key)).unwrap(), key);
+        assert!(parse_revocation_pubkey(&B64.encode([1u8; 31])).is_err());
+        assert!(parse_revocation_pubkey(&B64.encode([1u8; 33])).is_err());
+        assert!(parse_revocation_pubkey("%%").is_err());
+        assert!(stored_revocation_key(&key).is_some());
+        assert!(stored_revocation_key(&[0u8; 3]).is_none());
     }
 
     #[tokio::test]

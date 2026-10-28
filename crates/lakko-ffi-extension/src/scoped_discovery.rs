@@ -242,7 +242,7 @@ mod tests {
                     let mut scope_id = vec![0u8; 64];
                     scope_id[..2].copy_from_slice(&i.to_be_bytes());
                     ReachStateEntry {
-                        class: ReachClass::Group,
+                        class: ReachClass::Link,
                         scope_id,
                         version: 1,
                     }

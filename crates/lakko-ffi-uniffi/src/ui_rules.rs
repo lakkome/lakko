@@ -250,6 +250,14 @@ pub fn looks_like_a_name(typed: String) -> bool {
     rust_looks_like_a_name(&typed)
 }
 
+/// The name prefilled for a guest joining a call from a link:
+/// "<adjective> <animal>". `random` is any random value from the caller.
+#[uniffi::export]
+#[must_use]
+pub fn guest_name(random: u64) -> String {
+    lakko_ui_rules::guest_name::guest_name(random)
+}
+
 /// Which info a conversation's name opens — `docs/ux/conversation-info.md`
 /// section 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -322,6 +330,10 @@ pub enum InfoSection {
     /// UX `who-can-find-me.md` 6.3). Appended last: uniffi decodes by
     /// ordinal.
     ChannelMembers,
+    /// Put a person the viewer removed back on the contact list: local,
+    /// sends nothing (UX `conversation-info.md` 2.1). Appended last: uniffi
+    /// decodes by ordinal.
+    AddContact,
 }
 
 impl From<RustInfoSection> for InfoSection {
@@ -347,6 +359,7 @@ impl From<RustInfoSection> for InfoSection {
             RustInfoSection::ManageChannel => Self::ManageChannel,
             RustInfoSection::Unsubscribe => Self::Unsubscribe,
             RustInfoSection::ChannelMembers => Self::ChannelMembers,
+            RustInfoSection::AddContact => Self::AddContact,
         }
     }
 }
@@ -355,14 +368,17 @@ impl From<RustInfoSection> for InfoSection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
 pub struct PersonInfoCapabilities {
     /// This device's membership in the conversation is over (ADR-0045 UX 6.2).
-    /// A person's card is the contact card; there is no `is_contact`.
     pub membership_ended: bool,
+    /// The person is on this device's contact list. `false` only for a
+    /// person the viewer removed, whose one-to-one remains.
+    pub is_contact: bool,
 }
 
 impl From<PersonInfoCapabilities> for RustPersonInfoCapabilities {
     fn from(c: PersonInfoCapabilities) -> Self {
         Self {
             membership_ended: c.membership_ended,
+            is_contact: c.is_contact,
         }
     }
 }
@@ -746,7 +762,11 @@ pub fn call_grid(count: u32, width: u32, height: u32) -> CallGrid {
 }
 
 /// One person, as the stage rule sees them.
+///
+/// Four independent facts about a tile, so four booleans rather than a
+/// state enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct StageCandidate {
     /// This device's own tile.
     pub is_local: bool,
@@ -757,6 +777,10 @@ pub struct StageCandidate {
     /// When the person last was the active speaker, in milliseconds on the
     /// caller's own clock; `0` for never.
     pub last_spoke_at_ms: u64,
+    /// The tile is a shared screen (ADR-0083), its own entry beside the
+    /// sharer's camera tile.
+    #[uniffi(default = false)]
+    pub is_screen: bool,
 }
 
 /// Who is on the stage in the layout with one large tile: an index into
@@ -771,6 +795,7 @@ pub fn call_stage(people: Vec<StageCandidate>, pinned: Option<u32>) -> Option<u3
             camera_on: p.camera_on,
             speaking: p.speaking,
             last_spoke_at_ms: p.last_spoke_at_ms,
+            is_screen: p.is_screen,
         })
         .collect();
     let pinned = pinned.and_then(|p| usize::try_from(p).ok());
@@ -1872,9 +1897,16 @@ mod tests {
     fn the_sections_cross_the_boundary_as_the_core_decided_them() {
         let ended = person_info_sections(PersonInfoCapabilities {
             membership_ended: true,
+            is_contact: true,
         });
         assert!(ended.contains(&InfoSection::DeleteChat));
         assert!(!ended.contains(&InfoSection::Call));
+        let removed = person_info_sections(PersonInfoCapabilities {
+            membership_ended: false,
+            is_contact: false,
+        });
+        assert!(removed.contains(&InfoSection::AddContact));
+        assert!(!removed.contains(&InfoSection::RemoveContact));
         assert!(channel_info_sections(ChannelInfoCapabilities {
             is_publisher: false,
             is_subscriber: true,
@@ -1906,6 +1938,11 @@ mod tests {
         assert!(looks_like_a_name("@anna".to_string()));
         assert!(!looks_like_a_name("ab".to_string()));
         assert_eq!(bare_name("  @anna ".to_string()), "anna");
+    }
+
+    #[test]
+    fn the_guest_name_crosses_the_boundary_intact() {
+        assert_eq!(guest_name(0), "Calm Dog");
     }
 
     #[test]

@@ -248,6 +248,9 @@ function waitForFrame(video: HTMLVideoElement, timeoutMs: number): Promise<boole
 export async function acquireStream(
   kind: CaptureKind,
   facing: "user" | "environment" = "user",
+  /** The profile camera (docs/ux/profile-screen.md section 2.3) asks for the
+   *  camera alone: a profile photo or video never keeps sound. */
+  options: { readonly audio?: boolean; readonly idealSide?: number } = {},
 ): Promise<MediaStream> {
   let stream: MediaStream;
   try {
@@ -255,8 +258,12 @@ export async function acquireStream(
       kind === "voice"
         ? { audio: true }
         : {
-            audio: true,
-            video: { facingMode: facing, width: { ideal: 640 }, height: { ideal: 640 } },
+            audio: options.audio ?? true,
+            video: {
+              facingMode: facing,
+              width: { ideal: options.idealSide ?? 640 },
+              height: { ideal: options.idealSide ?? 640 },
+            },
           },
     );
   } catch (err) {

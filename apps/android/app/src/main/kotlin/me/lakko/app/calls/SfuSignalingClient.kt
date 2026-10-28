@@ -60,12 +60,13 @@ internal fun sfuSubprotocolHeader(jwt: String): String =
  * it touches UI state).
  */
 interface SfuSignalingCallbacks {
-    /** First frame after admission — seeds the roster. */
-    fun onWelcome(selfPeerId: String, callId: String, roster: List<SfuPeerSnapshot>) {}
+    /** First frame after admission — seeds the roster. `room` is the room
+     *  the token named (ADR-0078 section 2). */
+    fun onWelcome(selfPeerId: String, room: String, roster: List<SfuPeerSnapshot>) {}
 
-    /** A participant joined the same call. `peerTag` is the ADR-0021
-     *  per-call tag (empty from a pre-ADR-0021 SFU). */
-    fun onPeerJoined(peerId: String, accountPseudonym: String, peerTag: String) {}
+    /** A participant joined the same call. The SFU says nothing about who it
+     *  is (ADR-0078 section 2): its sealed announcement does. */
+    fun onPeerJoined(peerId: String) {}
 
     /** A participant left. */
     fun onPeerLeft(peerId: String) {}
@@ -337,9 +338,8 @@ class SfuSignalingClient(
     private fun dispatch(frame: SfuServerFrame) {
         when (frame) {
             is SfuServerFrame.Welcome ->
-                callbacks.onWelcome(frame.peerId, frame.callId, frame.roster)
-            is SfuServerFrame.PeerJoined ->
-                callbacks.onPeerJoined(frame.peerId, frame.accountPseudonym, frame.peerTag)
+                callbacks.onWelcome(frame.peerId, frame.room, frame.roster)
+            is SfuServerFrame.PeerJoined -> callbacks.onPeerJoined(frame.peerId)
             is SfuServerFrame.PeerLeft -> callbacks.onPeerLeft(frame.peerId)
             is SfuServerFrame.SignalRelay ->
                 callbacks.onSignalRelay(frame.from, frame.payloadB64)

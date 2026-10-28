@@ -81,8 +81,10 @@ final class SilentContinuityAlignmentTests: XCTestCase {
         var bound: String? = "acct=="
         var asked: [String] = []
 
-        func boundAccount(wakeDevicePseudonymHex: String?) -> String? { bound }
-        func lookupRoute(accountIdB64: String, pushGidHex: String) -> String? { route[pushGidHex] }
+        func boundAccount(wakeSubscriptionIdHex: String?) -> String? { bound }
+        func lookupRoute(accountIdB64: String, pushGidHex: String, subscriptionIdHex: String?) -> String? {
+            route[pushGidHex] ?? (known.contains(pushGidHex) ? pushGidHex : nil)
+        }
         func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool { known.contains(groupHex) }
         func loadIdentitySeed(accountIdB64: String) -> Data? { Data(repeating: 1, count: 32) }
         func loadSnapshot(accountIdB64: String) -> Data? { Data(repeating: 2, count: 8) }
@@ -124,7 +126,7 @@ final class SilentContinuityAlignmentTests: XCTestCase {
         NseProcessedRow(kind: .chat, text: text, attachmentCount: 0, senderKeyB64: sender, resendOrigin: resend)
     }
 
-    private var wake: NsePushWake { NsePushWake(groupHex: groupHex, pointer: 1, devicePseudonymHex: "dd") }
+    private var wake: NsePushWake { NsePushWake(groupHex: groupHex, pointer: 1, subscriptionIdHex: "dd") }
 
     func testAChatRowFromASupersededSenderIsNotPreviewed() async {
         let deps = deps([(1, chat("from the old key", sender: "old"))])
@@ -193,8 +195,8 @@ final class SilentContinuityAlignmentTests: XCTestCase {
 
     func testTheDefaultDependencyObjectDropsNothing() {
         final class Plain: NsePushDecryptDeps {
-            func boundAccount(wakeDevicePseudonymHex: String?) -> String? { nil }
-            func lookupRoute(accountIdB64: String, pushGidHex: String) -> String? { nil }
+            func boundAccount(wakeSubscriptionIdHex: String?) -> String? { nil }
+            func lookupRoute(accountIdB64: String, pushGidHex: String, subscriptionIdHex: String?) -> String? { nil }
             func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool { false }
             func loadIdentitySeed(accountIdB64: String) -> Data? { nil }
             func loadSnapshot(accountIdB64: String) -> Data? { nil }
@@ -215,14 +217,14 @@ final class SilentContinuityAlignmentTests: XCTestCase {
         // is the conversation's root.
         deps.route = [pushGidHex: rootHex]
         let before = nseConversationThread(
-            NsePushWake(groupHex: pushGidHex, pointer: 1, devicePseudonymHex: "dd"), deps)
+            NsePushWake(groupHex: pushGidHex, pointer: 1, subscriptionIdHex: "dd"), deps)
         // After the move: another routing id, naming the successor, which
         // the lineage mirror places in the same conversation.
         let successorGid = String(repeating: "e", count: 64)
         deps.route = [successorGid: groupHex]
         deps.conversation = [groupHex: rootHex]
         let after = nseConversationThread(
-            NsePushWake(groupHex: successorGid, pointer: 1, devicePseudonymHex: "dd"), deps)
+            NsePushWake(groupHex: successorGid, pointer: 1, subscriptionIdHex: "dd"), deps)
         XCTAssertEqual(before, rootHex)
         XCTAssertEqual(after, rootHex, "a successor's notifications stack with those delivered before the move")
     }
@@ -233,22 +235,22 @@ final class SilentContinuityAlignmentTests: XCTestCase {
         let second = String(repeating: "2", count: 64)
         deps.route = [first: groupHex, second: groupHex]
         XCTAssertEqual(
-            nseConversationThread(NsePushWake(groupHex: first, pointer: 1, devicePseudonymHex: "dd"), deps),
-            nseConversationThread(NsePushWake(groupHex: second, pointer: 1, devicePseudonymHex: "dd"), deps))
+            nseConversationThread(NsePushWake(groupHex: first, pointer: 1, subscriptionIdHex: "dd"), deps),
+            nseConversationThread(NsePushWake(groupHex: second, pointer: 1, subscriptionIdHex: "dd"), deps))
     }
 
     func testAWakeThatCannotBeRoutedKeepsItsOwnGroupingKey() {
         let deps = Deps()
         XCTAssertNil(nseConversationThread(
-            NsePushWake(groupHex: pushGidHex, pointer: 1, devicePseudonymHex: "dd"), deps))
+            NsePushWake(groupHex: pushGidHex, pointer: 1, subscriptionIdHex: "dd"), deps))
         deps.bound = nil
         deps.known = [pushGidHex]
         XCTAssertNil(nseConversationThread(
-            NsePushWake(groupHex: pushGidHex, pointer: 1, devicePseudonymHex: "dd"), deps),
+            NsePushWake(groupHex: pushGidHex, pointer: 1, subscriptionIdHex: "dd"), deps),
             "no binding: nothing is read")
         XCTAssertNil(nseConversationThread(nil, deps))
         XCTAssertNil(nseConversationThread(
-            NsePushWake(groupHex: "not-hex", pointer: 1, devicePseudonymHex: "dd"), deps))
+            NsePushWake(groupHex: "not-hex", pointer: 1, subscriptionIdHex: "dd"), deps))
     }
 
     func testALegacyWakeNamingTheGroupItselfIsGroupedByItsConversation() {
@@ -256,7 +258,7 @@ final class SilentContinuityAlignmentTests: XCTestCase {
         deps.known = [groupHex]
         deps.conversation = [groupHex: rootHex]
         XCTAssertEqual(
-            nseConversationThread(NsePushWake(groupHex: groupHex, pointer: 1, devicePseudonymHex: "dd"), deps),
+            nseConversationThread(NsePushWake(groupHex: groupHex, pointer: 1, subscriptionIdHex: "dd"), deps),
             rootHex)
     }
 
@@ -468,25 +470,22 @@ final class SilentContinuityAlignmentTests: XCTestCase {
         XCTAssertEqual(parsedForward.resendOriginMessageId, 8)
     }
 
-    // MARK: - D: an /i/ link from an established contact opens that contact
+    // MARK: - D: an /i/ link from an established contact offers its chat
 
-    @MainActor
-    func testAKnownContactOpensWithNoResultScreen() {
+    /// ADR-0079 / `docs/ux/contact-invite-link.md` section 3 — a link from a
+    /// person already in the contacts sends nothing and offers Open chat: the
+    /// one-to-one when this device holds it, else the contact.
+    func testAKnownContactOffersOpenChat() {
         typealias Model = InviteLandingViewModel
-        XCTAssertNil(Model.contactToOpen(.running))
-        XCTAssertFalse(Model.showsResult(.running))
-
-        let known = Model.State.done(.knownContact(contactMessageId: 41))
-        XCTAssertEqual(Model.contactToOpen(known), 41)
-        XCTAssertFalse(Model.showsResult(known), "no intermediate result screen")
-
-        for result: AcceptInviteResult in [
-            .alreadyAccepted, .expired, .exhausted, .notFound, .damaged, .rateLimited,
-            .accepted(recipientAccountId: Data(), inviterFingerprint: "f", groupIdHex: nil),
-        ] {
-            XCTAssertNil(Model.contactToOpen(.done(result)))
-            XCTAssertTrue(Model.showsResult(.done(result)))
-        }
+        XCTAssertEqual(
+            Model.state(for: .knownContact(contactMessageId: 41, groupIdHex: "ab", statedName: "Anna")),
+            .alreadyContacts(.conversation(groupIdHex: "ab"), statedName: "Anna"))
+        XCTAssertEqual(
+            Model.state(for: .knownContact(contactMessageId: 41, groupIdHex: nil, statedName: nil)),
+            .alreadyContacts(.contact(messageId: 41), statedName: nil))
+        XCTAssertEqual(Model.state(for: .dead), .dead)
+        XCTAssertEqual(Model.state(for: .own), .own)
+        XCTAssertEqual(Model.state(for: .failed(message: "x")), .openFailed)
     }
 }
 

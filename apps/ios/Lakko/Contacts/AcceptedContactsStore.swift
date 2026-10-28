@@ -7,12 +7,10 @@ import Foundation
 /// ACCOUNT.
 ///
 /// Closes (for the accepted list) the long-standing "No persistence yet"
-/// gap noted on ``ContactsRepository`` and unblocks ADR-0021 group-call
-/// roster name resolution: the SFU sends a per-call `peer_tag` derived
-/// from each peer's account_id, and the client re-derives the same over
-/// its contacts' account_ids to resolve a name — which requires the
-/// accepted contacts (each carrying `request.fromAccountId`) to survive a
-/// relaunch.
+/// gap noted on ``ContactsRepository``: the accepted contacts (each carrying
+/// `request.fromAccountId`) survive a relaunch. (A group-call tile is no
+/// longer named through the account id: since ADR-0078 section 2 the SFU
+/// knows no account and each peer announces itself, sealed and signed.)
 ///
 /// ## Why per account (2026-09-30)
 ///
@@ -116,11 +114,37 @@ enum AcceptedContactsStore {
         defaults.set(data, forKey: storageKey(accountIdB64: accountIdB64))
     }
 
+    /// The account keys this account removed from its contacts
+    /// (`docs/ux/conversation-info.md`: removal is local and leaves the
+    /// conversation). The one-to-one adoption rule skips them; an explicit add
+    /// takes a key out again.
+    static func loadRemovedKeys(accountIdB64: String) -> Set<Data> {
+        guard let data = defaults.data(forKey: removedKey(accountIdB64: accountIdB64)),
+              let keys = try? JSONDecoder().decode([Data].self, from: data)
+        else { return [] }
+        return Set(keys)
+    }
+
+    /// Persist ``loadRemovedKeys(accountIdB64:)``. Not written once the
+    /// account's session has ended (``AccountStoreGate``).
+    static func saveRemovedKeys(_ keys: Set<Data>, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        guard let data = try? JSONEncoder().encode(keys.sorted { $0.lexicographicallyPrecedes($1) })
+        else { return }
+        defaults.set(data, forKey: removedKey(accountIdB64: accountIdB64))
+    }
+
+    static func removedKey(accountIdB64: String) -> String {
+        storageKey(accountIdB64: accountIdB64) + ".removed"
+    }
+
     /// Forget-device: drop one account's list (and the old device-wide row,
     /// which nothing reads any more). Other accounts' lists are untouched.
     static func clear(accountIdB64: String) {
         let store = defaults
         store.removeObject(forKey: storageKey(accountIdB64: accountIdB64))
+        store.removeObject(forKey: removedKey(accountIdB64: accountIdB64))
         store.removeObject(forKey: legacyGlobalKey)
     }
 }

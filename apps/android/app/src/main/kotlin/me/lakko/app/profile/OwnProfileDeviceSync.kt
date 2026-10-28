@@ -34,6 +34,8 @@ public fun ownProfileForDevices(profile: OwnProfile?, accountId: ByteArray): Ffi
         accountId = accountId.takeIf { it.size == ACCOUNT_ID_BYTES }?.copyOf(),
         usernameCertificate = null,
         grants = emptyList(),
+        // ADR-0084 — the photo travels with the name, under the same stamp.
+        avatar = profile.avatar?.toFfi(),
     )
 }
 
@@ -79,6 +81,7 @@ public fun adoptOwnProfileFromDevice(
         username = stored?.username,
         updatedAtMs = maxOf(stored?.updatedAtMs ?: 0L, incomingMs),
         nameUpdatedAtMs = incomingMs,
+        avatar = avatarRefsOf(incoming.avatar),
     )
 }
 

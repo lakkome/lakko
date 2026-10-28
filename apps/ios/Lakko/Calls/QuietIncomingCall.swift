@@ -46,6 +46,8 @@ struct QuietIncomingCall: Equatable {
     /// The offer's own media flag, so the word the person reads matches what
     /// the caller chose.
     let video: Bool
+    /// ADR-0084 — the caller's signature key, for their photo.
+    var callerKey: Data? = nil
 
     /// `Voice call` / `Video call` (`docs/ux/calls.md` section 3), derived from
     /// the offer rather than stated twice.
@@ -83,11 +85,12 @@ enum QuietIncomingCallPresentation {
         quiet: Bool,
         groupIdHex: String?,
         callerName: String?,
-        video: Bool
+        video: Bool,
+        callerKey: Data? = nil
     ) -> QuietIncomingCall? {
         guard quiet, state == .ringing, let groupIdHex else { return nil }
         return QuietIncomingCall(
-            groupIdHex: groupIdHex, callerName: callerName, video: video)
+            groupIdHex: groupIdHex, callerName: callerName, video: video, callerKey: callerKey)
     }
 
     /// Does the open chat carry the panel?

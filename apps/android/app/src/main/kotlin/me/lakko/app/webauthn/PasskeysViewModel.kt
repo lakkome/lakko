@@ -368,6 +368,21 @@ public class PasskeysViewModel(
                 // THIS deletion, whatever was proven before, and makes only
                 // this one.
                 if (hasPasskey) assertDeletion()
+                // ADR-0078 section 10: the invite ledgers name no owner, so
+                // the directory cannot delete this account's links. Revoke
+                // every live link this device keeps a record of first, while
+                // the session still works; one it has no record of lives
+                // until it expires.
+                try {
+                    DiscoveryClient().use { discovery ->
+                        discovery.setSessionToken(secrets.sessionToken)
+                        me.lakko.app.contacts.OwnLinks.revokeAll(
+                            me.lakko.app.auth.base64Encode(secrets.accountId), discovery,
+                        )
+                    }
+                } catch (e: Throwable) {
+                    me.lakko.app.rethrowIfCancelled(e) {}
+                }
                 try {
                     client.deleteAccount(grant)
                 } catch (e: WebauthnHttpError) {

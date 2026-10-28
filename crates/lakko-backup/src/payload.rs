@@ -129,9 +129,10 @@ pub struct AcceptedContactRecord {
     /// User-chosen display name (UTF-8). Empty string is valid;
     /// `MAX_DISPLAY_NAME_LEN` bytes max.
     pub display_name: String,
-    /// Sender's 16-byte account_id (ADR-0021), when known. `None` for a
-    /// contact accepted before the account_id was learned. Lets a restored
-    /// contact resolve to an SFU group-call roster `peer_tag`.
+    /// Sender's 16-byte account_id, when known. `None` for a contact
+    /// accepted before the account_id was learned. (It once resolved the
+    /// ADR-0021 SFU peer tag, which ADR-0078 section 2 removed; a call
+    /// roster now names a peer from its own signed announcement.)
     pub account_id: Option<[u8; ACCOUNT_ID_LEN]>,
 }
 

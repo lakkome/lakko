@@ -25,7 +25,7 @@ import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import { ContactsClient } from "./client";
 import { dsAccess } from "../ds/access";
 import { bindRegistrarListAccount, recordRegistrarListEntry } from "../ds/registrar-list";
-import { fakeAccessSigner, fakeRegistrarAuthority, fakeStatementSigner } from "../ds/access-test-doubles";
+import { fakeAccessSigner, fakeRegistrarAuthority, fakeStatementSigner, withCommitRoute } from "../ds/access-test-doubles";
 import type { DsClient } from "../ds/client";
 import type { DiscoveryClient } from "../discovery/client";
 import type { ActingCommitter } from "../chat/committer-beacon";
@@ -99,14 +99,14 @@ function sweepingGroup(): { group: WasmGroup; order: string[] } {
 
 function client(registrations: Array<{ epoch: bigint; revoke: Uint8Array[] }>): ContactsClient {
   let id = 100;
-  const ds = {
+  const ds = withCommitRoute({
     registerGroupEpoch: vi.fn(async (_g: Uint8Array, epoch: bigint, _k: Uint8Array, revoke: Uint8Array[] = []) => {
       registrations.push({ epoch, revoke: [...revoke] });
     }),
     publishGroup: vi.fn(async () => ({ id: (id += 1), createdAt: "t" })),
     publishMailbox: vi.fn(async () => ({ id: (id += 1), createdAt: "t" })),
     fetchGroup: vi.fn(async () => ({ messages: [], hasMore: false })),
-  } as unknown as DsClient;
+  }) as unknown as DsClient;
   return new ContactsClient({} as unknown as DiscoveryClient, ds, {
     identityProvider: () => IDENTITY_TOKEN,
     onPersist: async () => {},

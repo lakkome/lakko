@@ -36,6 +36,26 @@
 //! commit kind. They are what makes leaving possible at all: an owner may not
 //! leave while owner, so without transfer a person was bound to every group they
 //! created.
+//!
+//! **Staged direct commits (ADR-0081, an invariant-#3 change).** Each direct
+//! path a client still sends to a Delivery Service has a staged twin:
+//! [`Group::stage_add_members`] (and `_from_wire`), [`Group::stage_remove_member`],
+//! [`Group::stage_set_group_roles`]. A staged twin builds the same commit with
+//! the same local refusals but leaves the group at epoch N holding it as
+//! pending, exactly as [`Group::stage_pending_proposals`] leaves a sweep, so
+//! the one pending-commit lifecycle serves both: [`Group::has_staged_sweep`],
+//! [`Group::staged_export_secret`] (the N+1 key the commit is registered
+//! under), [`Group::merge_staged_sweep`] (the Delivery Service accepted the
+//! commit) and [`Group::abandon_staged_sweep`] (it refused it; a per-group
+//! `clear_pending_commit`, never a whole-provider restore). The staged commit
+//! is persisted with the group state, so a client records it durably before
+//! sending and can always finish it after a restart: the order ADR-0040
+//! established for crash safety, with the epoch advance held back until the
+//! server decided. While a commit is staged every membership operation on the
+//! group is refused with [`crate::RefusalReason::SweepAlreadyStaged`]. The
+//! eager paths stay for commits no Delivery Service decides on (a founding
+//! commit nobody else receives, a `PublisherGroup` rotation). Pinned by
+//! `tests/staged_direct_commit.rs`.
 
 use openmls::ciphersuite::hash_ref::ProposalRef;
 use openmls::credentials::CredentialType;
@@ -388,6 +408,31 @@ pub(crate) fn decode_pending_external_joins(
     Ok(pending)
 }
 
+/// How a direct commit path ends ([ADR-0081]).
+///
+/// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DirectFinish {
+    /// Merge before returning: the eager path, for a commit no Delivery
+    /// Service decides on (a founding commit nobody else receives, a
+    /// `PublisherGroup` rotation, the tests).
+    Merge,
+    /// Leave the commit staged at N until the Delivery Service answers.
+    Stage,
+}
+
+/// What [`Group::process_incoming_gated`] shows its gate before a commit is
+/// merged: the leaves the commit removes (with their pre-merge signature
+/// keys) and the RFC 9420 references of the KeyPackages it adds (ADR-0015,
+/// ADR-0081 amendment).
+#[derive(Clone, Debug, Default)]
+pub struct GatedCommit {
+    /// Each removed leaf and its signature public key before the merge.
+    pub removed: Vec<(LeafNodeIndex, Vec<u8>)>,
+    /// The `KeyPackageRef` of every KeyPackage the commit adds.
+    pub added_key_package_refs: Vec<Vec<u8>>,
+}
+
 /// Output of [`Group::add_member`].
 ///
 /// - `commit` is broadcast to existing group members so they can advance
@@ -663,6 +708,46 @@ impl Group {
     /// if the message is not a Welcome, or [`Error::Group`] on OpenMLS
     /// failure (e.g. signature mismatch, ciphersuite mismatch).
     pub fn join_from_welcome(welcome_bytes: &[u8], identity: &Identity) -> Result<Self> {
+        Self::join_admitted(
+            welcome_bytes,
+            identity,
+            WelcomeAdmission::Conversation,
+            None,
+        )
+    }
+
+    /// Join a group that carries NO role table, a [`crate::DeviceGroup`] or a
+    /// [`crate::PublisherGroup`], from a Welcome ([ADR-0081] amendment of
+    /// 2026-10-19). [`Group::join_from_welcome`] refuses such a Welcome, so
+    /// these two types join through here and nowhere else.
+    ///
+    /// Refuses a Welcome that DOES carry the `0xFF02` role table (a
+    /// conversation is never joined as a device or publisher group) and, when
+    /// `expected_group_id` is given, a Welcome for any other group.
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+    pub(crate) fn join_table_less_from_welcome(
+        welcome_bytes: &[u8],
+        identity: &Identity,
+        expected_group_id: Option<&[u8]>,
+    ) -> Result<Self> {
+        Self::join_admitted(
+            welcome_bytes,
+            identity,
+            WelcomeAdmission::TableLess,
+            expected_group_id,
+        )
+    }
+
+    /// The one Welcome join. Every check that can refuse runs on the STAGED
+    /// Welcome, before `into_group` writes anything, so a refused join leaves
+    /// no group in the identity's storage.
+    fn join_admitted(
+        welcome_bytes: &[u8],
+        identity: &Identity,
+        admission: WelcomeAdmission,
+        expected_group_id: Option<&[u8]>,
+    ) -> Result<Self> {
         let mls_in = decode_message(welcome_bytes)?;
         let MlsMessageBodyIn::Welcome(welcome) = mls_in.extract() else {
             return Err(Error::Unsupported("expected Welcome message"));
@@ -673,27 +758,40 @@ impl Group {
             .build();
         let staged = StagedWelcome::new_from_welcome(&identity.provider, &cfg, welcome, None)
             .map_err(|e| Error::Group(format!("staged welcome: {e:?}")))?;
-        // ADR-0062: a conversation (a group carrying the ADR-0022 role table)
-        // must say what kind it is, readably, or it is not joined — checked
-        // before the group is written to storage, so a refused Welcome leaves
-        // nothing behind. A device that cannot classify a conversation must
-        // never have to guess (invariant #4 shape: refuse rather than degrade).
-        refuse_unclassifiable_conversation(staged.group_context().extensions())?;
-        let inner = staged
-            .into_group(&identity.provider)
-            .map_err(|e| Error::Group(format!("welcome -> group: {e:?}")))?;
-
-        let group = Self::from_mls_group(inner);
+        // ADR-0062 + ADR-0081 amendment: an ordinary group is a conversation,
+        // so it carries the role table and its kind, readably, or it is not
+        // joined; a device or publisher group carries no role table. A device
+        // that cannot classify a group must never have to guess (invariant #4
+        // shape: refuse rather than degrade).
+        admit_welcome(staged.group_context().extensions(), admission)?;
+        if let Some(expected) = expected_group_id {
+            if staged.group_context().group_id().as_slice() != expected {
+                return Err(Error::Group(
+                    "welcome refused: it is for another group than the one expected".into(),
+                ));
+            }
+        }
         // ADR-0050: the joiner checks the roster it lands in. A leaf whose
         // credential resolves to no account was admitted by a gate that is
-        // not Lakko's; refuse the group rather than reason about it.
-        if group.members().iter().any(|m| m.account_key.is_empty()) {
+        // not Lakko's; refuse the group rather than reason about it. Checked
+        // on the staged roster, the same resolution `members()` applies.
+        let unbound = staged.members().any(|m| {
+            crate::device_binding::account_key_of_credential(
+                m.credential.serialized_content(),
+                &m.signature_key,
+            )
+            .is_none()
+        });
+        if unbound {
             return Err(Error::refused(
                 RefusalReason::DeviceBindingInvalid,
                 "welcome refused: a member's device binding does not verify",
             ));
         }
-        Ok(group)
+        let inner = staged
+            .into_group(&identity.provider)
+            .map_err(|e| Error::Group(format!("welcome -> group: {e:?}")))?;
+        Ok(Self::from_mls_group(inner))
     }
 
     /// **A direct commit must never carry a proposal it did not ask for.**
@@ -814,6 +912,103 @@ impl Group {
         ))
     }
 
+    /// Refuse to build a commit while one is staged ([ADR-0081]).
+    ///
+    /// OpenMLS refuses too (a group holding a pending commit is not
+    /// operational), but with an untyped error; this gives the caller the
+    /// same typed refusal a second [`Group::stage_pending_proposals`] gets.
+    /// Building a second commit would replace the first, which may already
+    /// be on the Delivery Service.
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+    fn refuse_if_commit_staged(&self, op: &str) -> Result<()> {
+        if self.has_staged_sweep() {
+            return Err(Error::refused(
+                RefusalReason::SweepAlreadyStaged,
+                format!("{op} refused: a staged commit is already awaiting a verdict"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// End a direct commit path: merge it, or leave it staged.
+    fn finish_direct(&mut self, identity: &Identity, finish: DirectFinish) -> Result<()> {
+        if finish == DirectFinish::Merge {
+            self.inner
+                .merge_pending_commit(&identity.provider)
+                .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+        }
+        Ok(())
+    }
+
+    /// Replace one leaf by a new member in ONE commit: remove `leaf` and add
+    /// `key_package` ([ADR-0081] amendment, the DeviceGroup rejoin under the
+    /// attested-removal policy). The commit carries both proposals by value,
+    /// so peers need no stored proposal to apply it. Merges eagerly, like
+    /// [`Self::add_member`]; the DeviceGroup's commit outbox keeps the
+    /// durable state at N until the Delivery Service took the commit.
+    ///
+    /// The same local refusals as the two eager paths it combines: a commit
+    /// already staged, a pending member proposal, a leaf whose device binding
+    /// does not resolve to an account.
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] for the refusals above or any OpenMLS-side failure;
+    /// [`RefusalReason::DeviceBindingInvalid`] for an unbound leaf.
+    pub fn replace_member(
+        &mut self,
+        identity: &Identity,
+        leaf: LeafNodeIndex,
+        key_package: KeyPackage,
+    ) -> Result<MemberAddition> {
+        self.refuse_if_commit_staged("replace_member")?;
+        self.refuse_if_proposals_pending("replace_member")?;
+        let added = key_package.leaf_node();
+        if crate::device_binding::account_key_of_credential(
+            added.credential().serialized_content(),
+            added.signature_key().as_slice(),
+        )
+        .is_none()
+        {
+            return Err(Error::refused(
+                RefusalReason::DeviceBindingInvalid,
+                "replace_member refused: the added leaf's device binding does not verify",
+            ));
+        }
+        let bundle = self
+            .inner
+            .commit_builder()
+            .consume_proposal_store(false)
+            .propose_removals([leaf])
+            .propose_adds([key_package])
+            .load_psks(identity.provider.storage())
+            .map_err(|e| Error::Group(format!("replace_member load_psks: {e:?}")))?
+            .build(
+                identity.provider.rand(),
+                identity.provider.crypto(),
+                &identity.signature_keys,
+                // The filter also sees the two proposals above; the store is
+                // excluded by `consume_proposal_store(false)`.
+                |_| true,
+            )
+            .map_err(|e| Error::Group(format!("replace_member build: {e:?}")))?
+            .stage_commit(&identity.provider)
+            .map_err(|e| Error::Group(format!("replace_member stage_commit: {e:?}")))?;
+        let (commit, welcome, _group_info) = bundle.into_contents();
+        let welcome = welcome
+            .ok_or_else(|| Error::Group("replace_member: the commit carries no Welcome".into()))?;
+        self.inner
+            .merge_pending_commit(&identity.provider)
+            .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+        Ok(MemberAddition {
+            commit,
+            welcome: MlsMessageOut::from_welcome(welcome, ProtocolVersion::Mls10),
+        })
+    }
+
     /// Add a member by their published [`KeyPackage`].
     ///
     /// Consumes one of the new member's published KeyPackages on success.
@@ -861,9 +1056,53 @@ impl Group {
         identity: &Identity,
         key_packages: Vec<KeyPackage>,
     ) -> Result<MemberAddition> {
+        self.add_members_finishing(identity, key_packages, DirectFinish::Merge)
+    }
+
+    /// [`Self::add_members`], **staged** instead of merged ([ADR-0081]).
+    ///
+    /// The commit and the Welcome are built exactly as the eager path builds
+    /// them, every local refusal included, but the group stays at epoch N
+    /// holding the commit as pending, as [`Group::stage_pending_proposals`]
+    /// leaves a sweep. The caller records the commit durably, sends it with
+    /// the key of N+1 ([`Group::staged_export_secret`]), and then either
+    /// merges ([`Group::merge_staged_sweep`], on the Delivery Service's
+    /// acceptance) or abandons ([`Group::abandon_staged_sweep`], on its
+    /// refusal). The staged commit is part of the group state OpenMLS
+    /// persists, so it survives a snapshot and a restart.
+    ///
+    /// **No client calls this today.** The ADR-0081 amendment of 2026-10-19
+    /// deleted the clients' direct-commit paths for ordinary groups (a group
+    /// with no role table is refused, and [`Self::join_from_welcome`] refuses
+    /// its Welcome), so every membership change is a proposal swept through
+    /// [`Self::stage_pending_proposals`]. The twin stays in the core, with its
+    /// tests, as the staged form of a direct commit.
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::add_members`] returns, and a typed
+    /// [`RefusalReason::SweepAlreadyStaged`] refusal while any commit is
+    /// staged.
+    pub fn stage_add_members(
+        &mut self,
+        identity: &Identity,
+        key_packages: Vec<KeyPackage>,
+    ) -> Result<MemberAddition> {
+        self.add_members_finishing(identity, key_packages, DirectFinish::Stage)
+    }
+
+    fn add_members_finishing(
+        &mut self,
+        identity: &Identity,
+        key_packages: Vec<KeyPackage>,
+        finish: DirectFinish,
+    ) -> Result<MemberAddition> {
         if key_packages.is_empty() {
             return Err(Error::Group("add_members: no KeyPackage given".to_owned()));
         }
+        self.refuse_if_commit_staged("add_member")?;
         self.refuse_if_proposals_pending("add_member")?;
         // ADR-0050: the direct path admits nothing the proposal path would
         // refuse — a leaf whose credential does not resolve to an account.
@@ -895,9 +1134,7 @@ impl Group {
             .add_members(&identity.provider, &identity.signature_keys, &key_packages)
             .map_err(|e| Error::Group(format!("add_members: {e:?}")))?;
 
-        self.inner
-            .merge_pending_commit(&identity.provider)
-            .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+        self.finish_direct(identity, finish)?;
 
         Ok(MemberAddition { commit, welcome })
     }
@@ -973,6 +1210,30 @@ impl Group {
         identity: &Identity,
         key_packages: &[&[u8]],
     ) -> Result<MemberAddition> {
+        let validated = Self::validate_key_packages(identity, key_packages)?;
+        self.add_members(identity, validated)
+    }
+
+    /// [`Self::add_members_from_wire`], staged ([`Self::stage_add_members`]).
+    /// No client calls this today (see [`Self::stage_add_members`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::KeyPackage`] for a validation failure of any package, else
+    /// what [`Self::stage_add_members`] returns.
+    pub fn stage_add_members_from_wire(
+        &mut self,
+        identity: &Identity,
+        key_packages: &[&[u8]],
+    ) -> Result<MemberAddition> {
+        let validated = Self::validate_key_packages(identity, key_packages)?;
+        self.stage_add_members(identity, validated)
+    }
+
+    fn validate_key_packages(
+        identity: &Identity,
+        key_packages: &[&[u8]],
+    ) -> Result<Vec<KeyPackage>> {
         let mut validated = Vec::with_capacity(key_packages.len());
         for bytes in key_packages {
             let kp_in = crate::key_package::deserialize(bytes)?;
@@ -982,7 +1243,7 @@ impl Group {
                     .map_err(|e| Error::KeyPackage(format!("validate: {e:?}")))?,
             );
         }
-        self.add_members(identity, validated)
+        Ok(validated)
     }
 
     /// Remove a member identified by their leaf index.
@@ -1000,6 +1261,35 @@ impl Group {
         identity: &Identity,
         leaf: LeafNodeIndex,
     ) -> Result<MlsMessageOut> {
+        self.remove_member_finishing(identity, leaf, DirectFinish::Merge)
+    }
+
+    /// [`Self::remove_member`], staged ([ADR-0081]; see
+    /// [`Self::stage_add_members`] for the lifecycle). No client calls this
+    /// today (see the same place).
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::remove_member`] returns, and a typed
+    /// [`RefusalReason::SweepAlreadyStaged`] refusal while any commit is
+    /// staged.
+    pub fn stage_remove_member(
+        &mut self,
+        identity: &Identity,
+        leaf: LeafNodeIndex,
+    ) -> Result<MlsMessageOut> {
+        self.remove_member_finishing(identity, leaf, DirectFinish::Stage)
+    }
+
+    fn remove_member_finishing(
+        &mut self,
+        identity: &Identity,
+        leaf: LeafNodeIndex,
+        finish: DirectFinish,
+    ) -> Result<MlsMessageOut> {
+        self.refuse_if_commit_staged("remove_member")?;
         self.refuse_if_proposals_pending("remove_member")?;
         // ADR-0062: removing a person's last leaf from a one-to-one is refused
         // here, locally, before the commit is built; every peer refuses it too.
@@ -1013,9 +1303,7 @@ impl Group {
             .remove_members(&identity.provider, &identity.signature_keys, &[leaf])
             .map_err(|e| Error::Group(format!("remove_members: {e:?}")))?;
 
-        self.inner
-            .merge_pending_commit(&identity.provider)
-            .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+        self.finish_direct(identity, finish)?;
 
         Ok(commit)
     }
@@ -1037,6 +1325,16 @@ impl Group {
         identity: &Identity,
         extensions: Extensions<GroupContext>,
     ) -> Result<MlsMessageOut> {
+        self.set_group_context_extensions_finishing(identity, extensions, DirectFinish::Merge)
+    }
+
+    fn set_group_context_extensions_finishing(
+        &mut self,
+        identity: &Identity,
+        extensions: Extensions<GroupContext>,
+        finish: DirectFinish,
+    ) -> Result<MlsMessageOut> {
+        self.refuse_if_commit_staged("set_group_context_extensions")?;
         self.refuse_if_proposals_pending("set_group_context_extensions")?;
         // ADR-0062: a one-to-one's GroupContext is frozen from creation, and no
         // rewrite anywhere may change a conversation's kind. Both are refused
@@ -1063,9 +1361,7 @@ impl Group {
             )
             .map_err(|e| Error::Group(format!("update_group_context_extensions: {e:?}")))?;
 
-        self.inner
-            .merge_pending_commit(&identity.provider)
-            .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+        self.finish_direct(identity, finish)?;
 
         Ok(commit)
     }
@@ -1680,12 +1976,40 @@ impl Group {
     /// of the group, when a member proposal is pending (see
     /// [`Self::refuse_if_proposals_pending`]), or on any OpenMLS-side failure.
     pub fn set_group_roles(&mut self, identity: &Identity, roles: &RoleTable) -> Result<Vec<u8>> {
+        self.set_group_roles_finishing(identity, roles, DirectFinish::Merge)
+    }
+
+    /// [`Self::set_group_roles`], staged ([ADR-0081]; see
+    /// [`Self::stage_add_members`] for the lifecycle). No client calls this
+    /// today (see the same place).
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::set_group_roles`] returns, and a typed
+    /// [`RefusalReason::SweepAlreadyStaged`] refusal while any commit is
+    /// staged.
+    pub fn stage_set_group_roles(
+        &mut self,
+        identity: &Identity,
+        roles: &RoleTable,
+    ) -> Result<Vec<u8>> {
+        self.set_group_roles_finishing(identity, roles, DirectFinish::Stage)
+    }
+
+    fn set_group_roles_finishing(
+        &mut self,
+        identity: &Identity,
+        roles: &RoleTable,
+        finish: DirectFinish,
+    ) -> Result<Vec<u8>> {
         self.refuse_unenforceable_role_table(identity, roles)?;
         // `set_group_context_extensions` replaces the whole extension set, so
         // the list is the current one verbatim with only the role table swapped
         // (ADR-0062 — the kind and `required_capabilities` ride through).
         let exts = self.role_rewrite_extensions(roles)?;
-        let commit = self.set_group_context_extensions(identity, exts)?;
+        let commit = self.set_group_context_extensions_finishing(identity, exts, finish)?;
         encode_message(&commit)
     }
 
@@ -2761,10 +3085,15 @@ impl Group {
             && one_to_one_holds(&effects, members, self.group_kind()).is_ok()
     }
 
-    /// `true` when a sweep built by [`Group::stage_pending_proposals`] is
-    /// staged and still awaiting its journal verdict.
+    /// `true` when a commit is staged and still awaiting its verdict: a sweep
+    /// built by [`Group::stage_pending_proposals`], or (since [ADR-0081]) a
+    /// direct commit built by [`Group::stage_add_members`],
+    /// [`Group::stage_remove_member`] or [`Group::stage_set_group_roles`].
+    /// The verdict entry points below ([`Group::staged_export_secret`],
+    /// [`Group::merge_staged_sweep`], [`Group::abandon_staged_sweep`]) serve
+    /// both: OpenMLS holds one pending commit per group, whatever built it.
     ///
-    /// Only that method can put this group into that state. Every
+    /// Only those methods can put this group into that state. Every eager
     /// direct-commit path ([`Group::add_member`], [`Group::remove_member`],
     /// [`Group::set_group_context_extensions`], [`Group::self_update`],
     /// [`Group::approve_external_join`]) merges before it returns, and
@@ -2772,6 +3101,8 @@ impl Group {
     /// after any of them this is `false` and the verdict entry points below are
     /// no-ops. That is the whole reason a rollback here cannot reach a path
     /// that never had one.
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
     #[must_use]
     pub fn has_staged_sweep(&self) -> bool {
         self.inner.pending_commit().is_some()
@@ -3327,7 +3658,7 @@ impl Group {
         gate: F,
     ) -> Result<Incoming>
     where
-        F: FnOnce(&[(LeafNodeIndex, Vec<u8>)]) -> Result<()>,
+        F: FnOnce(&GatedCommit) -> Result<()>,
     {
         let mls_in = decode_message(bytes)?;
         let protocol = mls_in
@@ -3366,8 +3697,26 @@ impl Group {
                     })
                     .collect();
 
+                // ADR-0081 amendment — the references of the KeyPackages the
+                // same commit adds, so a self-removal proof can be checked
+                // against the replacement it names. A reference that cannot
+                // be computed is left out, which can only refuse a proof.
+                let added_key_package_refs: Vec<Vec<u8>> = staged
+                    .add_proposals()
+                    .filter_map(|qap| {
+                        qap.add_proposal()
+                            .key_package()
+                            .hash_ref(identity.provider.crypto())
+                            .ok()
+                            .map(|r| r.as_slice().to_vec())
+                    })
+                    .collect();
+
                 // Refuse-to-apply hook — runs before the merge.
-                gate(&removed)?;
+                gate(&GatedCommit {
+                    removed,
+                    added_key_package_refs,
+                })?;
 
                 self.inner
                     .merge_staged_commit(&identity.provider, *staged)
@@ -3525,6 +3874,34 @@ impl Group {
             .collect()
     }
 
+    /// `true` when a leaf of this group carries the leaf node of the
+    /// wire-format KeyPackage `key_package_bytes` (the same HPKE encryption
+    /// key): that KeyPackage was already admitted ([ADR-0081] amendment).
+    /// The rejoin replaces a leaf by one with the SAME signature key, often at
+    /// the same leaf index, so a roster of keys cannot tell whether a knock
+    /// was already answered; the leaf's encryption key can, until the device
+    /// next updates its leaf. A KeyPackage that does not validate answers
+    /// `false`. `identity` supplies the crypto provider.
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+    #[must_use]
+    pub fn contains_leaf_of_key_package(
+        &self,
+        identity: &Identity,
+        key_package_bytes: &[u8],
+    ) -> bool {
+        let Ok(kp_in) = crate::key_package::deserialize(key_package_bytes) else {
+            return false;
+        };
+        let Ok(kp) = kp_in.validate(identity.provider.crypto(), ProtocolVersion::Mls10) else {
+            return false;
+        };
+        let leaf_key = kp.leaf_node().encryption_key();
+        self.inner
+            .members()
+            .any(|m| EncryptionKey::from(m.encryption_key) == *leaf_key)
+    }
+
     /// MLS `group_id` (RFC 9420 §6.2) — the opaque identifier
     /// shared by every member of the group at every epoch.
     ///
@@ -3620,6 +3997,36 @@ fn conversation_required_capabilities() -> Extension {
 /// but no `0xFF03`, or an `0xFF03` body that does not decode. A group with no
 /// role table is not a conversation (`PublisherGroup`, `DeviceGroup`) and is
 /// not asked.
+/// Which groups a Welcome join admits ([`Group::join_admitted`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WelcomeAdmission {
+    /// An ordinary group: a conversation, with the `0xFF02` role table and a
+    /// readable `0xFF03` kind.
+    Conversation,
+    /// A [`crate::DeviceGroup`] or [`crate::PublisherGroup`]: no role table.
+    TableLess,
+}
+
+/// The admission rule of a Welcome's GroupContext ([ADR-0062], [ADR-0081]
+/// amendment of 2026-10-19).
+///
+/// [ADR-0062]: ../../../docs/adr/0062-conversation-kind.md
+/// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+fn admit_welcome(extensions: &Extensions<GroupContext>, admission: WelcomeAdmission) -> Result<()> {
+    let has_roles = extensions.unknown(ROLE_EXTENSION_TYPE).is_some();
+    match admission {
+        WelcomeAdmission::TableLess if has_roles => Err(Error::Group(
+            "welcome refused: a conversation is not joined as a device or publisher group".into(),
+        )),
+        WelcomeAdmission::TableLess => Ok(()),
+        WelcomeAdmission::Conversation if !has_roles => Err(Error::refused(
+            RefusalReason::NoRoleTable,
+            "welcome refused: the group carries no role table, so it is not a conversation",
+        )),
+        WelcomeAdmission::Conversation => refuse_unclassifiable_conversation(extensions),
+    }
+}
+
 fn refuse_unclassifiable_conversation(extensions: &Extensions<GroupContext>) -> Result<()> {
     if extensions.unknown(ROLE_EXTENSION_TYPE).is_none() {
         return Ok(());
@@ -7399,7 +7806,10 @@ mod external_join_tests {
             .approve_external_join(&alice, &bob_pk)
             .expect("the direct approve is the one that survives here");
         let welcome = encode_message(&addition.welcome).expect("encode welcome");
-        Group::join_from_welcome(&welcome, &bob).expect("bob joins from the Welcome");
+        // A table-less group's Welcome joins through the table-less entry point
+        // only (ADR-0081 second amendment: the conversation one refuses it).
+        Group::join_table_less_from_welcome(&welcome, &bob, None)
+            .expect("bob joins from the Welcome");
         assert!(pg.inner().pending_external_joins().is_empty());
     }
 
@@ -7839,5 +8249,130 @@ mod one_to_one_gate_tests {
         let (welcome, joiner) = welcome_into(Some(GroupKind::OneToOne.extension()), 0x0B);
         let g = Group::join_from_welcome(&welcome, &joiner).expect("joins");
         assert_eq!(g.group_kind(), Some(GroupKind::OneToOne));
+    }
+
+    // ---- ADR-0081 amendment (2026-10-19): Welcome admission ----
+
+    /// A group with NO role table (the `create_with_id` shape a
+    /// PublisherGroup uses), `joiner` added, and its Welcome.
+    fn table_less_welcome(tag: u8) -> (Vec<u8>, Identity, Vec<u8>) {
+        let founder = Identity::from_seed(&[0x80 ^ tag; 64]).expect("founder");
+        let joiner = Identity::from_seed(&[0x90 ^ tag; 64]).expect("joiner");
+        let gid = vec![tag; GROUP_ID_LEN];
+        let mut g = Group::create_with_id(&founder, &gid).expect("founded");
+        assert!(g.group_roles().is_none(), "no role table");
+        let add = g
+            .add_member_from_wire(&founder, &kp_wire(&joiner))
+            .expect("add");
+        (wire(add.welcome), joiner, gid)
+    }
+
+    #[test]
+    fn a_welcome_without_a_role_table_is_refused_and_leaves_nothing() {
+        let (welcome, joiner, gid) = table_less_welcome(0x21);
+        let err = Group::join_from_welcome(&welcome, &joiner)
+            .err()
+            .expect("refused");
+        assert_eq!(
+            reason(&err),
+            Some(RefusalReason::NoRoleTable),
+            "typed: {err}"
+        );
+        assert!(
+            Group::load(&joiner, &gid).expect("load").is_none(),
+            "a refused join leaves no group in storage"
+        );
+        // Nothing of the joiner's was consumed either: the same Welcome still
+        // opens through the table-less entry point (its KeyPackage keys are
+        // deleted only when a join is written).
+        let g = Group::join_table_less_from_welcome(&welcome, &joiner, Some(&gid))
+            .expect("the table-less entry point joins it");
+        assert_eq!(g.group_id(), gid);
+        assert!(Group::load(&joiner, &gid).expect("load").is_some());
+    }
+
+    #[test]
+    fn a_conversation_welcome_without_a_kind_leaves_nothing() {
+        let (welcome, joiner) = welcome_into(None, 0x22);
+        assert!(Group::join_from_welcome(&welcome, &joiner).is_err());
+        assert!(Group::load(&joiner, &[0x22; GROUP_ID_LEN])
+            .expect("load")
+            .is_none());
+    }
+
+    #[test]
+    fn a_chat_welcome_joins_and_the_table_less_entry_point_refuses_it_leaving_nothing() {
+        let founder = Identity::from_seed(&[0x23; 64]).expect("founder");
+        let joiner = Identity::from_seed(&[0x24; 64]).expect("joiner");
+        let mut g = Group::create(&founder, GroupKind::Group).expect("chat");
+        let gid = g.group_id();
+        let add = g
+            .add_member_from_wire(&founder, &kp_wire(&joiner))
+            .expect("add");
+        let welcome = wire(add.welcome);
+        assert!(
+            Group::join_table_less_from_welcome(&welcome, &joiner, None).is_err(),
+            "a conversation is never joined as a device or publisher group"
+        );
+        assert!(Group::load(&joiner, &gid).expect("load").is_none());
+        let chat = Group::join_from_welcome(&welcome, &joiner).expect("the chat joins");
+        assert_eq!(chat.group_kind(), Some(GroupKind::Group));
+        assert!(chat.group_roles().is_some());
+    }
+
+    #[test]
+    fn a_table_less_welcome_for_another_group_is_refused_before_anything_is_written() {
+        let (welcome, joiner, gid) = table_less_welcome(0x25);
+        let other = vec![0x26; GROUP_ID_LEN];
+        assert!(Group::join_table_less_from_welcome(&welcome, &joiner, Some(&other)).is_err());
+        assert!(Group::load(&joiner, &gid).expect("load").is_none());
+        assert!(Group::join_table_less_from_welcome(&welcome, &joiner, Some(&gid)).is_ok());
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 64,
+            .. proptest::prelude::ProptestConfig::default()
+        })]
+
+        /// The admission table, over every combination of what a Welcome's
+        /// GroupContext can carry: a conversation needs the role table AND a
+        /// readable kind; a device or publisher group needs no role table
+        /// (whatever else it carries).
+        #[test]
+        fn welcome_admission_follows_the_table(
+            roles in proptest::bool::ANY,
+            kind in 0u8..3, // 0 none, 1 readable, 2 unreadable
+            table_less in proptest::bool::ANY,
+        ) {
+            let mut exts = Vec::new();
+            if roles {
+                exts.push(Extension::Unknown(
+                    ROLE_EXTENSION_TYPE,
+                    UnknownExtension(RoleTable::owner_only([7; 32]).encode()),
+                ));
+            }
+            match kind {
+                1 => exts.push(GroupKind::Group.extension()),
+                2 => exts.push(Extension::Unknown(
+                    GROUP_KIND_EXTENSION_TYPE,
+                    UnknownExtension(vec![0x01, 0x09]),
+                )),
+                _ => {}
+            }
+            let exts: Extensions<GroupContext> = Extensions::from_vec(exts).expect("exts");
+            let admission = if table_less {
+                WelcomeAdmission::TableLess
+            } else {
+                WelcomeAdmission::Conversation
+            };
+            let admitted = admit_welcome(&exts, admission).is_ok();
+            let expected = if table_less { !roles } else { roles && kind == 1 };
+            proptest::prop_assert_eq!(admitted, expected);
+            if !table_less && !roles {
+                let reason = admit_welcome(&exts, admission).err().and_then(|e| reason(&e));
+                proptest::prop_assert_eq!(reason, Some(RefusalReason::NoRoleTable));
+            }
+        }
     }
 }

@@ -24,21 +24,25 @@ public enum class ReachKind {
     /** The one party a request of the owner's went to. Scope: a random id. */
     REPLY,
 
-    /** Members of a group the owner lets find them. Scope: the group id. */
+    /** Members of the groups the owner lets find them. Empty scope: one key
+     *  for every group (ADR-0078 section 9). */
     GROUP,
 
-    /** Every co-member of a group, whatever the setting. Scope: the group id. */
+    /** Every co-member of every group, whatever the setting. Empty scope. */
     MEMBER,
 
-    /** Members of a channel the owner lets find them. Scope: the channel id. */
+    /** Members of the channels the owner lets find them. Empty scope. */
     CHANNEL,
 
     /** Contacts of contacts. Empty scope. */
     FOF,
     ;
 
-    /** Whether the class is derived over an empty scope. */
-    public val scopeless: Boolean get() = this == CONTACT || this == FOF
+    /** Whether the class is ONE key per account, derived over an empty scope:
+     *  every class but `link` and `reply` (ADR-0078 section 9 made `group`,
+     *  `member` and `channel` account-wide, so a mailbox write under one no
+     *  longer names the group or channel its writer shares with the owner). */
+    public val scopeless: Boolean get() = this != LINK && this != REPLY
 }
 
 /** How long a `reply` key lives (ADR-0060 §1): seven days, chosen, not measured. */
@@ -93,12 +97,14 @@ public data class ReachInputs(
 
 /**
  * The key set the owner's mailbox should hold at [nowMs] (ADR-0060 §1, the
- * client contract "Reach keys the owner holds").
+ * client contract "Reach keys the owner holds"; ADR-0078 section 9).
  *
- * `contact` is always there (a contact can always write); `member` for every
- * joined group; `group` / `channel` only where the setting allows; `fof` only
- * with part 2.1 on; a link key per live link; a reply key per waiting request.
- * An expired link or reply contributes nothing, so the diff removes its key.
+ * `contact` is always there (a contact can always write); ONE `member` key
+ * while the account is in any group; ONE `group` key while the setting lets
+ * the members of any joined group find the owner; ONE `channel` key while it
+ * lets the members of any channel find the owner; `fof` only with part 2.1
+ * on; a link key per live link; a reply key per waiting request. An expired
+ * link or reply contributes nothing, so the diff removes its key.
  */
 public fun desiredReachKeys(inputs: ReachInputs, nowMs: Long): List<DesiredReachKey> {
     fun version(slot: ReachSlot): Int = inputs.versions[slot] ?: 0
@@ -109,11 +115,9 @@ public fun desiredReachKeys(inputs: ReachInputs, nowMs: Long): List<DesiredReach
     }
     add(ReachKind.CONTACT, "", null)
     if (inputs.contactsOfContacts) add(ReachKind.FOF, "", null)
-    for (group in inputs.joinedGroups.sorted()) add(ReachKind.MEMBER, group, null)
-    for (group in inputs.visibleGroups.filter { it in inputs.joinedGroups }.sorted()) {
-        add(ReachKind.GROUP, group, null)
-    }
-    for (channel in inputs.visibleChannels.sorted()) add(ReachKind.CHANNEL, channel, null)
+    if (inputs.joinedGroups.isNotEmpty()) add(ReachKind.MEMBER, "", null)
+    if (inputs.visibleGroups.any { it in inputs.joinedGroups }) add(ReachKind.GROUP, "", null)
+    if (inputs.visibleChannels.isNotEmpty()) add(ReachKind.CHANNEL, "", null)
     for ((link, expiry) in inputs.links.toSortedMap()) {
         if (expiry != null && expiry <= nowMs) continue
         add(ReachKind.LINK, link, expiry)
@@ -362,21 +366,37 @@ public fun holdsNoVersionState(versionsEmpty: Boolean, registeredEmpty: Boolean,
 public fun reachSlotId(slot: ReachSlot): String = slot.kind.name + ":" + slot.scopeHex
 
 /**
- * The slots a restored device can name and recover: `contact` and `fof`
- * (empty scope), `group` and `member` of each group it holds, `channel` of
- * each channel it holds. `link` and `reply` are per capability or single use
- * and are never recovered.
+ * The slots a restored device can name and recover: `contact` and `fof`,
+ * `group` and `member` once it holds any group, `channel` once it holds any
+ * channel (all empty-scoped, ADR-0078 section 9). `link` and `reply` are per
+ * capability or single use and are never recovered.
  */
 public fun recoverableSlots(joinedGroups: Collection<String>, channels: Collection<String>): List<ReachSlot> {
     val out = ArrayList<ReachSlot>()
     out += ReachSlot(ReachKind.CONTACT, "")
     out += ReachSlot(ReachKind.FOF, "")
-    for (group in joinedGroups.map { it.lowercase() }.distinct().sorted()) {
-        out += ReachSlot(ReachKind.MEMBER, group)
-        out += ReachSlot(ReachKind.GROUP, group)
+    if (joinedGroups.isNotEmpty()) {
+        out += ReachSlot(ReachKind.MEMBER, "")
+        out += ReachSlot(ReachKind.GROUP, "")
     }
-    for (channel in channels.map { it.lowercase() }.distinct().sorted()) out += ReachSlot(ReachKind.CHANNEL, channel)
+    if (channels.isNotEmpty()) out += ReachSlot(ReachKind.CHANNEL, "")
     return out
+}
+
+/**
+ * ADR-0078 section 9 — whether the account LEFT a group (or a channel)
+ * between two membership lists (hex ids): an id present in [previous] is
+ * absent from [current]. Its members still hold this account's one key of
+ * that class, so the class rotates. An empty [current] while [previous] was
+ * not is read as "not loaded yet", never as leaving everything (with no group
+ * at all no `group` / `member` key is registered anyway); an empty
+ * [previous] (the first list) rotates nothing. The same rule as web's
+ * `departuresOf` and iOS `ReachRules.departures`.
+ */
+public fun reachDeparted(previous: Collection<String>, current: Collection<String>): Boolean {
+    if (previous.isEmpty() || current.isEmpty()) return false
+    val now = current.map { it.lowercase() }.toHashSet()
+    return previous.any { it.lowercase() !in now }
 }
 
 /**

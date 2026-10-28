@@ -48,6 +48,8 @@ import {
   applyVersionChecks,
   adoptReachState,
   bindReachBook,
+  departuresOf,
+  rotateClasses,
   bookHoldsNoVersionState,
   bumpVersion,
   decodeReachBook,
@@ -62,7 +64,6 @@ import {
   pruneExpired,
   reachClassName,
   reachStateEntries,
-  raiseVersion,
   reachDiff,
   rotateFof,
   versionChecksDue,
@@ -225,9 +226,11 @@ export class ReachSession {
   // Grants this account hands out
   // ---------------------------------------------------------------------
 
-  /** The current version of `(cls, scope)`. */
+  /** The current version of `(cls, scope)`; every class but `link` and
+   *  `reply` is account-wide (ADR-0078 section 9) and ignores `scope`. */
   currentVersion(cls: ReachClassName, scope: Uint8Array = new Uint8Array(0)): number {
-    return cls === "reply" ? 0 : versionOf(this.book, cls, journalHex(scope));
+    if (cls === "reply") return 0;
+    return versionOf(this.book, cls, isAccountWideClass(cls) ? "" : journalHex(scope));
   }
 
   /**
@@ -248,7 +251,7 @@ export class ReachSession {
   /** The current grant of `(cls, scope)`. The caller frees it. Every grant
    *  carries this account's mailbox binding (ADR-0078). */
   grant(cls: ReachClassName, scope: Uint8Array = new Uint8Array(0)): WasmReachGrant {
-    const scopeHex = journalHex(scope);
+    const scopeHex = isAccountWideClass(cls) ? "" : journalHex(scope);
     const version = cls === "reply" ? 0 : versionOf(this.book, cls, scopeHex);
     return this.wasm.deriveReachGrant(
       this.accountSeed,
@@ -438,12 +441,29 @@ export class ReachSession {
 
   /**
    * A group shrank (ADR-0043 membership diff): new `group` and `member`
-   * versions. Call strictly after the removal commit merged, then republish
-   * the profile (the C-61 shape). The old keys go at the next sync.
+   * versions. Since ADR-0078 section 9 they are the account's one key per
+   * class, so the profile carrying them is republished in EVERY group (the
+   * grant signature of each changes). Call strictly after the removal commit
+   * merged (the C-61 shape). The old keys go at the next sync. `_groupId` is
+   * kept for the callers.
    */
-  async rotateOnShrink(groupId: Uint8Array): Promise<void> {
-    const hex = journalHex(groupId);
-    this.book = this.restamp(bumpVersion(bumpVersion(this.book, "group", hex), "member", hex));
+  async rotateOnShrink(_groupId?: Uint8Array): Promise<void> {
+    this.book = this.restamp(rotateClasses(this.book, ["group", "member"]));
+    await this.persistBook();
+    this.versionsChanged(true);
+    await this.syncNow(false);
+  }
+
+  /**
+   * The "who can find me" setting was changed on this device (ADR-0078
+   * section 9, decision 4): new `group` and `channel` versions, so a group
+   * or channel the setting no longer allows stops holding a working key, and
+   * the profile carrying the new grants is republished in every group. A
+   * change received from another device arrives with that device's bumped
+   * counters and is not rotated again here.
+   */
+  async rotateOnSettingChange(): Promise<void> {
+    this.book = this.restamp(rotateClasses(this.book, ["group", "channel"]));
     await this.persistBook();
     this.versionsChanged(true);
     await this.syncNow(false);
@@ -455,19 +475,6 @@ export class ReachSession {
     await this.persistBook();
     this.versionsChanged(true);
     await this.syncNow(false);
-  }
-
-  /** The channel moved to a new seed epoch: its key follows. */
-  async channelEpoch(channelId: Uint8Array, epoch: number): Promise<void> {
-    const next = raiseVersion(this.book, "channel", journalHex(channelId), epoch);
-    if (next === this.book) {
-      this.requestSync();
-      return;
-    }
-    this.book = this.restamp(next);
-    await this.persistBook();
-    this.versionsChanged(true);
-    this.requestSync();
   }
 
   // ---------------------------------------------------------------------
@@ -611,6 +618,24 @@ export class ReachSession {
       book = this.restamp(rotateFof(book, now));
       rotated = true;
     }
+    // ADR-0078 section 9: leaving a group (or being removed from it) or a
+    // channel rotates that class's one key, since its former members hold it.
+    const departures = departuresOf(book, scopes);
+    const leftClasses: ReachClassName[] = [
+      ...(departures.leftGroup ? (["group", "member"] as const) : []),
+      ...(departures.leftChannel ? (["channel"] as const) : []),
+    ];
+    if (leftClasses.length > 0) {
+      book = this.restamp(rotateClasses(book, leftClasses));
+      rotated = true;
+    }
+    const memberOf = departures.memberOf;
+    const sameMembership =
+      book.memberOf !== undefined &&
+      book.memberOf !== null &&
+      book.memberOf.groups.join(",") === memberOf.groups.join(",") &&
+      book.memberOf.channels.join(",") === memberOf.channels.join(",");
+    if (!sameMembership) book = { ...book, memberOf };
     const setting = this.setting();
     const everyone =
       setting !== null && setting.mode === this.wasm.VisibilityMode.Everyone;

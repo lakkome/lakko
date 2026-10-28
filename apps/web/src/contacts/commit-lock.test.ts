@@ -2,53 +2,19 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0040 (G-35) — the per-group serializing lock over the four
- * `ContactsClient` create-commit -> publish regions.
+ * ADR-0045 — membership changes under the per-group MLS lock, and why the UI
+ * `busy` flag is not the guard.
  *
- * The lock itself now lives in `src/mls/group-lock.ts`: G-38 brought the poll's
- * apply half (`chat/client.ts`) and the co-publisher poll + approve
- * (`channels/copublisher.ts`) under the SAME queue, and one resource must have
- * exactly one lock. These tests still drive it through `ContactsClient`, which
- * is the surface that matters here; `chat/poll-lock.test.ts` and
- * `channels/copublisher-lock.test.ts` cover the two new callers.
- *
- * The hazard: the `lakko-mls` create-commit paths **eagerly merge** epoch
- * N -> N+1 into the shared in-memory provider INSIDE the create call, before the
- * caller publishes anything. Two of those regions interleaved on one group both
- * build on N; the second publishes a commit on an epoch peers have not reached,
- * and if it lands first the peers drop it and the committing device is durably
- * ahead of a group that never adopted its last commit — the "device-ahead" shape
- * ADR-0040 exists to prevent. The outbox sweep cannot repair it (the entry was
- * acked, so there is nothing to re-publish).
- *
- * The `busy` signal in `routes/Chat.tsx` is not that guard — it is one shared
- * boolean with several independent owners, and `refresh()` is launched
- * fire-and-forget (`void refresh()`) at the tail of every commit handler, so it
- * outlives the handler that started it and clears the flag out from under an
- * unrelated commit still in flight. The last test in this file reproduces that
- * ownership pattern directly, so the reachability claim is executable rather
- * than asserted in prose.
- *
- * The doubles here are deliberately FAITHFUL rather than convenient: the mock
- * group's create-commit really does advance an epoch, and the role-table mock
- * really does read back what the previous commit wrote. A double that threw (or
- * ignored the write) where the real core mutates would let these tests pass with
- * the lock removed.
- *
- * ## Which of these actually discriminate (measured, not assumed)
- *
- * Neutering `withGroupMlsLock` to a bare `return task()`:
- *   - "a second commit on the SAME group does not create until the first has
- *     published" FAILS with `expected 7n to be 6n` — two eager merges ran while
- *     the first op was still parked in its publish. This is the defect itself;
- *   - "SERIALIZING, not coalescing" FAILS on the commit ids.
- * Re-keying the lock to a single global name instead:
- *   - "DIFFERENT groups do not block each other" TIMES OUT, so the per-group
- *     keying is load-bearing rather than incidental.
- * The remaining cases are guards, not discriminators, and say so where they sit.
+ * ADR-0081 amendment (2026-10-19): the four direct create-commit -> publish
+ * regions this suite used to serialize are gone (a group with no role table
+ * is refused; every membership change is a proposal, and only the sweep
+ * commits). The lock itself lives in `src/mls/group-lock.ts` and is covered
+ * by `chat/poll-lock.test.ts` and `channels/copublisher-lock.test.ts`; what
+ * remains here is the role-change refusal while one is pending, and the
+ * reachability of the `busy` flag hazard.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fakeAccessSigner } from "../ds/access-test-doubles";
+import { fakeAccessSigner, withCommitRoute, withStagedTwins } from "../ds/access-test-doubles";
 
 // No IndexedDB in the node test env; the store round-trip is covered by
 // `src/chat/commit-outbox.test.ts`.
@@ -87,211 +53,8 @@ function settle(): Promise<void> {
   return new Promise((r) => setTimeout(r, 0));
 }
 
-/**
- * A stand-in for an MLS group whose remove-commit eager-merges N -> N+1
- * exactly as the real core does inside `removeMember`. The live epoch is
- * observable so a test can count how many creates have run at a given moment —
- * which is precisely what serialization controls.
- */
-function statefulGroup(
-  groupId: Uint8Array,
-  startEpoch: bigint,
-  order: string[],
-  label: string,
-): { group: WasmGroup; epoch: () => bigint } {
-  let epoch = startEpoch;
-  const group = {
-    get groupId(): Uint8Array {
-      return groupId;
-    },
-    get epoch(): bigint {
-      return epoch;
-    },
-    dsAccessSigner: fakeAccessSigner(() => epoch),
-    removeMember: vi.fn((_id: unknown, leaf: number) => {
-      epoch += 1n; // the eager merge
-      order.push(`create:${label}${leaf}`);
-      return new Uint8Array([1, 2, 3]);
-    }),
-  } as unknown as WasmGroup;
-  return { group, epoch: () => epoch };
-}
-
 afterEach(() => {
   vi.clearAllMocks();
-});
-
-describe("ADR-0040 — the commit region is serialized per group", () => {
-  const GID = new Uint8Array([9, 9, 9, 9]);
-
-  it("a second commit on the SAME group does not create until the first has published", async () => {
-    const order: string[] = [];
-    const g = statefulGroup(GID, 5n, order, "g");
-    const gate = deferred<void>();
-    const targetEpochs: string[] = [];
-    let publishes = 0;
-
-    const publishGroup = vi.fn(async () => {
-      publishes += 1;
-      order.push("publish");
-      // The FIRST publish hangs — modelling an ordinary slow DS round-trip,
-      // which is the whole window the UI `busy` flag fails to cover.
-      if (publishes === 1) await gate.promise;
-      return { id: publishes, createdAt: "t" };
-    });
-
-    const client = new ContactsClient(
-      {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
-      {
-        identityProvider: () => IDENTITY_TOKEN,
-        onPersistWithCommit: async (e) => {
-          order.push("persist");
-          targetEpochs.push((e as { targetEpoch: string }).targetEpoch);
-        },
-      },
-    );
-
-    // Two clicks, neither awaited — exactly how the UI dispatches them once the
-    // shared `busy` flag has been cleared by an unrelated in-flight `refresh()`.
-    const opA = client.removeMemberFromGroup(null, g.group, 1);
-    const opB = client.removeMemberFromGroup(null, g.group, 2);
-
-    await settle();
-
-    // The load-bearing assertion. Op A is parked in its publish; op B must not
-    // have created ANYTHING yet, so exactly one eager merge has happened.
-    expect(g.epoch()).toBe(6n);
-    expect(order).toEqual(["create:g1", "persist", "publish"]);
-
-    gate.resolve();
-    await Promise.all([opA, opB]);
-
-    // B's create ran only after A's publish returned, so B built on the epoch A
-    // actually published — never on an epoch no peer has reached.
-    expect(order).toEqual([
-      "create:g1",
-      "persist",
-      "publish",
-      "create:g2",
-      "persist",
-      "publish",
-    ]);
-    expect(g.epoch()).toBe(7n);
-    expect(targetEpochs).toEqual(["6", "7"]);
-  });
-
-  it("SERIALIZING, not coalescing — both distinct removals run in full", async () => {
-    const order: string[] = [];
-    const g = statefulGroup(GID, 5n, order, "g");
-    const gate = deferred<void>();
-    let publishes = 0;
-    const publishGroup = vi.fn(async () => {
-      publishes += 1;
-      if (publishes === 1) await gate.promise;
-      return { id: publishes, createdAt: "t" };
-    });
-
-    const client = new ContactsClient(
-      {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
-      {
-        identityProvider: () => IDENTITY_TOKEN,
-        onPersistWithCommit: async () => {},
-      },
-    );
-
-    const opA = client.removeMemberFromGroup(null, g.group, 1);
-    const opB = client.removeMemberFromGroup(null, g.group, 2);
-    await settle();
-    gate.resolve();
-    const [a, b] = await Promise.all([opA, opB]);
-
-    // Two clicks are two intended membership changes. Folding the second into
-    // the first would silently drop a removal the operator believes happened —
-    // that was `lakko-security` F1 in the ADR-0043 review.
-    expect(publishGroup).toHaveBeenCalledTimes(2);
-    expect(order).toEqual(["create:g1", "create:g2"]);
-    // ADR-0045 — these doubles carry no `roleTableOwner`, so `usesProposalPath`
-    // reads them as legacy groups and they keep the direct-commit path.
-    expect(a.kind).toBe("committed");
-    expect(b.kind).toBe("committed");
-    expect(a.kind === "committed" ? a.commitMessageId : -1).toBe(1);
-    expect(b.kind === "committed" ? b.commitMessageId : -1).toBe(2);
-  });
-
-  it("DIFFERENT groups do not block each other", async () => {
-    const order: string[] = [];
-    const g1 = statefulGroup(new Uint8Array([1, 1]), 5n, order, "a");
-    const g2 = statefulGroup(new Uint8Array([2, 2]), 5n, order, "b");
-    const gate = deferred<void>();
-
-    const publishGroup = vi.fn(async (gid: Uint8Array) => {
-      // Group 1's publish hangs; group 2 must sail past it.
-      if (gid[0] === 1) await gate.promise;
-      return { id: 1, createdAt: "t" };
-    });
-
-    const client = new ContactsClient(
-      {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
-      {
-        identityProvider: () => IDENTITY_TOKEN,
-        onPersistWithCommit: async () => {},
-      },
-    );
-
-    const opA = client.removeMemberFromGroup(null, g1.group, 1);
-    const opB = client.removeMemberFromGroup(null, g2.group, 1);
-
-    // Group 2 completes while group 1 is still parked in its publish.
-    await expect(opB).resolves.toEqual({
-      kind: "committed",
-      commitMessageId: 1,
-      welcomeMessageId: undefined,
-    });
-    expect(g2.epoch()).toBe(6n);
-
-    gate.resolve();
-    await opA;
-    expect(g1.epoch()).toBe(6n);
-  });
-
-  it("a FAILING predecessor does not poison its successor", async () => {
-    const order: string[] = [];
-    const g = statefulGroup(GID, 5n, order, "g");
-    let persists = 0;
-    const publishGroup = vi.fn(async () => ({ id: 7, createdAt: "t" }));
-
-    const client = new ContactsClient(
-      {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
-      {
-        identityProvider: () => IDENTITY_TOKEN,
-        onPersistWithCommit: async () => {
-          persists += 1;
-          if (persists === 1) throw new Error("IndexedDB quota hiccup");
-        },
-        // Model the ADR-0040 F1 reset: reload at the last durable epoch.
-        onCommitPersistAbort: async () => {
-          // The abort rolled the provider back; nothing else to do here.
-        },
-      },
-    );
-
-    const opA = client.removeMemberFromGroup(null, g.group, 1);
-    const opB = client.removeMemberFromGroup(null, g.group, 2);
-
-    await expect(opA).rejects.toThrow();
-    // The queued op still runs — a predecessor's failure is its own caller's,
-    // and B's trigger (a real removal the operator asked for) is unaffected.
-    await expect(opB).resolves.toEqual({
-      kind: "committed",
-      commitMessageId: 7,
-      welcomeMessageId: undefined,
-    });
-    expect(publishGroup).toHaveBeenCalledTimes(1);
-  });
 });
 
 /**
@@ -340,7 +103,7 @@ describe("ADR-0045 — a second role change is refused while one is pending", ()
     const adminsFlat = new Uint8Array(0);
     const pending: Array<{ kind: string }> = [];
     const proposed: Uint8Array[] = [];
-    const group = {
+    const group = withStagedTwins({
       get groupId(): Uint8Array {
         return GID;
       },
@@ -358,7 +121,7 @@ describe("ADR-0045 — a second role change is refused while one is pending", ()
           return new Uint8Array([4, 5, 6]);
         },
       ),
-    } as unknown as WasmGroup;
+    }) as unknown as WasmGroup;
     return { group, admins: () => adminsFlat, proposed: () => proposed };
   }
 
@@ -374,7 +137,7 @@ describe("ADR-0045 — a second role change is refused while one is pending", ()
 
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {},
@@ -406,7 +169,7 @@ describe("ADR-0045 — a second role change is refused while one is pending", ()
     const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {},

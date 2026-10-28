@@ -18,30 +18,24 @@
  * owner's known signature key + the present-key set, and (b) computes that
  * present-key set from what the client can observe on the SFU roster.
  *
- * ## Presence — what the reference can and cannot bind
+ * ## Presence — how a peer is bound to a member
  *
  * The election needs "is member X present?" but the SFU roster is keyed on
- * an opaque per-connection `peer_id`, not on an MLS leaf. Two bindings are
- * available WITHOUT any new wire (invariant #2):
+ * an opaque per-connection `peer_id` (random per admission token, ADR-0078
+ * section 2), not on an MLS leaf, and the SFU knows no account. Two
+ * bindings exist:
  *
  *   * **Self** — this client is connected, so its own signature key is
  *     always present.
- *   * **Owner** — the owner's per-call `peer_tag`
- *     (`sfuPeerTag(call_id, owner_account_id)`, ADR-0021) is re-derivable
- *     from the capability's `owner_account_id`, so the owner is present iff
- *     that tag appears in the current roster. This makes the common case
- *     (owner-present → owner commits) and the reclaim case (owner returns →
- *     roster tag reappears → committer reverts to the owner) fully correct.
- *
- * A NON-owner member's leaf↔peer binding is the documented residual: a
- * stranger joiner only knows its own + the owner's account id, so it cannot
- * in general map another joiner's peer to that joiner's leaf. The reference
- * binds a non-owner member opportunistically when it observes a relay FROM
- * that peer ({@link CallPresence.bindPeerToMember}); members it has never
- * heard from are treated as absent for the successor election. Per ADR-0032
- * this is a low-severity residual (a redirected joiner lands in an isolated
- * group, never a plaintext or cross-group E2EE break); a strong-auth
- * successor delegation is deferred.
+ *   * **Every other member, the owner included** — each participant
+ *     announces its own peer id, signed with its MLS leaf key and sealed
+ *     under the call seed (`call-relay.ts`); a verified announcement binds
+ *     that peer to that leaf ({@link CallPresence.bindPeerToMember}). The
+ *     owner is present iff a peer in the roster announced the capability's
+ *     owner key. This replaces the ADR-0021 peer tag the SFU used to send,
+ *     and makes the successor election as exact as the owner case: every
+ *     member that announced is known, a member that has not is treated as
+ *     absent until it does.
  */
 
 /** Minimal view of the wasm `electCommitter` export (Sprint 2). */
@@ -125,9 +119,10 @@ export function electActingCommitterLeaf(
  * consumes. See the module doc for the binding model.
  */
 export class CallPresence {
-  /** peer_id → peer_tag (undefined when the SFU emits no tag). */
-  private readonly roster = new Map<string, string | undefined>();
-  /** peer_id → member signature-key hex, learned from a relay's `from`. */
+  /** The peer ids currently in the SFU room. */
+  private readonly roster = new Set<string>();
+  /** peer_id → member signature-key hex, from a verified announcement (or
+   *  the committer's own admission of a KeyPackage relayed by that peer). */
   private readonly peerToMember = new Map<string, string>();
 
   constructor(
@@ -135,23 +130,17 @@ export class CallPresence {
     private readonly selfKeyHex: string,
     /** The capability owner's signature-key hex. */
     private readonly ownerKeyHex: string,
-    /** The owner's per-call `peer_tag` (`sfuPeerTag(call_id,
-     *  owner_account_id)`), or `null` when this client IS the owner (then
-     *  owner-presence rides `selfKeyHex`). */
-    private readonly ownerPeerTag: string | null,
   ) {}
 
   /** Replace the roster from an SFU `Welcome` snapshot. */
-  setRoster(
-    entries: readonly { peerId: string; peerTag?: string | undefined }[],
-  ): void {
+  setRoster(peerIds: readonly string[]): void {
     this.roster.clear();
-    for (const e of entries) this.roster.set(e.peerId, e.peerTag);
+    for (const id of peerIds) this.roster.add(id);
   }
 
   /** A peer joined the SFU room. */
-  addPeer(peerId: string, peerTag?: string): void {
-    this.roster.set(peerId, peerTag);
+  addPeer(peerId: string): void {
+    this.roster.add(peerId);
   }
 
   /** The member signature-key hex bound to a peer, or `undefined` when this
@@ -168,21 +157,20 @@ export class CallPresence {
     this.peerToMember.delete(peerId);
   }
 
-  /** Opportunistically bind a peer to a member signature key — learned
-   *  when a relay arrives FROM that peer carrying a KeyPackage (committer
-   *  side) or a Welcome (joiner side, binds the committer/owner peer). */
+  /** Bind a peer to a member signature key: from that peer's verified
+   *  announcement, or (committer side) from the KeyPackage it relayed and
+   *  this client admitted. A later announcement replaces it. */
   bindPeerToMember(peerId: string, memberKeyHex: string): void {
     this.peerToMember.set(peerId, memberKeyHex);
   }
 
-  /** `true` iff the owner is currently present (this client is the owner,
-   *  or the owner's peer_tag is in the roster). Load-bearing for the
-   *  common case + reclaim. */
+  /** `true` iff the owner is currently present: this client is the owner,
+   *  or a peer in the roster announced the owner's key. Load-bearing for
+   *  the common case + reclaim. */
   ownerPresent(): boolean {
     if (this.ownerKeyHex === this.selfKeyHex) return true;
-    if (this.ownerPeerTag === null) return false;
-    for (const tag of this.roster.values()) {
-      if (tag === this.ownerPeerTag) return true;
+    for (const [peerId, memberKeyHex] of this.peerToMember) {
+      if (memberKeyHex === this.ownerKeyHex && this.roster.has(peerId)) return true;
     }
     return false;
   }

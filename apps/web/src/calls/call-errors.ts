@@ -15,6 +15,7 @@
 import { keyedErrorText } from "../l10n/keyed-error";
 import { t } from "../l10n";
 import { CallJwtHttpError, CallJwtNetworkError } from "./call-jwt-client";
+import { anonTokenMessage } from "../tokens/token-copy";
 import { captureFailureReason } from "./capture-fallback";
 import type { CallText } from "./call-slot";
 import { isSFrameTransformSupported } from "./sframe-transform";
@@ -29,10 +30,14 @@ export function callFailureReason(err: unknown): CallText | null {
   // Invariant #4: a browser that cannot encrypt call media never gets a call.
   // Asked directly rather than read out of the refusal's prose.
   if (!isSFrameTransformSupported()) return () => t("call.error.no_media_encryption");
+  // The admission token is paid for by an anonymous `call-join` token
+  // (ADR-0078 section 2): an allowance used up, or no token to be had,
+  // speaks the token copy, never a lost session.
+  const tokenCopy = anonTokenMessage(err, t("common.error.offline"));
+  if (tokenCopy !== null) return () => tokenCopy;
   if (err instanceof CallJwtHttpError) {
     if (err.status === 429) return () => t("call.error.not_accepting");
-    if (err.status === 401) return () => t("common.error.session_expired");
-    if (err.status === 503) return () => t("call.error.unavailable");
+    if (err.status === 401 || err.status === 503) return () => t("call.error.unavailable");
     return null;
   }
   if (err instanceof CallJwtNetworkError) return () => t("common.error.offline");

@@ -362,11 +362,11 @@ public final class NotificationService: UNNotificationServiceExtension {
             pointer = nil
         }
         guard let pointer else { return nil }
-        // `d` — the device pseudonym the wake was sent to. The decrypt core
-        // handles the wake only when it equals the pseudonym the app bound to
-        // the signed-in account (ADR-0042, amended 2026-09-30); a missing `d`
-        // is carried as `nil` and refused there.
-        let devicePseudonymHex = (userInfo["d"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        return NsePushWake(groupHex: groupHex, pointer: pointer, devicePseudonymHex: devicePseudonymHex)
+        // `s` — the push-gw subscription the wake was delivered for
+        // (ADR-0078). The decrypt core handles the wake only when the bound
+        // account's route row for `g` holds that id (ADR-0042, amended
+        // 2026-09-30); a missing `s` is carried as `nil` and refused there.
+        let subscriptionIdHex = (userInfo["s"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return NsePushWake(groupHex: groupHex, pointer: pointer, subscriptionIdHex: subscriptionIdHex)
     }
 }

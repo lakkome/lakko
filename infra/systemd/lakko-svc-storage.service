@@ -17,6 +17,10 @@ EnvironmentFile=/etc/lakko/lakko.env
 Environment=RUST_LOG=info
 Environment=LAKKO_BIND=127.0.0.1:8083
 Environment=LAKKO_BLOB_DIR=/var/lib/lakko/blobs
+# ADR-0065: LAKKO_STORAGE_DATABASE_URL (the blob index), LAKKO_STORAGE_PASS_SECRET
+# and LAKKO_ANON_TOKEN_MASTER_SECRET come from /etc/lakko/lakko.env above.
+# Without a database URL the index is a file under the blob directory
+# (.lakko-index/), which ReadWritePaths below already covers.
 
 ExecStart=/usr/local/bin/lakko-svc-storage
 Restart=on-failure

@@ -77,7 +77,16 @@
 //! the [`statement`] module - the root and registrar seed derivations and
 //! the signed statements (claim, root reset, register epoch in append or
 //! replace mode, registrar management, the whole registrar set, root
-//! transfer, push binding) the DS routes take as bodies.
+//! transfer) the DS routes take as bodies; the push binding is retired (ADR-0078).
+//!
+//! # Commits ([ADR-0081])
+//!
+//! The [`commit`] module: the body of `POST /ds/group/{hex}/commit`, which
+//! registers an epoch (an append-mode statement) and appends the commit row
+//! that reaches it in one step, so a registration without its commit row
+//! cannot exist.
+//!
+//! [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
 //!
 //! [ADR-0057]: ../../../docs/adr/0057-journal-ownership.md
 //!
@@ -90,10 +99,10 @@
 pub mod statement;
 
 pub use statement::{
-    journal_registrar_seed, journal_root_seed, push_binding_key, sign_statement,
-    statement_signing_key, Rank, RegisterMode, RegistrarChange, RegistrarEntry, SignedStatement,
-    StatementBody, StatementError, StatementKind, StatementSigner, JOURNAL_ID_LEN,
-    MAX_LIST_ENTRIES, MAX_REGISTRARS, MAX_STATEMENT_LEN, ROOT_RANK_BYTE, STATEMENT_DOMAIN,
+    journal_registrar_seed, journal_root_seed, sign_statement, statement_signing_key, Rank,
+    RegisterMode, RegistrarChange, RegistrarEntry, SignedStatement, StatementBody, StatementError,
+    StatementKind, StatementSigner, JOURNAL_ID_LEN, MAX_LIST_ENTRIES, MAX_REGISTRARS,
+    MAX_STATEMENT_LEN, ROOT_RANK_BYTE, STATEMENT_DOMAIN,
 };
 
 use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD};
@@ -105,8 +114,14 @@ pub use lakko_contacts::mailbox::{
 };
 pub use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey};
 
+pub mod commit;
 pub mod committer;
 pub mod delegation;
+
+pub use commit::{
+    commit_body_json, commit_row_hash, is_commit_statement, CommitBodyError, COMMIT_PATH_SEGMENT,
+    COMMIT_ROW_FIELD, COMMIT_STATEMENT_FIELD,
+};
 
 pub use committer::{check_committer_delegations, delegation_for, CommitterDelegationCheckError};
 pub use delegation::{

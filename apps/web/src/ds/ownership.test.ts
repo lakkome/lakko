@@ -17,20 +17,16 @@ import {
   RANK_ADMIN,
   RANK_MEMBER,
   NoJournalAuthorityError,
-  attestedResetBody,
-  bindPushRouting,
-  resetWithAttestation,
   transferRoot,
-  transferRootWithAttestation,
   claimAsOwner,
   claimOrReset,
   desiredRegistrars,
   evicteeAccountKeys,
   JournalClaimFailedError,
   claimAtCreation,
-  mayBindPush,
   probeRoot,
-  registerEpochWith,
+  commitEpochWith,
+  isCommitConflict,
   replaceEpochWith,
   revocationKeys,
   sendStatement,
@@ -73,7 +69,7 @@ describe("statements on the wire", () => {
     let builds = 0;
     await sendStatement(s, () => {
       builds += 1;
-      return fakeStatementSigner("r").registerEpoch(GID, 3n, new Uint8Array(32), new Uint8Array(0));
+      return fakeStatementSigner("r").replaceEpoch(GID, 3n, new Uint8Array(32), new Uint8Array(0));
     });
     expect(builds).toBe(2);
     const t = scriptedSender([409, 409]);
@@ -91,32 +87,72 @@ describe("statements on the wire", () => {
   });
 });
 
-describe("obligation 5 — register with the root or a registrar, never without", () => {
-  it("the root signs the register-epoch statement, revoke list included", async () => {
-    const s = scriptedSender([]);
-    await registerEpochWith(s, GID, fakeRootAuthority("root"), 8n, new Uint8Array(32).fill(8), [
+/** A commit sender scripted with statuses; `201` / `200` answer an id. */
+function scriptedCommitter(statuses: number[]) {
+  const posts: Array<{ path: string; body: string; proofEpoch: bigint }> = [];
+  return {
+    posts,
+    postCommit: vi.fn(async (path: string, body: string, proof: { epoch: bigint }) => {
+      posts.push({ path, body, proofEpoch: proof.epoch });
+      const status = statuses.shift() ?? 201;
+      if (status >= 400) throw Object.assign(new Error(`HTTP ${status}`), { status });
+      return { id: 40, createdAt: "t", resent: status === 200 };
+    }),
+  };
+}
+
+const PROOF = { epoch: 7n, sign: () => "proof" };
+const ROW = new Uint8Array([0xc0, 0x11]);
+
+describe("obligation 5 + ADR-0081 — commit with the root or a registrar, never without", () => {
+  it("the root signs the commit's append statement, revoke list and row included", async () => {
+    const s = scriptedCommitter([]);
+    const answer = await commitEpochWith(s, GID, fakeRootAuthority("root"), 8n, new Uint8Array(32).fill(8), [
       new Uint8Array(32).fill(1),
       new Uint8Array(32).fill(2),
-    ]);
-    const st = parseFakeStatement(s.puts[0]?.body ?? "");
-    expect(segmentOf(s.puts[0]?.path ?? "")).toBe("access");
+    ], ROW, PROOF);
+    expect(answer.id).toBe(40);
+    const st = parseFakeStatement(s.posts[0]?.body ?? "");
+    expect(segmentOf(s.posts[0]?.path ?? "")).toBe("commit");
     expect(st.signer).toBe("root");
     expect(st.epoch).toBe("8");
     expect(st.keys).toBe("01".repeat(32) + "02".repeat(32));
+    expect(st.row).toBe("c011");
+    expect(s.posts[0]?.proofEpoch).toBe(7n);
   });
 
   it("a registrar signs it too", async () => {
-    const s = scriptedSender([]);
-    await registerEpochWith(s, GID, fakeRegistrarAuthority("reg"), 8n, new Uint8Array(32));
-    expect(parseFakeStatement(s.puts[0]?.body ?? "").signer).toBe("reg");
+    const s = scriptedCommitter([]);
+    await commitEpochWith(s, GID, fakeRegistrarAuthority("reg"), 8n, new Uint8Array(32), [], ROW, PROOF);
+    expect(parseFakeStatement(s.posts[0]?.body ?? "").signer).toBe("reg");
   });
 
   it("without either, nothing is sent and the caller must not commit", async () => {
-    const s = scriptedSender([]);
-    await expect(registerEpochWith(s, GID, { kind: "none" }, 8n, new Uint8Array(32))).rejects.toBeInstanceOf(
-      NoJournalAuthorityError,
+    const s = scriptedCommitter([]);
+    await expect(
+      commitEpochWith(s, GID, { kind: "none" }, 8n, new Uint8Array(32), [], ROW, PROOF),
+    ).rejects.toBeInstanceOf(NoJournalAuthorityError);
+    expect(s.posts).toHaveLength(0);
+  });
+
+  it("a 409 is retried once with a fresh statement, then is a lost commit", async () => {
+    const once = scriptedCommitter([409, 201]);
+    await commitEpochWith(once, GID, fakeRootAuthority("root"), 8n, new Uint8Array(32), [], ROW, PROOF);
+    expect(once.posts).toHaveLength(2);
+    const twice = scriptedCommitter([409, 409]);
+    const err = await commitEpochWith(twice, GID, fakeRootAuthority("root"), 8n, new Uint8Array(32), [], ROW, PROOF).catch(
+      (e: unknown) => e,
     );
-    expect(s.puts).toHaveLength(0);
+    expect(isCommitConflict(err)).toBe(true);
+    expect(twice.posts).toHaveLength(2);
+  });
+
+  it("an empty row is refused before any request", async () => {
+    const s = scriptedCommitter([]);
+    await expect(
+      commitEpochWith(s, GID, fakeRootAuthority("root"), 8n, new Uint8Array(32), [], new Uint8Array(0), PROOF),
+    ).rejects.toThrow(/non-empty/);
+    expect(s.posts).toHaveLength(0);
   });
 });
 
@@ -204,118 +240,9 @@ describe("obligation 3 — the owner's desired registrar set", () => {
       ["b", RANK_ADMIN],
     ]);
   });
-
 });
 
-describe("ADR-0073 — the attested reset of the DeviceGroup journal after a key reset", () => {
-  /** A root signer whose reset body is the real `{"statement_b64"}` shape. */
-  function rootWithWireBody(label: string) {
-    const inner = fakeStatementSigner(label, new Uint8Array(32).fill(0xbb));
-    return {
-      ...inner,
-      reset: (j: Uint8Array, epoch: bigint, epochKey: Uint8Array) => {
-        const built = inner.reset(j, epoch, epochKey);
-        return {
-          path: built.path,
-          bodyJson: JSON.stringify({ statement_b64: btoa(built.bodyJson) }),
-          free: () => undefined,
-        };
-      },
-    };
-  }
-
-  it("the body carries the statement, the attestation AND the root endorsement, nothing else", () => {
-    const body = JSON.parse(attestedResetBody('{"statement_b64":"c3RtdA=="}', "YXR0ZXN0", "ZW5k")) as Record<string, string>;
-    expect(body).toEqual({
-      statement_b64: "c3RtdA==",
-      key_reset_attest_b64: "YXR0ZXN0",
-      root_endorsement_b64: "ZW5k",
-    });
-    expect(() => attestedResetBody('{"other":1}', "YXR0ZXN0", "ZW5k")).toThrow(/statement_b64/);
-    // ADR-0074 4.6: an attested statement without the endorsement is never sent.
-    expect(() => attestedResetBody('{"statement_b64":"c3RtdA=="}', "YXR0ZXN0", "")).toThrow(/endorsement/);
-  });
-
-  it("a 2xx is a reset: one PUT to .../reset with both fields", async () => {
-    const s = scriptedSender([204]);
-    expect(await resetWithAttestation(s, GID, rootWithWireBody("new"), 1n, new Uint8Array(32).fill(1), "YXR0ZXN0", "ZW5k")).toBe("reset");
-    expect(s.puts.map((p) => segmentOf(p.path))).toEqual(["reset"]);
-    const body = JSON.parse(s.puts[0]?.body ?? "") as Record<string, string>;
-    expect(body["key_reset_attest_b64"]).toBe("YXR0ZXN0");
-    expect(body["root_endorsement_b64"]).toBe("ZW5k");
-    expect(parseFakeStatement(atob(body["statement_b64"] ?? "")).signer).toBe("new");
-  });
-
-  it("a 409 is 'already reset' only when the root probe naming this root answers 204", async () => {
-    const s = scriptedSender([409, 204]);
-    expect(await resetWithAttestation(s, GID, rootWithWireBody("new"), 1n, new Uint8Array(32), "YXR0ZXN0", "ZW5k")).toBe("already-reset");
-    expect(s.puts.map((p) => segmentOf(p.path))).toEqual(["reset", "root"]);
-    const raced = scriptedSender([409, 401]);
-    await expect(
-      resetWithAttestation(raced, GID, rootWithWireBody("new"), 1n, new Uint8Array(32), "YXR0ZXN0", "ZW5k"),
-    ).rejects.toMatchObject({ status: 409 });
-  });
-
-  it("a stranger's 401, a bad attestation (400) and a server without the key (503) surface as they are", async () => {
-    for (const status of [401, 400, 503]) {
-      await expect(
-        resetWithAttestation(scriptedSender([status]), GID, rootWithWireBody("new"), 1n, new Uint8Array(32), "YXR0ZXN0", "ZW5k"),
-      ).rejects.toMatchObject({ status });
-    }
-  });
-});
-
-describe("ADR-0074 — the root transfers of a key rotation", () => {
-  const wireBody = (label: string, key: number) => {
-    const inner = fakeStatementSigner(label, new Uint8Array(32).fill(key));
-    return {
-      ...inner,
-      rootTransfer: (j: Uint8Array, newRoot: Uint8Array) => {
-        const built = inner.rootTransfer(j, newRoot);
-        return {
-          path: built.path,
-          bodyJson: JSON.stringify({ statement_b64: btoa(built.bodyJson) }),
-          free: () => undefined,
-        };
-      },
-    };
-  };
-
-  it("the attested transfer: the OLD root signs, naming the NEW root, with the attestation and the endorsement", async () => {
-    const s = scriptedSender([204]);
-    const out = await transferRootWithAttestation(s, GID, wireBody("old", 0x0a), wireBody("new", 0x0b), "YXR0ZXN0", "ZW5k");
-    expect(out).toBe("transferred");
-    expect(s.puts.map((p) => segmentOf(p.path))).toEqual(["root"]);
-    const body = JSON.parse(s.puts[0]?.body ?? "") as Record<string, string>;
-    expect(body["key_reset_attest_b64"]).toBe("YXR0ZXN0");
-    expect(body["root_endorsement_b64"]).toBe("ZW5k");
-    const statement = parseFakeStatement(atob(body["statement_b64"] ?? ""));
-    expect(statement.signer).toBe("old");
-    expect(statement.newRoot).toBe("0b".repeat(32));
-  });
-
-  it("a retry: the generation already landed (409) or the old root is refused (401), and the NEW root's probe says so", async () => {
-    for (const status of [409, 401]) {
-      const s = scriptedSender([status, 204]);
-      expect(
-        await transferRootWithAttestation(s, GID, wireBody("old", 0x0a), wireBody("new", 0x0b), "YXR0ZXN0", "ZW5k"),
-      ).toBe("already");
-      expect(s.puts.map((p) => segmentOf(p.path))).toEqual(["root", "root"]);
-      const raced = scriptedSender([status, 401]);
-      await expect(
-        transferRootWithAttestation(raced, GID, wireBody("old", 0x0a), wireBody("new", 0x0b), "YXR0ZXN0", "ZW5k"),
-      ).rejects.toMatchObject({ status });
-    }
-  });
-
-  it("is never sent without the endorsement", async () => {
-    const s = scriptedSender([204]);
-    await expect(
-      transferRootWithAttestation(s, GID, wireBody("old", 0x0a), wireBody("new", 0x0b), "YXR0ZXN0", ""),
-    ).rejects.toThrow(/endorsement/);
-    expect(s.puts).toEqual([]);
-  });
-
+describe("ADR-0074 — the root transfer of a key rotation", () => {
   it("the plain transfer of an owned journal: old root -> new root, done when the new root already is the root", async () => {
     const s = scriptedSender([204]);
     expect(await transferRoot(s, GID, fakeStatementSigner("old"), fakeStatementSigner("new", new Uint8Array(32).fill(0x0b)))).toBe("transferred");
@@ -330,13 +257,13 @@ describe("ADR-0074 — the root transfers of a key rotation", () => {
 });
 
 describe("second security pass — Append, Replace, the probe and the claim at creation", () => {
-  it("an Append 409 surfaces to the commit path; nothing is sent as a Replace", async () => {
-    const s = scriptedSender([409, 409]);
+  it("a lost commit (409) surfaces to the commit path; nothing is sent as a Replace", async () => {
+    const s = scriptedCommitter([409, 409]);
     await expect(
-      registerEpochWith(s, GID, fakeRootAuthority("root"), 5n, new Uint8Array(32).fill(5)),
+      commitEpochWith(s, GID, fakeRootAuthority("root"), 5n, new Uint8Array(32).fill(5), [], ROW, PROOF),
     ).rejects.toMatchObject({ status: 409 });
-    expect(s.puts.map((p) => segmentOf(p.path))).toEqual(["access", "access"]);
-    expect(s.puts.every((p) => parseFakeStatement(p.body).segment === "access")).toBe(true);
+    expect(s.posts.map((p) => segmentOf(p.path))).toEqual(["commit", "commit"]);
+    expect(s.posts.every((p) => parseFakeStatement(p.body).segment === "commit")).toBe(true);
   });
 
   it("the repair's Replace names the epoch and its key; a member cannot send one", async () => {
@@ -371,37 +298,6 @@ describe("second security pass — Append, Replace, the probe and the claim at c
     await expect(
       claimAtCreation(scriptedSender([500]), GID, fakeStatementSigner("root"), 1n, new Uint8Array(32)),
     ).rejects.toBeInstanceOf(JournalClaimFailedError);
-  });
-});
-
-describe("obligation 8 — push binding", () => {
-  it("the root and an admin bind; a member does not try", () => {
-    expect(mayBindPush(fakeRootAuthority())).toBe(true);
-    expect(mayBindPush(fakeRegistrarAuthority("a", RANK_ADMIN))).toBe(true);
-    expect(mayBindPush(fakeRegistrarAuthority("m", RANK_MEMBER))).toBe(false);
-    expect(mayBindPush({ kind: "none" })).toBe(false);
-  });
-
-  it("binds the journal to the push_gid", async () => {
-    const s = scriptedSender([204]);
-    const gidPush = new Uint8Array(32).fill(0x99);
-    expect(await bindPushRouting(s, GID, fakeRootAuthority("root"), gidPush)).toBe("bound");
-    expect(segmentOf(s.puts[0]?.path ?? "")).toBe("push-binding");
-    expect(parseFakeStatement(s.puts[0]?.body ?? "").pushGid).toBe("99".repeat(32));
-  });
-
-  it("409 and 503 are logged and the caller continues; nothing throws", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(await bindPushRouting(scriptedSender([409]), GID, fakeRootAuthority(), new Uint8Array(32))).toBe(
-      "conflict",
-    );
-    expect(await bindPushRouting(scriptedSender([503]), GID, fakeRootAuthority(), new Uint8Array(32))).toBe(
-      "disabled",
-    );
-    expect(await bindPushRouting(scriptedSender([]), GID, fakeRegistrarAuthority(), new Uint8Array(32))).toBe(
-      "not-permitted",
-    );
-    warn.mockRestore();
   });
 });
 
@@ -440,13 +336,20 @@ describe("the real signers (journal-authority.ts)", () => {
     const cases: Array<[string, { path: string; bodyJson: string; free(): void }]> = [
       ["claim", root.claim(GID, 1n, key)],
       ["reset", root.reset(GID, 1n, key)],
-      ["access", root.registerEpoch(GID, 2n, key, new Uint8Array(0))],
       ["registrars", root.registrars(GID, key, Uint8Array.from([RANK_MEMBER]))],
       ["registrars-set", root.registrarsSet(GID, key, Uint8Array.from([RANK_MEMBER]))],
       ["access", root.replaceEpoch(GID, 2n, key, new Uint8Array(0))],
       ["root", root.rootTransfer(GID, root.publicKey())],
-      ["push-binding", root.pushBinding(GID, new Uint8Array(32).fill(7))],
     ];
+    // ADR-0078 section 3: the push binding is gone from the signer.
+    expect("pushBinding" in root).toBe(false);
+    // ADR-0081 (open question 1): no plain Append; a new epoch goes with its
+    // commit row to the commit route.
+    expect("registerEpoch" in root).toBe(false);
+    const commit = root.commit(GID, 2n, key, new Uint8Array(0), Uint8Array.from([7]));
+    expect(commit.path).toBe(`/ds/group/${hex}/commit`);
+    expect(Object.keys(JSON.parse(commit.bodyJson) as object)).toEqual(["statement_b64", "row_b64"]);
+    commit.free();
     for (const [segment, req] of cases) {
       expect(req.path).toBe(`/ds/group/${hex}/${segment}`);
       expect(Object.keys(JSON.parse(req.bodyJson) as object)).toEqual(["statement_b64"]);

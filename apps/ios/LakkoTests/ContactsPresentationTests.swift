@@ -104,12 +104,11 @@ final class ContactsPresentationTests: XCTestCase {
             maxUses: 0, createdAtMs: createdAtMs)
     }
 
-    func testUsesLeftCopyFollowsTheSentinels() {
-        XCTAssertEqual(InviteLinkRows.usesLeftCopy(maxUses: 0, usedCount: 0), "1 use left")
-        XCTAssertEqual(InviteLinkRows.usesLeftCopy(maxUses: 0, usedCount: 1), "Used up")
-        XCTAssertEqual(InviteLinkRows.usesLeftCopy(maxUses: 10, usedCount: 7), "3 uses left")
-        XCTAssertEqual(InviteLinkRows.usesLeftCopy(maxUses: 10, usedCount: 12), "Used up", "never negative")
-        XCTAssertNil(InviteLinkRows.usesLeftCopy(maxUses: UInt32.max, usedCount: 3), "unlimited shows no count")
+    func testLimitCopyFollowsTheSentinels() {
+        XCTAssertEqual(InviteLinkRows.limitCopy(maxUses: 0), "single-use")
+        XCTAssertEqual(InviteLinkRows.limitCopy(maxUses: 1), "single-use")
+        XCTAssertEqual(InviteLinkRows.limitCopy(maxUses: 10), "up to 10 uses")
+        XCTAssertEqual(InviteLinkRows.limitCopy(maxUses: UInt32.max), "unlimited")
     }
 
     func testMergeKeepsServerRowsFirstAddsUnknownSessionRowsAndDropsExpired() throws {
@@ -135,7 +134,7 @@ final class ContactsPresentationTests: XCTestCase {
             secrets: secrets)
         XCTAssertEqual(rows.map(\.slug), ["new", "srv"], "newest first; the server copy wins over the session copy")
         XCTAssertEqual(rows[1].title, "Team")
-        XCTAssertEqual(rows[1].usesLeft, "8 uses left")
+        XCTAssertEqual(rows[1].limit, "up to 10 uses")
         XCTAssertEqual(rows[1].origin, .server)
         // The link must point at the stack the account lives on, so the
         // prefix comes from configuration (`ApiEndpoints.webOrigin`) and a
@@ -149,19 +148,45 @@ final class ContactsPresentationTests: XCTestCase {
             active: [active(slug: "elsewhere", expiryMs: nowMs + 60_000, maxUses: 0, used: 0,
                             createdAt: "2026-09-10T10:00:00Z")],
             sessionGenerated: [], now: now, accountIdB64: "acct", secrets: secrets)
-        XCTAssertNil(other.first?.url, "a link made on another device offers Revoke only")
+        XCTAssertNil(other.first?.url, "a link whose secret this device lacks offers Revoke only")
         let otherAccount = InviteLinkRows.merge(
             active: [active(slug: "srv", expiryMs: nowMs + 60_000, maxUses: 0, used: 0,
                             createdAt: "2026-09-10T10:00:00Z")],
             sessionGenerated: [], now: now, accountIdB64: "someone-else", secrets: secrets)
         XCTAssertNil(otherAccount.first?.url, "the secrets are per account")
-        XCTAssertEqual(rows[0].title, "Invite link")
-        XCTAssertEqual(rows[0].usesLeft, "1 use left")
+        XCTAssertNil(rows[0].title, "a link without a label has no title line, not a placeholder name")
+        XCTAssertEqual(rows[1].usesLeft, 8, "a known use count shows uses left")
+        XCTAssertEqual(InviteLinkRows.useFact(rows[1]), "8 uses left")
+        XCTAssertNil(rows[0].usesLeft, "a session row carries no use count")
+        XCTAssertEqual(InviteLinkRows.useFact(rows[0]), "single-use")
+        XCTAssertEqual(rows[0].limit, "single-use")
         if case .session(let blobId) = rows[0].origin {
             XCTAssertEqual(blobId.count, 6)
         } else {
             XCTFail("a session-only link revokes through its blob id")
         }
+    }
+
+    func testUsesLeftOnlyForAMultiUseLinkWithAKnownCount() {
+        XCTAssertEqual(InviteLinkRows.usesLeft(maxUses: 10, used: 3), 7)
+        XCTAssertEqual(InviteLinkRows.usesLeft(maxUses: 10, used: 12), 0)
+        XCTAssertNil(InviteLinkRows.usesLeft(maxUses: 10, used: nil), "unknown count: show the limit")
+        XCTAssertNil(InviteLinkRows.usesLeft(maxUses: 0, used: 0), "single-use")
+        XCTAssertNil(InviteLinkRows.usesLeft(maxUses: 1, used: 0), "single-use")
+        XCTAssertNil(InviteLinkRows.usesLeft(maxUses: UInt32.max, used: 4), "unlimited")
+    }
+
+    func testAScannedCodeOpensOnlyALakkoLink() {
+        let origin = "https://test.lakko.me"
+        XCTAssertNotNil(InviteIntake.scannedLink("https://test.lakko.me/i/AbCdEfGh#secret", webOrigin: origin))
+        XCTAssertNotNil(InviteIntake.scannedLink(" https://lakko.me/g/AbCdEfGh#k\n", webOrigin: origin))
+        XCTAssertNotNil(InviteIntake.scannedLink("https://lakko.me/c/AbCdEfGh#k", webOrigin: origin))
+        XCTAssertNil(InviteIntake.scannedLink("https://evil.example/i/AbCdEfGh#k", webOrigin: origin))
+        XCTAssertNil(InviteIntake.scannedLink("https://notlakko.me/i/AbCdEfGh", webOrigin: origin))
+        XCTAssertNil(InviteIntake.scannedLink("http://lakko.me/i/AbCdEfGh", webOrigin: origin))
+        XCTAssertNil(InviteIntake.scannedLink("https://lakko.me/i/", webOrigin: origin))
+        XCTAssertNil(InviteIntake.scannedLink("https://lakko.me/feed/import#x", webOrigin: origin))
+        XCTAssertNil(InviteIntake.scannedLink("WIFI:S:home;T:WPA;P:pw;;", webOrigin: origin))
     }
 
     /// `docs/ux/client-redesign.md` section 5.3 — a row without a secret on
@@ -253,7 +278,7 @@ final class ContactsPresentationTests: XCTestCase {
         XCTAssertEqual(plain(DeviceRowPresentation.title(isSelf: false, position: 3)), "Device 3")
     }
 
-    // MARK: - Add by username
+    // MARK: - Not found copy
 
     /// `docs/ux/who-can-find-me.md` section 6.1, "Not found": a name that does
     /// not resolve never tells the searcher whether the account exists

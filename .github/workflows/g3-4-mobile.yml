@@ -158,7 +158,7 @@ jobs:
           jwt=$(cargo run --quiet --release -p lakko-call-jwt \
             --example mint_test_jwt -- \
             --call-id deadbeef0000000000000000000000aa \
-            --account cafef00d0000000000000000000000bb \
+            --peer-id cafef00d0000000000000000000000bb \
             --role participant \
             --ttl-secs 600)
           # Stash on the step output AND in GITHUB_ENV so both

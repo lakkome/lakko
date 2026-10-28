@@ -74,6 +74,39 @@ describe("ProfileStore", () => {
     expect(store.get(KEY_A)?.displayName).toBe("Alice");
   });
 
+  it("a same-stamp re-send fills in a missing certificate for the same username and checks the claim again", async () => {
+    const store = new ProfileStore(new MemoryProfileBackend(), isNewer);
+    // A contact request's profile that arrived without the certificate,
+    // checked and cached as a mismatch.
+    await store.ingest(ACCOUNT, KEY_A, profile("Alice", "alice", 100n));
+    store.recordVerification(ACCOUNT, KEY_A, "alice", { state: "mismatch", checkedAtMs: 1 });
+    const cert = new Uint8Array(153).fill(7);
+    // Another username's certificate is not taken.
+    expect(
+      await store.ingest(ACCOUNT, KEY_A, { ...profile("Alice", "mallory", 100n), usernameCertificate: cert }),
+    ).toBe(false);
+    expect(store.get(KEY_A)?.usernameCertificateB64).toBeNull();
+    expect(store.verification(KEY_A, "alice")?.state).toBe("mismatch");
+    // The same profile again, now with it.
+    expect(
+      await store.ingest(ACCOUNT, KEY_A, { ...profile("Alice", "alice", 100n), usernameCertificate: cert }),
+    ).toBe(true);
+    expect(store.get(KEY_A)?.usernameCertificateB64).not.toBeNull();
+    expect(store.get(KEY_A)?.displayName).toBe("Alice");
+    expect(store.verification(KEY_A, "alice")).toBeUndefined();
+  });
+
+  it("a newer profile with another certificate drops the verdict reached without it", async () => {
+    const store = new ProfileStore(new MemoryProfileBackend(), isNewer);
+    await store.ingest(ACCOUNT, KEY_A, profile("Alice", "alice", 100n));
+    store.recordVerification(ACCOUNT, KEY_A, "alice", { state: "mismatch", checkedAtMs: 1 });
+    await store.ingest(ACCOUNT, KEY_A, {
+      ...profile("Alice", "alice", 101n),
+      usernameCertificate: new Uint8Array(153).fill(7),
+    });
+    expect(store.verification(KEY_A, "alice")).toBeUndefined();
+  });
+
   it("a same-stamp re-send fills in a missing account id and nothing else", async () => {
     const store = new ProfileStore(new MemoryProfileBackend(), isNewer);
     await store.ingest(ACCOUNT, KEY_A, profile("Alice", "alice", 100n));

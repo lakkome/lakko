@@ -35,6 +35,9 @@ public struct ChatListScreen: View {
         case chat
         case group
         case channel
+        /// ADR-0065 / UX `saved-messages-and-file-lifetime.md` section 3 —
+        /// not a creation: the Saved screen, reached from the same menu.
+        case saved
     }
 
     @ObservedObject public var viewModel: ChatListViewModel
@@ -52,12 +55,12 @@ public struct ChatListScreen: View {
     public var onOpen: (ConversationListRow) -> Void
     /// One of the three create-menu items.
     public var onCreate: (CreateChoice) -> Void
-    /// A channel the network lookup found, which this device may not hold yet.
+    /// A channel the search found by its handle, which this device may not
+    /// hold yet: its subscribe page.
     public var onFoundChannel: (_ channelIdHex: String, _ handle: String) -> Void
-    /// A person the network lookup found. The contact request asks for an
-    /// introduction this field has no room for, so the name travels to
-    /// Contacts rather than being half-answered here.
-    public var onFoundPerson: (_ username: String) -> Void
+    /// **Open** on a found person who is already a contact: the conversation
+    /// with them (`docs/ux/who-can-find-me.md` section 6.1).
+    public var onOpenPerson: (FoundPerson) -> Void
     /// `docs/ux/chat-folders.md` 2.2 — Reorder folders / Edit folders open
     /// Settings > Chat folders (`true` = in its reorder state).
     public var onOpenFolderSettings: (_ reorder: Bool) -> Void
@@ -72,16 +75,20 @@ public struct ChatListScreen: View {
     /// UX 18.3 — `Updating keys...` in the header while a kept device adopts
     /// the account's new keys (``KeysUpdatingLabel``); `nil` draws nothing.
     var keysUpdatingLabel: KeysUpdatingLabel?
-    /// ADR-0060 — "Search people" (`docs/ux/who-can-find-me.md` section 6.1):
-    /// the network search for a username or a name, and the request to one of
-    /// its results. `nil` hides the row.
-    public var peopleSearch: PeopleSearchActions?
+    /// ADR-0060 — the search field's people (`docs/ux/who-can-find-me.md`
+    /// section 6.1): the people this device knows, and from three characters
+    /// the network search under People, asked without a button. `nil` shows
+    /// conversations only.
+    public var peopleSearch: PeopleSearchModel?
 
     /// Phase 2a3e2c-iOS — cross-device per-thread flags (pinned / muted /
     /// archived). The Combine subscription inside ``DeviceGroupSyncRepository``
     /// keeps the row indicators + the sort order live as sibling devices
     /// publish updates.
     @EnvironmentObject private var deviceGroupSync: DeviceGroupSyncRepository
+    /// ADR-0079 — the people added through their invite link whose app has
+    /// not answered yet are listed in All chats at once.
+    @EnvironmentObject private var contactsRepository: ContactsRepository
     /// `docs/ux/calls.md` section 2.1.1 — the app-level 1x1 call host, read for
     /// ONE thing: a call arriving in a MUTED conversation, which is offered on
     /// that conversation's row here as well as in the chat itself. Every other
@@ -96,13 +103,13 @@ public struct ChatListScreen: View {
         onOpen: @escaping (ConversationListRow) -> Void,
         onCreate: @escaping (CreateChoice) -> Void,
         onFoundChannel: @escaping (String, String) -> Void,
-        onFoundPerson: @escaping (String) -> Void,
+        onOpenPerson: @escaping (FoundPerson) -> Void = { _ in },
         onOpenFolderSettings: @escaping (Bool) -> Void = { _ in },
         onOpenDevices: @escaping () -> Void = {},
         accountNotice: AccountNoticeBanner? = nil,
         recalledNotice: RecalledNoticeBanner? = nil,
         keysUpdatingLabel: KeysUpdatingLabel? = nil,
-        peopleSearch: PeopleSearchActions? = nil
+        peopleSearch: PeopleSearchModel? = nil
     ) {
         self.viewModel = viewModel
         self.channels = channels
@@ -110,7 +117,7 @@ public struct ChatListScreen: View {
         self.onOpen = onOpen
         self.onCreate = onCreate
         self.onFoundChannel = onFoundChannel
-        self.onFoundPerson = onFoundPerson
+        self.onOpenPerson = onOpenPerson
         self.onOpenFolderSettings = onOpenFolderSettings
         self.onOpenDevices = onOpenDevices
         self.recalledNotice = recalledNotice
@@ -120,11 +127,9 @@ public struct ChatListScreen: View {
     }
 
     /// Spec section 4 — the field covers users, groups and channels. The local
-    /// half filters what this device holds; the network half is the single
-    /// lookup row below the list.
+    /// half filters what this device holds; the network half asks by itself
+    /// (`docs/ux/who-can-find-me.md` section 6.1, ``PeopleSearchModel``).
     @State private var searchText: String = ""
-    @State private var lookupBusy = false
-    @State private var lookupNote: String?
 
     // MARK: Chat folders (`docs/ux/chat-folders.md`)
 
@@ -137,6 +142,9 @@ public struct ChatListScreen: View {
     @State private var editor: FolderEditorRequest?
     /// The folder whose deletion is being confirmed.
     @State private var deleting: FolderView?
+    @State private var createMenuOpen = false
+    /// The toolbar's create menu carries Saved; the empty state's does not.
+    @State private var createMenuWithSaved = true
 
     public var body: some View {
 #if DEBUG
@@ -175,21 +183,20 @@ public struct ChatListScreen: View {
                     onSave: { changes in try await deviceGroupSync.applyFolderChanges(changes) },
                     onDelete: { folder in deleteFolder(folder) })
             }
-            .alert(
-                deleting.map { l10n.t("folders.delete_confirm.title", texts: ["name": $0.meta.name]) } ?? "",
-                isPresented: Binding(
-                    get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
-                presenting: deleting
-            ) { folder in
-                Button(l10n.t("common.cancel"), role: .cancel) { deleting = nil }
-                Button(l10n.t("common.delete"), role: .destructive) { deleteFolder(folder) }
-            } message: { _ in
-                Text(l10n.t("folders.delete_confirm.body"))
+            .lakkoDialog(item: $deleting) { folder in
+                LakkoDialogContent(
+                    title: l10n.t("folders.delete_confirm.title", texts: ["name": folder.meta.name]),
+                    message: l10n.t("folders.delete_confirm.body"),
+                    actions: [
+                        .cancel { deleting = nil },
+                        .danger(l10n.t("common.delete")) { deleteFolder(folder) },
+                    ])
             }
+            .lakkoActionSheet(isPresented: $createMenuOpen) { createMenuItems(includeSaved: createMenuWithSaved) }
             .navigationTitle(l10n.t("nav.chats"))
             .navigationBarTitleDisplayMode(.large)
             .searchable(text: $searchText, prompt: Text(l10n.t("chats.search.placeholder")))
-            .onChange(of: searchText) { _, _ in lookupNote = nil }
+            .onChange(of: searchText) { _, text in peopleSearch?.update(query: text) }
             // Receiving is automatic; the pull gesture runs the same poll
             // once more, on demand (UX spec section 2, principle 3).
             .refreshable { await viewModel.pollNow() }
@@ -224,20 +231,26 @@ public struct ChatListScreen: View {
     /// not a compose action. A bare `+` reads as "add contact", so the icon is
     /// the compose one.
     private var createMenu: some View {
-        Menu {
-            Button { onCreate(.chat) } label: {
-                Label(l10n.t("chats.create.chat"), systemImage: "bubble.left")
-            }
-            Button { onCreate(.group) } label: {
-                Label(l10n.t("chats.create.group"), systemImage: "person.3")
-            }
-            Button { onCreate(.channel) } label: {
-                Label(l10n.t("chats.create.channel"), systemImage: "megaphone")
-            }
+        Button {
+            createMenuWithSaved = true
+            createMenuOpen = true
         } label: {
             Image(systemName: "square.and.pencil")
         }
         .accessibilityLabel(l10n.t("chats.create.menu"))
+    }
+
+    /// The create menu's rows (Lakko's own action sheet, never a system menu).
+    private func createMenuItems(includeSaved: Bool) -> [LakkoMenuItem] {
+        var items: [LakkoMenuItem] = [
+            .action(l10n.t("chats.create.chat"), systemImage: "bubble.left") { onCreate(.chat) },
+            .action(l10n.t("chats.create.group"), systemImage: "person.3") { onCreate(.group) },
+            .action(l10n.t("chats.create.channel"), systemImage: "megaphone") { onCreate(.channel) },
+        ]
+        if includeSaved {
+            items.append(.action(l10n.t("saved.title"), systemImage: "bookmark") { onCreate(.saved) })
+        }
+        return items
     }
 
     // MARK: - Rows
@@ -315,7 +328,8 @@ public struct ChatListScreen: View {
                 endedLine: chatListLine(
                     membershipState(
                         isActive: !thread.membershipEnded, leaveRequestedAtMs: nil)),
-                markedUnread: flags?.unreadOverride == true)
+                markedUnread: flags?.unreadOverride == true,
+                personKey: kind == .group ? nil : viewModel.peerSignatureKey(groupIdHex: thread.groupIdHex))
         }
     }
 
@@ -381,7 +395,8 @@ public struct ChatListScreen: View {
     /// One page: All chats (`folder == nil`) or one folder's rows.
     @ViewBuilder
     private func listPage(rows visible: [ConversationListRow], folder: FolderView?) -> some View {
-        if visible.isEmpty {
+        let invited = folder == nil ? invitedRows : []
+        if visible.isEmpty && invited.isEmpty {
             // Inside a scroll view so the pull gesture works on the empty list
             // too.
             ScrollView {
@@ -391,11 +406,14 @@ public struct ChatListScreen: View {
                     emptyState
                 } else {
                     VStack(spacing: 12) {
-                        Text(l10n.t("chats.search.no_results"))
-                            .foregroundStyle(Color.lakkoTextMuted)
-                        lookupSection
                         if let peopleSearch {
-                            PeopleSearchSection(query: query, actions: peopleSearch)
+                            PeopleSearchSection(
+                                model: peopleSearch, includesChannels: true, showsLocalContacts: true,
+                                emptyText: l10n.t("chats.search.no_results"),
+                                onOpenPerson: onOpenPerson, onOpenChannel: openFoundChannel)
+                        } else {
+                            Text(l10n.t("chats.search.no_results"))
+                                .foregroundStyle(Color.lakkoTextMuted)
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -406,6 +424,11 @@ public struct ChatListScreen: View {
         } else {
             let quietCall = callHost.quietIncomingCall
             List {
+                ForEach(invited) { contact in
+                    InvitedChatRow(contact: contact)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                }
                 ForEach(visible) { row in
                     VStack(spacing: 8) {
                         Button { onOpen(row) } label: {
@@ -439,15 +462,14 @@ public struct ChatListScreen: View {
                     // Spec section 2.1, Per platform — the row's own menu is a
                     // long press on both natives: the swipe's actions plus the
                     // folder items (`docs/ux/chat-folders.md` section 5).
-                    .contextMenu {
-                        rowActions(row: row, folder: folder, inMenu: true)
-                        folderActions(row: row, folder: folder)
-                    }
+                    .lakkoLongPressMenu { rowMenuItems(row: row, folder: folder) }
                 }
-                // ADR-0060 — the network search stays offered under the local
-                // results (UX section 6.1).
+                // ADR-0060 — the people this device knows, then the network
+                // results under People (UX section 6.1).
                 if !query.isEmpty, let peopleSearch {
-                    PeopleSearchSection(query: query, actions: peopleSearch)
+                    PeopleSearchSection(
+                        model: peopleSearch, includesChannels: true, showsLocalContacts: true,
+                        onOpenPerson: onOpenPerson, onOpenChannel: openFoundChannel)
                         .listRowSeparator(.hidden)
                 }
             }
@@ -455,6 +477,19 @@ public struct ChatListScreen: View {
             // Rebuilt on a layout-direction flip: a UIKit-backed List keeps the
             // mirroring it was built with (see SettingsScreen).
             .id(l10n.layoutDirection)
+        }
+    }
+
+    /// ADR-0079 section 4 — the pending contacts with no one-to-one yet,
+    /// filtered by the search like any row.
+    private var invitedRows: [PendingContact] {
+        let peers = Set(contactsRepository.state.accepted.map(\.request.fromPubkey))
+        let shown = PendingContacts.shown(contactsRepository.invited, oneToOnePeerKeys: peers)
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return shown }
+        return shown.filter { contact in
+            let title = PendingContacts.name(contact) ?? l10n.t("invite.contact.page.unnamed")
+            return ChatListFormatting.matches(query: trimmed, title: title, preview: "")
         }
     }
 
@@ -501,55 +536,62 @@ public struct ChatListScreen: View {
         return out
     }
 
-    /// Section 5 — Add to folder, and inside a folder, Remove from folder.
-    @ViewBuilder
-    private func folderActions(row: ConversationListRow, folder: FolderView?) -> some View {
+    /// The row's long-press menu (Lakko's own, never the system context
+    /// menu): the swipe's actions, then the folder items; "Add to folder" is
+    /// a second level of the same sheet listing the folders.
+    private func rowMenuItems(row: ConversationListRow, folder: FolderView?) -> [LakkoMenuItem] {
+        var items: [LakkoMenuItem] = []
+        if let folder {
+            let pinned = ChatFolders.isPinned(row, in: folder)
+            let atLimit = !pinned && folder.pinned.count >= ChatFolders.maxPins
+            items.append(.action(
+                l10n.t(pinned ? "chats.action.unpin" : "chats.action.pin"),
+                systemImage: pinned ? "pin.slash" : "pin", enabled: !atLimit
+            ) { Task { await toggleFolderPin(folder: folder, row: row) } })
+            if atLimit { items.append(.text(ChatFolders.pinLimitLine, secondary: true)) }
+        } else if row.kind != .channel {
+            items.append(.action(
+                l10n.t(row.pinned ? "chats.action.unpin" : "chats.action.pin"),
+                systemImage: row.pinned ? "pin.slash" : "pin"
+            ) { Task { await toggleFlag(groupIdHex: row.id, field: .pin) } })
+        }
+        if row.kind != .channel {
+            items.append(.action(
+                l10n.t(row.muted ? "chats.action.unmute" : "chats.action.mute"),
+                systemImage: row.muted ? "bell" : "bell.slash"
+            ) { Task { await toggleFlag(groupIdHex: row.id, field: .mute) } })
+            items.append(.action(
+                l10n.t(row.archived ? "chats.action.unarchive" : "chats.action.archive"),
+                systemImage: row.archived ? "tray.and.arrow.up" : "archivebox"
+            ) { Task { await toggleFlag(groupIdHex: row.id, field: .archive) } })
+        }
         let folders = deviceGroupSync.folders
+        let openEditor = {
+            editor = FolderEditorRequest(folder: nil, prefill: ChatFolders.ref(for: row), rows: allRows)
+        }
         if folders.isEmpty {
-            // With no folders yet, Add to folder goes straight to the editor.
-            Button {
-                editor = FolderEditorRequest(
-                    folder: nil, prefill: ChatFolders.ref(for: row), rows: allRows)
-            } label: {
-                Label(l10n.t("folders.add_to_folder"), systemImage: "folder.badge.plus")
-            }
+            items.append(.action(l10n.t("folders.add_to_folder"), systemImage: "folder.badge.plus", perform: openEditor))
         } else {
-            Menu {
-                ForEach(folders, id: \.folderId) { f in
-                    let isIn = ChatFolders.matches(f, row)
-                    Button {
-                        Task { await toggleMembership(folder: f, row: row) }
-                    } label: {
-                        if isIn {
-                            Label(f.meta.name, systemImage: "checkmark")
-                        } else {
-                            Text(f.meta.name)
-                        }
-                    }
-                    .disabled(
-                        !isIn && ChatFolders.handState(f, rowId: row.id) != .excluded
-                            && ChatFolders.handAddLimitReached(f))
-                }
-                Divider()
-                Button(l10n.t("folders.new_ellipsis")) {
-                    editor = FolderEditorRequest(
-                        folder: nil, prefill: ChatFolders.ref(for: row), rows: allRows)
-                }
-                .disabled(folders.count >= ChatFolders.maxFolders)
-                if folders.count >= ChatFolders.maxFolders {
-                    Text(ChatFolders.folderLimitLine)
-                }
-            } label: {
-                Label(l10n.t("folders.add_to_folder"), systemImage: "folder.badge.plus")
+            var sub: [LakkoMenuItem] = folders.map { f in
+                let isIn = ChatFolders.matches(f, row)
+                return .action(
+                    f.meta.name, systemImage: isIn ? "checkmark" : nil,
+                    enabled: isIn || ChatFolders.handState(f, rowId: row.id) == .excluded
+                        || !ChatFolders.handAddLimitReached(f)
+                ) { Task { await toggleMembership(folder: f, row: row) } }
             }
+            sub.append(.action(
+                l10n.t("folders.new_ellipsis"), systemImage: "folder.badge.plus",
+                enabled: folders.count < ChatFolders.maxFolders, perform: openEditor))
+            if folders.count >= ChatFolders.maxFolders { sub.append(.text(ChatFolders.folderLimitLine, secondary: true)) }
+            items.append(.submenu(l10n.t("folders.add_to_folder"), systemImage: "folder.badge.plus", items: sub))
         }
         if let folder {
-            Button {
+            items.append(.action(l10n.t("folders.remove_from_folder"), systemImage: "folder.badge.minus") {
                 Task { await toggleMembership(folder: folder, row: row) }
-            } label: {
-                Label(l10n.t("folders.remove_from_folder"), systemImage: "folder.badge.minus")
-            }
+            })
         }
+        return items
     }
 
     private func toggleMembership(folder: FolderView, row: ConversationListRow) async {
@@ -622,65 +664,13 @@ public struct ChatListScreen: View {
         }
     }
 
-    // MARK: - The one network lookup
+    // MARK: - A channel the search found
 
-    /// Spec section 4.3 — ONE row, for the whole name, offered only when
-    /// nothing local matched and the text could be a name.
-    ///
-    /// Never a list of partial matches: the server evaluates the blinded name
-    /// it was given and can answer "does this exact name exist" and nothing
-    /// about prefixes, because a prefix search is the server learning the
-    /// prefix.
-    @ViewBuilder
-    private var lookupSection: some View {
-        if NameLookup.looksLikeAName(query) {
-            Button { Task { await lookUp() } } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(Color.lakkoAccent)
-                    Text(lookupBusy ? l10n.t("common.looking_up") : NameLookup.rowLabel(for: query))
-                        .foregroundStyle(Color.lakkoText)
-                }
-            }
-            .disabled(lookupBusy)
-        }
-        if let lookupNote {
-            Text(lookupNote)
-                .font(.footnote)
-                .foregroundStyle(Color.lakkoTextMuted)
-                .multilineTextAlignment(.center)
-                .accessibilityAddTraits(.updatesFrequently)
-        }
-    }
-
-    private func lookUp() async {
-        if lookupBusy { return }
-        lookupBusy = true
-        lookupNote = nil
-        defer { lookupBusy = false }
-        let typed = query
-        // A client per namespace rather than one captured across both: the two
-        // lookups are sequential, a `DiscoveryClient` is a thin wrapper over a
-        // session, and the alternative is a shared reference crossing a
-        // concurrency boundary for no gain.
-        let found = await NameLookup.find(
-            typed: typed,
-            lookups: NameLookups(
-                channel: { try await DiscoveryClient().lookupChannel(handle: $0) },
-                person: { handle in
-                    let result = try await DiscoveryClient().lookup(username: handle)
-                    return result.account == nil ? nil : result.normalisedUsername
-                }))
-        switch found {
-        case .channel(let channelIdHex, let handle):
-            searchText = ""
-            onFoundChannel(channelIdHex, handle)
-        case .person(let username):
-            searchText = ""
-            onFoundPerson(username)
-        case .nothing, .unreachable, .allowanceUsed:
-            lookupNote = NameLookup.message(for: found, typed: typed)
-        }
+    /// A channel row under People: its subscribe page. The field is cleared,
+    /// as it was for the lookup row this replaced.
+    private func openFoundChannel(_ channelIdHex: String, _ handle: String) {
+        searchText = ""
+        onFoundChannel(channelIdHex, handle)
     }
 
     // MARK: - Channel refresh
@@ -851,16 +841,9 @@ public struct ChatListScreen: View {
                 .foregroundStyle(Color.lakkoTextMuted)
             Text(l10n.t("chats.empty.title"))
                 .font(.headline)
-            Menu {
-                Button { onCreate(.chat) } label: {
-                    Label(l10n.t("chats.create.chat"), systemImage: "bubble.left")
-                }
-                Button { onCreate(.group) } label: {
-                    Label(l10n.t("chats.create.group"), systemImage: "person.3")
-                }
-                Button { onCreate(.channel) } label: {
-                    Label(l10n.t("chats.create.channel"), systemImage: "megaphone")
-                }
+            Button {
+                createMenuWithSaved = false
+                createMenuOpen = true
             } label: {
                 Text(l10n.t("chats.empty.action"))
                     .padding(.horizontal, 16)
@@ -890,7 +873,8 @@ struct ConversationRowView: View {
         HStack(alignment: .center, spacing: 12) {
             InitialsAvatar(
                 // The id is hashed for the tint only, never shown.
-                name: row.title, identity: row.id, size: 40)
+                name: row.title, identity: row.id, size: 40,
+                photo: row.personKey.map(AvatarPhoto.person))
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(row.title)
@@ -1030,6 +1014,11 @@ public final class ChatListViewModel: ObservableObject {
     /// conversation has one (only a group can: a name received in a
     /// one-to-one is dropped, ADR-0062 §7) — else the other person's resolved
     /// name (ADR-0048) for a one-to-one, else the members' names. Never a hex id (UX spec section 6).
+    /// ADR-0084 — the other person of a one-to-one, for the row's photo.
+    func peerSignatureKey(groupIdHex: String) -> Data? {
+        repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex)
+    }
+
     func title(groupIdHex: String) -> String {
         if let shared = repository.groupName(groupIdHex: groupIdHex) {
             return shared
@@ -1119,5 +1108,35 @@ public final class ChatListViewModel: ObservableObject {
         for thread in threads {
             try? await repository.pollGroup(groupIdHex: thread.groupIdHex)
         }
+    }
+}
+
+/// ADR-0079 section 4 — the chat with a person added through their invite
+/// link before their app has answered: drawn like any row (no "pending"
+/// badge), opening the pending chat.
+struct InvitedChatRow: View {
+    let contact: PendingContact
+
+    var body: some View {
+        let title = PendingContacts.name(contact) ?? Localization.text("invite.contact.page.unnamed")
+        NavigationLink(value: TabRoute.pendingChat(accountIdHex: contact.accountIdHex)) {
+            HStack(alignment: .center, spacing: 12) {
+                InitialsAvatar(
+                    name: title, identity: contact.accountIdHex, size: 40,
+                    photo: .person(contact.signaturePubkey))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.body)
+                        .foregroundStyle(Color.lakkoText)
+                        .lineLimit(1)
+                    Text(Localization.text("chat.pending.waiting", texts: ["name": title]))
+                        .font(.subheadline)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.vertical, 4)
+        }
+        .buttonStyle(.plain)
     }
 }

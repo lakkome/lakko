@@ -34,6 +34,9 @@
 //!     (`clear_prefix || ciphertext || sframe_header || trailer`):
 //!     the split, the trailer, the AAD, and the sender's clear-prefix
 //!     rule per codec.
+//!   * [`relay`] — ADR-0078 section 2. The sealed `signal-relay`
+//!     channel of an SFU call and the signed peer announcement it
+//!     carries, which replaces the server-derived ADR-0021 peer tag.
 //!   * [`group_call`] — Phase 3c1. Multi-participant ledger
 //!     that owns the [`CallKey`] seed + tracks which leaves
 //!     are currently on the call (a subset of the MLS
@@ -60,7 +63,9 @@ pub mod header;
 pub mod link_invite;
 pub mod media_frame;
 pub mod quality;
+pub mod relay;
 pub mod safety_number;
+pub mod screen_share;
 pub mod session;
 pub mod sframe;
 pub mod signaling;
@@ -74,8 +79,8 @@ pub use group_call::{GroupCallScope, GroupCallSession, Participant, SignalingOut
 pub use header::{HeaderError, SframeHeader, MAX_HEADER_LEN};
 pub use link_invite::{accept_call_invite, AcceptedCallInvite};
 pub use media_frame::{
-    clear_prefix_len, vp8_is_key_frame, MediaCodec, MediaFrameError, MediaFrameParts,
-    MAX_CLEAR_PREFIX_LEN, MEDIA_FRAME_VERSION,
+    clear_prefix_len, red_primary, vp8_is_key_frame, MediaCodec, MediaContent, MediaFrameError,
+    MediaFrameParts, MAX_CLEAR_PREFIX_LEN, MEDIA_FRAME_VERSION,
 };
 pub use quality::{
     estimate_quality, recommend_bitrate, AudioCodec, QualityLevel, QualitySample, QualitySampler,

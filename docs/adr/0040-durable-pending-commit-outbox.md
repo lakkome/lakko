@@ -5,6 +5,31 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0040: Durable pending-commit outbox for crash-safe MLS group commits
 
+> **Amended by [ADR-0081](0081-devicegroup-commits-cannot-strand.md)
+> (2026-10-18).** Option B now covers the direct-commit paths too: an add, a
+> remove and a role-table rewrite are STAGED in the core
+> (`stage_add_members`, `stage_remove_member`, `stage_set_group_roles`), the
+> entry and the snapshot carrying the staged commit are written fail-closed
+> before anything is sent, the commit goes out through the DS commit route
+> (`POST .../commit`, the epoch's registration and the row together), and
+> the group merges only on the answer (abandons on a `409` or a definitive
+> refusal; an unanswered commit stays owed and is re-sent by the owed
+> verdict). Where this document describes an eager merge before the record
+> and a whole-provider reset after an abort, that is history for these
+> paths; the reset survives only as the fallback when an abandon fails.
+>
+> **Amended again by ADR-0081 (2026-10-19, "Amendment (2026-10-19,
+> second)").** The clients' direct-commit paths (add, remove, role change on
+> a group with no role table) are deleted on web, iOS and Android; such a
+> group is refused (`NoRoleTable`), and `join_from_welcome` refuses its
+> Welcome. What writes this outbox for an ordinary group is now the ADR-0045
+> sweep alone. Everything this document says about the four (later three)
+> direct commit paths is history, and so is the F1 in-memory reset after a
+> failed persist (web `resetGroupAfterPersistAbort`, iOS
+> `resetGroupToDurableSnapshot`, Android `resetGroupToDurableSnapshotOrThrow`
+> and `runCrashSafeCommit`'s abort hook, all deleted): a staged sweep has no
+> eager merge to undo and is rolled back per group by `abandonStagedSweep`.
+
 - **Status:** **Accepted — implemented S1–S5 (2026-07), end to end on web + iOS +
   Android; G-35 CLOSED.** ~~Accepted — design (S1) … the S2–S5 per-client
   implementation is **pending**~~ — that status line stood after the

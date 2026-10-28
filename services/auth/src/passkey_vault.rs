@@ -186,7 +186,7 @@ pub(crate) async fn passkey_put(
     .await
     .map_err(ApiError::Db)?;
     tx.commit().await.map_err(ApiError::Db)?;
-    tracing::info!(account_id = %URL_SAFE_NO_PAD.encode(auth.0), "passkey-vault: stored");
+    tracing::info!("passkey-vault: stored");
     Ok(Json(serde_json::json!({ "stored": true })))
 }
 
@@ -243,11 +243,7 @@ pub(crate) async fn passkey_delete(
             .map_err(ApiError::Db)?
             .rows_affected()
             > 0;
-    tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(auth.0),
-        deleted,
-        "passkey-vault: blob removed"
-    );
+    tracing::info!(deleted, "passkey-vault: blob removed");
     Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
@@ -366,7 +362,7 @@ mod vault_e2e_tests {
             turn: None,
             totp_enc_key: None,
             vault_enc_key: with_key.then(|| Arc::new(VAULT_KEY)),
-            throttle: crate::throttle::ThrottleConfig::disabled(),
+            room_cap: std::sync::Arc::new(crate::room_cap::RoomAdmissionCap::disabled()),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),

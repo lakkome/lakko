@@ -131,6 +131,7 @@ mod tests {
             key_package: vec![0xfe; 768],
             rendezvous_pseudonym: vec![0xab; 32],
             login_handle: vec![0x42; 32],
+            self_removal_proof: vec![0x5a; 137],
         };
 
         let mut buf = Vec::new();

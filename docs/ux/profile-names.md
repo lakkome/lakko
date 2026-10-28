@@ -88,7 +88,8 @@ Persian/Indic joiners are allowed. Empty after trimming = no name.
 |---|---|
 | Profile not yet received | Fallback per §3 (username if verified, else fingerprint). Updates in place when it arrives. The device does not only wait: it asks the group to introduce itself right after joining, and again when it opens a group where someone is still unnamed (at most once a day per group), so a name arrives as soon as its owner's device next reads the group |
 | Username being verified | Show the name without the username; add `· @alice` when verification completes |
-| Username verification failed or mismatched | Username never shown for this person; a quiet "Username not verified" line in the contact detail only |
+| Username verification refused (the directory's certificate does not bind this username to this person, or there is none) | Username never shown for this person; a quiet "Username not verified" line in the contact detail only |
+| Username check could not reach the directory (a 429, the network, no token; amended 2026-10-24) | As "being verified": the name without the username and no line. Tried again by itself after 15 s, 30 s, 1, 2, then every 5 minutes (honouring a 429's Retry-After where the client receives one) |
 | Name changed by the other person | Updates everywhere on next receipt; no notification, no history |
 | Local rename set | The rename wins everywhere; contact detail also shows `Their name: Alice Petrova` |
 | Two contacts with the same name | Both shown as-is; the username (or fingerprint) under the name disambiguates in lists |
@@ -109,5 +110,7 @@ AppShell menu, iOS settings sheet, Android settings screen).
 
 ## 9. Out of scope
 
-Avatars, bios, per-chat nicknames, name history, and showing names to people you have no
-chat or request with.
+Bios, per-chat nicknames, name history, and showing names to people you have no chat or
+request with. (Avatars were listed here without a reason given; since 2026-10-26 they are
+[`profile-screen.md`](profile-screen.md) and ADR-0084, which also replace the Settings >
+Profile part of section 4.)

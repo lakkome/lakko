@@ -249,7 +249,9 @@ export type ExitBlock =
  */
 export function exitBlock(input: ExitBlockInput): ExitBlock {
   // ADR-0045 UX §6.2.7 — FIRST, ahead of every other arm including `hidden`.
-  // A legacy group with no role table still evicts you by direct commit, and
+  // A legacy group with no role table could evict you by direct commit (that
+  // path is deleted since the ADR-0081 amendment, but a peer's client is not
+  // this one), and
   // an owner cannot reach this state at all (the core refuses a `Remove`
   // targeting the owner and refuses an owner's own leave), so ordering this
   // after the `usesProposalPath` gate would silently withhold the one control

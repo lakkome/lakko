@@ -158,11 +158,12 @@ pub enum FfiReachClass {
     Link,
     /// The one party a request of the owner's went to. Scope: a random id.
     Reply,
-    /// Members of a group the owner lets find them. Scope: the group id.
+    /// Members of every group the owner lets find them. Empty scope: one
+    /// key per account (ADR-0078 section 9).
     Group,
-    /// Every co-member of a group, whatever the setting. Scope: the group id.
+    /// Every co-member of every group, whatever the setting. Empty scope.
     Member,
-    /// Members of a channel the owner lets find them. Scope: the channel id.
+    /// Members of every channel the owner lets find them. Empty scope.
     Channel,
     /// Contacts of contacts. Empty scope.
     Fof,
@@ -267,8 +268,8 @@ impl TryFrom<FfiReachGrant> for RustReachGrant {
 ///
 /// * [`FfiError::Reach`] `seedLength` — `account_seed` is not 32 bytes.
 /// * [`FfiError::Reach`] `scopeIdTooLong` / `scopeIdNotEmpty` /
-///   `scopeIdEmpty` — the scope does not fit the class (empty for `Contact`
-///   and `Fof`, 1 to 64 bytes otherwise).
+///   `scopeIdEmpty` — the scope does not fit the class (1 to 64 bytes for
+///   `Link` and `Reply`, empty for every other class).
 #[uniffi::export]
 pub fn reach_seed(
     account_seed: Vec<u8>,
@@ -981,7 +982,7 @@ pub fn max_visibility_scope_id_len() -> u32 {
 pub struct FfiReachStateEntry {
     /// The class.
     pub class: FfiReachClass,
-    /// The scope, shaped per the class (empty for `Contact` / `Fof`).
+    /// The scope, shaped per the class (empty for every class but `Link` / `Reply`).
     pub scope_id: Vec<u8>,
     /// The current key version.
     pub version: u32,
@@ -1587,18 +1588,18 @@ mod tests {
     fn reach_seed_reproduces_the_core_golden() {
         let seed = reach_seed(
             ACCOUNT_SEED.to_vec(),
-            FfiReachClass::Group,
-            b"group-1".to_vec(),
+            FfiReachClass::Link,
+            b"link-1".to_vec(),
             3,
         )
         .unwrap();
         assert_eq!(
             hex(&seed),
-            "00cad2ad9a1885862187f17ef75e33818653b1b54b9a480dad919d3d3d9d851e"
+            "69e756d3faf95aae33944de2bdb27569fe890279b0817350e3980d23dd137cb6"
         );
         assert_eq!(
             hex(&reach_verifying_key(seed.clone()).unwrap()),
-            "e7c2e2aa6ff74083318d5f6b1dfa7939c3cc074549376d9e91c5592a67a35e8f"
+            "f81b813554d8b791c378ffb6e836d2218f76ddf26e2e8d0be1209b0c2adac4d5"
         );
     }
 
@@ -1631,9 +1632,9 @@ mod tests {
 
     #[test]
     fn reach_seed_matches_the_core_and_grants_round_trip() {
-        let seed = reach_seed(ACCOUNT_SEED.to_vec(), FfiReachClass::Group, vec![7; 8], 3).unwrap();
+        let seed = reach_seed(ACCOUNT_SEED.to_vec(), FfiReachClass::Link, vec![7; 8], 3).unwrap();
         let core =
-            rust_reach_seed(&ACCOUNT_SEED, ReachClass::Group, &[7; 8], 3).expect("core derives");
+            rust_reach_seed(&ACCOUNT_SEED, ReachClass::Link, &[7; 8], 3).expect("core derives");
         assert_eq!(seed, core.as_bytes().to_vec());
         assert_eq!(
             reach_verifying_key(seed.clone()).unwrap(),
@@ -1641,7 +1642,7 @@ mod tests {
         );
 
         let grant =
-            derive_reach_grant(ACCOUNT_SEED.to_vec(), FfiReachClass::Group, vec![7; 8], 3).unwrap();
+            derive_reach_grant(ACCOUNT_SEED.to_vec(), FfiReachClass::Link, vec![7; 8], 3).unwrap();
         assert_eq!(grant.seed, seed);
         // ADR-0078: the grant names the owner's mailbox, verified only under
         // the owner's account key.
@@ -1680,7 +1681,7 @@ mod tests {
         let e = reach_seed(ACCOUNT_SEED.to_vec(), FfiReachClass::Contact, vec![1], 1).unwrap_err();
         assert!(matches!(&e, FfiError::Reach(_)));
         assert_eq!(code_of(&e), "scopeIdNotEmpty");
-        let e = reach_seed(ACCOUNT_SEED.to_vec(), FfiReachClass::Group, vec![], 1).unwrap_err();
+        let e = reach_seed(ACCOUNT_SEED.to_vec(), FfiReachClass::Link, vec![], 1).unwrap_err();
         assert_eq!(code_of(&e), "scopeIdEmpty");
         let e = reach_seed(vec![0; 31], FfiReachClass::Fof, vec![], 1).unwrap_err();
         assert_eq!(code_of(&e), "seedLength");
@@ -1850,7 +1851,7 @@ mod tests {
                     version: 2,
                 },
                 FfiReachStateEntry {
-                    class: FfiReachClass::Group,
+                    class: FfiReachClass::Link,
                     scope_id: vec![1; 8],
                     version: 5,
                 },
@@ -1860,7 +1861,7 @@ mod tests {
         let wire = compose_reach_state_envelope(state.clone()).unwrap();
         assert_eq!(decode_reach_state_envelope(wire).unwrap(), state);
         assert_eq!(
-            reach_state_version_of(state.clone(), FfiReachClass::Group, vec![1; 8]),
+            reach_state_version_of(state.clone(), FfiReachClass::Link, vec![1; 8]),
             Some(5)
         );
         assert_eq!(
@@ -1883,7 +1884,7 @@ mod tests {
         assert_eq!(code_of(&e), "someWithNoPart");
         let state = FfiReachState {
             entries: vec![FfiReachStateEntry {
-                class: FfiReachClass::Group,
+                class: FfiReachClass::Link,
                 scope_id: vec![],
                 version: 1,
             }],

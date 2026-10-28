@@ -1102,9 +1102,9 @@ mod tests {
             entries: vec![
                 entry(ReachClass::Contact, b"", 3),
                 entry(ReachClass::Fof, b"", 9),
-                entry(ReachClass::Group, b"g1", 1),
-                entry(ReachClass::Member, b"g1", 2),
-                entry(ReachClass::Channel, b"c1", u32::MAX),
+                entry(ReachClass::Group, b"", 1),
+                entry(ReachClass::Member, b"", 2),
+                entry(ReachClass::Channel, b"", u32::MAX),
                 entry(ReachClass::Link, &[7; MAX_REACH_SCOPE_ID_LEN], 0),
                 entry(ReachClass::Reply, &[8; 16], 0),
             ],
@@ -1223,11 +1223,11 @@ mod tests {
     fn a_merge_that_overflows_the_bound_is_refused() {
         let a = rs(
             (0..MAX_REACH_STATE_ENTRIES)
-                .map(|i| entry(ReachClass::Group, format!("a{i}").as_bytes(), 1))
+                .map(|i| entry(ReachClass::Link, format!("a{i}").as_bytes(), 1))
                 .collect(),
             1,
         );
-        let b = rs(vec![entry(ReachClass::Group, b"extra", 1)], 2);
+        let b = rs(vec![entry(ReachClass::Link, b"extra", 1)], 2);
         assert_eq!(
             merge_reach_state(&a, &b, 3),
             Err(VisibilityError::TooManyEntries {
@@ -1244,7 +1244,7 @@ mod tests {
         let slots: [(ReachClass, &[u8]); 3] = [
             (ReachClass::Contact, b""),
             (ReachClass::Fof, b""),
-            (ReachClass::Group, b"g"),
+            (ReachClass::Link, b"g"),
         ];
         // Deterministic spread of starting states and clocks.
         for seed in 0u64..200 {
@@ -1304,8 +1304,12 @@ mod tests {
         let wire = compose_reach_state(&s).unwrap();
         assert_eq!(wire, raw_state(&s));
         assert_eq!(decode_reach_state(&wire).unwrap(), s);
-        assert_eq!(s.version_of(ReachClass::Member, b"g1"), Some(2));
-        assert_eq!(s.version_of(ReachClass::Member, b"g2"), None);
+        assert_eq!(s.version_of(ReachClass::Member, b""), Some(2));
+        assert_eq!(
+            s.version_of(ReachClass::Member, b"g2"),
+            None,
+            "an account-wide class has no scoped entry"
+        );
         let empty = ReachState {
             entries: Vec::new(),
             updated_at_ms: 0,
@@ -1321,8 +1325,8 @@ mod tests {
         let cases = [
             (
                 vec![
-                    entry(ReachClass::Group, b"g", 1),
-                    entry(ReachClass::Group, b"g", 2),
+                    entry(ReachClass::Link, b"g", 1),
+                    entry(ReachClass::Link, b"g", 2),
                 ],
                 VisibilityError::DuplicateEntry,
             ),
@@ -1331,15 +1335,11 @@ mod tests {
                 VisibilityError::Reach(ReachError::ScopeIdNotEmpty),
             ),
             (
-                vec![entry(ReachClass::Group, b"", 1)],
+                vec![entry(ReachClass::Link, b"", 1)],
                 VisibilityError::Reach(ReachError::ScopeIdEmpty),
             ),
             (
-                vec![entry(
-                    ReachClass::Group,
-                    &[1; MAX_REACH_SCOPE_ID_LEN + 1],
-                    1,
-                )],
+                vec![entry(ReachClass::Link, &[1; MAX_REACH_SCOPE_ID_LEN + 1], 1)],
                 VisibilityError::Reach(ReachError::ScopeIdTooLong {
                     len: MAX_REACH_SCOPE_ID_LEN + 1,
                 }),
@@ -1370,8 +1370,8 @@ mod tests {
         // The same scope under two classes is two entries.
         let ok = ReachState {
             entries: vec![
-                entry(ReachClass::Group, b"g", 1),
-                entry(ReachClass::Member, b"g", 1),
+                entry(ReachClass::Link, b"g", 1),
+                entry(ReachClass::Reply, b"g", 1),
             ],
             updated_at_ms: 1,
         };
@@ -1543,7 +1543,7 @@ mod tests {
                 let mut scope_id = vec![0u8; crate::reach::MAX_REACH_SCOPE_ID_LEN];
                 scope_id[..8].copy_from_slice(&(i as u64).to_be_bytes());
                 ReachStateEntry {
-                    class: ReachClass::Group,
+                    class: ReachClass::Link,
                     scope_id,
                     version: u32::MAX,
                 }

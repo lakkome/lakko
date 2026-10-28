@@ -74,7 +74,7 @@ import {
   type VideoPublishState,
 } from "./sfu-call-session";
 import type { SfuPeerSnapshot } from "./sfu-signaling-client";
-import { TurnCredentialClient } from "./turn-credential-client";
+import { groupPeerAnnouncer, type VerifiedPeerIdentity } from "./call-relay";
 import {
   CallPresence,
   electActingCommitterLeaf,
@@ -89,11 +89,15 @@ import type {
 import { t } from "../l10n";
 import { base64Encode } from "../auth/account-id";
 import type { IncomingProfile } from "../profile/profile-store";
-import { accountIdHexOfBytes } from "../profile/profile-store";
-import { callTileName, EarlyRelays, profileClaimMatchesPeer } from "./tile-name";
+import { callTileName, EarlyRelays, boundProfileClaim } from "./tile-name";
 import { ENDED_FOR_ALL } from "./end-for-everyone";
 import { splitStreamId, withLightStream, withoutLightStream } from "./light-stream";
+import { GroupScreenShare } from "./group-screen-share";
+import { screenShareActions } from "./screen-share-store";
+import { SCREEN_SHARE_NOTICE_MS } from "./screen-share-capability";
 import type { VideoQuality } from "./video-wants";
+import { avatarFromWasm } from "../profile/avatar-model";
+import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 
 /** A profile a member sealed into the call, as the profile store takes it. */
 export type AnnouncedProfile = IncomingProfile;
@@ -134,16 +138,15 @@ export interface MultiJoinerCallOptions {
   readonly identity: WasmIdentity;
   /** 16-byte `call_id` from the capability. */
   readonly callId: Uint8Array;
-  /** Owner's 16-byte `account_id` from the capability (for the owner's
-   *  per-call peer_tag → presence match). */
+  /** Owner's 16-byte `account_id` from the capability. A profile the owner
+   *  seals into the call keeps its account id (and with it a username
+   *  certificate) only when it claims this one (`boundProfileClaim`). */
   readonly ownerAccountId: Uint8Array;
   /** Owner's 32-byte Ed25519 signature key from the capability (identifies
    *  the owner's MLS leaf + is the election's `is_owner` anchor). */
   readonly ownerSignatureKey: Uint8Array;
   /** SFU WebSocket origin (`VITE_LAKKO_SFU_URL`). */
   readonly sfuBaseUrl: string;
-  /** Live session token — mints the call-admission JWT. */
-  readonly sessionToken: string;
   /** Mic / camera request. */
   readonly media: { readonly audio: boolean; readonly video: boolean };
   /** The name on the local tile (§4.4: the user's own profile name). Defaults
@@ -156,22 +159,16 @@ export interface MultiJoinerCallOptions {
   readonly ownProfileEnvelope?: () => Promise<Uint8Array | null>;
   /** `services/auth` base URL for the JWT mint (default `/api/auth`). */
   readonly authBaseUrl?: string;
-  /** Extra ICE servers. A TURN row is minted from `sessionToken` on top of
-   *  whatever this carries; the default base is public STUN. */
+  /** Extra ICE servers. The TURN credential minted beside the call token
+   *  is added on top of whatever this carries; the default base is public
+   *  STUN. */
   readonly iceServers?: readonly RTCIceServer[];
-  /** Resolve a peer to a person this device knows (ADR-0021 peer_tag
-   *  lookup), or `null`. What names a tile before its member has announced
-   *  itself. */
-  readonly resolveDisplayName?: (
-    peerId: string,
-    accountPseudonym: string,
-    peerTag: string | undefined,
-  ) => string | null;
   /** A member announced its profile inside the call. `personKeyB64` is the
-   *  MLS-authenticated sender, resolved to the account key at receipt (C-68),
-   *  and the account id the profile claims is the one the SFU admitted the
-   *  relaying peer as (`profileClaimMatchesPeer`). The host files it in the
-   *  profile store, which is what verifies a claimed username. */
+   *  MLS-authenticated sender, resolved to the account key at receipt (C-68).
+   *  The profile keeps its claimed account id (and username certificate)
+   *  only when the sender is the link's owner and claims the capability's
+   *  owner account id (`boundProfileClaim`); anyone else's is filed without
+   *  them. The host files it in the profile store. */
   readonly onMemberProfile?: (personKeyB64: string, profile: AnnouncedProfile) => void;
   /** What the one resolver calls `personKeyB64` (rename, profile name,
    *  verified `@username`), or `null` when it has only a fingerprint. */
@@ -221,6 +218,8 @@ export class LinkCallAbandonedError extends Error {
 /** The orchestrator instance IS the caller's handle. */
 export class MultiJoinerCall {
   private readonly session: SfuCallSession;
+  /** The screen share of this call (ADR-0083). */
+  private readonly share: GroupScreenShare;
   private readonly presence: CallPresence;
 
   /** Remote MSID stream id → live `MediaStream` (for the Call.tsx tiles). */
@@ -266,11 +265,8 @@ export class MultiJoinerCall {
   /** SFU peer id -> the person (base64 account key) whose sealed profile
    *  that peer relayed. */
   private readonly peerPersons = new Map<string, string>();
-  /** What each remote tile was named from, so it can be named again. */
-  private readonly namingInputs = new Map<
-    string,
-    { pseudonym: string; peerTag: string | undefined }
-  >();
+  /** Every remote tile's SFU peer id, so each can be named again. */
+  private readonly namingInputs = new Set<string>();
   /** SFU peer id -> the username that peer's sealed profile claims. */
   private readonly peerUsernames = new Map<string, string>();
   /** Broadcasts that arrived before this client had a group to read them. */
@@ -324,8 +320,8 @@ export class MultiJoinerCall {
     private readonly opts: MultiJoinerCallOptions,
     private readonly role: "owner" | "joiner",
     jwt: string,
+    turn: RTCIceServer | null,
     private readonly ownerKeyHex: string,
-    ownerPeerTag: string | null,
     initialSeed: Uint8Array | undefined,
     initialLeaf: number | undefined,
   ) {
@@ -367,11 +363,40 @@ export class MultiJoinerCall {
     };
     this.localLeaf = initialLeaf ?? null;
 
-    this.presence = new CallPresence(
-      hexKey(opts.identity.signaturePublicKey),
-      this.ownerKeyHex,
-      ownerPeerTag,
-    );
+    this.presence = new CallPresence(hexKey(opts.identity.signaturePublicKey), this.ownerKeyHex);
+
+    const announcer = groupPeerAnnouncer(wasm, opts.identity, opts.callId, () => this.group);
+    // The screen share (ADR-0083). Its store writes are this attempt's only
+    // while it is the current one, like every other write to the call store.
+    const ifCurrent = <A extends unknown[]>(write: (...args: A) => void) =>
+      (...args: A): void => {
+        if (this.current()) write(...args);
+      };
+    this.share = new GroupScreenShare({
+      announcer,
+      session: {
+        sendSealedRelay: (plaintext) => this.session.sendSealedRelay(plaintext),
+        attachScreenShare: (capture) => this.session.attachScreenShare(capture),
+        detachScreenShare: () => this.session.detachScreenShare(),
+        getSelfPeerId: () => this.session.getSelfPeerId(),
+      },
+      nameOf: (personKeyB64) => {
+        for (const [peerId, person] of this.peerPersons) {
+          if (person === personKeyB64) return this.nameOf(peerId);
+        }
+        return "";
+      },
+      notice: (text) => {
+        if (this.current()) callActions.showNotice(text, SCREEN_SHARE_NOTICE_MS);
+      },
+      store: {
+        setCurrent: ifCurrent(screenShareActions.setCurrent),
+        setControl: ifCurrent(screenShareActions.setControl),
+        setBusy: ifCurrent(screenShareActions.setBusy),
+        setStream: ifCurrent(screenShareActions.setStream),
+      },
+    });
+    this.share.init(wasm);
 
     this.session = new SfuCallSession(
       {
@@ -382,6 +407,10 @@ export class MultiJoinerCall {
         // the owner for the SFU roster, which decides whether it founds the
         // group or comes back into one a successor is holding.
         deferPublish: true,
+        // ADR-0078 section 2: who each peer is comes from its own sealed,
+        // signed announcement, verified against the call group's roster
+        // (none before this client holds the group).
+        peerAnnouncer: announcer,
         // Omit undefined optionals (exactOptionalPropertyTypes).
         ...(initialSeed !== undefined ? { seed: initialSeed } : {}),
         ...(initialLeaf !== undefined ? { localLeaf: initialLeaf } : {}),
@@ -392,8 +421,8 @@ export class MultiJoinerCall {
       {
         onStateChange: (s): void => this.onSessionState(s),
         onWelcome: (self, roster): void => this.onSfuWelcome(self, roster),
-        onPeerJoined: (peerId, pseudo, tag): void =>
-          this.onSfuPeerJoined(peerId, pseudo, tag),
+        onPeerJoined: (peerId): void => this.onSfuPeerJoined(peerId),
+        onPeerIdentified: (peerId, identity): void => this.onPeerIdentified(peerId, identity),
         onPeerLeft: (peerId): void => this.onSfuPeerLeft(peerId),
         onRemoteTrack: (rt): void => this.onRemoteTrack(rt),
         // The SFU's `video-given` frames are read by the session this call
@@ -408,17 +437,17 @@ export class MultiJoinerCall {
           if (this.current()) callActions.setParticipantCamera(id, cameraOn);
         },
         onSignalRelay: (from, payload): void => this.onRelay(from, payload),
+        onRemoteScreenShareState: (peerId, state): void => this.share.onState(peerId, state),
         onLocalStream: (stream): void => this.setLocalStream(stream),
         onVideoPublishState: (state): void => this.setVideoPublishState(state),
         onCaptureFallback: (fallback): void => this.onCaptureFallback(fallback),
       },
     );
     // A joiner behind a symmetric NAT has no server-reflexive candidate and
-    // reaches the room only through the relay. Fail-soft: no credential
-    // leaves the call on STUN.
-    const turn = new TurnCredentialClient(opts.authBaseUrl);
-    turn.setSessionToken(opts.sessionToken);
-    this.session.setTurnProvider(() => turn.fetchOrNull());
+    // reaches the room only through the relay. The credential came with the
+    // call token (ADR-0078 section 2). Fail-soft: none leaves the call on
+    // STUN.
+    this.session.setTurnProvider(async () => turn);
   }
 
   /** Section 4.4: the device lacked what the call asked for. Turn the missing
@@ -445,19 +474,18 @@ export class MultiJoinerCall {
    *  the peers are joiners waiting for a group and the owner founds one. */
   static async host(opts: MultiJoinerCallOptions): Promise<MultiJoinerCall> {
     const wasm = await loadWasm();
-    const callIdHex = groupIdHex(opts.callId);
-    const jwt = await mintJwt(wasm, opts, callIdHex);
+    const minted = await mintJwt(wasm, opts);
     // Left or replaced while the token was minted: no session is opened.
     if (opts.isCurrent?.() === false) throw new LinkCallAbandonedError();
     const ownerKeyHex = hexKey(opts.ownerSignatureKey);
-    // Owner-presence rides `self` (ownerPeerTag = null on the owner's client).
+    // Owner presence rides `self` on the owner's client.
     const call = new MultiJoinerCall(
       wasm,
       opts,
       "owner",
-      jwt,
+      minted.jwt,
+      minted.turn,
       ownerKeyHex,
-      null,
       undefined,
       undefined,
     );
@@ -548,22 +576,19 @@ export class MultiJoinerCall {
    *  and wait for the committer's Welcome. */
   static async join(opts: MultiJoinerCallOptions): Promise<MultiJoinerCall> {
     const wasm = await loadWasm();
-    const callIdHex = groupIdHex(opts.callId);
-    const jwt = await mintJwt(wasm, opts, callIdHex);
+    const minted = await mintJwt(wasm, opts);
     // Left or replaced while the token was minted: no session is opened.
     if (opts.isCurrent?.() === false) throw new LinkCallAbandonedError();
     const ownerKeyHex = hexKey(opts.ownerSignatureKey);
-    // The owner's per-call peer_tag lets a joiner detect owner presence on
-    // the SFU roster (ADR-0021 + ADR-0032 election).
-    const ownerPeerTag = wasm.sfuPeerTag(callIdHex, groupIdHex(opts.ownerAccountId));
-
+    // Owner presence is learnt once this client holds the group: the owner's
+    // sealed announcement verifies against the capability's owner key.
     const call = new MultiJoinerCall(
       wasm,
       opts,
       "joiner",
-      jwt,
+      minted.jwt,
+      minted.turn,
       ownerKeyHex,
-      ownerPeerTag,
       undefined,
       undefined,
     );
@@ -661,6 +686,8 @@ export class MultiJoinerCall {
     this.clearRebroadcast();
     this.clearOwnerProbe();
     this.lastKnownCameraOn.clear();
+    this.share.dispose();
+    if (this.current()) screenShareActions.reset();
     this.session.hangUp();
     this.setRemoteStreams(() => new Map());
     this.setRemoteLightStreams(() => new Map());
@@ -748,6 +775,7 @@ export class MultiJoinerCall {
             shortFingerprint: this.safetyNumber ?? null,
           });
         }
+        this.share.onConnected();
         if (!this.firedLive) {
           this.firedLive = true;
           this.opts.onLive?.();
@@ -755,6 +783,8 @@ export class MultiJoinerCall {
         break;
       case "failed":
       case "closed":
+        this.share.dispose();
+        if (current) screenShareActions.reset();
         if (current) callActions.setPhase({ kind: "ended", endedAt: Date.now() });
         this.opts.onEnded?.();
         break;
@@ -767,17 +797,10 @@ export class MultiJoinerCall {
     selfPeerId: string,
     roster: readonly SfuPeerSnapshot[],
   ): void {
-    this.presence.setRoster(
-      roster.map((p) => ({ peerId: p.peer_id, peerTag: p.peer_tag })),
-    );
+    this.presence.setRoster(roster.map((p) => p.peer_id));
     const remotes = roster
       .filter((p) => p.peer_id !== selfPeerId)
-      .map((p) =>
-        this.remoteParticipant(
-          this.nameOf(p.peer_id, p.account_pseudonym, p.peer_tag),
-          p.peer_id,
-        ),
-      );
+      .map((p) => this.remoteParticipant(this.nameOf(p.peer_id), p.peer_id));
     if (this.current()) callActions.setParticipants([this.localParticipant(), ...remotes]);
     if (this.role === "owner" && this.group === null && !this.joined) {
       if (remotes.length === 0) {
@@ -791,20 +814,26 @@ export class MultiJoinerCall {
     if (this.pendingKeyPackage !== null) this.startRebroadcast();
   }
 
-  private onSfuPeerJoined(
-    peerId: string,
-    accountPseudonym: string,
-    peerTag: string | undefined,
-  ): void {
-    this.presence.addPeer(peerId, peerTag);
-    const joined = this.remoteParticipant(
-      this.nameOf(peerId, accountPseudonym, peerTag),
-      peerId,
-    );
+  private onSfuPeerJoined(peerId: string): void {
+    this.presence.addPeer(peerId);
+    const joined = this.remoteParticipant(this.nameOf(peerId), peerId);
     if (this.current()) callActions.participantJoined(joined);
     // A newly-present peer may be a freshly-elected committer (owner
     // reclaim / a successor); re-broadcast so it sees a still-pending join.
     this.broadcastKeyPackage();
+    this.share.onPeerJoined();
+  }
+
+  /** ADR-0078 section 2: a peer's sealed announcement verified against a
+   *  leaf of the call group. Bind the peer to that member (presence, the
+   *  committer election, a departure's removal) and to that person (the
+   *  tile's name). */
+  private onPeerIdentified(peerId: string, identity: VerifiedPeerIdentity): void {
+    this.presence.bindPeerToMember(peerId, identity.memberKeyHex);
+    this.share.onPeerIdentified(peerId, identity.memberKeyHex);
+    if (this.peerPersons.get(peerId) === identity.personKeyB64) return;
+    this.peerPersons.set(peerId, identity.personKeyB64);
+    this.renameTile(peerId);
   }
 
   private onSfuPeerLeft(peerId: string): void {
@@ -818,6 +847,7 @@ export class MultiJoinerCall {
     this.peerUsernames.delete(peerId);
     this.peerPersons.delete(peerId);
     this.namingInputs.delete(peerId);
+    this.share.onPeerLeft(peerId);
     // The companion and the middle track go with their peer.
     this.setRemoteLightStreams((prev) => withoutLightStream(prev, peerId));
     this.setRemoteMiddleStreams((prev) => withoutLightStream(prev, peerId));
@@ -865,6 +895,8 @@ export class MultiJoinerCall {
     // A light companion or a middle track (`light-stream.ts`) goes into its
     // own map and touches nothing else: no roster entry, no camera flag, no
     // entry in `remoteStreams`. Mirrors `sfu-call-ui.ts` `addCopyStream`.
+    // A shared screen (ADR-0083) goes to the share's store, likewise.
+    if (this.share.onRemoteTrack(rt.streamId, rt.track)) return;
     const id = splitStreamId(rt.streamId);
     if (id.role !== "main") {
       if (rt.track.kind !== "video") return;
@@ -1021,7 +1053,7 @@ export class MultiJoinerCall {
   }
 
   /** Joiner side: open the committer's Welcome and go live. */
-  private onIncomingWelcome(from: string, welcomeEnvelope: Uint8Array): void {
+  private onIncomingWelcome(_from: string, welcomeEnvelope: Uint8Array): void {
     // The returning owner is a joiner here too (see `host`).
     if (this.joined || this.pendingKeyPackage === null) return;
     let group: WasmGroup;
@@ -1066,11 +1098,8 @@ export class MultiJoinerCall {
 
     const seed = this.deriveSeed(group);
     this.safetyNumber = safeSafetyNumber(this.wasm, seed);
-    // The committer (during the happy path, the owner) admitted us; bind its
-    // peer for presence when we can identify it as the owner.
-    if (this.presence.ownerPresent()) {
-      this.presence.bindPeerToMember(from, this.ownerKeyHex);
-    }
+    // Who the committer's peer is (and the owner's) comes from their sealed
+    // announcements, which this client can open from now on.
     this.opts.onJoined?.();
     // Publish media ONLY now — after joining + deriving the seed (invariant #4).
     void this.session.publish(seed, this.localLeaf).catch((err) => {
@@ -1106,27 +1135,31 @@ export class MultiJoinerCall {
       return;
     }
     if (processed.kind === "Application") {
-      // The MLS-authenticated sender leaf names the member behind this SFU
-      // peer: bind them, so a later departure of that peer can be answered
-      // with the removal of the right leaf whoever ends up committer.
-      if (processed.senderLeaf !== undefined) {
-        const sender = this.groupMembers().find((m) => m.leafIndex === processed.senderLeaf);
-        if (sender !== undefined) this.presence.bindPeerToMember(from, sender.signatureKeyHex);
-      }
+      // Who the peer is comes from its verified announcement (ADR-0078
+      // section 2), not from the sender of a message it relayed: anyone can
+      // relay a sealed message it received.
       if (processed.applicationData !== undefined) {
         // The account key resolved at receipt names the PERSON (ADR-0050,
         // C-68); a leaf with no device binding is its own account key.
         const account = processed.senderAccount;
         const senderKeyB64 =
           account !== undefined && account.length === 32 ? base64Encode(account) : null;
-        // Whether the MLS-authenticated sender is the link's owner: the key
-        // the SIGNED capability names, matched the way the join check does.
-        const fromOwner =
-          processed.senderLeaf !== undefined &&
-          this.groupMembers().some(
-            (m) => m.leafIndex === processed.senderLeaf && m.signatureKeyHex === this.ownerKeyHex,
-          );
-        this.onMemberApplication(from, senderKeyB64, fromOwner, processed.applicationData);
+        // The MLS-authenticated sender's leaf key; whether it is the link's
+        // owner (the key the SIGNED capability names, matched the way the
+        // join check does).
+        const senderLeafKeyHex =
+          processed.senderLeaf === undefined
+            ? null
+            : (this.groupMembers().find((m) => m.leafIndex === processed.senderLeaf)
+                ?.signatureKeyHex ?? null);
+        const fromOwner = senderLeafKeyHex === this.ownerKeyHex;
+        this.onMemberApplication(
+          from,
+          senderKeyB64,
+          senderLeafKeyHex,
+          fromOwner,
+          processed.applicationData,
+        );
       }
       return;
     }
@@ -1139,14 +1172,15 @@ export class MultiJoinerCall {
   }
 
   /** A member's sealed application message. Only a profile is understood;
-   *  anything else is ignored. The profile binds to the relaying SFU peer —
-   *  the same binding the peer's media tracks already rest on — and to the
-   *  person who sealed it, so the tile is named by the one resolver: a
-   *  person who set no profile name still reads as their verified
-   *  `@username`, and a contact as what the viewer calls them. */
+   *  anything else is ignored. The profile's announced name binds to the
+   *  relaying SFU peer only when that peer's verified announcement names the
+   *  same leaf that sealed the profile (ADR-0078 section 2), and the profile
+   *  is filed under the person who sealed it, so the tile is named by the
+   *  one resolver. */
   private onMemberApplication(
     from: string,
     senderKeyB64: string | null,
+    senderLeafKeyHex: string | null,
     fromOwner: boolean,
     plaintext: Uint8Array,
   ): void {
@@ -1164,29 +1198,28 @@ export class MultiJoinerCall {
         updatedAtMs: decoded.updatedAtMs,
         accountId: decoded.accountId ?? null,
         usernameCertificate: decoded.usernameCertificate ?? null,
+        // ADR-0084 - copied out of the handle (and freed) here.
+        avatar: avatarFromWasm(decoded.avatar),
       };
     } catch {
       return;
     }
-    const name = profile.displayName?.trim() ?? "";
-    if (name.length > 0) this.peerNames.set(from, name);
-    else this.peerNames.delete(from);
-    const username = profile.username?.trim() ?? "";
-    if (username.length > 0) this.peerUsernames.set(from, username);
-    else this.peerUsernames.delete(from);
-    // Filed in the profile store, and bound to a person, only when the
-    // account the profile claims is the account the SFU admitted this peer
-    // as. Otherwise the tile shows what was announced, as plain text.
-    const claimed = profileClaimMatchesPeer(
-      accountIdHexOfBytes(profile.accountId),
-      this.namingInputs.get(from)?.peerTag,
-      (accountIdHex) => this.wasm.sfuPeerTag(groupIdHex(this.opts.callId), accountIdHex),
-    );
-    if (senderKeyB64 !== null && claimed) {
-      this.peerPersons.set(from, senderKeyB64);
-      this.opts.onMemberProfile?.(senderKeyB64, profile);
-    } else {
-      this.peerPersons.delete(from);
+    // The announced name names `from` only when `from` announced the leaf
+    // that sealed this profile; a relayed copy of someone else's profile
+    // names nobody.
+    if (senderLeafKeyHex !== null && this.presence.memberKeyFor(from) === senderLeafKeyHex) {
+      const name = profile.displayName?.trim() ?? "";
+      if (name.length > 0) this.peerNames.set(from, name);
+      else this.peerNames.delete(from);
+      const username = profile.username?.trim() ?? "";
+      if (username.length > 0) this.peerUsernames.set(from, username);
+      else this.peerUsernames.delete(from);
+    }
+    if (senderKeyB64 !== null) {
+      this.opts.onMemberProfile?.(
+        senderKeyB64,
+        boundProfileClaim(profile, fromOwner, this.opts.ownerAccountId),
+      );
     }
     this.renameTile(from);
   }
@@ -1232,16 +1265,15 @@ export class MultiJoinerCall {
   /** Re-run the naming rule for every remote tile. The host calls it when
    *  the profile store changes: a username verified, a contact renamed. */
   refreshNames(): void {
-    for (const peerId of this.namingInputs.keys()) this.renameTile(peerId);
+    for (const peerId of this.namingInputs) this.renameTile(peerId);
+    this.share.refreshNames();
   }
 
   private renameTile(peerId: string): void {
-    const inputs = this.namingInputs.get(peerId);
-    if (inputs === undefined || !this.current()) return;
-    callActions.setParticipantName(
-      `${PEER_PREFIX}${peerId}`,
-      this.nameOf(peerId, inputs.pseudonym, inputs.peerTag),
-    );
+    if (!this.namingInputs.has(peerId) || !this.current()) return;
+    callActions.setParticipantName(`${PEER_PREFIX}${peerId}`, this.nameOf(peerId));
+    // ADR-0084 - the verified person behind the tile, for their photo.
+    callActions.setParticipantPerson(`${PEER_PREFIX}${peerId}`, this.peerPersons.get(peerId) ?? null);
   }
 
   /** Seal the own profile into the call group and relay it to every member.
@@ -1324,22 +1356,16 @@ export class MultiJoinerCall {
   // Store-participant helpers (ported from sfu-call-ui.ts)
   // -----------------------------------------------------------------
 
-  private nameOf(
-    peerId: string,
-    pseudonym: string,
-    peerTag: string | undefined,
-  ): string {
-    this.namingInputs.set(peerId, { pseudonym, peerTag });
+  private nameOf(peerId: string): string {
+    this.namingInputs.add(peerId);
     const person = this.peerPersons.get(peerId);
-    // Never the SFU pseudonym (a piece of the account id). An empty name is
-    // the call screen's unnamed state, for the moment before the person's
-    // profile reaches this device (`tile-name.ts`).
+    // An empty name is the call screen's unnamed state, for the moment
+    // before the peer's announcement or profile reaches this device
+    // (`tile-name.ts`).
     return (
       callTileName({
         resolved:
-          (person === undefined ? null : (this.opts.resolvePersonName?.(person) ?? null)) ??
-          this.opts.resolveDisplayName?.(peerId, pseudonym, peerTag) ??
-          null,
+          person === undefined ? null : (this.opts.resolvePersonName?.(person) ?? null),
         announcedName: this.peerNames.get(peerId) ?? null,
         claimedUsername: this.peerUsernames.get(peerId) ?? null,
       }) ?? ""
@@ -1360,6 +1386,7 @@ export class MultiJoinerCall {
       camOn: this.opts.media.video && this.captureFallback === null,
       quality: "good",
       speaking: false,
+      personKeyB64: OWN_AVATAR_KEY,
     };
   }
 
@@ -1378,15 +1405,16 @@ export class MultiJoinerCall {
 
 // ---- module helpers ------------------------------------------------
 
+/** The call token and the TURN credential beside it, paid for by one
+ *  anonymous `call-join` token for the room of the link's call id (ADR-0078
+ *  section 2). */
 async function mintJwt(
   wasm: WasmModule,
   opts: MultiJoinerCallOptions,
-  callIdHex: string,
-): Promise<string> {
+): Promise<{ readonly jwt: string; readonly turn: RTCIceServer | null }> {
   const client = new CallJwtClient(wasm, opts.authBaseUrl);
-  client.setSessionToken(opts.sessionToken);
-  const minted = await client.mint(callIdHex, "participant");
-  return minted.jwt;
+  const minted = await client.mintForCall(opts.callId, "participant");
+  return { jwt: minted.jwt, turn: minted.turn };
 }
 
 /** Safety number is display-only — a derivation failure must never abort. */

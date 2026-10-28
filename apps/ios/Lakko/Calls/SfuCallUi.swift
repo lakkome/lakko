@@ -113,10 +113,10 @@ final class SfuCallUi {
         config: SfuCallSession.Config,
         ui: CallUiState,
         localDisplayName: String = "",
-        // Never the SFU pseudonym (a piece of the account id). An empty name is
-        // the tile's unnamed state, for the moment before the person's profile
-        // reaches this device (``CallTileName``).
-        resolveDisplayName: @escaping (_ peerId: String, _ accountPseudonym: String, _ peerTag: String) -> String = { _, _, _ in "" }
+        // Who each remote tile is, from the peers' verified announcements
+        // (ADR-0078 section 2). `nil`: every remote tile stays unnamed (the
+        // tile's unnamed state, ``CallTileName``).
+        peerNames: GroupCallPeerNames? = nil
     ) {
         self.ui = ui
         let relay = VideoPublishStateRelay()
@@ -129,6 +129,7 @@ final class SfuCallUi {
         // Per-participant video probes — what makes a two-person group call
         // able to reach the video layout at all (see `RemotePictureTracker`).
         let pictureTracker = RemotePictureTracker()
+        let screenTracker = ScreenShareTracks()
         let audio = config.audio
         let video = config.video
         // Canonical call safety number derived from the shared seed — the
@@ -155,6 +156,8 @@ final class SfuCallUi {
                 case .failed, .closed:
                     speaking.stop()
                     ui.clearRemoteVideoCopies()
+                    screenTracker.detachAll(ui: ui)
+                    ui.setScreenShare(nil)
                     ui.setPhase(.ended(endedAt: Date()))
                 case .idle:
                     break
@@ -162,14 +165,9 @@ final class SfuCallUi {
             },
             onWelcome: { selfPeerId, roster in
                 let local = Self.localParticipant(localDisplayName, audio: audio, video: video)
-                let remotes = roster
-                    .filter { $0.peerId != selfPeerId }
-                    .map {
-                        Self.remoteParticipant(
-                            resolveDisplayName($0.peerId, $0.accountPseudonym, $0.peerTag),
-                            peerId: $0.peerId
-                        )
-                    }
+                let remotePeers = roster.map(\.peerId).filter { $0 != selfPeerId }
+                peerNames?.setRoster(remotePeers)
+                let remotes = remotePeers.map { Self.remoteParticipant("", peerId: $0) }
                 ui.setParticipants([local] + remotes)
                 NSLog("SfuCallUi: roster from welcome remotes=%d", remotes.count)
                 // The roster decides whether there is a SOLE remote, which is
@@ -177,17 +175,25 @@ final class SfuCallUi {
                 // before the roster did is only now resolvable.
                 Self.refreshSolePicture(ui: ui, tracker: pictureTracker)
             },
-            onPeerJoined: { peerId, accountPseudonym, peerTag in
-                ui.participantJoined(
-                    Self.remoteParticipant(
-                        resolveDisplayName(peerId, accountPseudonym, peerTag),
-                        peerId: peerId
-                    )
-                )
+            onPeerJoined: { peerId in
+                peerNames?.peerJoined(peerId)
+                ui.participantJoined(Self.remoteParticipant("", peerId: peerId))
                 // A second remote turns a sole-remote call into a gallery.
                 Self.refreshSolePicture(ui: ui, tracker: pictureTracker)
             },
+            onPeerIdentified: { peerId, identity in
+                // The peer's sealed announcement verified against the chat
+                // group's roster (ADR-0078 section 2): name its tile.
+                if let name = peerNames?.identify(peerId, personKeyB64: identity.personKeyB64) {
+                    ui.setParticipantName(Self.participantId(forPeer: peerId), name)
+                }
+                // ADR-0084 — the same verified key shows their photo.
+                ui.setPersonKey(
+                    Data(base64Encoded: identity.personKeyB64),
+                    forParticipant: Self.participantId(forPeer: peerId))
+            },
             onPeerLeft: { peerId in
+                peerNames?.peerLeft(peerId)
                 let id = Self.participantId(forPeer: peerId)
                 // Forget the departed peer's sticky camera state so a later
                 // rejoin under the same id starts from a clean slate.
@@ -197,7 +203,11 @@ final class SfuCallUi {
                 // stops rendering a stale last frame before the roster
                 // removes the tile.
                 ui.setRemoteVideoTrack(nil, forParticipant: id)
+                // Their screen's picture goes with them; the share itself
+                // ends through the fold (``onScreenShareChanged``).
+                screenTracker.attach(nil, sharer: id, ui: ui)
                 ui.participantLeft(id)
+                ui.setPersonKey(nil, forParticipant: id)
                 Self.refreshSolePicture(ui: ui, tracker: pictureTracker)
             },
             onRemoteVideoTrack: { track, streamId in
@@ -328,6 +338,15 @@ final class SfuCallUi {
                 // What the SFU gives of each person (ADR-0070 step 6): a tile
                 // shows the lower of that and what it wants.
                 ui.setRemoteVideoGiven(byPeerId: given)
+            },
+            onScreenShareChanged: { current in
+                // The fold's current share (ADR-0083, C-87): the share tile,
+                // and the layout it switches to and back.
+                ui.setScreenShare(
+                    ScreenShareShown.of(current, sharerParticipantId: Self.participantId(forPeer:)))
+            },
+            onRemoteScreenVideoTrack: { track, peerId in
+                screenTracker.attach(track, sharer: Self.participantId(forPeer: peerId), ui: ui)
             }
         )
         let session = SfuCallSession(config: config, callbacks: callbacks)
@@ -402,9 +421,8 @@ final class SfuCallUi {
         }
     }
 
-    /// Stable roster id for a remote peer.
     /// The roster participant id for an SFU peer. Internal (not private) so
-    /// ``GroupCallNameResolver`` can re-label the same tile later without a
+    /// ``GroupCallPeerNames`` can re-label the same tile later without a
     /// second copy of the convention.
     static func participantId(forPeer peerId: String) -> String {
         "peer-\(peerId)"

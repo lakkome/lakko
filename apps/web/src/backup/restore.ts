@@ -49,6 +49,7 @@ import { announceRestoredSyncedState } from "../devices/sync/synced-state-source
 import { mergeSyncStateFromBackup } from "../devices/sync/sync-state-idb";
 import { mergeRestoredFoldBytes } from "../devices/sync/synced-projection";
 import { t } from "../l10n";
+import { requestConfirm } from "../ui/confirm-dialog";
 import { loadWasm } from "../wasm";
 import {
   applyRestoredContacts,
@@ -161,9 +162,15 @@ const DEFAULT_DEPS: AccountBackupRestoreDeps = {
   markOwed: (accountIdB64) => markBackupRestoreOwed(accountIdB64),
   clearOwed: (accountIdB64) => clearBackupRestoreOwed(accountIdB64),
   alertRollbackRefused: () => {
-    if (typeof window !== "undefined" && typeof window.alert === "function") {
-      window.alert(t("backup.rollback_refused.body"));
-    }
+    // The app's own notice, never `window.alert` (design system section 6).
+    void requestConfirm({
+      title: t("backup.rollback_refused.title"),
+      body: t("backup.rollback_refused.body"),
+      confirmLabel: t("common.ok"),
+      cancelLabel: t("common.close"),
+      tone: "neutral",
+      notice: true,
+    });
   },
 };
 

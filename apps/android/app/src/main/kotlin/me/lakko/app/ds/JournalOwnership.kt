@@ -34,50 +34,6 @@ import uniffi.lakko_ffi_uniffi.DsStatementSignerInterface
 /** One `PUT` to the Delivery Service, as the core signer built it. */
 public data class DsStatement(val path: String, val bodyJson: String)
 
-/**
- * ADR-0073 section 5 — the same `Reset` statement with the key-reset
- * attestation beside it (`{"statement_b64": ..., "key_reset_attest_b64": ...}`,
- * standard base64 of the 177 bytes) and the root endorsement
- * (`"root_endorsement_b64"`, ADR-0074): the DS then hears the
- * reset from a signer that is NOT the journal's root, verifies the
- * attestation under its pinned attest key, requires a strictly greater
- * generation than it stored, and re-roots the journal under the signer.
- */
-public fun DsStatement.withKeyResetEvidence(evidence: KeyResetRootEvidence): DsStatement {
-    val body = kotlinx.serialization.json.Json.parseToJsonElement(bodyJson)
-        as? kotlinx.serialization.json.JsonObject
-        ?: throw IllegalArgumentException("a statement body is a JSON object")
-    val merged = kotlinx.serialization.json.JsonObject(
-        body +
-            (KEY_RESET_ATTEST_FIELD to kotlinx.serialization.json.JsonPrimitive(evidence.attestationB64)) +
-            (ROOT_ENDORSEMENT_FIELD to kotlinx.serialization.json.JsonPrimitive(evidence.rootEndorsementB64)),
-    )
-    return DsStatement(path, merged.toString())
-}
-
-/**
- * ADR-0074 "T5 as built" item 21 - what an attested `reset` (after a key
- * reset or a recall) or an attested `root` transfer (after a rotation)
- * carries beside its statement. The DS refuses the attestation alone: the
- * key the attestation names must also say which key becomes the journal's
- * root. Both fields are standard base64; neither is secret.
- */
-public class KeyResetRootEvidence(
-    /** The 177-byte key-reset attestation. */
-    public val attestationB64: String,
-    /** `signDsRootEndorsement(newAccountEd25519Seed, journalId,
-     *  keyGeneration, rootKey)`, `rootKey` being the key that becomes the
-     *  root: the signer of a `reset`, the `new_root` of a transfer. */
-    public val rootEndorsementB64: String,
-)
-
-/** The body field the attested reset adds. */
-public const val KEY_RESET_ATTEST_FIELD: String = "key_reset_attest_b64"
-
-/** The body field carrying the root endorsement (required with the
- *  attestation since ADR-0074 T5). */
-public const val ROOT_ENDORSEMENT_FIELD: String = "root_endorsement_b64"
-
 /** A registrar's rank. The root outranks both. */
 public enum class JournalRank { ADMIN, MEMBER }
 
@@ -96,13 +52,17 @@ public interface DsStatementSigning {
 
     public fun reset(journalId: ByteArray, epoch: ULong, epochKey: ByteArray): DsStatement
 
-    /** `access` in APPEND mode: accepted only at the journal's next epoch
-     *  (`409` otherwise). Every commit path registers with this. */
-    public fun registerEpoch(
+    /** ADR-0081 decision 1 — `commit`: an APPEND registration of [epoch]
+     *  (accepted only at the journal's next epoch, `409` otherwise) together
+     *  with the commit [row], sent as `POST .../commit` proven under epoch
+     *  `epoch - 1`. Every commit path sends this; since ADR-0081 (open
+     *  question 1, decided 2026-10-18) `access` refuses a plain Append. */
+    public fun commit(
         journalId: ByteArray,
         epoch: ULong,
         epochKey: ByteArray,
         revoke: List<ByteArray>,
+        row: ByteArray,
     ): DsStatement
 
     /** `access` in REPLACE mode (second security pass, finding 1): the repair
@@ -121,8 +81,6 @@ public interface DsStatementSigning {
      *  every registrar not listed is removed. */
     public fun registrarsSet(journalId: ByteArray, entries: List<JournalRegistrarEntry>): DsStatement
 
-    public fun pushBinding(journalId: ByteArray, pushGid: ByteArray): DsStatement
-
     /** `root`: move the journal's root to [newRoot]. Signed by the CURRENT
      *  root (the handed-over seed, ADR-0057 S2 finding 1). */
     public fun rootTransfer(journalId: ByteArray, newRoot: ByteArray): DsStatement
@@ -138,12 +96,13 @@ public class FfiDsStatementSigning(private val inner: DsStatementSignerInterface
     override fun reset(journalId: ByteArray, epoch: ULong, epochKey: ByteArray): DsStatement =
         inner.reset(journalId, epoch, epochKey, null as List<DsRegistrarEntry>?).let { DsStatement(it.path, it.bodyJson) }
 
-    override fun registerEpoch(
+    override fun commit(
         journalId: ByteArray,
         epoch: ULong,
         epochKey: ByteArray,
         revoke: List<ByteArray>,
-    ): DsStatement = inner.registerEpoch(journalId, epoch, epochKey, revoke).let { DsStatement(it.path, it.bodyJson) }
+        row: ByteArray,
+    ): DsStatement = inner.commit(journalId, epoch, epochKey, revoke, row).let { DsStatement(it.path, it.bodyJson) }
 
     override fun replaceEpoch(
         journalId: ByteArray,
@@ -168,9 +127,6 @@ public class FfiDsStatementSigning(private val inner: DsStatementSignerInterface
                 )
             },
         ).let { DsStatement(it.path, it.bodyJson) }
-
-    override fun pushBinding(journalId: ByteArray, pushGid: ByteArray): DsStatement =
-        inner.pushBinding(journalId, pushGid).let { DsStatement(it.path, it.bodyJson) }
 
     override fun rootTransfer(journalId: ByteArray, newRoot: ByteArray): DsStatement =
         inner.rootTransfer(journalId, newRoot).let { DsStatement(it.path, it.bodyJson) }
@@ -255,25 +211,27 @@ public fun journalAuthorityKind(
 }
 
 /**
- * ADR-0057 — register the key of the epoch a commit moves to ([after], the
- * N+1 access signer, whose verifying key is what the server learns) with
- * [statements] (root or registrar), revoking [revoke] in the same step, BEFORE
- * the commit is persisted or published; hand back [before] (N), which signs
- * the commit POST itself.
+ * ADR-0081 decision 1 over ADR-0057 — register the key of the epoch a commit
+ * moves to ([after], the N+1 access signer, whose verifying key is what the
+ * server learns) with [statements] (root or registrar), revoking [revoke] in
+ * the same step, AND append the commit [row], in ONE request (`POST
+ * .../commit`) proven by [before] (N). Returns what the commit route answered.
  *
- * Throws [DsRegistrationUnavailable] (and [put] is never called) when either
+ * Throws [DsRegistrationUnavailable] (and [post] is never called) when either
  * access signer is missing, the commit does not move the epoch by exactly one,
  * or there is no statement signer — the last is the ordinary state of a plain
- * member, which may not commit at all. The caller aborts on ANY throw.
+ * member, which may not commit at all. Throws [DsCommitConflictError] when
+ * another commit owns the epoch. The caller aborts on ANY throw.
  */
-public suspend fun registerEpochBeforePublish(
+public suspend fun commitEpochWith(
     journalId: ByteArray,
     before: DsJournalSigner?,
     after: DsJournalSigner?,
     statements: DsStatementSigning?,
     revoke: List<ByteArray>,
-    put: suspend (make: () -> DsStatement) -> Unit,
-): DsJournalSigner {
+    row: ByteArray,
+    post: suspend (make: () -> DsStatement, proof: DsJournalSigner) -> DsCommitAnswer,
+): DsCommitAnswer {
     val current = before
         ?: throw DsRegistrationUnavailable("no access signer for the epoch the commit leaves")
     val next = after
@@ -285,9 +243,9 @@ public suspend fun registerEpochBeforePublish(
     }
     val signer = statements
         ?: throw DsRegistrationUnavailable("this account holds neither the root nor a registrar key")
+    if (row.isEmpty()) throw DsRegistrationUnavailable("a commit row must be non-empty")
     val key = next.verifyingKey
-    put { signer.registerEpoch(journalId, next.epoch, key, revoke) }
-    return current
+    return post({ signer.commit(journalId, next.epoch, key, revoke, row) }, current)
 }
 
 // -----------------------------------------------------------------
@@ -702,12 +660,6 @@ public suspend fun claimOrReset(
     epochKey: ByteArray,
     statements: DsStatementSigning,
     refounded: Boolean,
-    /** ADR-0073 / ADR-0074: the key-reset attestation with the root
-     *  endorsement for the resetting root, when this founding follows a
-     *  reset of the account keys, so the reset is heard although the
-     *  journal's chain belongs to the OLD root. `null` (or a `null` answer)
-     *  for the ordinary same-root re-founding. */
-    keyResetEvidence: ((rootKey: ByteArray) -> KeyResetRootEvidence?)? = null,
     put: suspend (make: () -> DsStatement) -> Unit,
 ): JournalClaimOutcome {
     try {
@@ -717,11 +669,7 @@ public suspend fun claimOrReset(
         if (e.status != HTTP_CONFLICT_STATUS) throw e
     }
     if (!refounded) return JournalClaimOutcome.ALREADY_CLAIMED
-    put {
-        val reset = statements.reset(journalId, epoch, epochKey)
-        val evidence = keyResetEvidence?.invoke(statements.publicKey)
-        if (evidence != null) reset.withKeyResetEvidence(evidence) else reset
-    }
+    put { statements.reset(journalId, epoch, epochKey) }
     return JournalClaimOutcome.RESET
 }
 
@@ -780,31 +728,25 @@ public suspend fun probeRoot(
 
 /**
  * ADR-0074 section 3.5 "DS" - move [journalId]'s root from [oldRoot] to
- * [newRoot] after a rotation of the account keys: a `root` transfer signed
- * by the OLD root, with the key-reset attestation and the new account key's
- * endorsement of [newRoot] beside it when [evidence] is in hand (the DS then
- * also records the generation; a plain transfer is the same hand-over
- * without it). The chain, the registrars and the push binding are kept.
+ * [newRoot] after a rotation of the account keys: a plain `root` transfer
+ * signed by the OLD root (ADR-0078 phase 6 retired the attested transfer
+ * along with the journal id in the key-reset attestation). The chain, the
+ * registrars and the push binding are kept.
  *
- * A `401` (the old root is no longer the root) or a `409` (the attested
- * generation is not newer) means the transfer may already have landed, from
- * this device earlier or from another device of the account: the new root
- * then probes itself. Returns whether [newRoot] IS the journal's root now;
- * every other refusal propagates.
+ * A `401` (the old root is no longer the root) or a `409` means the transfer
+ * may already have landed, from this device earlier or from another device
+ * of the account: the new root then probes itself. Returns whether [newRoot]
+ * IS the journal's root now; every other refusal propagates.
  */
 public suspend fun transferRootOrConfirm(
     journalId: ByteArray,
     oldRoot: DsStatementSigning,
     newRoot: DsStatementSigning,
-    evidence: KeyResetRootEvidence?,
     put: suspend (make: () -> DsStatement) -> Unit,
 ): Boolean {
     if (oldRoot.publicKey.contentEquals(newRoot.publicKey)) return true
     try {
-        put {
-            val transfer = oldRoot.rootTransfer(journalId, newRoot.publicKey)
-            if (evidence != null) transfer.withKeyResetEvidence(evidence) else transfer
-        }
+        put { oldRoot.rootTransfer(journalId, newRoot.publicKey) }
         return true
     } catch (e: DsHttpError) {
         if (e.status != HTTP_UNAUTHORIZED_STATUS && e.status != HTTP_CONFLICT_STATUS) throw e
@@ -812,29 +754,8 @@ public suspend fun transferRootOrConfirm(
     return probeRoot(journalId, newRoot, put)
 }
 
-/** What a push-binding attempt did (obligation 8): log-and-continue states. */
-public enum class PushBindingOutcome {
-    BOUND,
-    CONFLICT,
-    DISABLED,
-    FAILED,
-
-    /** This device holds neither the root nor an admin registrar key: nothing
-     *  was sent (a member never binds). */
-    NOT_PERMITTED,
-}
-
-/** Classify a push-binding refusal: `409` bound elsewhere, `503` disabled. */
-public fun pushBindingOutcomeOf(error: Throwable?): PushBindingOutcome = when {
-    error == null -> PushBindingOutcome.BOUND
-    error is DsHttpError && error.status == HTTP_CONFLICT_STATUS -> PushBindingOutcome.CONFLICT
-    error is DsHttpError && error.status == HTTP_UNAVAILABLE_STATUS -> PushBindingOutcome.DISABLED
-    else -> PushBindingOutcome.FAILED
-}
-
 private const val HTTP_CONFLICT_STATUS: Int = 409
 private const val HTTP_UNAUTHORIZED_STATUS: Int = 401
-private const val HTTP_UNAVAILABLE_STATUS: Int = 503
 
 /** Lowercase hex, the key spelling of every map here. */
 public fun hexOf(bytes: ByteArray): String = DsClient.pseudonymHex(bytes)

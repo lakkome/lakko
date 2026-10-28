@@ -1806,10 +1806,6 @@
       "text": "לא ניתן היה להוריד את הקובץ המצורף. נסו שוב.",
       "status": "machine"
     },
-    "chat.attachment.error.gone": {
-      "text": "הקובץ המצורף כבר לא זמין בשרת.",
-      "status": "machine"
-    },
     "chat.attachment.error.open_photo": {
       "text": "לא ניתן היה לפתוח את התמונה הזו. נסו שוב.",
       "status": "machine"
@@ -2312,10 +2308,6 @@
     },
     "chat.info.group": {
       "text": "פרטי הקבוצה",
-      "status": "machine"
-    },
-    "chat.invite_link.cleared": {
-      "text": "הקישור נמחק (לקישור מוטבע אין מה לבטל).",
       "status": "machine"
     },
     "chat.invite_link.copy": {
@@ -3442,14 +3434,6 @@
       "text": "אין עדיין צ׳אטים",
       "status": "machine"
     },
-    "chats.lookup.action": {
-      "text": "חיפוש {name}",
-      "status": "machine"
-    },
-    "chats.lookup.nothing": {
-      "text": "לא נמצאו תוצאות עבור {name}.",
-      "status": "machine"
-    },
     "chats.lookup.unreachable": {
       "text": "לא ניתן היה לחפש. בדקו את החיבור ונסו שוב.",
       "status": "machine"
@@ -3854,40 +3838,8 @@
       "text": "הבקשה הזו הגיעה מגרסה ישנה יותר של Lakko. בקשו מהשולח לעדכן ולשלוח אותה שוב.",
       "status": "machine"
     },
-    "contacts.add.by_username": {
-      "text": "הוספה לפי שם משתמש",
-      "status": "machine"
-    },
-    "contacts.add.intro_label": {
-      "text": "הודעה (לא חובה)",
-      "status": "machine"
-    },
-    "contacts.add.intro_placeholder": {
-      "text": "היי, זו נועה מהכנס.",
-      "status": "machine"
-    },
-    "contacts.add.send": {
-      "text": "שליחה",
-      "status": "machine"
-    },
     "contacts.add.share_invite": {
       "text": "שיתוף קישור הזמנה",
-      "status": "machine"
-    },
-    "contacts.add.subtitle": {
-      "text": "הבקשות מוצפנות מקצה לקצה. השרתים של Lakko לא יכולים לקרוא אותן.",
-      "status": "machine"
-    },
-    "contacts.add.title": {
-      "text": "הוספת איש קשר",
-      "status": "machine"
-    },
-    "contacts.add.username_label": {
-      "text": "שם משתמש",
-      "status": "machine"
-    },
-    "contacts.add.username_placeholder": {
-      "text": "@alice",
       "status": "machine"
     },
     "contacts.detail.actions": {
@@ -3958,12 +3910,8 @@
       "text": "הוספה",
       "status": "machine"
     },
-    "contacts.list.empty.action": {
-      "text": "הוספת איש קשר",
-      "status": "machine"
-    },
     "contacts.list.empty.body": {
-      "text": "הוסיפו מישהו לפי שם משתמש, או שתפו את קישור ההזמנה שלכם.",
+      "text": "מצאו מישהו לפי שם או שם משתמש בשדה החיפוש למעלה, או שתפו את קישור ההזמנה שלכם.",
       "status": "machine"
     },
     "contacts.list.empty.title": {
@@ -4108,18 +4056,6 @@
     },
     "contacts.safety.title": {
       "text": "אימות מספר הבטיחות",
-      "status": "machine"
-    },
-    "contacts.send.done": {
-      "text": "הבקשה נשלחה אל {name}. היא ממתינה ב„נשלחו” עד שתאושר.",
-      "status": "machine"
-    },
-    "desktop.quit_call.confirm": {
-      "text": "סיום שיחה ויציאה",
-      "status": "machine"
-    },
-    "desktop.quit_call.title": {
-      "text": "לסיים את השיחה ולצאת?",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4550,12 +4486,12 @@
       "text": "המכשירים האחרים שלכם שומרים על הצ׳אטים שלהם ומקבלים את המפתחות החדשים בעצמם.",
       "status": "machine"
     },
-    "devices.rotate.effect_links": {
-      "text": "קישורי ההזמנה וקישורי השיחה שיצרת קודם יפסיקו לפעול. יש ליצור חדשים.",
-      "status": "machine"
-    },
     "devices.rotate.effect_passkeys": {
       "text": "מפתחות הגישה שלכם עדיין מחברים אתכם. האפשרות \"שחזור מפתחות עם מפתח הגישה הזה\" כבויה עד שתפעילו אותה שוב.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_links": {
+      "text": "קישורי ההזמנה וקישורי השיחה שיצרת קודם יפסיקו לפעול. יש ליצור חדשים.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -6146,14 +6082,6 @@
       "text": "אף פעם",
       "status": "machine"
     },
-    "invite.links.for_new_user": {
-      "text": "למישהו חדש ב-Lakko",
-      "status": "machine"
-    },
-    "invite.links.inline_note": {
-      "text": "Lakko לא הצליחה לקצר את הקישור הזה, ולכן הוא ארוך. הוא עובד באותו אופן ואי אפשר לבטל אותו.",
-      "status": "machine"
-    },
     "invite.links.label_field": {
       "text": "תווית (לא חובה)",
       "status": "machine"
@@ -6180,10 +6108,6 @@
     },
     "invite.links.new_badge": {
       "text": "חדש",
-      "status": "machine"
-    },
-    "invite.links.referral_option": {
-      "text": "למישהו שעדיין אין לו חשבון Lakko",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -7342,10 +7266,6 @@
       "text": "הוספת איש קשר",
       "status": "machine"
     },
-    "search.people.add_contact_title": {
-      "text": "הוספת {name}",
-      "status": "machine"
-    },
     "search.people.channel_result": {
       "text": "ערוץ {handle}",
       "status": "machine"
@@ -7366,16 +7286,8 @@
       "text": "לא ניתן היה לשלוח את הבקשה. ייתכן שהם שינו את ההגדרה של מי יכול למצוא אותם.",
       "status": "machine"
     },
-    "search.people.search": {
-      "text": "חיפוש אנשים",
-      "status": "machine"
-    },
     "search.people.searching_a11y": {
       "text": "מחפשים",
-      "status": "machine"
-    },
-    "search.people.send_request": {
-      "text": "שליחת בקשה",
       "status": "machine"
     },
     "settings.about.lede_web": {
@@ -7396,54 +7308,6 @@
     },
     "settings.about.protection.title": {
       "text": "איך Lakko מגנה עליכם",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.close_window": {
-      "text": "סגירת החלון",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.destinations": {
-      "text": "צ׳אטים, פיד, אנשי קשר, שיחות, הגדרות",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.edit_last": {
-      "text": "עריכת ההודעה האחרונה שלי (בשדה הודעה ריק)",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.escape": {
-      "text": "סגירת תפריט, חלון דו-שיח או גיליון; יציאה מחיפוש",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.folders": {
-      "text": "מעבר בין תיקיות צ'אט",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.new_chat": {
-      "text": "צ'אט חדש",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.previous_next": {
-      "text": "השיחה הקודמת או הבאה",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.quit": {
-      "text": "יציאה מ-Lakko",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.search": {
-      "text": "חיפוש בשיחות ובאנשים",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.send": {
-      "text": "שליחה או שורה חדשה",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.settings": {
-      "text": "הגדרות",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.title": {
-      "text": "קיצורי מקלדת",
       "status": "machine"
     },
     "settings.about.translations_updated": {
@@ -7634,30 +7498,6 @@
       "text": "הנתונים שלכם",
       "status": "machine"
     },
-    "settings.desktop.keep_running.sub": {
-      "text": "הודעות ושיחות ימשיכו להגיע כשהחלון סגור.",
-      "status": "machine"
-    },
-    "settings.desktop.keep_running.title": {
-      "text": "להמשיך לפעול כשהחלון סגור",
-      "status": "machine"
-    },
-    "settings.desktop.lede": {
-      "text": "איך Lakko פועל במחשב הזה.",
-      "status": "machine"
-    },
-    "settings.desktop.open_at_login.title": {
-      "text": "לפתוח את Lakko כשאני נכנס למחשב הזה",
-      "status": "machine"
-    },
-    "settings.desktop.read_failed": {
-      "text": "לא ניתן היה לקרוא את ההגדרות. פתחו שוב את ההגדרות.",
-      "status": "machine"
-    },
-    "settings.desktop.save_failed": {
-      "text": "לא ניתן היה לשנות את ההגדרה. נסו שוב.",
-      "status": "machine"
-    },
     "settings.devices.add.lede": {
       "text": "קודם התחברו ל-Lakko במכשיר החדש. אחר כך בחרו איזה משני המכשירים מציג קוד.",
       "status": "machine"
@@ -7702,14 +7542,6 @@
       "text": "חדש",
       "status": "machine"
     },
-    "settings.devices.remove.body": {
-      "text": "הוא נותק כעת. בפעם הבאה שיתחבר, יימחק כל מה שהחשבון הזה שמר בו: צ'אטים, אנשי קשר, מפתחות וביטוי השחזור.",
-      "status": "machine"
-    },
-    "settings.devices.remove.confirm": {
-      "text": "הסרת המכשיר",
-      "status": "machine"
-    },
     "settings.devices.remove.confirm_named": {
       "text": "הסרת {device}",
       "status": "machine"
@@ -7720,10 +7552,6 @@
     },
     "settings.devices.remove.reason_unused": {
       "text": "אני כבר לא משתמש/ת בו",
-      "status": "machine"
-    },
-    "settings.devices.remove.title": {
-      "text": "להסיר את {device}?",
       "status": "machine"
     },
     "settings.devices.remove.working": {
@@ -8022,36 +7850,8 @@
       "text": "סיסמה",
       "status": "machine"
     },
-    "settings.profile.error.generic": {
-      "text": "לא ניתן היה לשמור את השם. נסו שוב.",
-      "status": "machine"
-    },
-    "settings.profile.lede": {
-      "text": "איך אנשי הקשר שלכם רואים אתכם.",
-      "status": "machine"
-    },
-    "settings.profile.name.hint": {
-      "text": "מוצג לאנשים שאתם מדברים איתם. לא חייב להיות ייחודי, עד {count, plural, one {תו אחד} two {שני תווים} other {# תווים}}.",
-      "status": "machine"
-    },
     "settings.profile.name.label": {
       "text": "השם שלכם",
-      "status": "machine"
-    },
-    "settings.profile.preview.label": {
-      "text": "איך אחרים רואים אתכם",
-      "status": "machine"
-    },
-    "settings.profile.preview.no_name": {
-      "text": "עד שתגדירו שם, אחרים רואים את טביעת האצבע של המפתח שלכם.",
-      "status": "machine"
-    },
-    "settings.profile.saved": {
-      "text": "השם שלכם יתעדכן אצל אנשי הקשר.",
-      "status": "machine"
-    },
-    "settings.profile.username.none": {
-      "text": "אין",
       "status": "machine"
     },
     "settings.recovery.devices.title": {
@@ -8302,28 +8102,8 @@
       "text": "שם משתמש: {message}",
       "status": "machine"
     },
-    "username.change.body": {
-      "text": "אנשים כבר לא ימצאו אתכם לפי {old}. אף אחד אחר לא יוכל לקחת אותו במשך 30 יום.",
-      "status": "machine"
-    },
-    "username.change.next_change": {
-      "text": "אחרי זה תוכלו לשנות אותו שוב בעוד 30 יום.",
-      "status": "machine"
-    },
-    "username.change.other_devices": {
-      "text": "המכשירים האחרים שלכם יקבלו את שם המשתמש החדש בפעם הבאה שיהיו מחוברים לרשת.",
-      "status": "machine"
-    },
-    "username.change.save": {
-      "text": "שינוי",
-      "status": "machine"
-    },
     "username.change.title": {
       "text": "שינוי שם משתמש",
-      "status": "machine"
-    },
-    "username.change.too_soon": {
-      "text": "תוכלו לשנות שוב את שם המשתמש ב-{date}.",
       "status": "machine"
     },
     "username.claim.body": {
@@ -8496,6 +8276,262 @@
     },
     "who_can_find_me.title": {
       "text": "מי יכול למצוא אותי",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "להוסיף את {name} לאנשי הקשר שלך?",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "הוספה",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "לא עכשיו",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} כבר באנשי הקשר שלך",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "פתיחת צ׳אט",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "זה קישור ההזמנה שלך",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "שתפו אותו עם האדם שתרצו להוסיף.",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "סיום",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "לא ניתן היה להוסיף את {name}. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "האדם הזה",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} יקבל את ההודעות שלך כשהאפליקציה שלו תתחבר שוב.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} עדיין לא ענה. אפשר לבקש ממנו קישור חדש.",
+      "status": "machine"
+    },
+    "chat.pending.call_disabled": {
+      "text": "יהיה זמין כש־{name} יתחבר.",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "הוספה לאנשי הקשר",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "מחזיר את {name} לרשימת אנשי הקשר בחשבון הזה.",
+      "status": "machine"
+    },
+    "contacts.add_back.action": {
+      "text": "הוספה",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "לא ניתן היה להגיע אל {name}. כדאי לבדוק את החיבור ולנסות שוב.",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "הצגת קוד QR",
+      "status": "machine"
+    },
+    "invite.links.qr_hint": {
+      "text": "כל מי שסורק את הקוד הזה יכול לשלוח לך בקשת קשר.",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "סריקת קוד QR",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "הקוד הזה אינו קישור של Lakko. נסו קוד אחר.",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "סיום שיחה ויציאה",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "לסיים את השיחה ולצאת?",
+      "status": "machine"
+    },
+    "invite.links.expires_option_custom": {
+      "text": "מותאם אישית",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "מותאם אישית",
+      "status": "machine"
+    },
+    "invite.links.custom_expiry_amount": {
+      "text": "תקופה",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "שעות",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "ימים",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "מספר אנשים",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "יש להזין תקופה משעה אחת עד 365 ימים.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "יש להזין מספר אנשים מ-1 עד {max}.",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} מזמין/ה אותך ל-Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko היא אפליקציית מסרים שבה כל צ'אט ושיחה מוצפנים מקצה לקצה.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "יצירת חשבון",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "כבר יש לי חשבון",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "קישור ההזמנה הזה כבר לא עובד",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "אפשר לבקש מהשולח/ת קישור חדש.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "עריכת קישור",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "תנאי הקישור",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "השמירה יוצרת קישור חדש. הקישור הישן יפסיק לעבוד.",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "מחיקת קישור",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "למחוק את הקישור הזה?",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "מי שכבר קיבל אותו לא יוכל להשתמש בו.",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "הקישור נמחק.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "לא ניתן למחוק את הקישור. יש לבדוק את החיבור ולנסות שוב.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "לא ניתן לשמור את הקישור. יש לבדוק את החיבור ולנסות שוב.",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.close_window": {
+      "text": "סגירת החלון",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "צ׳אטים, פיד, אנשי קשר, שיחות, הגדרות",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "עריכת ההודעה האחרונה שלי (בשדה הודעה ריק)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "סגירת תפריט, חלון דו-שיח או גיליון; יציאה מחיפוש",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "מעבר בין תיקיות צ'אט",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "צ'אט חדש",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "השיחה הקודמת או הבאה",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "יציאה מ-Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "חיפוש בשיחות ובאנשים",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "שליחה או שורה חדשה",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "הגדרות",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "קיצורי מקלדת",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "הודעות ושיחות ימשיכו להגיע כשהחלון סגור.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "להמשיך לפעול כשהחלון סגור",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "איך Lakko פועל במחשב הזה.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "לפתוח את Lakko כשאני נכנס למחשב הזה",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "לא ניתן היה לקרוא את ההגדרות. פתחו שוב את ההגדרות.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "לא ניתן היה לשנות את ההגדרה. נסו שוב.",
       "status": "machine"
     }
   }

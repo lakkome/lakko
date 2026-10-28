@@ -33,6 +33,15 @@
   cases and amends invariant #6's acceptance side and
   [ADR-0016](0016-identity-supersession-transport.md).
 - **Date:** 2026-10-03
+- **Amended by [ADR-0078](0078-servers-cannot-link-accounts.md) phase 6 (2026-10-16):**
+  the key-reset attestation is version 2, 145 bytes, without
+  `device_group_journal_id` (auth would otherwise have to learn the
+  seed-derived DeviceGroup id); the DS attested reset of section 5 is removed
+  (`ds_group_owner.key_generation` dropped by DS migration `0011`). A reset
+  clears the own predecessors and founds the DeviceGroup at the id the new
+  seed derives, `BLAKE3-derive-key("lakko/device-group/id/v2", seed)`, with
+  an ordinary claim; the old journal is left behind with the devices the
+  reset signed out.
 - **Context:** account recovery, Part 4 (after [ADR-0017](0017-phrase-seeded-identity.md),
   [ADR-0018](0018-recovery-factor-cascade.md), [ADR-0049](0049-identity-recovery-word-vault.md),
   [ADR-0072](0072-recovery-model-simplification.md))

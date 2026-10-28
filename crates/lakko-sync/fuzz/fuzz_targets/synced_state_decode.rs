@@ -3,7 +3,7 @@
 
 //! Fuzz target — the byte decoders of the synced state (`lakko-sync`).
 //!
-//! Four decoders run on bytes this device did not write:
+//! Five decoders run on bytes this device did not write:
 //!
 //! * `decode_lineage_envelope` (ADR-0073 R.5): a conversation-lineage
 //!   envelope another device of the same account sent over the DeviceGroup's
@@ -17,6 +17,13 @@
 //! * `decode_own_username_envelope` (ADR-0076 section 3): the account's own
 //!   username register, sent the same way and laid out the same; the value
 //!   must be empty or a canonical username.
+//! * `decode_link_record_envelope` (ADR-0079 section 4): the account's own
+//!   invite links, sent the same way (version `0x02` since the record carries
+//!   the ledger row's revocation seed, 0 or 32 bytes, reworked 2026-10-17;
+//!   the persisted state is version 4). Domain, version, a bounded count,
+//!   every length checked against its bound before any copy, strictly
+//!   ascending link ids, no trailing bytes; a revoked record it carries must
+//!   be held revoked after the fold.
 //! * `SyncedState::from_bytes` (ADR-0058): the persisted fold, which is also
 //!   what the backup payload carries, so a hostile storage tier chooses it.
 //!

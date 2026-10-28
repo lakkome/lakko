@@ -312,13 +312,15 @@ describe("adoptReachState", () => {
       [
         { cls: "contact", scopeHex: "", version: 4 },
         { cls: "fof", scopeHex: "", version: 2 },
-        { cls: "group", scopeHex: "", version: 9 }, // a scope that does not fit: skipped
+        { cls: "group", scopeHex: "", version: 9 }, // account-wide since ADR-0078
+        { cls: "member", scopeHex: "bb", version: 3 }, // a scope that does not fit: skipped
       ],
       77,
     );
     expect(reachStateEntries(next)).toEqual([
       { cls: "contact", scopeHex: "", version: 4 },
       { cls: "link", scopeHex: "aa", version: 1 },
+      { cls: "group", scopeHex: "", version: 9 },
       { cls: "fof", scopeHex: "", version: 2 },
     ]);
     expect(next.stateUpdatedAtMs).toBe(77);
@@ -434,6 +436,7 @@ describe("classifyServiceEnvelope: the own profile", () => {
       kind: "profile",
       updatedAtMs: 101n,
       displayName: "Alice",
+      avatar: null,
     });
   });
 
@@ -464,11 +467,13 @@ describe("classifyServiceEnvelope: the own profile", () => {
       kind: "profile",
       updatedAtMs: 200n,
       displayName: null,
+      avatar: null,
     });
     expect(classifyServiceEnvelope(W(), ownProfileAt(200n, "Alice", undefined), held)).toEqual({
       kind: "profile",
       updatedAtMs: 200n,
       displayName: "Alice",
+      avatar: null,
     });
   });
 });
@@ -482,7 +487,7 @@ describe("the own-profile intake", () => {
     const stop = subscribeOwnProfileAdopted((own) => adopted.push(own.displayName));
     try {
       expect(await receiveServiceEnvelope(ownProfileAt(5_000n, "Alice"))).toMatchObject({ kind: "profile" });
-      expect(loadOwnProfile("acct", storage)).toEqual({ displayName: "Alice", updatedAtMs: 5_000 });
+      expect(loadOwnProfile("acct", storage)).toEqual({ displayName: "Alice", updatedAtMs: 5_000, avatar: null });
 
       // Equal (a re-send) and older: ignored.
       expect(await receiveServiceEnvelope(ownProfileAt(5_000n, "Again"))).toEqual({ kind: "stale", of: "profile" });
@@ -491,11 +496,11 @@ describe("the own-profile intake", () => {
       expect(await receiveServiceEnvelope(ownProfileAt(9_000n, "Mallory", OTHER_ACCOUNT))).toEqual({
         kind: "foreign",
       });
-      expect(loadOwnProfile("acct", storage)).toEqual({ displayName: "Alice", updatedAtMs: 5_000 });
+      expect(loadOwnProfile("acct", storage)).toEqual({ displayName: "Alice", updatedAtMs: 5_000, avatar: null });
 
       // A cleared name, newer: adopted as no name.
       await receiveServiceEnvelope(ownProfileAt(6_000n, null));
-      expect(loadOwnProfile("acct", storage)).toEqual({ displayName: null, updatedAtMs: 6_000 });
+      expect(loadOwnProfile("acct", storage)).toEqual({ displayName: null, updatedAtMs: 6_000, avatar: null });
       expect(adopted).toEqual(["Alice", null]);
 
       // A later local save still orders after the adopted stamp.
@@ -525,7 +530,7 @@ describe("sending the own profile to the other devices", () => {
       decoded.free();
     }
     // Never saved: nothing to send.
-    expect(composeOwnProfileForDevices(W(), { displayName: null, updatedAtMs: 0 }, ACCOUNT)).toBeNull();
+    expect(composeOwnProfileForDevices(W(), { displayName: null, updatedAtMs: 0, avatar: null }, ACCOUNT)).toBeNull();
   });
 
   it("goes out on a save, and in the pairing hand-over when a name was saved", async () => {

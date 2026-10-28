@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Changing a username (ADR-0076): what the screen shows, the too-soon rule,
- * the one resumable operation with its rollback, and the small owed record
+ * Changing a username (ADR-0076; no minimum interval since 2026-10-26): how
+ * the recovery email fares, the one resumable operation with its rollback,
+ * and the small owed record
  * that lets a crash between steps be finished or rolled back.
  *
  * The operation, in order:
@@ -13,11 +14,11 @@
  *      the previous handle, and the recovery email re-keyed when this device
  *      holds the address: with a vault freshly sealed under the NEW handle
  *      when no phrase is saved);
- *   c. discovery `username/replace`. When it fails (the name is taken, too
- *      soon, anything), the OLD handle is bound back the same way, the vault
+ *   c. discovery `username/replace`. When it fails (the name is taken, or
+ *      anything else), the OLD handle is bound back the same way, the vault
  *      re-sealed under the old handle;
- *   d. the certificate is kept and the name saved on this device (the local
- *      marker, the session, the own-username register);
+ *   d. the certificate is kept and the name saved on this device (the
+ *      session, the own-username register);
  *   e. the publishers follow by themselves (their inputs changed).
  *
  * Pure rules and a runner over ports. Nothing here holds the address beyond
@@ -26,7 +27,7 @@
 import type { MarkerStorage } from "./phrase-gate";
 
 // ---------------------------------------------------------------------------
-// The screen
+// The recovery email
 // ---------------------------------------------------------------------------
 
 /** How the recovery email fares in a rename, on this device. */
@@ -37,7 +38,7 @@ export type RenameEmail =
    *  name, nothing is lost and nothing is said. */
   | "kept"
   /** It has one and this device does NOT hold the address: the rename turns
-   *  it off, and the screen says so (`recovery_email.username_change`). */
+   *  it off. */
   | "dropped";
 
 export function renameEmail(hasRecoveryEmail: boolean, addressHeld: boolean): RenameEmail {
@@ -45,62 +46,10 @@ export function renameEmail(hasRecoveryEmail: boolean, addressHeld: boolean): Re
   return addressHeld ? "kept" : "dropped";
 }
 
-/** The warning lines of the screen, in order (catalog keys). */
-export function renameWarningKeys(email: RenameEmail): string[] {
-  const keys = ["username.change.body", "username.change.next_change"];
-  if (email === "dropped") keys.push("recovery_email.username_change");
-  return keys;
-}
-
 /** Whether the rename seals a vault: the recovery email is kept and no
  *  phrase is saved (a phrase-protected account has no vault). */
 export function renameSealsVault(email: RenameEmail, phraseSaved: boolean): boolean {
   return email === "kept" && !phraseSaved;
-}
-
-// ---------------------------------------------------------------------------
-// Too soon
-// ---------------------------------------------------------------------------
-
-/** A name can be changed once in this long. The server is the authority
- *  (`429 rename-too-soon`); the local stamp only saves a round trip. */
-export const RENAME_INTERVAL_MS = 30 * 24 * 60 * 60 * 1000;
-
-/** When the next change is allowed, unix ms, or `null` when it is allowed
- *  now (no known change, or one at least thirty days ago). A stamp in the
- *  future (a clock that went backwards) is not trusted. */
-export function renameAllowedAtMs(lastChangedAtMs: number | null, nowMs: number): number | null {
-  if (lastChangedAtMs === null || lastChangedAtMs > nowMs) return null;
-  const at = lastChangedAtMs + RENAME_INTERVAL_MS;
-  return at > nowMs ? at : null;
-}
-
-/** The date `429 rename-too-soon` names, from its `retry_after_secs`. */
-export function tooSoonUntilMs(retryAfterSecs: number | null, nowMs: number): number {
-  return nowMs + Math.max(0, retryAfterSecs ?? RENAME_INTERVAL_MS / 1000) * 1000;
-}
-
-function changedAtKey(accountIdB64: string): string {
-  return `lakko:username-changed-at:${accountIdB64}`;
-}
-
-export function readRenamedAt(storage: MarkerStorage | undefined, accountIdB64: string): number | null {
-  try {
-    const raw = storage?.getItem(changedAtKey(accountIdB64)) ?? null;
-    if (raw === null) return null;
-    const ms = Number(raw);
-    return Number.isFinite(ms) && ms > 0 ? ms : null;
-  } catch {
-    return null;
-  }
-}
-
-export function writeRenamedAt(storage: MarkerStorage | undefined, accountIdB64: string, nowMs: number): void {
-  try {
-    storage?.setItem(changedAtKey(accountIdB64), String(nowMs));
-  } catch {
-    // Storage blocked: the server's answer says when.
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -162,11 +111,10 @@ export function writeRenameOwed(
   }
 }
 
-/** Forget both rows (sign-out wipe). */
+/** Forget the owed record (sign-out wipe). */
 export function clearRenameStores(storage: MarkerStorage | undefined, accountIdB64: string): void {
   try {
     storage?.removeItem(owedKey(accountIdB64));
-    storage?.removeItem(changedAtKey(accountIdB64));
   } catch {
     // Storage blocked: nothing was recorded either.
   }
@@ -203,14 +151,12 @@ export function renameResume(
 /** Why a rename did not go through. */
 export type RenameFailure =
   | { readonly kind: "taken" }
-  /** `429 rename-too-soon`: allowed again at `untilMs`. */
-  | { readonly kind: "too-soon"; readonly untilMs: number }
   /** `403 fresh-auth-required`: the proof block. */
   | { readonly kind: "proof-required" }
   /** `429 handle-bind-limited`. */
   | { readonly kind: "bind-limited"; readonly retryAfterSecs: number | null }
   /** `403 address-mismatch`: the address this device holds is not the
-   *  account's. It is cleared; the screen then warns about the email. */
+   *  account's. It is cleared, so the next rename carries no address. */
   | { readonly kind: "address-mismatch" }
   | { readonly kind: "offline" }
   | { readonly kind: "error" };
@@ -232,12 +178,9 @@ export function bindFailure(answer: Answer): RenameFailure {
 }
 
 /** Read a refused `username/replace` (step c). */
-export function replaceFailure(answer: Answer, nowMs: number): RenameFailure {
+export function replaceFailure(answer: Answer): RenameFailure {
   if (answer.status === null) return { kind: "offline" };
   if (answer.status === 409 && answer.errorCode === "username-taken") return { kind: "taken" };
-  if (answer.status === 429 && answer.errorCode === "rename-too-soon") {
-    return { kind: "too-soon", untilMs: tooSoonUntilMs(answer.retryAfterSecs, nowMs) };
-  }
   return { kind: "error" };
 }
 
@@ -274,9 +217,8 @@ export interface RenamePorts {
   >;
   /** Persist the owed record (or drop it: `null`). */
   readonly saveOwed: (record: RenameOwed | null) => void;
-  /** Step d: the name is this device's (marker, session, register). */
+  /** Step d: the name is this device's (session, register). */
   readonly finishLocal: (username: string, certificate: Uint8Array | null) => Promise<void>;
-  readonly nowMs: () => number;
 }
 
 export type RenameOutcome =
@@ -376,7 +318,7 @@ export async function runRename(
   // c.
   const replaced = await ports.replace(input.newUsername);
   if (!replaced.ok) {
-    const failure = replaceFailure(replaced.answer, ports.nowMs());
+    const failure = replaceFailure(replaced.answer);
     if (failure.kind === "offline") {
       // The replace may have landed: the record stays and the next landing
       // sends it again.

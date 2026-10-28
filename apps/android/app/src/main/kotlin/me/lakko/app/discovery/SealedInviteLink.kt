@@ -143,57 +143,33 @@ public data class InviteLinkArgument(val slug: String, val fragment: String?) {
 /**
  * What an upload to one of the three ledgers carries (all but `sealed` in
  * clear, for the fetch filter, the consume ceiling, the pruner and the
- * issuer's revoke): the sealed link, the 32-byte key that signed the
- * capability, and the capability's `expiry_ms` / `max_uses`. [label] and
- * [bootstrapReferral] are sent by the `/i/` ledger only.
+ * revoke): the sealed link, the public half of the link's own revocation key
+ * (ADR-0078 section 10: never the issuer's identity key, and no owner), and
+ * the capability's `expiry_ms` / `max_uses`.
  */
 public class SealedInviteUpload(
     public val sealed: ByteArray,
-    public val issuerPubkey: ByteArray,
+    public val revocationPubkey: ByteArray,
     public val expiryMs: Long,
     public val maxUses: Long,
-    public val label: String = "",
-    public val bootstrapReferral: Boolean = false,
 )
 
 /**
- * The shareable URL for a minted link: the pointer form over [blobId] when the
- * upload landed, the inline form over [sealed] when it failed in transport;
- * either way with the fragment.
+ * The shareable URL for a minted link: the ledger id the upload returned, with
+ * the fragment. There is no link without a ledger id: a failed upload mints
+ * nothing (the inline form was removed on 2026-10-19).
  */
 public fun composeSealedInviteUrl(
     origin: String,
     prefix: String,
-    blobId: ByteArray?,
-    sealed: ByteArray,
+    blobId: ByteArray,
     linkSecret: ByteArray,
     lengths: InviteLinkLengths = InviteLinkLengths.core,
 ): String {
-    val slug = if (blobId != null) {
-        require(blobId.size == lengths.blobIdLen) {
-            "blobId must be ${lengths.blobIdLen} bytes, got ${blobId.size}"
-        }
-        base64UrlEncodeNoPad(blobId)
-    } else {
-        base64UrlEncodeNoPad(sealed)
+    require(blobId.size == lengths.blobIdLen) {
+        "blobId must be ${lengths.blobIdLen} bytes, got ${blobId.size}"
     }
-    return appendInviteLinkSecret("$origin$prefix$slug", linkSecret, lengths)
-}
-
-/**
- * `true` when an upload failure is a TRANSPORT failure (no route, DNS, TLS, a
- * timeout) — the only case a sealed link falls back to the inline form. A
- * server refusal (any HTTP status) is not.
- */
-public fun isInviteUploadTransportFailure(error: Throwable): Boolean {
-    var cause: Throwable? = error
-    val seen = HashSet<Throwable>()
-    while (cause != null && seen.add(cause)) {
-        if (cause is DiscoveryHttpError) return false
-        if (cause is DiscoveryNetworkError || cause is java.io.IOException) return true
-        cause = cause.cause
-    }
-    return false
+    return appendInviteLinkSecret("$origin$prefix${base64UrlEncodeNoPad(blobId)}", linkSecret, lengths)
 }
 
 /**

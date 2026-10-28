@@ -27,8 +27,6 @@ import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import { AuthClient } from "../auth/client";
 import type { SessionPair } from "../auth/session-pair";
 import { loginHandleWith } from "../auth/login-handle";
-import { deviceRestoreErrorMessage } from "../auth/auth-error-copy";
-import { KeyedError } from "../l10n/keyed-error";
 import {
   PAIRING_UNSUPPORTED,
   PAIRING_WRONG_ACCOUNT,
@@ -76,7 +74,6 @@ vi.mock("./state-bundle", async (importOriginal) => {
 });
 
 import {
-  JOINED_WRONG_ACCOUNT,
   prepareAnonymousJoinFlow,
   runJoinerRecovery,
 } from "./orchestrator";
@@ -299,7 +296,9 @@ describe("the anonymous join (the no-password restore)", () => {
    *  recovery row under the post-add exporter. */
   function confirmOnOtherDevice(payload: Uint8Array): { welcome: Uint8Array; seed: Uint8Array } {
     const founderIdentity = wasm.Identity.fromSeed(new Uint8Array(32).fill(7));
-    const founder = wasm.DeviceGroup.createFounder(founderIdentity, ACCOUNT);
+    const account = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x5a));
+    const founder = wasm.DeviceGroup.createFounder(founderIdentity, ACCOUNT, account);
+    account.free();
     const decoded = parsePairingQrPayloadWith(wasm, payload, alice());
     const added = founder.addDeviceFromWire(founderIdentity, decoded.keyPackage);
     const key = founder.exportSecret(
@@ -345,7 +344,12 @@ describe("the anonymous join (the no-password restore)", () => {
     session.dispose();
   });
 
-  it("refuses a Welcome that is not the DeviceGroup of the redeemed account", async () => {
+  // ADR-0078 section 6: the joined group is bound by the recovery row sealed
+  // under its exporter, not by an id derived from the redeemed account (the
+  // DeviceGroup id is a function of the account seed now). A redeem that
+  // names another account than the row's phrase is refused later, by the
+  // restore's check of the phrase against that account's published identity.
+  it("binds the joined DeviceGroup by its own id, whatever account the redeem names", async () => {
     stubFetch(() => ({
       status: 200,
       json: {
@@ -359,16 +363,8 @@ describe("the anonymous join (the no-password restore)", () => {
     }));
     const session = await prepareAnonymousJoinFlow({ loginHandle: alice() });
     const { welcome } = confirmOnOtherDevice(session.qrPayload);
-    const err = await session.accept(welcome, { welcomeCursor: 1 }).then(
-      () => null,
-      (e: unknown) => e,
-    );
-    // ADR-0061 section 6 — keyed, so the screen renders it in the current
-    // language; the English rendering is the constant.
-    expect(err).toBeInstanceOf(KeyedError);
-    expect((err as KeyedError).key).toBe("device_link.error.wrong_account");
-    expect((err as Error).message).toBe(JOINED_WRONG_ACCOUNT);
-    expect(deviceRestoreErrorMessage(err)).toBe(JOINED_WRONG_ACCOUNT);
+    const outcome = await session.accept(welcome, { welcomeCursor: 1 });
+    expect(outcome.recovery?.accountIdBytes).toEqual(new Uint8Array(16).fill(0x43));
     session.dispose();
   });
 });
@@ -388,7 +384,7 @@ describe("the anonymous join applies the pairing state bundle", () => {
   /** The confirming device, as in the suite above, publishing a state row. */
   function confirmWithState(payload: Uint8Array): Uint8Array {
     const founderIdentity = wasm.Identity.fromSeed(new Uint8Array(32).fill(7));
-    const founder = wasm.DeviceGroup.createFounder(founderIdentity, ACCOUNT);
+    const founder = wasm.DeviceGroup.createFounder(founderIdentity, ACCOUNT, founderIdentity);
     const decoded = parsePairingQrPayloadWith(wasm, payload, alice());
     const added = founder.addDeviceFromWire(founderIdentity, decoded.keyPackage);
     // ADR-0050 section 2.9: the recovery row and the state bundle, each

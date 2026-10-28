@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The states of **Search people** and what each one says
+ * The states of the People part of the search field and what each one says
  * (`docs/ux/who-can-find-me.md` section 6.1, copy verbatim).
  *
  * The rule this module exists to hold: "not found" is an ANSWER, and only a
@@ -13,16 +13,22 @@
  * connection dropped is the worst thing this can do.
  */
 import { t } from "../l10n";
-import { anonTokenQuotaExhausted } from "../tokens/anon-token-pool";
-import { LOOKUP_ALLOWANCE_USED } from "../tokens/token-copy";
+import { anonTokenPoolEmpty, anonTokenQuotaExhausted } from "../tokens/anon-token-pool";
 
 /** Not found - identical whether the person does not exist or does not let
  *  the searcher find them. */
 export const SEARCH_NOT_FOUND = (): string => t("search.people.not_found");
 /** Network failure. Never "not found". */
 export const SEARCH_FAILED = (): string => t("search.people.failed");
+/** Searching spends anonymous tokens and they ran out. Never "not found",
+ *  never the network line. */
+export const SEARCH_OUT_OF_SEARCHES = (): string => t("search.people.out_of_searches");
 /** The person changed their setting after they were found. */
 export const REQUEST_REFUSED = (): string => t("search.people.request_refused");
+/** A request to a found person failed for any other reason. */
+export const REQUEST_FAILED = (): string => t("search.people.request_failed");
+/** What a found person's row reads once the request went. */
+export const REQUEST_SENT = (): string => t("search.people.request_sent");
 
 /** How one question of a search ended. */
 export type LegOutcome = "answered" | "failed" | "allowance-used";
@@ -33,12 +39,15 @@ export type PeopleSearchState =
   | { readonly kind: "found" }
   | { readonly kind: "not-found" }
   | { readonly kind: "failed" }
-  /** ADR-0054: each lookup spends an anonymous token and today's are used. */
+  /** ADR-0054: each lookup spends an anonymous token and there is none left
+   *  (the daily allowance is used, or the device's pool is empty until its
+   *  next scheduled refill). */
   | { readonly kind: "allowance-used" };
 
-/** The outcome of a failed question. */
+/** The outcome of a failed question: out of tokens (the issuer's quota, or
+ *  an empty pool with no refill running) is its own outcome. */
 export function legOutcomeOf(err: unknown): LegOutcome {
-  return anonTokenQuotaExhausted(err) !== null ? "allowance-used" : "failed";
+  return anonTokenQuotaExhausted(err) !== null || anonTokenPoolEmpty(err) ? "allowance-used" : "failed";
 }
 
 /**
@@ -62,7 +71,7 @@ export function searchStateMessage(state: PeopleSearchState): string | null {
     case "failed":
       return SEARCH_FAILED();
     case "allowance-used":
-      return LOOKUP_ALLOWANCE_USED();
+      return SEARCH_OUT_OF_SEARCHES();
     default:
       return null;
   }

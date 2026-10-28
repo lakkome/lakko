@@ -34,6 +34,8 @@ struct IncomingCallScreen: View {
     @ObservedObject var l10n = Localization.shared
     /// The caller, already resolved through ``CallPeerName`` by the call host.
     let callerName: String?
+    /// ADR-0084 — the caller's signature key, for their profile photo.
+    var callerKey: Data? = nil
     /// The offer's own media flag, so the word matches what the caller chose.
     let video: Bool
     let onAccept: () -> Void
@@ -63,7 +65,8 @@ struct IncomingCallScreen: View {
                 VStack(spacing: 20) {
                     InitialsAvatar(
                         name: callerName ?? "", identity: callerName ?? "lakko.call",
-                        size: 96, placeholderSymbol: "person.fill")
+                        size: 96, placeholderSymbol: "person.fill",
+                        photo: callerKey.map(AvatarPhoto.person))
 
                     VStack(spacing: 8) {
                         Text(displayName)

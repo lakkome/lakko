@@ -104,10 +104,10 @@ final class GroupInviteDiscoveryURLProtocol: URLProtocol {
 
 /// The group-invite ledger upload and revoke are `require_session` routes on
 /// `services/discovery`. They used to go out on the repository's anonymous
-/// client, so every upload was answered 401 and the mint silently fell back to
-/// the long inline link. They now carry the signed-in session's bearer token,
-/// read at call time; with no token at all the mint fails loudly, and only a
-/// transport failure still falls back to the inline form.
+/// client, so every upload was answered 401. They now carry the signed-in
+/// session's bearer token, read at call time; with no token at all the mint
+/// fails loudly, and any failed upload (the network included: the inline form
+/// was removed on 2026-10-19) mints no link.
 @MainActor
 final class GroupInviteUploadAuthTests: XCTestCase {
 
@@ -164,8 +164,7 @@ final class GroupInviteUploadAuthTests: XCTestCase {
             "nothing is sent to the ledger without a session")
     }
 
-    /// A server refusal (the 401 seen live) is the server's answer, not a
-    /// transport failure: it surfaces instead of producing the inline link.
+    /// A server refusal (the 401 seen live) surfaces and mints nothing.
     func testAServerRefusalSurfacesInsteadOfFallingBack() async throws {
         let scope = GroupInviteDiscoveryURLProtocol.freshScope(.status(401))
         let f = try makeOwnerRepo(discoveryScope: scope, token: "t")
@@ -177,30 +176,22 @@ final class GroupInviteUploadAuthTests: XCTestCase {
         } catch {}
     }
 
-    /// A censored or offline network still gets a working link.
-    func testATransportFailureFallsBackToTheInlineLink() async throws {
+    /// A censored or offline network mints no link: the error surfaces and
+    /// the person tries again (the inline form was removed on 2026-10-19).
+    func testANetworkFailureMintsNoLink() async throws {
         let scope = GroupInviteDiscoveryURLProtocol.freshScope(.network)
         let f = try makeOwnerRepo(discoveryScope: scope, token: "t")
         defer { try? FileManager.default.removeItem(at: f.outboxDir) }
 
-        let link = try await f.repo.createGroupInviteLink(groupIdHex: f.groupIdHex)
-        let slug = try XCTUnwrap(GroupInviteLink.split(link).base
-            .components(separatedBy: "/g/").last)
-        XCTAssertGreaterThan(slug.count, 100, "the inline form carries the whole sealed blob")
-        guard case .inline = try GroupInviteUrl.parseGroupInviteSlug(slug) else {
-            return XCTFail("the fallback link parses as inline")
-        }
-        XCTAssertEqual(GroupInviteLink.split(link).fragment?.count, 16,
-                       "the link secret still rides the fragment, 16 characters")
+        do {
+            let link = try await f.repo.createGroupInviteLink(groupIdHex: f.groupIdHex)
+            XCTFail("expected the network failure to surface, got \(link)")
+        } catch {}
     }
 
-    func testTheFallbackRuleAndTheLogSummary() {
+    func testTheLogSummary() {
         let network = DiscoveryClientError.network(endpoint: "/x", underlying: URLError(.timedOut))
         let refused = DiscoveryClientError.http(status: 401, endpoint: "/x", body: "capability?")
-        XCTAssertTrue(ChatRepository.groupInviteUploadFallsBackInline(network))
-        XCTAssertFalse(ChatRepository.groupInviteUploadFallsBackInline(refused))
-        XCTAssertFalse(ChatRepository.groupInviteUploadFallsBackInline(
-            DiscoveryClientError.http(status: 503, endpoint: "/x", body: "")))
         XCTAssertEqual(ChatRepository.discoveryFailureSummary(refused), "http 401")
         XCTAssertEqual(ChatRepository.discoveryFailureSummary(network), "network")
     }

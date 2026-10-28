@@ -65,6 +65,9 @@ final class CallHost: ObservableObject {
         /// through ``CallPeerName``, so it is a name or nothing — never a
         /// placeholder standing in for one.
         var peerName: @MainActor (_ groupIdHex: String) -> String?
+        /// ADR-0084 — the other person's signature key for a 1x1 chat, for
+        /// their profile photo on the call surfaces.
+        var peerKey: @MainActor (_ groupIdHex: String) -> Data? = { _ in nil }
         var mintCallId: () -> Data
         /// `docs/ux/calls.md` section 6 — write the finished call's row into
         /// the conversation. Local to this device; no wire format.
@@ -106,13 +109,13 @@ final class CallHost: ObservableObject {
         var placeCall: @MainActor (_ session: CallSession, _ audio: Bool, _ video: Bool) -> Void = {
             session, audio, video in session.dial(audio: audio, video: video)
         }
-        /// The TURN-credential client handed to each new session, or `nil` for
-        /// STUN-only ICE.
+        /// The TURN-credential client handed to each new session for its call
+        /// id, or `nil` for host candidates only.
         ///
-        /// A port rather than a stored client because the credential is minted
-        /// against the current session token, and a test must be able to watch
-        /// a call be placed without reaching the auth service.
-        var turnClient: @MainActor () -> TurnCredentialClient? = { nil }
+        /// A port so a test can watch a call be placed without reaching the
+        /// auth service. In production the credential is minted for the call's
+        /// room through the anonymous call-join exchange (ADR-0078 section 2).
+        var turnClient: @MainActor (_ callId: Data) -> TurnCredentialClient? = { _ in nil }
     }
 
     // MARK: - Published state
@@ -289,7 +292,11 @@ final class CallHost: ObservableObject {
         case .drop:
             return
         case .apply:
-            activeCall?.applyIncomingSignaling(row.body)
+            if case .screenShare(let callId, _) = row.body, let verified = row.verifiedScreenShare {
+                activeCall?.applyScreenShare(verified, callId: callId)
+            } else {
+                activeCall?.applyIncomingSignaling(row.body)
+            }
         case .busy:
             // Not recorded as ended: the caller is still ringing this device,
             // and a later offer row for the same call is answered busy again.
@@ -493,6 +500,11 @@ final class CallHost: ObservableObject {
         activeGroupIdHex.flatMap { ports.peerName($0) }
     }
 
+    /// The other person's signature key, for their photo.
+    var activePeerKey: Data? {
+        activeGroupIdHex.flatMap { ports.peerKey($0) }
+    }
+
     /// The muted conversation's ringing call, as the two quiet surfaces need it
     /// (`docs/ux/calls.md` section 2.1.1), or `nil`.
     ///
@@ -505,7 +517,8 @@ final class CallHost: ObservableObject {
             quiet: incomingQuiet,
             groupIdHex: activeGroupIdHex,
             callerName: activePeerName,
-            video: incomingVideo)
+            video: incomingVideo,
+            callerKey: activePeerKey)
     }
 
     /// Resolves once every publish queued so far has been attempted. Tests.
@@ -548,11 +561,12 @@ final class CallHost: ObservableObject {
         } else {
             NSLog("CallHost: call-key derivation failed; the call will refuse per invariant #4")
         }
-        // Without this the session resolves STUN-only ICE, and two peers that
-        // cannot reach each other directly never connect. Fail-soft by
-        // contract: a `nil` client, or a credential the auth service declines
-        // to mint, leaves the call on STUN rather than refusing it.
-        session.setTurnClient(ports.turnClient())
+        // Without this the session has no ICE server at all (host candidates
+        // only), and two peers that cannot reach each other directly never
+        // connect. Fail-soft by contract: a `nil` client, or a credential the
+        // auth service declines to mint, leaves the call on host candidates
+        // rather than refusing it.
+        session.setTurnClient(ports.turnClient(callId))
         activeCall = session
         activeGroupIdHex = groupIdHex
         incomingQuiet = quiet
@@ -739,17 +753,13 @@ final class CallHost: ObservableObject {
 extension CallHost {
     /// The composition root's ports over the live repository.
     ///
-    /// `sessionTokenProvider` is read at each call rather than captured once,
-    /// because the token is rebound on login, recover and pairing, and a TURN
-    /// credential minted against a stale one is refused.
+    /// `sessionTokenProvider` gates the TURN mint on a signed-in session: the
+    /// anonymous token that pays for it is drawn with the session.
     static func live(
         repository: ChatRepository,
         sessionTokenProvider: @escaping @MainActor () -> String? = { nil }
     ) -> CallHost {
-        // One client for the process: it holds no per-call state, only the
-        // bearer token, which the port refreshes before every mint.
-        let turn = TurnCredentialClient()
-        return CallHost(ports: Ports(
+        CallHost(ports: Ports(
             publish: { [weak repository] groupIdHex, bytes in
                 guard let repository else { return false }
                 do {
@@ -788,6 +798,9 @@ extension CallHost {
                     profileName: resolved.flatMap { $0.isPlaceholder ? nil : $0.name },
                     chatTitle: repository.conversationTitle(groupIdHex: groupIdHex))
             },
+            peerKey: { [weak repository] groupIdHex in
+                repository?.oneToOnePeerSignatureKey(groupIdHex: groupIdHex)
+            },
             mintCallId: { CallSession.mintCallId() },
             recordCall: { [weak repository] call in
                 repository?.recordFinishedCall(call)
@@ -795,10 +808,9 @@ extension CallHost {
             callTarget: { [weak repository] groupIdHex in
                 repository?.oneToOneCallTarget(groupIdHex: groupIdHex) ?? .dial(groupIdB64: groupIdHex)
             },
-            turnClient: {
+            turnClient: { callId in
                 guard let token = sessionTokenProvider(), !token.isEmpty else { return nil }
-                turn.setSessionToken(token)
-                return turn
+                return TurnCredentialClient.forCall(callId: callId)
             }
         ))
     }

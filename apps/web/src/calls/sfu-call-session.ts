@@ -85,6 +85,8 @@ import {
   type SfuWelcome,
 } from "./sfu-signaling-client";
 import { loadWasm } from "../wasm";
+import { iceServersFor, iceServersLine } from "./ice-servers";
+import { CallRelay, type PeerAnnouncer, type VerifiedPeerIdentity } from "./call-relay";
 import { describeLocalCamera } from "./local-preview";
 import {
   attachReceiverSFrame,
@@ -95,8 +97,12 @@ import {
   isSFrameTransformSupported,
   SFRAME_STREAM_CAMERA_LIGHT,
   SFRAME_STREAM_CAMERA_MIDDLE,
+  SFRAME_STREAM_SCREEN_AUDIO,
+  SFRAME_STREAM_SCREEN_SHARE,
   type SFrameStreamIndex,
 } from "./sframe-transform";
+import { ScreenShareNotSealedError, screenStreamPeerOf } from "./screen-share-tracks";
+import { queueParameterWrite } from "./sender-parameters";
 import {
   sframePeerConnectionConfig,
   sframeTransport,
@@ -135,6 +141,7 @@ import {
   BUDGETED_SENDER_KINDS,
   describePublishBudgetChange,
   readEncodingCeiling,
+  screenSenderCeiling,
   SenderCeiling,
   senderCeiling,
   type BudgetedSenderKind,
@@ -145,6 +152,7 @@ import {
   describeDeltas,
   describeOutboundSenders,
   describeGivenChanges,
+  describeScreenSender,
   describeSender,
   describeShownPeers,
   readMedia,
@@ -165,6 +173,7 @@ import {
   type InboundSample,
 } from "./av-align";
 import { splitStreamId } from "./light-stream";
+import { CallPathLog } from "./call-path";
 import { registerVideoFrameSource } from "./video-frame-watch";
 import { VideoGivenBook, videoGivenChanges, type VideoGivenEntry } from "./video-given";
 import {
@@ -194,6 +203,12 @@ export interface SfuCallMedia {
   readonly videoDeviceId?: string | null;
 }
 
+/** How often a device re-announces who it is to the call (ADR-0078 section
+ *  2). Chosen, not measured: an announcement sealed under a relay key a peer
+ *  did not hold yet (it had not applied the commit) is lost to that peer, and
+ *  the next one names the tile. */
+export const PEER_ANNOUNCE_INTERVAL_MS = 15_000;
+
 /** Configuration handed to a session at construction. */
 export interface SfuCallConfig {
   /** SFU origin, e.g. `wss://sfu.lakko.me` (no trailing path). */
@@ -222,9 +237,18 @@ export interface SfuCallConfig {
   /** Mic / camera request. */
   readonly media: SfuCallMedia;
   /**
-   * ICE servers (STUN / TURN). Defaults to public STUN; production
-   * supplies the self-hosted TURN credentials from
-   * `services/auth` `POST /call/turn-credential`.
+   * ADR-0078 section 2: composes this device's signed peer announcement and
+   * verifies everyone else's against the call's MLS roster. The session
+   * seals it under the call seed's relay key and broadcasts it (after the
+   * Welcome, after every rekey, when someone joins, and every
+   * {@link PEER_ANNOUNCE_INTERVAL_MS}); a verified one fires
+   * {@link SfuCallCallbacks.onPeerIdentified}. Absent: no device here is
+   * named (tests).
+   */
+  readonly peerAnnouncer?: PeerAnnouncer;
+  /**
+   * ICE servers (STUN / TURN). Defaults to public STUN; production adds the
+   * TURN credential minted beside the call token (`setTurnProvider`).
    */
   readonly iceServers?: readonly RTCIceServer[];
   /**
@@ -286,13 +310,13 @@ export interface SfuCallCallbacks {
   onStateChange?(state: SfuCallState): void;
   /** Initial roster (from the SFU `Welcome`). */
   onWelcome?(selfPeerId: string, roster: readonly SfuPeerSnapshot[]): void;
-  /** A participant joined the call. `peerTag` is the ADR-0021 per-call
-   *  tag (absent from a pre-ADR-0021 SFU). */
-  onPeerJoined?(
-    peerId: string,
-    accountPseudonym: string,
-    peerTag: string | undefined,
-  ): void;
+  /** A participant joined the call. The SFU says nothing about who it is;
+   *  {@link onPeerIdentified} does, once its announcement verifies. */
+  onPeerJoined?(peerId: string): void;
+  /** A peer's sealed announcement verified against the call's roster
+   *  (ADR-0078 section 2): `identity` is the person (and the leaf key)
+   *  behind `peerId`. Fired again on every re-announcement. */
+  onPeerIdentified?(peerId: string, identity: VerifiedPeerIdentity): void;
   /** A participant left. */
   onPeerLeft?(peerId: string): void;
   /**
@@ -323,9 +347,10 @@ export interface SfuCallCallbacks {
    * invariant #2). The multi-joiner orchestrator classifies these with
    * `dispatchIncomingEnvelope` (CallKeyPackage / CallWelcome / commit).
    *
-   * A `MediaState` relay (camera-off-cleanup) is NOT delivered here — the
-   * session classifies + consumes it internally and fires
-   * {@link onRemoteMediaState} instead. Every other kind falls through to
+   * A payload sealed under the call's relay key (ADR-0078 section 2: the
+   * camera media state and the peer announcements) is NOT delivered here -
+   * the session opens and consumes it and fires {@link onRemoteMediaState}
+   * or {@link onPeerIdentified}. Everything it cannot open falls through to
    * this callback unchanged.
    */
   onSignalRelay?(from: string, payload: Uint8Array): void;
@@ -340,6 +365,13 @@ export interface SfuCallCallbacks {
    */
   onRemoteMediaState?(peerId: string, cameraOn: boolean): void;
   /**
+   * A peer's signed screen-share state arrived, sealed under the call's relay
+   * key (ADR-0083). `peerId` is the SFU's word for the sender; the caller
+   * verifies the state against the leaf key that peer's announcement
+   * verified with before acting on it.
+   */
+  onRemoteScreenShareState?(peerId: string, state: Uint8Array): void;
+  /**
    * The device did not have everything the call asked for, so the person
    * joined with less (`docs/ux/calls.md` section 4.4): the camera failed and
    * only the microphone is live, or neither could be captured and they
@@ -349,10 +381,6 @@ export interface SfuCallCallbacks {
   onCaptureFallback?(fallback: CaptureFallback): void;
 }
 
-const DEFAULT_ICE_SERVERS: readonly RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-];
 
 /**
  * One instance per active SFU call. Construct, then `connect()`. Tear
@@ -393,12 +421,29 @@ function emptyCopySlot(): CopySlot {
   return { sender: null, transformId: null, refusalWarned: false };
 }
 
+/** This device's screen share in the call (ADR-0083): its transceivers, one
+ *  for the picture and one for the sound when the capture has any. */
+interface ScreenSlot {
+  readonly transceivers: RTCRtpTransceiver[];
+  readonly transformIds: string[];
+  readonly video: RTCRtpSender | null;
+}
+
+/** The screen sender's frame-rate ceiling. A screen is read, not watched:
+ *  chosen, not measured. */
+export const SCREEN_MAX_FRAMERATE = 15;
+
 export class SfuCallSession {
   private state: SfuCallState = "idle";
   private pc: RTCPeerConnection | null = null;
   private localStream: MediaStream | null = null;
   private signaling: SfuSignalingClient | null = null;
   private selfPeerId: string | null = null;
+  /** The relay keys of the current and previous call epoch (ADR-0078
+   *  section 2), built on first use; `null` before. */
+  private relay: CallRelay | null = null;
+  /** The periodic peer re-announcement. */
+  private announceTimer: ReturnType<typeof setInterval> | null = null;
 
   /** Serializes SFU-initiated offers so two `setRemoteDescription`
    *  calls never overlap. Each entry is the offer SDP. */
@@ -480,6 +525,11 @@ export class SfuCallSession {
     main: new SenderCeiling("main"),
     middle: new SenderCeiling("middle"),
   };
+  /** This device's screen share, while it sends one (ADR-0083). */
+  private screen: ScreenSlot | null = null;
+  /** Keeps the screen sender under the third ceiling of the SFU's
+   *  `publish-budget` frame, when it names one. */
+  private readonly screenCeiling = new SenderCeiling("screen");
 
   /** The shared rules, once loaded (`connect()`). */
   private wasm: Awaited<ReturnType<typeof loadWasm>> | null = null;
@@ -524,6 +574,9 @@ export class SfuCallSession {
    *  base of the next interval's line and of the total at the end). */
   private mediaCountersTimer: ReturnType<typeof setInterval> | null = null;
   private mediaCountersLast: MediaReading | null = null;
+  /** Which network path the media takes to the SFU, logged when it is first
+   *  known and when it changes (`call-path.ts`). */
+  private callPathLog = new CallPathLog();
   /** The media timer runs at the alignment rule's reading interval
    *  (`av-align.ts`); the counters are logged every this many ticks, which
    *  is every {@link MEDIA_COUNTERS_INTERVAL_MS}. */
@@ -544,6 +597,9 @@ export class SfuCallSession {
     light: new Set<string>(),
     middle: new Set<string>(),
   };
+  /** The ids of the remote tracks that are shared screens (ADR-0083), for
+   *  the same reason. */
+  private readonly screenTrackIds = new Set<string>();
   private lastInboundMs = 0;
   private lastPingMs = 0;
   private pingNonce = 0;
@@ -735,6 +791,8 @@ export class SfuCallSession {
       const ceiling = this.senderCeilings[kind];
       if (ceiling.bound) ceiling.want(senderCeiling(kind, this.publishBudget));
     }
+    this.screenCeiling.bind(this.screen?.video ?? null);
+    if (this.screenCeiling.bound) this.screenCeiling.want(screenSenderCeiling(this.publishBudget));
   }
 
   /**
@@ -794,6 +852,14 @@ export class SfuCallSession {
     for (const id of this.transformIds) {
       rekeySFrame(id, newSeed);
     }
+    // The relay key follows the seed; announce under the new one.
+    this.relay?.setSeed(newSeed);
+    this.announceSelf();
+  }
+
+  /** The shared core, once `connect()` loaded it; `null` before. */
+  loadedWasm(): Awaited<ReturnType<typeof loadWasm>> | null {
+    return this.wasm;
   }
 
   /** Current lifecycle phase. */
@@ -896,6 +962,10 @@ export class SfuCallSession {
     // The socket is open and the Welcome has arrived: start the keepalive.
     this.lastInboundMs = this.lastPingMs = this.nowMs();
     this.keepaliveTimer = setInterval(() => this.onKeepaliveTick(), SFU_KEEPALIVE_TICK_MS);
+    // ADR-0078 section 2: say who this device is, now and periodically (an
+    // announcement sealed under a key a peer did not hold yet is lost to it).
+    this.announceSelf();
+    this.announceTimer = setInterval(() => this.announceSelf(), PEER_ANNOUNCE_INTERVAL_MS);
 
     // 2. Build the peer connection + capture + publish — UNLESS the caller
     //    asked to defer (ADR-0032 link joiner: stay signaling-only until it
@@ -980,7 +1050,11 @@ export class SfuCallSession {
     if (this.pc !== null || this.publishing) return;
     // A session that was hung up, or failed, opens no device.
     if (this.isOver()) return;
-    if (seed !== undefined) this.activeSeed = seed;
+    if (seed !== undefined) {
+      this.activeSeed = seed;
+      this.relay?.setSeed(seed);
+      this.announceSelf();
+    }
     if (localLeaf !== undefined) this.publishLeaf = localLeaf;
     if (this.activeSeed === null) {
       throw new Error(
@@ -997,6 +1071,139 @@ export class SfuCallSession {
       if (this.isOver()) return;
       this.fail("publish failed", err);
       throw err;
+    }
+  }
+
+  /**
+   * Add a screen capture to the call (ADR-0083 section 3): the picture, and
+   * its sound when there is any, each an ordinary sender on a transceiver of
+   * its own, sealed under SFrame stream index 2 (picture) and 5 (sound)
+   * before the renegotiation that describes them. Every offer from then on
+   * names their `mid`s, so the SFU forwards them as `<peer>~screen`.
+   *
+   * Rejects with {@link ScreenShareNotSealedError} when a sender cannot be
+   * sealed: nothing of the share is then left in the call (invariant #4).
+   * Rejects with a plain error when there is no media connection yet or a
+   * share is already there.
+   */
+  async attachScreenShare(capture: MediaStream): Promise<void> {
+    const pc = this.pc;
+    const seed = this.activeSeed;
+    if (pc === null || seed === null || this.isOver()) {
+      throw new Error("no media connection to share the screen on");
+    }
+    if (this.screen !== null) throw new Error("a screen share is already in the call");
+    const tracks = [...capture.getVideoTracks().slice(0, 1), ...capture.getAudioTracks().slice(0, 1)];
+    const transceivers: RTCRtpTransceiver[] = [];
+    const transformIds: string[] = [];
+    let video: RTCRtpSender | null = null;
+    try {
+      for (const track of tracks) {
+        // A transceiver of its own, never one the SFU opened to send this
+        // device someone else's media, and never the camera's.
+        const transceiver = pc.addTransceiver(track, { direction: "sendonly", streams: [capture] });
+        transceivers.push(transceiver);
+        if (track.kind === "video") video = transceiver.sender;
+      }
+    } catch (err) {
+      this.removeScreenTransceivers(pc, transceivers);
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+    try {
+      for (const transceiver of transceivers) {
+        const kind = transceiver.sender.track?.kind;
+        transformIds.push(
+          attachSenderSFrame(transceiver.sender, {
+            seed,
+            localLeaf: this.publishLeaf,
+            streamIndex: kind === "video" ? SFRAME_STREAM_SCREEN_SHARE : SFRAME_STREAM_SCREEN_AUDIO,
+          }),
+        );
+      }
+    } catch (err) {
+      // An unsealed share sender is never left in the call.
+      this.removeScreenTransceivers(pc, transceivers);
+      throw new ScreenShareNotSealedError(err);
+    }
+    for (const id of transformIds) this.transformIds.add(id);
+    this.screen = { transceivers, transformIds, video };
+    if (video !== null) {
+      // Sharpness over motion: keep the resolution, cap the frame rate.
+      const sender = video;
+      void queueParameterWrite(sender, async () => {
+        const params = sender.getParameters();
+        (params as RTCRtpSendParameters & { degradationPreference?: string }).degradationPreference =
+          "maintain-resolution";
+        const first = params.encodings[0];
+        if (first !== undefined) params.encodings[0] = { ...first, maxFramerate: SCREEN_MAX_FRAMERATE };
+        await sender.setParameters(params);
+      }).catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("SfuCallSession: the screen sender's frame-rate ceiling was refused", err);
+      });
+    }
+    this.syncSenderCeilings(this.mainCameraSender() ?? null);
+    // The senders were added in this turn, so the renegotiation
+    // `onnegotiationneeded` runs describes them; the offer names their mids.
+  }
+
+  /** Take this device's screen share out of the call. Idempotent. */
+  detachScreenShare(): void {
+    const slot = this.screen;
+    if (slot === null) return;
+    this.screen = null;
+    for (const id of slot.transformIds) this.transformIds.delete(id);
+    this.screenCeiling.reset();
+    const pc = this.pc;
+    if (pc !== null) this.removeScreenTransceivers(pc, slot.transceivers);
+  }
+
+  /** Whether this device sends a screen now. */
+  sharingScreen(): boolean {
+    return this.screen !== null;
+  }
+
+  private removeScreenTransceivers(pc: RTCPeerConnection, transceivers: readonly RTCRtpTransceiver[]): void {
+    for (const transceiver of transceivers) {
+      try {
+        if (typeof transceiver.stop === "function") transceiver.stop();
+        else pc.removeTrack(transceiver.sender);
+      } catch {
+        try {
+          pc.removeTrack(transceiver.sender);
+        } catch {
+          // A closed connection has nothing left to remove.
+        }
+      }
+    }
+  }
+
+  /** The `mid`s of this device's screen-share m-lines, once a local
+   *  description has given them one. */
+  private screenMids(): string[] {
+    const out: string[] = [];
+    for (const transceiver of this.screen?.transceivers ?? []) {
+      const mid = transceiver.mid;
+      if (typeof mid === "string" && mid.length > 0) out.push(mid);
+    }
+    return out;
+  }
+
+  /**
+   * Seal `plaintext` under the call's relay key and send it to everyone in
+   * the call (ADR-0078 section 2). Best-effort: `false` when there is no
+   * relay key or no open socket.
+   */
+  sendSealedRelay(plaintext: Uint8Array): boolean {
+    const wasm = this.wasm;
+    if (wasm === null || this.signaling === null) return false;
+    const sealed = this.relayFor(wasm).seal(plaintext);
+    if (sealed === null) return false;
+    try {
+      this.signaling.sendSignalRelayToCall(sealed);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -1072,18 +1279,59 @@ export class SfuCallSession {
     if (this.signaling === null) return;
     const on = this.localCameraOn;
     void (async (): Promise<void> => {
-      let bytes: Uint8Array;
+      let sealed: Uint8Array | null;
       try {
         const wasm = await loadWasm();
-        bytes = wasm.composeMediaState(on);
+        // Sealed under the call's relay key (ADR-0078 section 2): the SFU
+        // relays ciphertext only. No key yet (a link joiner before its
+        // Welcome) means nothing is said.
+        sealed = this.relayFor(wasm).seal(wasm.composeMediaState(on));
       } catch {
         return;
       }
+      if (sealed === null) return;
       try {
         // Re-check after the await — the call may have torn down.
-        this.signaling?.sendSignalRelayToCall(bytes);
+        this.signaling?.sendSignalRelayToCall(sealed);
       } catch {
         // socket gone / not open — the signal is best-effort.
+      }
+    })();
+  }
+
+  /** The relay keys, built on first use and seeded from the current seed. */
+  private relayFor(wasm: Awaited<ReturnType<typeof loadWasm>>): CallRelay {
+    if (this.relay === null) {
+      this.relay = new CallRelay(wasm);
+      if (this.activeSeed !== null) this.relay.setSeed(this.activeSeed);
+    }
+    return this.relay;
+  }
+
+  /**
+   * Broadcast this device's sealed peer announcement (ADR-0078 section 2).
+   * Best-effort: without an announcer, a self peer id, a relay key or an
+   * open socket nothing is sent.
+   */
+  private announceSelf(): void {
+    const announcer = this.config.peerAnnouncer;
+    const self = this.selfPeerId;
+    if (announcer === undefined || self === null || this.signaling === null) return;
+    void (async (): Promise<void> => {
+      let sealed: Uint8Array | null = null;
+      try {
+        const wasm = await loadWasm();
+        if (this.isOver()) return;
+        const announcement = announcer.compose(self);
+        if (announcement !== null) sealed = this.relayFor(wasm).seal(announcement);
+      } catch {
+        return;
+      }
+      if (sealed === null) return;
+      try {
+        this.signaling?.sendSignalRelayToCall(sealed);
+      } catch {
+        // best-effort
       }
     })();
   }
@@ -1182,9 +1430,8 @@ export class SfuCallSession {
         return;
       }
       localStream.addTrack(track);
-      // The main sender: `addTrack`, which mid-call may reuse a video
-      // transceiver the SFU already negotiated; the layers are asked for
-      // separately.
+      // The main sender, on a transceiver of its own (never one the SFU
+      // opened to send this device another person's camera).
       const sender = addCameraSenderMidCall(pc2, track, localStream);
       this.transformIds.add(
         attachSenderSFrame(sender, { seed, localLeaf: this.publishLeaf }),
@@ -1335,11 +1582,13 @@ export class SfuCallSession {
     readyState?: MediaStreamTrackState,
   ): RTCRtpSender | undefined {
     const copySenders = CAMERA_COPY_KINDS.map((k) => this.copies[k].sender?.sender);
+    const screenSenders = this.screen?.transceivers.map((t) => t.sender) ?? [];
     return pc
       .getSenders()
       .find(
         (s) =>
           !copySenders.includes(s) &&
+          !screenSenders.includes(s) &&
           s.track?.kind === kind &&
           (readyState === undefined || s.track.readyState === readyState),
       );
@@ -1500,6 +1749,24 @@ export class SfuCallSession {
    * camera sender. Empty without that sender or when the browser does not
    * answer.
    */
+  /** The stats ids of this device's screen-share picture sender, the same
+   *  way as {@link copyOutboundIds}. */
+  private async screenOutboundIds(): Promise<Set<string>> {
+    const ids = new Set<string>();
+    const sender = this.screen?.video ?? null;
+    if (sender === null) return ids;
+    try {
+      const report = await sender.getStats();
+      for (const e of report.values() as Iterable<Record<string, unknown>>) {
+        const id = e["id"];
+        if (e["type"] === "outbound-rtp" && typeof id === "string") ids.add(id);
+      }
+    } catch {
+      // The screen sender then reads as a camera sender in the log.
+    }
+    return ids;
+  }
+
   private async copyOutboundIds(kind: CameraCopyKind): Promise<Set<string>> {
     const ids = new Set<string>();
     const copy = this.copies[kind].sender;
@@ -1649,9 +1916,15 @@ export class SfuCallSession {
       // The senders' own reports are only needed to name them in the log.
       const lightOutbound = logCounters ? await this.copyOutboundIds("light") : new Set<string>();
       const middleOutbound = logCounters ? await this.copyOutboundIds("middle") : new Set<string>();
+      const screenOutbound = logCounters ? await this.screenOutboundIds() : new Set<string>();
       const report = await pc.getStats();
       const entries = [...(report.values() as Iterable<Record<string, unknown>>)];
       await this.readAvAlign(pc, entries);
+      const pathLine = this.callPathLog.note(entries);
+      if (pathLine !== null) {
+        // eslint-disable-next-line no-console
+        console.info(pathLine);
+      }
       if (!logCounters) return;
       reading = readMedia(
         entries,
@@ -1659,8 +1932,10 @@ export class SfuCallSession {
         lightOutbound,
         this.copyTrackIds.middle,
         middleOutbound,
+        this.screenTrackIds,
+        screenOutbound,
       );
-      sender = readSender(entries, lightOutbound, middleOutbound);
+      sender = readSender(entries, lightOutbound, middleOutbound, screenOutbound);
     } catch {
       return;
     }
@@ -1682,6 +1957,10 @@ export class SfuCallSession {
     )) {
       // eslint-disable-next-line no-console
       console.info(line);
+    }
+    if (reading.outboundScreen !== undefined && reading.outboundScreen !== null) {
+      // eslint-disable-next-line no-console
+      console.info(describeScreenSender("call media interval", reading.outboundScreen));
     }
     if (sender !== null) {
       // eslint-disable-next-line no-console
@@ -1721,6 +2000,7 @@ export class SfuCallSession {
     this.avAlign = null;
     const last = this.mediaCountersLast;
     this.mediaCountersLast = null;
+    this.callPathLog = new CallPathLog();
     this.senderCountersLast = null;
     if (last === null) return;
     // Counted from zero: the counters are cumulative from the stream's start.
@@ -1758,6 +2038,12 @@ export class SfuCallSession {
       clearInterval(this.keepaliveTimer);
       this.keepaliveTimer = null;
     }
+    if (this.announceTimer !== null) {
+      clearInterval(this.announceTimer);
+      this.announceTimer = null;
+    }
+    this.relay?.dispose();
+    this.relay = null;
     if (this.signaling !== null) {
       this.signaling.close();
       this.signaling = null;
@@ -1794,10 +2080,15 @@ export class SfuCallSession {
       slot.refusalWarned = false;
       this.copyTrackIds[kind].clear();
     }
+    this.screenTrackIds.clear();
     this.videoNeeded = null;
     for (const kind of CAMERA_SENDER_KINDS) this.senderActivity[kind].reset();
     this.publishBudget = null;
     for (const kind of BUDGETED_SENDER_KINDS) this.senderCeilings[kind].reset();
+    // The share's tracks were stopped with the peer connection's; the
+    // capture itself is its owner's to stop.
+    this.screen = null;
+    this.screenCeiling.reset();
     // Nothing more is asked of the SFU, and the tiles of a later call start
     // from nothing.
     this.wantsSender.reset();
@@ -1838,18 +2129,24 @@ export class SfuCallSession {
     this.turnProvider = provider;
   }
 
-  /** STUN always - explicit config wins over the default - plus TURN when
-   *  one can be minted. */
+  /** Lakko's own servers only (`./ice-servers.ts`): explicit config first,
+   *  then the minted TURN entry and STUN on its host. No public STUN server:
+   *  the SFU learns a person's outside address from their own packets. */
   private async resolveIceServers(): Promise<RTCIceServer[]> {
-    const base = [...(this.config.iceServers ?? DEFAULT_ICE_SERVERS)];
+    const base = [...(this.config.iceServers ?? [])];
     const provider = this.turnProvider;
-    if (provider === null) return base;
-    try {
-      const turn = await provider();
-      return turn === null ? base : [...base, turn];
-    } catch {
-      return base;
+    let turn: RTCIceServer | null = null;
+    if (provider !== null) {
+      try {
+        turn = await provider();
+      } catch {
+        turn = null;
+      }
     }
+    const servers = [...base, ...iceServersFor(turn)];
+    // eslint-disable-next-line no-console
+    console.info(`call ice servers: ${iceServersLine(servers)}`);
+    return servers;
   }
 
   private async openPeerConnectionAndPublish(): Promise<void> {
@@ -1994,6 +2291,21 @@ export class SfuCallSession {
       // Where the browser has no per-frame callback, the tile reads this
       // receiver's statistics instead (`video-frame-watch.ts`).
       if (ev.track.kind === "video") registerVideoFrameSource(ev.track, ev.receiver);
+      // A shared screen (ADR-0083) is not one of the peer's camera pictures
+      // nor its voice: decrypted like everything else, then handed over.
+      if (screenStreamPeerOf(remoteStream.id) !== null) {
+        const trackId = ev.track.id;
+        this.screenTrackIds.add(trackId);
+        ev.track.addEventListener("ended", () => {
+          this.screenTrackIds.delete(trackId);
+        });
+        this.callbacks.onRemoteTrack?.({
+          streamId: remoteStream.id,
+          track: ev.track,
+          stream: remoteStream,
+        });
+        return;
+      }
       // The receiver of a light companion or of a middle track is named as
       // such in the media counters.
       const role = splitStreamId(remoteStream.id).role;
@@ -2044,7 +2356,12 @@ export class SfuCallSession {
       throw new Error("createOffer produced no SDP body");
     }
     // The copies' transceivers have their `mid`s now.
-    this.signaling?.sendSdpOffer(offer.sdp, this.copyMids("light"), this.copyMids("middle"));
+    this.signaling?.sendSdpOffer(
+      offer.sdp,
+      this.copyMids("light"),
+      this.copyMids("middle"),
+      this.screenMids(),
+    );
     // The SFU has media state for this peer from this offer on: tell it what
     // this device shows of everyone.
     this.publishOfferSent = true;
@@ -2069,6 +2386,12 @@ export class SfuCallSession {
     );
     this.onRosterChanged(false);
     this.callbacks.onWelcome?.(frame.peer_id, frame.roster);
+    // The self peer id exists from here on. `connect()` resolves when the
+    // socket opens, before the Welcome, so its announcement had no id to
+    // name and was not sent: the peers already in the call showed this
+    // person as "Participant" until the periodic re-announcement, up to
+    // PEER_ANNOUNCE_INTERVAL_MS later (seen on a local stack 2026-10-22).
+    this.announceSelf();
   }
 
   /** Whether the SFU refused this device because the call had already
@@ -2126,17 +2449,14 @@ export class SfuCallSession {
       this.wantsBook.addPeer(frame.peer_id);
       this.onRosterChanged(true);
     }
-    this.callbacks.onPeerJoined?.(
-      frame.peer_id,
-      frame.account_pseudonym,
-      frame.peer_tag,
-    );
+    this.callbacks.onPeerJoined?.(frame.peer_id);
     // Re-announce our own current camera state so the newcomer is shown the
     // right thing immediately (camera-off-cleanup) — deterministic initial
     // sync for a peer who toggled off/on before this peer arrived. The relay
     // is a broadcast; existing peers re-applying an unchanged state is a
-    // harmless no-op.
+    // harmless no-op. And say who this device is, for the newcomer.
     this.announceCameraState();
+    this.announceSelf();
   }
 
   /**
@@ -2191,7 +2511,7 @@ export class SfuCallSession {
   private onSignalRelayFrame(frame: SfuSignalRelay): void {
     const mediaCb = this.callbacks.onRemoteMediaState;
     const relayCb = this.callbacks.onSignalRelay;
-    if (mediaCb === undefined && relayCb === undefined) return;
+    const identifiedCb = this.callbacks.onPeerIdentified;
     void (async (): Promise<void> => {
       let wasm: Awaited<ReturnType<typeof loadWasm>>;
       let payload: Uint8Array;
@@ -2205,25 +2525,21 @@ export class SfuCallSession {
       // Hung up while the module resolved: a relay is not delivered to a
       // call that is over.
       if (this.isOver()) return;
-      // Classify: consume a MediaState signal (camera-off-cleanup); everything
-      // else passes through to onSignalRelay unchanged.
-      if (mediaCb !== undefined) {
-        let isMediaState = false;
-        let cameraOn: boolean | undefined;
-        try {
-          const env = wasm.dispatchIncomingEnvelope(payload);
-          isMediaState = env.kind === wasm.IncomingEnvelopeKind.MediaState;
-          cameraOn = env.cameraOn;
-          env.free();
-        } catch {
-          // A domain-separator match with a malformed body throws; treat the
-          // payload as opaque and fall through to onSignalRelay.
-          isMediaState = false;
+      // ADR-0078 section 2: a payload sealed under the call's relay key is
+      // consumed here (the camera media state, a peer announcement); an
+      // unsealed media state is not accepted. Everything else passes through
+      // to onSignalRelay unchanged.
+      const opened = this.relayFor(wasm).open(payload);
+      if (opened !== null) {
+        if (opened.kind === "media-state") {
+          mediaCb?.(frame.from, opened.cameraOn);
+        } else if (opened.kind === "announcement") {
+          const identity = this.config.peerAnnouncer?.verify(frame.from, opened.bytes) ?? null;
+          if (identity !== null) identifiedCb?.(frame.from, identity);
+        } else if (opened.kind === "screen-share") {
+          this.callbacks.onRemoteScreenShareState?.(frame.from, opened.state);
         }
-        if (isMediaState) {
-          if (cameraOn !== undefined) mediaCb(frame.from, cameraOn);
-          return; // consumed — never double-dispatch to onSignalRelay
-        }
+        return;
       }
       relayCb?.(frame.from, payload);
     })();
@@ -2318,7 +2634,12 @@ export class SfuCallSession {
       await pc.setLocalDescription(); // implicit createOffer
       const sdp = pc.localDescription?.sdp;
       if (sdp !== undefined) {
-        signaling.sendSdpOffer(sdp, this.copyMids("light"), this.copyMids("middle"));
+        signaling.sendSdpOffer(
+          sdp,
+          this.copyMids("light"),
+          this.copyMids("middle"),
+          this.screenMids(),
+        );
       }
     } catch {
       // A failed renegotiation leaves the call up as-is; the publishVideo

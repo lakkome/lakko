@@ -21,6 +21,9 @@ public data class ContactRowModel(
     /** Whether the resolved name is the neutral placeholder — such a row sorts
      *  under `#` rather than under `M`, and matches no search term. */
     val placeholder: Boolean = false,
+    /** ADR-0084 — the person's signature key in either base64 spelling, for
+     *  rows whose [key] is not one (an invited contact); `null` = [key]. */
+    val personKey: String? = null,
 )
 
 /** A letter section of the alphabetical list: the header and its rows. */
@@ -104,6 +107,37 @@ public fun safetyNumberRows(groups: List<String>, perRow: Int = 3): List<List<St
 public fun contactRouteKey(signatureKey: ByteArray): String =
     me.lakko.app.auth.base64UrlEncodeNoPad(signatureKey)
 
+/** The signature key a route key names, or `null` when it is not base64url. */
+public fun routeKeyBytes(routeKey: String): ByteArray? = try {
+    me.lakko.app.auth.base64UrlDecodeNoPad(routeKey)
+} catch (_: IllegalArgumentException) {
+    null
+}
+
+/**
+ * The card of a person with no contact row whose one-to-one remains — a
+ * person the viewer removed (docs/ux/conversation-info.md section 2.1,
+ * amended 2026-10-24). Built from the conversation, as the one-to-one rule
+ * builds a row ([me.lakko.app.contacts.adoptingOneToOnePeer]), but never
+ * stored: the card offers `Add to contacts`, which stores it. `null` when the
+ * route key is malformed or [chatFor] finds no one-to-one with the person.
+ */
+public fun removedPeerContact(
+    routeKey: String,
+    chatFor: (peerKey: ByteArray) -> String?,
+): me.lakko.app.contacts.AcceptedContact? {
+    val key = routeKeyBytes(routeKey) ?: return null
+    val groupIdHex = chatFor(key) ?: return null
+    return me.lakko.app.contacts.adoptingOneToOnePeer(
+        accepted = emptyList(),
+        signatureKey = key,
+        accountId = null,
+        groupIdHex = groupIdHex,
+        nowMs = 0uL,
+        createdAt = "",
+    )?.singleOrNull()
+}
+
 // =============================================================================
 // Invite links sheet
 // =============================================================================
@@ -112,7 +146,7 @@ public fun contactRouteKey(signatureKey: ByteArray): String =
 internal const val INVITE_UNLIMITED_USES: Long = 0xFFFF_FFFFL
 
 /** UX 5.3 — the line a row shows in place of Copy and Share when this device
- *  does not hold the link's secret. Revoke stays. */
+ *  does not hold the link's secret. Delete link stays. */
 public val INVITE_CREATED_ELSEWHERE_COPY: UiText = UiText("invite.links.made_elsewhere_hint")
 
 /** One row of the "Invite links" sheet. */
@@ -132,16 +166,21 @@ public data class InviteLinkRow(
     val createdAtMs: Long?,
     /** UNIX millis; `0` = never expires. */
     val expiryMs: Long,
-    /** Uses left, or `null` when unknown (unlimited, or a session-only row
-     *  whose consume count the server has not reported yet). */
-    val usesLeft: Long?,
+    /** The `max_uses` sentinel the link was minted with. ADR-0078 section
+     *  10: the list is this device's own records, so how many uses are left
+     *  is not known here; the row states the limit. */
+    val maxUses: Long,
     /** `true` for a row this device generated this session — its raw
      *  `blob_id` is in memory, so revocation goes through the session path. */
     val fromSession: Boolean,
 )
 
+/** The title line of [row]: its label, or `null` for a link without one, so
+ *  the row leads with its meta line instead of a generic "Invite link". */
+public fun inviteRowTitle(row: InviteLinkRow): String? = row.label.trim().ifEmpty { null }
+
 /** What a row offers: Copy and Share with the full URL, or the
- *  [INVITE_CREATED_ELSEWHERE_COPY] line; Revoke is offered either way. */
+ *  [INVITE_CREATED_ELSEWHERE_COPY] line; Delete link is offered either way. */
 public sealed interface InviteRowShare {
     public data class Shareable(val url: String) : InviteRowShare
 
@@ -152,19 +191,10 @@ public sealed interface InviteRowShare {
 public fun inviteRowShare(row: InviteLinkRow): InviteRowShare =
     row.url?.let { InviteRowShare.Shareable(it) } ?: InviteRowShare.CreatedElsewhere
 
-/** Uses left from the wire `max_uses` sentinel and the server-counted
- *  consumes: `null` for unlimited, never negative. */
-public fun invitesUsesLeft(maxUses: Long, usedCount: Long): Long? = when (maxUses) {
-    INVITE_UNLIMITED_USES -> null
-    0L -> (1L - usedCount).coerceAtLeast(0L)
-    else -> (maxUses - usedCount).coerceAtLeast(0L)
-}
-
 /**
- * Merge the session-created rows with the server's list, keyed by slug: a slug
- * in both keeps the session row (it has the creation time) and takes the
- * server's uses-left; session rows come first, newest first, then the
- * server-only rows soonest-to-expire first.
+ * Merge the session-created rows with the recorded list, keyed by slug: a
+ * slug in both keeps the session row; session rows come first, newest first,
+ * then the recorded-only rows soonest-to-expire first.
  */
 public fun mergeInviteLinkRows(
     session: List<InviteLinkRow>,
@@ -173,7 +203,7 @@ public fun mergeInviteLinkRows(
     val serverBySlug = server.associateBy { it.slug }
     val merged = session
         .sortedByDescending { it.createdAtMs ?: 0L }
-        .map { row -> serverBySlug[row.slug]?.let { row.copy(usesLeft = it.usesLeft) } ?: row }
+        .map { row -> serverBySlug[row.slug]?.let { row.copy(createdAtMs = row.createdAtMs ?: it.createdAtMs) } ?: row }
     val sessionSlugs = session.map { it.slug }.toHashSet()
     val rest = server
         .filter { it.slug !in sessionSlugs }
@@ -186,15 +216,26 @@ public fun describeInviteExpiry(expiryMs: Long, nowMs: Long): UiText {
     if (expiryMs == 0L) return UiText("invite.links.never_expires")
     if (expiryMs <= nowMs) return UiText("invite.links.expired")
     val deltaMs = expiryMs - nowMs
-    val days = deltaMs / (24L * 60 * 60 * 1000)
-    if (days >= 1) return UiText("invite.links.expires_days", texts = mapOf("count" to days.toString()))
-    val hours = deltaMs / (60L * 60 * 1000)
-    if (hours >= 1) return UiText("invite.links.expires_hours", texts = mapOf("count" to hours.toString()))
-    val minutes = (deltaMs / (60L * 1000)).coerceAtLeast(1L)
+    // Same rule on all three clients: minutes round up (so "30 s" reads
+    // "1m"), hours and days round half up (so a 7-day link made an hour
+    // ago still reads "7d", not a floored "6d").
+    val minuteMs = 60_000L
+    val hourMs = 60 * minuteMs
+    val dayMs = 24 * hourMs
+    val minutes = (deltaMs + minuteMs - 1) / minuteMs
+    if (minutes >= 60) {
+        val hours = (deltaMs + hourMs / 2) / hourMs
+        if (hours < 24) return UiText("invite.links.expires_hours", texts = mapOf("count" to hours.toString()))
+        val days = (deltaMs + dayMs / 2) / dayMs
+        return UiText("invite.links.expires_days", texts = mapOf("count" to days.toString()))
+    }
     return UiText("invite.links.expires_minutes", texts = mapOf("count" to minutes.toString()))
 }
 
-/** "1 use left" / "3 uses left" / `null` when unknown. */
-public fun describeUsesLeft(usesLeft: Long?): UiText? = usesLeft?.let {
-    UiText("invite.links.uses_left", counts = mapOf("count" to it.toULong()))
+/** The limit a link was minted with: "single-use" / "up to 5 uses" /
+ *  "unlimited" (the web `describeInviteLimit`, iOS `limitCopy`). */
+public fun describeInviteLimit(maxUses: Long): UiText = when {
+    maxUses == INVITE_UNLIMITED_USES -> UiText("invite.uses.unlimited")
+    maxUses <= 1L -> UiText("invite.uses.single")
+    else -> UiText("invite.uses.up_to", counts = mapOf("count" to maxUses.toULong()))
 }

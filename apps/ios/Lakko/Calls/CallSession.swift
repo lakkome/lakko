@@ -156,6 +156,25 @@ public final class CallSession: ObservableObject {
     /// Sticky: a receiver that failed to arm is never re-armed.
     @Published public private(set) var remoteMediaUndecryptable: Bool = false
 
+    /// The other person's shared screen (ADR-0083 section 4): a remote video
+    /// track in a stream whose id ends in `~screen`. Its own picture, never
+    /// their camera.
+    @Published public private(set) var remoteScreenTrack: RTCVideoTrack?
+    /// `true` once ``remoteScreenTrack`` rendered a frame; until then the share
+    /// says it is waiting for the picture.
+    @Published public private(set) var remoteScreenFlowing: Bool = false
+    /// The call's current share, as the fold answers it: `nil` when none is
+    /// live. Fed only with states verified against the MLS sender
+    /// (``applyScreenShare(_:)``).
+    @Published private(set) var screenShare: CallCurrentScreenShare?
+    /// The one-share-at-a-time fold (C-87). Its own key decides only whether
+    /// a share is this device's own; this client never shares, so a key no
+    /// signer holds is enough.
+    private lazy var screenShares = ScreenShareFold(ownKey: Data(count: 32))
+    private var remoteScreenProbe: RemoteVideoFrameProbe?
+    /// The id of the remote video track the pod last reported removed.
+    private var lastRemovedVideoTrackId: String?
+
     /// The frame probe attached to the current remote video track, held so it
     /// can be detached when the track is replaced or the call ends.
     private var remoteVideoProbe: RemoteVideoFrameProbe?
@@ -225,6 +244,10 @@ public final class CallSession: ObservableObject {
     /// / [`downBps`] / [`upBps`]. Started on the first `.connected`
     /// transition, cancelled in `teardownMediaPipeline`.
     private var statsTask: Task<Void, Never>?
+    /// What the receivers report, logged with every stats sample and as a
+    /// total in `teardownMediaPipeline` (ADR-0067 step 1, as the group call
+    /// does).
+    private var inboundCounters = InboundCounterLog()
     /// The media-flow line is said once per call, not every two seconds.
     private var loggedMediaFlow = false
 
@@ -241,6 +264,9 @@ public final class CallSession: ObservableObject {
     }
     /// How long inbound media has been silent (`MediaWatchdog`).
     private var inboundActivity: MediaWatchdog.InboundActivity?
+    /// Which network path the media takes, logged when it is first known
+    /// and when it changes (``CallPath``).
+    private var callPathLog = CallPathLog()
     /// The ICE-`disconnected` grace, armed on the transition and cancelled by
     /// a recovery. See `handleConnectionState`.
     private var iceGraceTask: Task<Void, Never>?
@@ -270,15 +296,15 @@ public final class CallSession: ObservableObject {
 
     /// G3-1-turn — TURN-credential client. Injected by the
     /// call-UI layer via [`setTurnClient`] so tests can swap
-    /// a stub. When `nil` (or when its `fetchOrNil()`
-    /// returns `nil`) the call proceeds with STUN-only ICE —
-    /// fail-soft path per `TurnCredentialClient` docs.
+    /// a stub. When `nil` (or when it mints nothing) the
+    /// call proceeds on host candidates only — fail-soft
+    /// path per `TurnCredentialClient` docs.
     private var turnClient: TurnCredentialClient?
 
     /// Bind the TURN client used for ICE-server resolution at
     /// `dial` / `acceptCall` time. Idempotent; passing `nil`
-    /// disables TURN fetching for subsequent calls (STUN-only
-    /// fallback).
+    /// disables TURN fetching for subsequent calls (host
+    /// candidates only).
     public func setTurnClient(_ client: TurnCredentialClient?) {
         self.turnClient = client
     }
@@ -463,20 +489,16 @@ public final class CallSession: ObservableObject {
         }
     }
 
-    /// G3-1-turn — build the ICE-server list for this call:
-    /// `defaultIceServers()` (STUN-only) plus optionally one
-    /// TURN row freshly minted via the auth service. Fails
-    /// soft to STUN-only when `turnClient` is unset or
-    /// `fetchOrNil()` returns nil — the call still attempts
-    /// to connect (the SFU is reachable; only symmetric-NAT
-    /// peers will fail), and the failure surfaces as a normal
-    /// ICE-disconnected state rather than a refused call.
+    /// Build the ICE-server list for this call: Lakko's own
+    /// servers only (``IceServers``) — the TURN row minted via
+    /// the auth service and STUN on its host, or an empty list
+    /// (host candidates only) when `turnClient` is unset or
+    /// mints nothing. The call still attempts to connect then;
+    /// two peers behind NATs may not reach each other, and that
+    /// surfaces as a normal ICE-disconnected state rather than
+    /// a refused call.
     private func resolveIceServers() async -> [RTCIceServer] {
-        var servers = WebRTCPeerConnection.defaultIceServers()
-        if let turn = turnClient, let row = await turn.fetchOrNil() {
-            servers.append(row)
-        }
-        return servers
+        await IceServers.resolve(turnClient)
     }
 
     /// Resolve the seed + leaf and invoke
@@ -963,6 +985,11 @@ public final class CallSession: ObservableObject {
                 sdpMLineIndex: remote.sdpMLineIndex,
                 candidate: remote.candidate
             ) }
+        case .screenShare:
+            // ADR-0083: a share state is folded only once verified against the
+            // row's MLS sender (``applyScreenShare(_:callId:)``); the raw body
+            // carries no verdict.
+            break
         case .groupStart, .groupJoin, .groupLeave:
             // Group-call signaling (Phase 3c2) folds into the
             // repository's per-chat group-call record
@@ -1109,6 +1136,9 @@ public final class CallSession: ObservableObject {
         // dropping the peer connection.
         statsTask?.cancel()
         statsTask = nil
+        for line in inboundCounters.total() {
+            NSLog("%@", line)
+        }
         rtc?.close()
         rtc = nil
         if let capture = self.localCameraCapture {
@@ -1126,6 +1156,10 @@ public final class CallSession: ObservableObject {
         // `remoteVideoFlowing` from surviving into the next call.
         self.remoteVideoTrack = nil
         self.watchRemoteVideoFrames(on: nil)
+        // No share outlives the call.
+        self.setRemoteScreenTrack(nil)
+        self.screenShare = nil
+        self.screenShares = ScreenShareFold(ownKey: Data(count: 32))
         // G3-1-conn-quality — clear the stale stats so a fresh
         // call doesn't briefly show the previous RTT / bitrate.
         self.rttMs = nil
@@ -1134,6 +1168,7 @@ public final class CallSession: ObservableObject {
         self.upBps = nil
         self.prevStatsBytes = nil
         self.inboundActivity = nil
+        self.callPathLog = CallPathLog()
         // Reset perfect-negotiation state (B2b) so a late
         // renegotiation tick after teardown no-ops.
         self.negotiationReady = false
@@ -1204,6 +1239,19 @@ public final class CallSession: ObservableObject {
                             snap.mediaPacketsReceived, snap.mediaPacketsSent,
                             snap.mediaSsrcSent, signalled)
                     }
+                    // The receivers' counters, from a second read of the
+                    // report: the snapshot above carries numbers only.
+                    if let entries = await rtc.sampleMediaStatEntries(),
+                        !Task.isCancelled, self.rtc === rtc {
+                        for line in self.inboundCounters.interval(entries) {
+                            NSLog("%@", line)
+                        }
+                    }
+                    if let entries = await rtc.samplePathStatEntries(),
+                        !Task.isCancelled, self.rtc === rtc,
+                        let line = self.callPathLog.note(entries) {
+                        NSLog("%@", line)
+                    }
                     await MainActor.run { self.endIfMediaHasGoneSilent(atSec: nowSec) }
                     await MainActor.run {
                         self.rttMs = snap.rttMs
@@ -1224,6 +1272,41 @@ public final class CallSession: ObservableObject {
     /// Re-attaching on every track change matters: a peer that stops and
     /// restarts its camera produces a NEW track, and a stale `true` would send
     /// the screen to the video layout before the new track has drawn anything.
+    // MARK: - Screen share (ADR-0083 section 4)
+
+    /// Fold a share state already verified against the row's MLS sender leaf
+    /// (``ChatRepository/routeCallSignaling``). A state for another call is
+    /// dropped.
+    func applyScreenShare(_ verified: VerifiedCallScreenShare, callId: Data) {
+        guard callId == self.callId, state != .done else { return }
+        if screenShares.observe(verified) {
+            NSLog(
+                "CallSession: current screen share changed: live=%@",
+                screenShares.current != nil ? "true" : "false")
+            screenShare = screenShares.current
+        }
+    }
+
+    /// Keep (or, `nil`, drop) the other person's screen track, and probe it
+    /// for its first frame.
+    private func setRemoteScreenTrack(_ track: RTCVideoTrack?) {
+        if let previous = remoteScreenTrack, let probe = remoteScreenProbe {
+            previous.remove(probe)
+        }
+        remoteScreenProbe = nil
+        remoteScreenFlowing = false
+        remoteScreenTrack = track
+        guard let track else { return }
+        NSLog("CallSession: remote screen track attached; waiting for the first frame")
+        let probe = RemoteVideoFrameProbe { [weak self, weak track] in
+            guard let self, let track, self.remoteScreenTrack === track else { return }
+            NSLog("CallSession: remote screen first frame rendered")
+            self.remoteScreenFlowing = true
+        }
+        track.add(probe)
+        remoteScreenProbe = probe
+    }
+
     private func watchRemoteVideoFrames(on track: RTCVideoTrack?) {
         if let previous = probedRemoteVideoTrack, let probe = remoteVideoProbe {
             previous.remove(probe)
@@ -1371,13 +1454,24 @@ public final class CallSession: ObservableObject {
             onConnectionState: { [weak self] newState in
                 self?.handleConnectionState(newState)
             },
-            onRemoteVideoTrack: { [weak self] track, _ in
-                // 1×1: a single remote video track. The
-                // stream id is ignored here; the N-way SFU
-                // path will key on it to map the track to a
-                // specific participant leaf.
-                self?.remoteVideoTrack = track
-                self?.watchRemoteVideoFrames(on: track)
+            onRemoteVideoTrack: { [weak self] track, streamId in
+                guard let self else { return }
+                // ADR-0083: a stream id ending in `~screen` is the other
+                // person's shared screen, not their camera.
+                if case .screen = RemoteVideoRoute.of(streamId: streamId) {
+                    self.setRemoteScreenTrack(track)
+                    return
+                }
+                // A removal names no stream: it is the screen's when the
+                // track the pod just removed is the screen track.
+                if track == nil, let screen = self.remoteScreenTrack,
+                    self.lastRemovedVideoTrackId == screen.trackId {
+                    self.setRemoteScreenTrack(nil)
+                    return
+                }
+                // 1×1: a single remote camera track.
+                self.remoteVideoTrack = track
+                self.watchRemoteVideoFrames(on: track)
             },
             onRemoteReceiver: { [weak self] receiver, _ in
                 // Arm the SFrame decryptor on EVERY incoming track
@@ -1407,6 +1501,9 @@ public final class CallSession: ObservableObject {
                 // dead, and hanging up would replace a describable state with a
                 // dropped call — the same ambiguity one layer further out.
                 if !armed { self.remoteMediaUndecryptable = true }
+            },
+            onRemoteVideoTrackRemoved: { [weak self] trackId in
+                self?.lastRemovedVideoTrackId = trackId
             }
         ))
     }
@@ -1598,6 +1695,8 @@ extension CallSession {
         case .groupStart(let cid, _, _, _),
              .groupJoin(let cid, _, _),
              .groupLeave(let cid, _, _):
+            return cid
+        case .screenShare(let cid, _):
             return cid
         }
     }

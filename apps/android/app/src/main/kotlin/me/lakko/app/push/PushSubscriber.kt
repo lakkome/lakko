@@ -28,16 +28,19 @@ import me.lakko.app.BuildConfig
  *      fields from `BuildConfig.FCM_*` and feed them into
  *      [`FirebaseOptions.Builder`], then
  *      `FirebaseApp.initializeApp(context, options)` on first
- *      use. Idempotent — subsequent calls find the named app
- *      already created and skip the init.
+ *      use, as the DEFAULT app: `FirebaseMessaging.getInstance()`
+ *      and the SDK's own message delivery read only the default
+ *      app. Idempotent — a later call finds it and skips the init.
  *   2. **`FirebaseMessaging.getInstance().token.await()`** — the
  *      coroutine-friendly accessor for the per-device FCM
  *      registration token. The Firebase SDK caches the token;
  *      re-calling returns the same string until the OS rotates
  *      it (and our [`LakkoMessagingService.onNewToken`] callback
  *      fires).
- *   3. **`PushClient.register`** — POST the token to
- *      `lakko-svc-push-gw` so it knows where to fan out wakes.
+ *   3. **The sealed subscriptions** (ADR-0078 section 3) — the token is
+ *      kept on the device ([PushDeviceTokens]) and sealed into one push-gw
+ *      row per group ([PushSubscriptions.resubscribeAll]); push-gw holds no
+ *      device pseudonym and no token in the clear.
  *
  * ## Graceful degradation
  *
@@ -52,7 +55,7 @@ import me.lakko.app.BuildConfig
 public class PushSubscriber(
     private val context: Context,
     private val client: PushClient = PushClient(),
-    /** The client for an unregister that outlives the live session
+    /** The client for an unsubscribe that outlives the live session
      *  (logout): it spends a token drawn with that departing session. */
     private val detachedClient: (me.lakko.app.anon.AnonSession) -> PushClient = { session ->
         PushClient(
@@ -65,10 +68,9 @@ public class PushSubscriber(
 ) {
 
     /**
-     * Request the FCM registration token, persist the device
-     * pseudonym, and tell `push-gw` about it. Idempotent —
-     * the Firebase SDK caches the token; re-running returns
-     * the same bytes and just re-UPSERTs the server row.
+     * Request the FCM registration token, store it, and send every sealed
+     * subscription of [accountIdB64] carrying it (ADR-0078). Idempotent —
+     * the Firebase SDK caches the token; re-running replaces the same rows.
      *
      * Returns `null` (no throw) when:
      *
@@ -76,46 +78,30 @@ public class PushSubscriber(
      *     `lakko.fcm.*` Gradle properties).
      *   * Firebase fails to initialise / fetch the token (no
      *     Google Play Services on the device, no network, …).
-     *   * `DevicePushId.getOrCreate` fails (Keystore
-     *     unavailable).
-     *   * `PushClient.register` fails.
+     *   * The token or the binding cannot be stored.
      *
-     * Errors are logged via `android.util.Log.w(TAG, …)`. The
-     * caller treats `null` as "push not available, fall back
-     * to foreground polling".
+     * Errors are logged via `android.util.Log.w(TAG, …)`. The caller treats
+     * `null` as "push not available, fall back to foreground polling".
      *
-     * ADR-0042, amended 2026-09-30: once the pseudonym is registered for
-     * [accountIdB64] the pair is recorded in [PushWakeBindingStore], the
-     * binding the FCM service gates every wake on. [stillSignedIn] is asked
-     * right before that write, so a subscribe that outlived a Log out (which
-     * clears the binding first) does not re-create it.
+     * ADR-0042, amended 2026-09-30 — the account is recorded in
+     * [PushWakeBindingStore], the binding the FCM service gates every wake
+     * on, before any subscription is sent. [stillSignedIn] is asked right
+     * before that write, so a subscribe that outlived a Log out (which clears
+     * the binding first) does not re-create it. When the binding named
+     * ANOTHER account (it never logged out), that account's subscriptions
+     * are removed first.
      */
     public suspend fun subscribe(
         accountIdB64: String,
         stillSignedIn: () -> Boolean = { true },
     ): SubscribeResult? {
-        val options = buildFirebaseOptionsOrNull() ?: run {
-            Log.i(TAG, "FCM disabled (missing BuildConfig.FCM_* fields)")
-            return null
-        }
-        val firebaseApp = try {
-            ensureFirebaseInitialised(options)
-        } catch (cause: Throwable) {
-            Log.w(TAG, "Firebase init failed", cause)
-            return null
-        }
+        if (!ensureFirebase(context)) return null
 
         val token = try {
-            // `FirebaseMessaging.getInstance(firebaseApp)` was
-            // made package-private in Firebase BoM 33+; the
-            // public path is the no-arg overload, which resolves
-            // to the default app — which is the only one Lakko
-            // ever initialises. `firebaseApp` above is what
-            // guarantees the default app is ready; we don't
-            // need to pass it through here.
-            // `firebaseApp` is referenced above as the init
-            // gate; the messaging instance picks up the default
-            // app implicitly.
+            // `FirebaseMessaging.getInstance(firebaseApp)` was made
+            // package-private in Firebase BoM 33+; the public path is the
+            // no-arg overload, which resolves to the default app, the one
+            // [ensureFirebase] initialises.
             FirebaseMessaging.getInstance().token.await()
         } catch (cause: Throwable) {
             Log.w(TAG, "FCM token fetch failed", cause)
@@ -126,138 +112,131 @@ public class PushSubscriber(
             return null
         }
 
-        val pseudonym = try {
-            DevicePushId.getOrCreate(context)
-        } catch (cause: Throwable) {
-            Log.w(TAG, "device pseudonym unavailable", cause)
-            return null
-        }
-
-        try {
-            client.register(
-                devicePseudonym = pseudonym,
-                provider = PushClient.Provider.FCM,
-                tokenBytes = token.toByteArray(Charsets.UTF_8),
-            )
-        } catch (cause: Throwable) {
-            Log.w(TAG, "push-gw register failed", cause)
-            return null
-        }
-
         if (!stillSignedIn()) {
-            Log.i(TAG, "signed out during push subscribe; no wake binding written")
+            Log.i(TAG, "signed out during push subscribe; nothing bound or sent")
             return null
         }
+        val bindings = PushWakeBindingStore(context)
         try {
-            PushWakeBindingStore(context).bind(pseudonym, accountIdB64)
+            val previous = bindings.load()?.accountIdB64
+            if (previous != null && previous != accountIdB64) {
+                retire(PushRouteStore(context).subscriptionIds(previous), client)
+            }
+            PushDeviceTokens(context).setFcm(token)
+            bindings.bind(accountIdB64)
         } catch (cause: Throwable) {
-            // Without a binding every wake is dropped: push is unavailable,
-            // the same fallback as a failed register.
-            Log.w(TAG, "push wake binding write failed", cause)
+            // Without a binding every wake is dropped: push is unavailable.
+            Log.w(TAG, "push token or binding write failed", cause)
             return null
         }
-
-        return SubscribeResult(devicePseudonym = pseudonym, fcmToken = token)
+        PushSubscriptions.resubscribeAll(context, accountIdB64)
+        return SubscribeResult(fcmToken = token)
     }
 
     /**
-     * Drop the push registration locally + tell `push-gw` to
-     * forget the token. Called on logout + forgetDevice.
-     * Idempotent + best-effort: failures are logged.
+     * Remove [accountIdB64]'s sealed subscriptions at push-gw and forget this
+     * device's token. Called on logout + forgetDevice. Idempotent +
+     * best-effort: failures are logged.
      *
-     * ADR-0054: the unregister spends a `push-register` token. Logout calls
+     * The subscription ids live in the account's route rows; a wipe that ran
+     * first hands the ids it removed to [PendingPushUnsubscribes], drained
+     * here.
+     *
+     * ADR-0054: each removal spends a `push-register` token. Logout calls
      * this after the live session is gone, so it passes the departing
-     * [session] and the token is drawn with it.
+     * [session] and the tokens are drawn with it.
      */
-    public suspend fun unsubscribe(session: me.lakko.app.anon.AnonSession? = null) {
-        val pseudonym = DevicePushId.peek(context)
-        // Drop the local pseudonym BEFORE the network leg, so a sign-in that
-        // starts while the unregister is in flight mints a fresh one instead
-        // of re-registering (and re-binding) the departing session's. The
-        // wake binding itself was cleared first by [PushSignOut].
-        DevicePushId.clear(context)
-        if (pseudonym != null) {
-            val unregisterClient = if (session != null) detachedClient(session) else client
+    public suspend fun unsubscribe(
+        accountIdB64: String?,
+        session: me.lakko.app.anon.AnonSession? = null,
+    ) {
+        val ids = PendingPushUnsubscribes(context).drain().toMutableList()
+        if (accountIdB64 != null) ids += PushRouteStore(context).subscriptionIds(accountIdB64)
+        val unsubscribeClient = if (session != null) detachedClient(session) else client
+        try {
+            retire(ids, unsubscribeClient)
+        } finally {
+            if (unsubscribeClient !== client) unsubscribeClient.close()
+        }
+        PushDeviceTokens(context).clear()
+        // The FCM token stays a dangling no-op on Google's side: no push-gw
+        // row holds it any more.
+    }
+
+    /** `POST /push/unsubscribe` for each id, one after another, best-effort. */
+    private suspend fun retire(ids: List<ByteArray>, via: PushClient) {
+        val seen = HashSet<String>()
+        for (subId in ids) {
+            if (!seen.add(PushClient.pseudonymHex(subId))) continue
             try {
-                unregisterClient.unregister(
-                    devicePseudonym = pseudonym,
-                    provider = PushClient.Provider.FCM,
-                )
+                via.unsubscribe(subId)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
             } catch (cause: Throwable) {
-                Log.w(TAG, "push-gw unregister failed", cause)
-            } finally {
-                if (unregisterClient !== client) unregisterClient.close()
+                // A row left behind holds the token sealed under a key push-gw
+                // only sees inside a wake; it goes when FCM reports the token
+                // invalid.
+                Log.w(TAG, "push-gw unsubscribe failed", cause)
             }
         }
-        // Firebase doesn't expose a `deleteToken()` in the
-        // coroutine surface as cleanly as iOS's "stop calling
-        // register" pattern; for 1.20d we drop the local
-        // pseudonym (above) so the server row stops mapping to us,
-        // and leave the FCM token as a dangling no-op on Google's
-        // side. A future polish item can wire
-        // `FirebaseMessaging.deleteToken()` if the dangling
-        // token shows up as a leak risk.
     }
 
     // -----------------------------------------------------------------
     // Internal
     // -----------------------------------------------------------------
 
-    private fun buildFirebaseOptionsOrNull(): FirebaseOptions? {
-        val projectId = BuildConfig.FCM_PROJECT_ID
-        val appId = BuildConfig.FCM_APPLICATION_ID
-        val apiKey = BuildConfig.FCM_API_KEY
-        val senderId = BuildConfig.FCM_SENDER_ID
-        if (projectId.isEmpty() || appId.isEmpty() ||
-            apiKey.isEmpty() || senderId.isEmpty()
-        ) {
-            return null
-        }
-        return FirebaseOptions.Builder()
-            .setProjectId(projectId)
-            .setApplicationId(appId)
-            .setApiKey(apiKey)
-            .setGcmSenderId(senderId)
-            .build()
-    }
-
-    private fun ensureFirebaseInitialised(
-        options: FirebaseOptions,
-    ): FirebaseApp {
-        // Look for an already-initialised app with our name; if
-        // present, reuse it (subsequent calls within the same
-        // process). Otherwise init now.
-        return try {
-            FirebaseApp.getInstance(APP_NAME)
-        } catch (_: IllegalStateException) {
-            FirebaseApp.initializeApp(context.applicationContext, options, APP_NAME)
-        }
-    }
-
     public companion object {
         /** Logcat tag for the push module. */
         public const val TAG: String = "lakko-push"
 
-        /** Name we hand to `FirebaseApp.initializeApp` so we
-         *  don't collide with the default Firebase app (which
-         *  some host SDK might attempt to create). Using a
-         *  named app also lets us cleanly query its existence
-         *  via `FirebaseApp.getInstance(APP_NAME)`. */
-        public const val APP_NAME: String = "lakko"
+        /**
+         * Initialise the default Firebase app from `BuildConfig.FCM_*`
+         * unless it exists. Returns false when FCM is not configured for
+         * this build or the init fails; push then stays off.
+         *
+         * It must be the DEFAULT app: `FirebaseMessaging.getInstance()` and
+         * the SDK's delivery to [LakkoMessagingService] read only that one.
+         * Initialising a named app instead left the token fetch failing
+         * with "Default FirebaseApp is not initialized".
+         */
+        public fun ensureFirebase(context: Context): Boolean {
+            val options = firebaseOptionsOrNull() ?: run {
+                Log.i(TAG, "FCM disabled (missing BuildConfig.FCM_* fields)")
+                return false
+            }
+            return try {
+                val apps = FirebaseApp.getApps(context.applicationContext)
+                if (apps.none { it.name == FirebaseApp.DEFAULT_APP_NAME }) {
+                    FirebaseApp.initializeApp(context.applicationContext, options)
+                }
+                true
+            } catch (cause: Throwable) {
+                Log.w(TAG, "Firebase init failed", cause)
+                false
+            }
+        }
+
+        private fun firebaseOptionsOrNull(): FirebaseOptions? {
+            val projectId = BuildConfig.FCM_PROJECT_ID
+            val appId = BuildConfig.FCM_APPLICATION_ID
+            val apiKey = BuildConfig.FCM_API_KEY
+            val senderId = BuildConfig.FCM_SENDER_ID
+            if (projectId.isEmpty() || appId.isEmpty() ||
+                apiKey.isEmpty() || senderId.isEmpty()
+            ) {
+                return null
+            }
+            return FirebaseOptions.Builder()
+                .setProjectId(projectId)
+                .setApplicationId(appId)
+                .setApiKey(apiKey)
+                .setGcmSenderId(senderId)
+                .build()
+        }
     }
 }
 
 /** Result of a successful [PushSubscriber.subscribe]. */
 public data class SubscribeResult(
-    val devicePseudonym: ByteArray,
     val fcmToken: String,
-) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (other !is SubscribeResult) return false
-        return devicePseudonym.contentEquals(other.devicePseudonym) &&
-            fcmToken == other.fcmToken
-    }
-    override fun hashCode(): Int =
-        31 * devicePseudonym.contentHashCode() + fcmToken.hashCode()
-}
+)

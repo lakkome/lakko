@@ -64,6 +64,10 @@ public struct ReachRecord: Codable, Equatable {
     /// their ledger and re-sends the requests, then clears both.
     public var spentLinks: [LinkReach]?
     public var spentReplies: [ReplyReach]?
+    /// ADR-0078 section 9 — the groups and channels the account was in at the
+    /// last registration, so the next one sees which it left and rotates
+    /// that class's one key. `nil` until the first registration.
+    public var memberOf: ReachRules.Membership?
 
     public init() {}
 

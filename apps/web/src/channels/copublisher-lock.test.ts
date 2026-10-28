@@ -65,17 +65,33 @@ vi.mock("../reach/mailbox-write", async (importOriginal) => ({
 
 const fetchEpoch = vi.fn(async () => ({ epoch: 1 }));
 const listSubscribers = vi.fn(async () => ({ subscribers: ["aabb"] }));
-const rotateChannel = vi.fn(async () => {});
+const stageRotation = vi.fn(async () => ({ targetEpoch: 2, staged: 1 }));
+const commitRotation = vi.fn(async () => ({ epoch: 2 }));
 
 vi.mock("./api", () => ({
   fetchEpoch: (...a: unknown[]) => fetchEpoch(...(a as [])),
   listSubscribers: (...a: unknown[]) => listSubscribers(...(a as [])),
-  rotateChannel: (...a: unknown[]) => rotateChannel(...(a as [])),
+  stageRotation: (...a: unknown[]) => stageRotation(...(a as [])),
+  commitRotation: (...a: unknown[]) => commitRotation(...(a as [])),
+  MAX_STAGE_CHUNK_ENTRIES: 5000,
   rememberPublisherRole: async () => {},
+  appointCoPublisher: async () => {},
+}));
+
+// G-50 — the approve records its commit durably before any step; the store
+// is the channel log, replaced here so the ordering is what is under test.
+vi.mock("../state/channels-state", () => ({
+  channelsActions: {
+    recordPublisherCommit: async () => {},
+    savePublisherCommit: async () => {},
+    finishPublisherCommit: async () => {},
+    coPublisherGroupIdOf: () => undefined,
+  },
+  channelsState: { metaByChannel: () => new Map() },
 }));
 
 import { approveCoPublisher, pollCoPublisherJournal } from "./copublisher";
-import { fakeAccessSigner } from "../ds/access-test-doubles";
+import { fakeAccessSigner, withCommitRoute } from "../ds/access-test-doubles";
 import type { DsClient } from "../ds/client";
 
 interface Deferred<T> {
@@ -127,7 +143,10 @@ function statefulPublisherGroup(
   const group = {
     groupId: () => groupId,
     dsAccessSigner: fakeAccessSigner(() => BigInt(epoch)),
+    // ADR-0081: the approve records the access seed of the epoch it leaves.
+    dsAccessSeed: () => new Uint8Array(32).fill(epoch),
     channelId: () => new Uint8Array([7, 7]),
+    epoch: () => BigInt(epoch),
     channelSeed: vi.fn(() => {
       order.push(`seed@${epoch}`);
       return new Uint8Array([epoch]);
@@ -135,7 +154,7 @@ function statefulPublisherGroup(
     approveExternalJoin: vi.fn(() => {
       epoch += 1; // the eager merge
       order.push("approve-merge");
-      return { commit: new Uint8Array([1]), welcome: new Uint8Array([2]) };
+      return { commit: new Uint8Array([1]), welcome: new Uint8Array([2]), free: () => undefined };
     }),
     processIncomingVerifyingRoles: vi.fn((_id: unknown, p: Uint8Array) => {
       epoch += 1; // applying a commit advances the epoch
@@ -165,7 +184,7 @@ describe("G-38 residual 3 — the co-publisher poll is serialized against approv
     const publishGate = deferred<void>();
 
     let publishes = 0;
-    const ds = {
+    const ds = withCommitRoute({
       registerGroupEpoch: vi.fn(async () => {}),
       publishGroup: vi.fn(async () => {
         publishes += 1;
@@ -186,7 +205,7 @@ describe("G-38 residual 3 — the co-publisher poll is serialized against approv
           hasMore: false,
         };
       }),
-    } as unknown as DsClient;
+    }) as unknown as DsClient;
 
     const approve = approveCoPublisher(
       ds,
@@ -239,7 +258,7 @@ describe("G-38 residual 3 — the co-publisher poll is serialized against approv
     const seeds: number[] = [];
 
     let publishes = 0;
-    const ds = {
+    const ds = withCommitRoute({
       registerGroupEpoch: vi.fn(async () => {}),
       publishGroup: vi.fn(async () => {
         publishes += 1;
@@ -257,7 +276,7 @@ describe("G-38 residual 3 — the co-publisher poll is serialized against approv
         ],
         hasMore: false,
       })),
-    } as unknown as DsClient;
+    }) as unknown as DsClient;
 
     sealSubscriberSeedEnvelope.mockImplementation(
       (..._a: unknown[]) => new Uint8Array([0xaa]),

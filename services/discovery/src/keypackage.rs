@@ -129,20 +129,14 @@ async fn require_publishable_device(
     session_device: &[u8; DEVICE_ID_LEN],
 ) -> Result<(), RouteError> {
     if *device_id == UNBOUND_DEVICE_ID || device_id != session_device {
-        tracing::warn!(
-            account_id = %B64.encode(account_id),
-            "keypackage upload refused — device_id is not the session's device",
-        );
+        tracing::warn!("keypackage upload refused — device_id is not the session's device",);
         return Err(crate::key_reset::json_error(
             StatusCode::FORBIDDEN,
             crate::key_reset::CODE_DEVICE_MISMATCH,
         ));
     }
     if is_tombstoned(db, account_id, device_id).await? {
-        tracing::warn!(
-            account_id = %B64.encode(account_id),
-            "keypackage upload refused — the device id was removed from the directory",
-        );
+        tracing::warn!("keypackage upload refused — the device id was removed from the directory",);
         return Err(crate::key_reset::json_error(
             StatusCode::FORBIDDEN,
             crate::key_reset::CODE_DEVICE_REVOKED,
@@ -272,11 +266,7 @@ pub(crate) async fn upload(
     // user could overwrite someone else's KeyPackage to fork them
     // into a wrong-init-key 1×1 group on next contact.
     if account_id != authed.0 {
-        tracing::warn!(
-            body_account_id = %B64.encode(account_id),
-            token_account_id = %B64.encode(authed.0),
-            "keypackage upload: body account_id does not match token's"
-        );
+        tracing::warn!("keypackage upload: body account_id does not match token's");
         return Err(RouteError::Text(
             StatusCode::FORBIDDEN,
             "account_id mismatch between body and session token".to_string(),
@@ -287,7 +277,6 @@ pub(crate) async fn upload(
     // superseded device learns the one code it acts on and writes nothing.
     if crate::key_reset::floor_refuses(&state.db, &account_id, token_generation).await? {
         tracing::warn!(
-            account_id = %B64.encode(account_id),
             token_generation,
             "keypackage upload refused — session token's key generation superseded",
         );
@@ -369,11 +358,7 @@ pub(crate) async fn upload(
     .await
     .map_err(db_err)?;
 
-    tracing::info!(
-        account_id = %B64.encode(account_id),
-        bytes = kp_bytes.len(),
-        "keypackage upserted",
-    );
+    tracing::info!(bytes = kp_bytes.len(), "keypackage upserted",);
     Ok(Json(UploadResponse { ok: true }))
 }
 
@@ -468,7 +453,6 @@ pub(crate) async fn delete(
 
     if crate::key_reset::floor_refuses(&state.db, &account_id, generation.0).await? {
         tracing::warn!(
-            account_id = %B64.encode(account_id),
             token_generation = generation.0,
             "keypackage delete refused — session token's key generation superseded",
         );
@@ -503,11 +487,7 @@ pub(crate) async fn delete(
     .map_err(db_error)?;
     tx.commit().await.map_err(db_error)?;
 
-    tracing::info!(
-        account_id = %B64.encode(account_id),
-        own_device,
-        "keypackage deleted and device id tombstoned",
-    );
+    tracing::info!("keypackage deleted and device id tombstoned",);
     Ok(StatusCode::NO_CONTENT)
 }
 

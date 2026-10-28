@@ -143,8 +143,11 @@ export const ConfirmDialog: Component = () => {
             >
               {/* Cancel first in DOM order so it takes initial focus and so a
                   keyboard user reaches the safe answer first. */}
+              <Show when={open().request.notice !== true}>
               <button
-                ref={cancelButton}
+                ref={(el) => {
+                  cancelButton = el;
+                }}
                 type="button"
                 onClick={() => resolvePendingConfirm(false)}
                 style={{
@@ -159,7 +162,12 @@ export const ConfirmDialog: Component = () => {
               >
                 {open().request.cancelLabel}
               </button>
+              </Show>
               <button
+                ref={(el) => {
+                  // A notice's only button takes the initial focus.
+                  if (open().request.notice === true) cancelButton = el;
+                }}
                 type="button"
                 onClick={() => resolvePendingConfirm(true)}
                 style={{

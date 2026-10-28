@@ -248,14 +248,14 @@ private struct ChannelOrphanedView: View {
             .padding(16)
         }
         .background(Color.lakkoBackground)
-        .confirmationDialog(
-            l10n.t("channels.keys_reset.remove"), isPresented: $confirming, titleVisibility: .visible
-        ) {
-            Button(l10n.t("channels.keys_reset.remove"), role: .destructive) {
-                state.removeOrphanedChannel(channelId)
-                onRemoved()
-            }
-            Button(l10n.t("common.cancel"), role: .cancel) {}
+        .lakkoDialog(isPresented: $confirming, title: l10n.t("channels.keys_reset.remove")) {
+            [
+                .danger(l10n.t("channels.keys_reset.remove")) {
+                    state.removeOrphanedChannel(channelId)
+                    onRemoved()
+                },
+                .cancel(),
+            ]
         }
     }
 }

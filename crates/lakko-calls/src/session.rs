@@ -491,7 +491,10 @@ impl CallSession {
             // than synthesising a bogus transition.
             SignalingBody::GroupStart { .. }
             | SignalingBody::GroupJoin { .. }
-            | SignalingBody::GroupLeave { .. } => return vec![],
+            | SignalingBody::GroupLeave { .. }
+            // A share state (ADR-0083) moves no call state either: the
+            // client verifies it and feeds its `screen_share` fold.
+            | SignalingBody::ScreenShare { .. } => return vec![],
         };
         self.on_event(event)
     }

@@ -2,52 +2,46 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `/i/:slug` — invite-link landing page (Phase 1.18c).
+ * `/i/:slug#<secret>` — the contact invite page
+ * (`docs/ux/contact-invite-link.md` section 3, ADR-0079).
  *
- * The slug is the base64url-no-pad encoding of an
- * `InviteCapability` (see `crates/lakko-contacts::invite` for the
- * codec and `contacts/invite.ts` for the URL-side helpers).
+ * The link is the inviter's consent: pressing **Add** makes the two people
+ * contacts with nothing more to do. The page says who invites by the name
+ * the link states (sealed inside the capability, ADR-0079 section 1) and
+ * shows no key material: no fingerprint, no safety number, no expiry and no
+ * use count. The states are one pure decision (`contacts/invite-page.ts`):
+ * signed out (who invites, with Create an account / I already have an
+ * account; a dead link says so), loading,
+ * rate-limited, own link, already a contact, and the default Add / Not now.
+ * A link that does not work (revoked, expired, used up, unknown, damaged)
+ * has no page: the visitor lands on the Contacts screen (amended
+ * 2026-10-19).
  *
- * Three top-level states the page resolves to:
+ * **Add** sends the inviter a contact request carrying the link answer (the
+ * link's id and secret, sealed to the inviter: ADR-0079 section 2), so the
+ * inviter's device takes it by itself; this account records the inviter as
+ * a pending contact at once (`contacts/pending-contacts.ts`) and the page
+ * closes into the chat with them (section 4). The record is written only
+ * after the ledger's consume answered that the link still works (amended
+ * 2026-10-19: a consume that answers used up or gone keeps nothing and takes
+ * the visitor to Contacts), and BEFORE the request is sent, so an answer
+ * that comes back at once always finds it; a send that fails removes it
+ * again and the page says so.
  *
- *   1. **Bad slug / decode failure** — the URL is malformed or
- *      the signature didn't verify. We render a generic
- *      "this invite link is invalid" panel; we deliberately
- *      do not surface the underlying error string (it would
- *      leak codec internals).
- *   2. **Anonymous user** — the visitor opened the link without
- *      a Lakko session. We render a "log in / sign up to
- *      accept" prompt. Deep-link return after auth is a 1.18c
- *      follow-up — for now the visitor manually re-opens the
- *      link after authenticating.
- *   3. **Authenticated user** — we render the inviter card
- *      (label / fingerprint / expiry / max-uses) and an
- *      Accept / Decline pair. Accept calls
- *      `ContactsClient.sendContactRequestToBundle(...)` with
- *      the capability's pre-resolved bundle (no
- *      `/discovery/lookup` round-trip needed).
+ * `bootstrap_referral` links (ADR-0005 section 13.4) press Add by themselves
+ * once the visitor is signed in: the click on the link is the consent.
  *
- * `bootstrap_referral` capabilities are flagged in the UI and
- * **auto-trigger Accept on mount** (Phase 1.9b4 — ADR-0005 §13.4).
- * The click on the referral link IS the consent — the joiner
- * does not need to press Accept again. Decline stays clickable
- * during the 1.5s navigate-back grace window. For not-yet-
- * signed-in joiners, the existing `?return=` round-trip through
- * Signup / Login (1.18e) brings them back to this page, where
- * the auto-accept then fires once their session is live.
- *
- * The page is a **public route** — registered outside the
- * `<RequireSession>` block in `routes.tsx` — because an invite
- * URL can be opened by anyone, including users who haven't
- * authenticated yet on this device.
+ * A public route: an invite URL can be opened by anyone, signed in or not.
  */
 import {
   createMemo,
   createResource,
   createSignal,
+  Match,
   onCleanup,
   onMount,
   Show,
+  Switch,
   type JSX,
 } from "solid-js";
 import { A, useLocation, useNavigate, useParams } from "@solidjs/router";
@@ -55,58 +49,60 @@ import type { InviteCapability as WasmInviteCapability } from "../../wasm/lakko_
 import { useAuth } from "../auth/AuthContext";
 import { buildAuthUrlWithReturn } from "../auth/return-url";
 import { ContactsClient } from "../contacts/client";
-import { contactsErrorText } from "../contacts/errors";
 import { establishedContactOfAccount, pinKeysOf } from "../contacts/known-contact-request";
-import { accountKeysOf, loadAccepted } from "../contacts/local-store";
+import {
+  accountKeysOf,
+  loadAccepted,
+  restoreRemovedContact,
+  subscribeAcceptedChanged,
+} from "../contacts/local-store";
 import { readVerifiedBinding } from "../contacts/verified-binding";
 import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { groupIdHex } from "../devices/sync/state";
 import { t } from "../l10n";
-import { KeyedError } from "../l10n/keyed-error";
 import { createLiveText } from "../l10n/live-text";
-import { tRich } from "../l10n/rich";
-import {
-  INVITE_INLINE_MIN_LEN,
-  describeExpiry,
-  describeMaxUses,
-} from "../contacts/invite";
+import { inviteOpenFailure, invitePageView, type InvitePageView } from "../contacts/invite-page";
+import { addThroughInviteLink, answerAsKnownContact } from "../contacts/invite-add";
 import { DiscoveryClient, isDiscoveryRateLimited } from "../discovery/client";
 import {
-  INVITE_LINK_DAMAGED,
   INVITE_LINK_RATE_LIMITED,
   INVITE_LINK_TRY_AGAIN,
   inviteLinkWidths,
-  isInviteLinkDamaged,
+  isInviteLinkUnreachable,
   openInviteLinkFromUrl,
+  parseInviteLinkFragment,
 } from "../contacts/invite-link";
+import {
+  pendingContacts,
+  updatePendingContacts,
+  withPendingContact,
+  withoutPendingContact,
+} from "../contacts/pending-contacts";
+import { readIsActive } from "../chat/membership-ended";
 import { useChats } from "../chat/ChatContext";
+import { conversationKindOf } from "../chat/conversation-kind";
+import { personKeysOf } from "../chat/person-key";
 import { useProfiles } from "../profile/ProfileContext";
+import { Avatar } from "../ui/Avatar";
 import { loadWasm } from "../wasm";
 import { paths } from "./paths";
 import { PublicLayout } from "../ui/PublicLayout";
 
 interface DecodedInvite {
   cap: WasmInviteCapability;
-  fingerprintShort: string;
-  /** When the slug is an 8-character ledger id
-   *  (1.18d1b), the joiner can call `/discovery/invite/{id}/consume`
-   *  before sending the ContactRequest (1.18d2a). Inline-bytes
-   *  URLs have no associated server row — back-compat
-   *  compromise documented in the ROADMAP. The Accept path
-   *  branches on this. */
-  blobId: Uint8Array | null;
-  /** The PLAINTEXT capability wire the sealed link opened to
-   *  (`cap.wire`). 1.18d3c needs these for the per-joiner
-   *  dedup-tag derivation: tag = HMAC(SHA-256(domain ‖
-   *  capability_bytes), joiner_account_id). */
+  /** The 6-byte ledger id the slug names (every link is a ledger pointer). */
+  blobId: Uint8Array;
+  /** The plaintext capability wire (the joiner tag is computed over it). */
   capabilityBytes: Uint8Array;
+  /** The 12-byte link secret from the fragment: the link answer's secret. */
+  linkSecret: Uint8Array;
 }
 
-/** The resource's answer when the ledger rate-limited this address. */
 const RATE_LIMITED = "rate-limited" as const;
-/** The resource's answer for a link that does not open under its fragment
- *  (sealed-link amendment of ADR-0028, 2026-09-28). */
-const DAMAGED = "damaged" as const;
+/** The link could not be fetched or opened for a reason that says nothing
+ *  about the link: the network, a server error. */
+const OPEN_FAILED = "open-failed" as const;
+const DEAD = "dead" as const;
 
 export default function Invite(): JSX.Element {
   const params = useParams<{ slug: string }>();
@@ -115,354 +111,400 @@ export default function Invite(): JSX.Element {
   const chats = useChats();
   const profiles = useProfiles();
   const navigate = useNavigate();
+  // The contact list can change while the page is open (the inviter's answer
+  // to an earlier Add lands): the page's decision is read again then.
+  const [acceptedVersion, setAcceptedVersion] = createSignal(0);
+  onCleanup(subscribeAcceptedChanged(() => setAcceptedVersion((v) => v + 1)));
 
-  // Decode the slug + verify the capability signature in a
-  // memo-driven async resource so the panel below renders the
-  // appropriate state (loading / invalid / decoded) without any
-  // imperative juggling. Source signal is the raw slug —
-  // re-runs on navigation, no stale capability across
-  // /i/<a> → /i/<b> transitions.
-  // The fragment is the link secret (sealed-link amendment): re-run on it too.
+  const signedIn = (): boolean => auth.state().kind === "session" && auth.identitySecrets() !== null;
+  // The link is opened signed out too (amended 2026-10-26): the ledger serves
+  // the sealed blob without a session and the secret opens it here, so a
+  // visitor with no account sees who invites them. Nothing is consumed.
   const slugSignal = createMemo(() => ({ slug: params.slug, hash: location.hash }));
-  // Used for the pointer-form path. Created once per route
-  // mount; reuses the existing fetch defaults (Vite proxy in
-  // dev, same-origin nginx in prod).
-  // Phase 1.5b: the joiner-side fetchInvite / consumeInvite calls
-  // don't strictly require auth (Universal-Link joiners may not
-  // be signed up yet — fetch + consume are open by design), but
-  // we thread the token when available so logged-in joiners get
-  // the standard Authorization header on every protected path
-  // the page might trigger later.
   const discovery = new DiscoveryClient();
   discovery.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
   const [decoded, { refetch }] = createResource(
     slugSignal,
-    async ({ slug, hash }): Promise<
-      DecodedInvite | typeof RATE_LIMITED | typeof DAMAGED | null
-    > => {
-    try {
-      const wasm = await loadWasm();
-      // Sealed-link amendment of ADR-0028 (2026-09-28): a missing or
-      // malformed fragment is refused before any request; the pointer's blob
-      // (or the inline one) opens only under the fragment's secret, which
-      // also verifies the capability inside. A 404 surfaces as `null`, the
-      // same invalid panel as a malformed slug, by design.
-      const opened = await openInviteLinkFromUrl({
-        slug,
-        hash,
-        widths: inviteLinkWidths(wasm),
-        inlineMinLen: INVITE_INLINE_MIN_LEN,
-        what: "invite",
-        fetchPointer: (blobId) => discovery.fetchInvite(blobId),
-        open: (sealed, secret) => wasm.InviteCapability.openLink(sealed, secret),
-      });
-      if (opened.kind === "not-found") return null;
-      const cap = opened.capability;
-      return {
-        cap,
-        fingerprintShort: shortFingerprintFor(cap.ownerSignaturePubkey),
-        blobId: opened.blobId,
-        capabilityBytes: cap.wire,
-      };
-    } catch (err) {
-      // A 429 says nothing about the link: say "try again later", never
-      // "invalid" (ADR-0028 short-link amendment).
-      if (isDiscoveryRateLimited(err)) return RATE_LIMITED;
-      if (isInviteLinkDamaged(err)) return DAMAGED;
-      // eslint-disable-next-line no-console
-      console.warn("invite: decode/verify failed", err);
-      return null;
-    }
+    async ({ slug, hash }): Promise<DecodedInvite | typeof RATE_LIMITED | typeof OPEN_FAILED | typeof DEAD> => {
+      try {
+        const wasm = await loadWasm();
+        const widths = inviteLinkWidths(wasm);
+        const opened = await openInviteLinkFromUrl({
+          slug,
+          hash,
+          widths,
+          what: "invite",
+          fetchPointer: (blobId) => discovery.fetchInvite(blobId),
+          open: (sealed, secret) => wasm.InviteCapability.openLink(sealed, secret),
+        });
+        // A link whose id is unknown, revoked or expired reads as no longer
+        // working (UX section 3).
+        if (opened.kind === "not-found") return DEAD;
+        const fragment = parseInviteLinkFragment(hash, widths);
+        if (fragment.kind !== "secret") return DEAD;
+        const cap = opened.capability;
+        return { cap, blobId: opened.blobId, capabilityBytes: cap.wire, linkSecret: fragment.secret };
+      } catch (err) {
+        // A server error or the network says nothing about the link: it is
+        // offered again (seen on a local stack 2026-10-23: a server error on
+        // the fetch sent a person who had just opened a working link to
+        // Contacts with no word of why).
+        const failure = inviteOpenFailure(err, {
+          rateLimited: isDiscoveryRateLimited,
+          unreachable: isInviteLinkUnreachable,
+        });
+        if (failure === "rate-limited") return RATE_LIMITED;
+        if (failure === "dead") return DEAD;
+        // eslint-disable-next-line no-console
+        console.warn("invite: link did not open", err instanceof Error ? err.name : "");
+        return OPEN_FAILED;
+      }
     },
   );
   const invite = (): DecodedInvite | null => {
     const d = decoded();
-    return d === undefined || d === null || d === RATE_LIMITED || d === DAMAGED ? null : d;
+    return d === undefined || d === RATE_LIMITED || d === OPEN_FAILED || d === DEAD ? null : d;
   };
 
-  // 1.18c-V1 wires only the canonical accessor (no persist hook
-  // — `sendContactRequestToBundle` doesn't mutate MLS state, so
-  // there's nothing to snapshot).
+  /** The visitor's contact row for the inviter, when they already are one:
+   *  the pin or a verified binding naming the row's key, never a row whose
+   *  account id came only from a peer's own profile. */
+  const existingContactKeyB64 = (cap: WasmInviteCapability): string | null => {
+    const ownerAccountIdB64 = base64Encode(cap.ownerAccountId);
+    const existing = establishedContactOfAccount(loadAccepted(), groupIdHex(cap.ownerAccountId), {
+      pinKeysB64: pinKeysOf(accountKeysOf(ownerAccountIdB64)),
+      bindingKeyB64: readVerifiedBinding(ownerAccountIdB64)?.keyB64 ?? null,
+    });
+    return existing?.signaturePubkeyB64 ?? null;
+  };
+
+  const view = createMemo((): InvitePageView => {
+    const d = decoded();
+    if (decoded.loading || d === undefined) return { kind: "loading" };
+    if (d === RATE_LIMITED) return { kind: "rate-limited" };
+    if (d === OPEN_FAILED) return { kind: "open-failed" };
+    if (d === DEAD) return signedIn() ? { kind: "dead" } : { kind: "signed-out-dead" };
+    const s = auth.state();
+    const own =
+      signedIn() && s.kind === "session" && base64Encode(d.cap.ownerAccountId) === s.account.accountId;
+    acceptedVersion();
+    const ownerHex = groupIdHex(d.cap.ownerAccountId);
+    return invitePageView({
+      link: "opened",
+      expired: !d.cap.isValidNow(BigInt(Date.now())),
+      inviterDisplayName: d.cap.inviterDisplayName ?? null,
+      inviterUsername: d.cap.inviterUsername ?? null,
+      label: d.cap.label,
+      signedIn: signedIn(),
+      isOwn: own,
+      existingContactKeyB64: signedIn() ? existingContactKeyB64(d.cap) : null,
+      pendingInviter: pendingContacts().some((p) => p.accountIdHex === ownerHex),
+    });
+  });
+
+  const nameOr = (name: string | null): string => name ?? t("invite.contact.page.unnamed");
+  /** A contact's name as this account knows it, else the link's. */
+  const alreadyName = (keyB64: string, linkName: string | null): string => {
+    const resolved = profiles.resolve(keyB64);
+    return resolved.source === "fingerprint" ? nameOr(linkName) : resolved.name;
+  };
+  /** "Open chat": the one-to-one with the contact, else their page (which
+   *  offers Message). */
+  const chatPathOf = (keyB64: string): string => {
+    const g = chats
+      .groups()
+      .find((c) => conversationKindOf(c.group) === "chat" && personKeysOf(c.group).includes(keyB64));
+    return g !== undefined
+      ? paths.chat(base64UrlEncodeNoPad(g.group.groupId))
+      : paths.contact(base64UrlEncodeNoPad(base64Decode(keyB64)));
+  };
+
   const client = new ContactsClient(undefined, undefined, {
     identityProvider: () => chats.identity(),
-    // ADR-0048 §2 — the request carries this account's profile.
+    // ADR-0048 section 2 — the request carries this account's profile.
     ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
   });
 
   return (
     <PublicLayout>
-      <Show when={decoded.loading}>
-        <p class="form-info">{t("invite.link.loading")}</p>
-      </Show>
-      <Show when={!decoded.loading && decoded() === null}>
-        <InvalidInvitePanel />
-      </Show>
-      <Show when={!decoded.loading && decoded() === DAMAGED}>
-        <section class="lk-stack" style={{ gap: "12px" }}>
-          <p>{INVITE_LINK_DAMAGED()}</p>
-        </section>
-      </Show>
-      <Show when={!decoded.loading && decoded() === RATE_LIMITED}>
-        <RateLimitedInvitePanel onRetry={() => void refetch()} />
-      </Show>
-      <Show when={!decoded.loading && invite() !== null}>
-        <Show
-          when={auth.state().kind === "session" && auth.identitySecrets() !== null}
-          fallback={<NeedsAuthPanel slug={params.slug} hash={location.hash} />}
-        >
-          <ConnectPanel
-            invite={invite() as DecodedInvite}
-            client={client}
-            discovery={discovery}
-            onDone={() => navigate(paths.contacts)}
+      <Switch>
+        <Match when={view().kind === "loading"}>
+          <p class="form-info">{t("invite.link.loading")}</p>
+        </Match>
+        <Match when={view().kind === "rate-limited"}>
+          <section class="lk-stack" style={{ gap: "12px" }}>
+            <p>{INVITE_LINK_RATE_LIMITED()}</p>
+            <div class="lk-actions">
+              <button class="primary" type="button" onClick={() => void refetch()}>
+                {INVITE_LINK_TRY_AGAIN()}
+              </button>
+            </div>
+          </section>
+        </Match>
+        <Match when={view().kind === "open-failed"}>
+          <section class="lk-stack" style={{ gap: "12px" }}>
+            <p>{t("invite.contact.result.failed_title")}</p>
+            <div class="lk-actions">
+              <button class="primary" type="button" onClick={() => void refetch()}>
+                {INVITE_LINK_TRY_AGAIN()}
+              </button>
+            </div>
+          </section>
+        </Match>
+        <Match when={(() => { const v = view(); return v.kind === "signed-out" ? v : undefined; })()}>
+          {(v) => (
+            <InviterCard
+              title={t("invite.contact.page.signed_out_title", { name: nameOr(v().name) })}
+              name={nameOr(v().name)}
+              username={v().username}
+              label={v().label}
+            >
+              <p class="lk-muted">{t("invite.contact.page.about")}</p>
+              <SignedOutActions returnTo={returnPath(params.slug, location.hash)} />
+            </InviterCard>
+          )}
+        </Match>
+        <Match when={view().kind === "signed-out-dead"}>
+          <section class="lk-stack" style={{ gap: "12px", "align-items": "center", "text-align": "center" }}>
+            <h1>{t("invite.contact.page.dead_title")}</h1>
+            <p>{t("invite.contact.page.dead_body")}</p>
+            <SignedOutActions returnTo={null} />
+          </section>
+        </Match>
+        <Match when={view().kind === "dead"}>
+          <Redirect to={paths.contacts} />
+        </Match>
+        <Match when={view().kind === "own"}>
+          <DonePanel
+            title={t("invite.contact.page.own_title")}
+            body={t("invite.contact.page.own_body")}
           />
-        </Show>
-      </Show>
+        </Match>
+        <Match when={(() => { const v = view(); return v.kind === "already" ? v : undefined; })()}>
+          {(v) => (
+            <KnownContactPanel
+              invite={invite() as DecodedInvite}
+              name={alreadyName(v().contactKeyB64, v().name)}
+              chatPath={chatPathOf(v().contactKeyB64)}
+              client={client}
+              discovery={discovery}
+            />
+          )}
+        </Match>
+        <Match when={(() => { const v = view(); return v.kind === "pending" ? v : undefined; })()}>
+          {(v) => (
+            <section class="lk-stack" style={{ gap: "12px", "align-items": "center", "text-align": "center" }}>
+              <h1>{t("invite.contact.page.already_title", { name: nameOr(v().name) })}</h1>
+              <div class="lk-actions">
+                <button
+                  class="primary"
+                  type="button"
+                  onClick={() => {
+                    const d = invite();
+                    if (d !== null) navigate(paths.pendingChat(groupIdHex(d.cap.ownerAccountId)));
+                  }}
+                >
+                  {t("invite.contact.page.open_chat")}
+                </button>
+              </div>
+            </section>
+          )}
+        </Match>
+        <Match when={(() => { const v = view(); return v.kind === "default" ? v : undefined; })()}>
+          {(v) => (
+            <AddPanel
+              invite={invite() as DecodedInvite}
+              name={nameOr(v().name)}
+              username={v().username}
+              label={v().label}
+              client={client}
+              discovery={discovery}
+            />
+          )}
+        </Match>
+      </Switch>
     </PublicLayout>
   );
 }
 
-// ---------------------------------------------------------------
-// Subcomponents
-// ---------------------------------------------------------------
+/** Navigate to `to` (replacing this entry) as soon as the state shows. */
+function Redirect(props: { to: string }): JSX.Element {
+  const navigate = useNavigate();
+  onMount(() => navigate(props.to, { replace: true }));
+  return null;
+}
 
-function RateLimitedInvitePanel(props: { onRetry: () => void }): JSX.Element {
+/** The return path through sign-in: the fragment is the link secret, without
+ *  which the link opens nothing, so it is kept. */
+function returnPath(slug: string, hash: string): string {
+  const fragment = hash.length === 0 || hash.startsWith("#") ? hash : `#${hash}`;
+  return `${paths.invite(slug)}${fragment}`;
+}
+
+/** Create an account (primary) and I already have an account, for a visitor
+ *  who is not signed in. `returnTo` brings them back to the link afterwards;
+ *  `null` for a link that no longer works. */
+function SignedOutActions(props: { returnTo: string | null }): JSX.Element {
+  const href = (path: string): string =>
+    props.returnTo === null ? path : buildAuthUrlWithReturn(path, props.returnTo);
   return (
-    <section class="lk-stack" style={{ gap: "12px" }}>
-      <p>{INVITE_LINK_RATE_LIMITED()}</p>
+    <div class="lk-actions">
+      <A href={href(paths.signup)}>
+        <button class="primary" type="button">
+          {t("invite.contact.page.create_account")}
+        </button>
+      </A>
+      <A href={href(paths.login)}>
+        <button type="button">{t("invite.contact.page.have_account")}</button>
+      </A>
+    </div>
+  );
+}
+
+function DonePanel(props: { title: string; body: string }): JSX.Element {
+  const navigate = useNavigate();
+  return (
+    <section class="lk-stack" style={{ gap: "12px", "align-items": "center", "text-align": "center" }}>
+      <h1>{props.title}</h1>
+      <p>{props.body}</p>
       <div class="lk-actions">
-        <button class="primary" type="button" onClick={() => props.onRetry()}>
-          {INVITE_LINK_TRY_AGAIN()}
+        <button class="primary" type="button" onClick={() => navigate(paths.home)}>
+          {t("invite.contact.page.done")}
         </button>
       </div>
-      <p>
-        <A href={paths.home}>{t("invite.go_home")}</A>
-      </p>
     </section>
   );
 }
 
-function InvalidInvitePanel(): JSX.Element {
+/** Avatar, "Add Anna to your contacts?", `@anna`, the label: the head every
+ *  state that names the inviter shares. */
+function InviterCard(props: {
+  name: string;
+  username: string | null;
+  label: string | null;
+  /** The heading; "Add Anna to your contacts?" when not given. */
+  title?: string;
+  /** ADR-0084 - the inviter's signature key: their photo when this device
+   *  already holds their profile (the link's own preview carries none). */
+  personKey?: string | undefined;
+  children: JSX.Element;
+}): JSX.Element {
   return (
-    <section class="lk-stack" style={{ gap: "12px" }}>
-      <h1>{t("invite.contact.invalid_title")}</h1>
-      <p>{t("invite.contact.invalid_body")}</p>
-      <p>
-        <A href={paths.home}>{t("invite.go_home")}</A>
-      </p>
+    <section class="lk-stack" style={{ gap: "12px", "align-items": "center", "text-align": "center" }}>
+      <Avatar label={props.name} id={props.name} personKey={props.personKey} />
+      <h1>{props.title ?? t("invite.contact.page.title", { name: props.name })}</h1>
+      <Show when={props.username}>{(u) => <p class="lk-row-sub">@{u()}</p>}</Show>
+      <Show when={props.label}>{(l) => <p>{l()}</p>}</Show>
+      {props.children}
     </section>
   );
 }
 
-function NeedsAuthPanel(props: { slug: string; hash: string }): JSX.Element {
-  // 1.18e — preserve the current `/i/:slug` URL across the
-  // auth round-trip. `buildAuthUrlWithReturn` encodes the
-  // current path as a `?return=` query that Signup.tsx /
-  // Login.tsx read on success to bounce back here. Pre-1.18e
-  // the joiner had to re-paste / re-click the invite URL after
-  // signup — easy to lose when copy-pasting from email.
-  // The fragment is the link secret; without it the link opens nothing
-  // (sealed-link amendment), so the return path keeps it.
-  const fragment =
-    props.hash.length === 0 || props.hash.startsWith("#") ? props.hash : `#${props.hash}`;
-  const returnTo = `${paths.invite(props.slug)}${fragment}`;
-  return (
-    <section class="lk-stack" style={{ gap: "12px" }}>
-      <h1>{t("invite.contact.needs_auth_title")}</h1>
-      <p>{t("invite.contact.needs_auth_body")}</p>
-      <div class="lk-actions">
-        <A href={buildAuthUrlWithReturn(paths.signup, returnTo)}>
-          <button class="primary" type="button">
-            {t("invite.sign_up")}
-          </button>
-        </A>
-        <A href={buildAuthUrlWithReturn(paths.login, returnTo)}>
-          <button type="button">{t("auth.login.submit")}</button>
-        </A>
-      </div>
-    </section>
-  );
-}
-
-function ConnectPanel(props: {
+function AddPanel(props: {
   invite: DecodedInvite;
+  name: string;
+  username: string | null;
+  label: string | null;
   client: ContactsClient;
   discovery: DiscoveryClient;
-  onDone: () => void;
 }): JSX.Element {
   const auth = useAuth();
   const navigate = useNavigate();
+  const chats = useChats();
   const cap = props.invite.cap;
-  const [intro, setIntro] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createLiveText();
-  const [notice, setNotice] = createLiveText();
-  // The pause before leaving for the contact list (see `window.setTimeout`
-  // below). A person who leaves this screen first - during the send, or
-  // during the pause - must not be pulled to the contact list afterwards.
-  let doneTimer: number | undefined;
-  let disposed = false;
-  onCleanup(() => {
-    disposed = true;
-    if (doneTimer !== undefined) window.clearTimeout(doneTimer);
-  });
-  // 1.18d2a-web: when the server reports 410 Gone (or 404 on
-  // /consume — same fold-pattern as fetch), we lock the panel
-  // into a "this invite has been used up / revoked" state and
-  // disable Accept. Decline still works; the user can navigate
-  // back to /contacts.
-  // 1.18d3c: `already-consumed` is a fourth terminal state —
-  // the joiner has accepted this invite before, so we lock the
-  // panel + skip the ContactRequest send (re-sending would
-  // land another envelope in the inviter's stranger inbox;
-  // bad UX even if the server idempotency means it's safe).
-  const [exhausted, setExhausted] = createSignal<
-    null | "exhausted" | "not-found" | "already-consumed"
-  >(null);
 
-  const nowMs = Date.now();
-  const expired = !cap.isValidNow(BigInt(nowMs));
-  // ADR-0048 — a fingerprint is never shown with `@`: it is not a username.
-  const labelOrFingerprint = cap.label.length > 0 ? cap.label : props.invite.fingerprintShort;
-  // 1.9b4: bootstrap-referral auto-accept. When the inviter
-  // flagged the capability as a referral signup-deep-link
-  // (ADR-0005 §13.4), the joiner does not need to press Accept
-  // manually — the click on the link IS the consent. We
-  // auto-trigger `onAccept` once the panel mounts in a usable
-  // state (not expired, not already exhausted, identity secrets
-  // present). The user can still Decline before the inner
-  // `onAccept` round-trip lands, since we surface a "Sending…"
-  // notice and the Decline button remains active. The browser-
-  // side navigation back to /contacts also gives a 1.5s grace
-  // window for second thoughts.
-  //
-  // The empty intro is intentional — a bootstrap-referral click
-  // is by construction a "we already know each other" gesture;
-  // the inviter doesn't expect an introduction.
+  /** A live one-to-one with the inviter, when the visitor removed them from
+   *  their contacts and the conversation remains (2026-10-24). Add then puts
+   *  them back with it: the inviter's device answers such a request by
+   *  restoring, never by founding, so a pending contact would wait for an
+   *  answer that is never sent. */
+  const liveChatWithOwner = (): { readonly groupIdB64: string; readonly href: string } | null => {
+    const ownerKeyB64 = base64Encode(cap.ownerSignaturePubkey);
+    const g = chats
+      .groups()
+      .find(
+        (c) =>
+          conversationKindOf(c.group) === "chat" &&
+          personKeysOf(c.group).includes(ownerKeyB64) &&
+          readIsActive(c.group) === true,
+      );
+    return g === undefined
+      ? null
+      : { groupIdB64: g.groupIdB64, href: paths.chat(base64UrlEncodeNoPad(g.group.groupId)) };
+  };
+
+  // ADR-0005 section 13.4 — a referral link presses Add by itself.
   onMount(() => {
-    if (!cap.bootstrapReferral) return;
-    if (expired) return;
-    if (auth.identitySecrets() === null) return;
-    // Pre-flight all the same gates `Accept` checks; let the
-    // click-driven path handle the actual server round-trip /
-    // error surfacing so we don't duplicate state-machine code.
-    void onAccept();
+    if (cap.bootstrapReferral) void onAdd();
   });
 
-  async function onAccept(): Promise<void> {
+  async function onAdd(): Promise<void> {
+    const secrets = auth.identitySecrets();
+    const s = auth.state();
+    if (secrets === null || s.kind !== "session" || busy()) return;
+    const account = s.account.accountId;
     setError(null);
-    setNotice(null);
     setBusy(true);
+    const ownerHex = groupIdHex(cap.ownerAccountId);
     try {
       // ADR-0073 R.2: the link's owner may already be a contact under other
-      // keys. The published identity then passes the fail-closed gate before
-      // a use of the link is spent or anything is sent (an attested reset is
-      // accepted there, silently); a stranger passes.
-      await props.client.refuseContactRequestToUnverifiedKeys(
-        cap.ownerAccountId,
-        cap.ownerSignaturePubkey,
-      );
-      // ADR-0073 R.7 case 1 / UX 16.6 - a link from a person who is already
-      // a contact (a reset loses their contacts; they may hand out a new
-      // link) opens the existing contact: no request is sent and no use of
-      // the link is spent. The check above ran R.2 first, so an attested
-      // reset was accepted there and an unproven change was refused.
-      // "Already a contact" is the pin or a verified binding naming the
-      // row's key: a row whose account id came only from a peer's own
-      // profile does not swallow this person's link.
-      const ownerAccountIdB64 = base64Encode(cap.ownerAccountId);
-      const existing = establishedContactOfAccount(loadAccepted(), groupIdHex(cap.ownerAccountId), {
-        pinKeysB64: pinKeysOf(accountKeysOf(ownerAccountIdB64)),
-        bindingKeyB64: readVerifiedBinding(ownerAccountIdB64)?.keyB64 ?? null,
+      // keys; the published identity passes the fail-closed gate first.
+      await props.client.refuseContactRequestToUnverifiedKeys(cap.ownerAccountId, cap.ownerSignaturePubkey);
+      const blobId = props.invite.blobId;
+      const live = liveChatWithOwner();
+      const outcome = await addThroughInviteLink({
+        // The ledger's soft use count. A link this account used before is
+        // sent again: the inviter's device answers it either way.
+        consume: async () =>
+          (await props.discovery.consumeInvite(blobId, props.invite.capabilityBytes, secrets.accountId)).kind,
+        // ADR-0079 section 5 — the inviter is this account's contact from now
+        // on, written only once the link was found live.
+        // With a live one-to-one nothing is pending: the contact is put back
+        // once the request is sent (below).
+        recordPending: async () =>
+          live === null &&
+          (await updatePendingContacts(account, (list) =>
+            withPendingContact(list, {
+              accountIdHex: ownerHex,
+              signaturePubkeyB64: base64Encode(cap.ownerSignaturePubkey),
+              x25519PubkeyB64: base64Encode(cap.ownerX25519Pubkey),
+              displayName: cap.inviterDisplayName ?? "",
+              username: cap.inviterUsername ?? "",
+              addedAtMs: Date.now(),
+              linkIdHex: groupIdHex(cap.linkId),
+            }),
+          )) !== null,
+        // ADR-0060 section 6 — written to the owner's closed mailbox under
+        // the link's `link` grant, used for this one write and freed.
+        sendRequest: () => sendLinkAnswer(props.client, secrets, props.invite),
+        forgetPending: async () => {
+          await updatePendingContacts(account, (list) => withoutPendingContact(list, ownerHex));
+        },
       });
-      if (existing !== undefined) {
-        navigate(paths.contact(base64UrlEncodeNoPad(base64Decode(existing.signaturePubkeyB64))));
+      if (outcome === "dead") {
+        // The link died while the page was open: nothing is kept, nothing is
+        // held, the visitor lands on Contacts (amended 2026-10-19).
+        navigate(paths.contacts, { replace: true });
         return;
       }
-      // 1.18d2a-web: server-side max_uses enforcement runs on
-      // the **pointer** path. Inline-bytes URLs have no
-      // associated server row to bump — back-compat compromise
-      // documented in ROADMAP 1.18d2a-web. We deliberately do
-      // NOT silently fail-open on the inline path; it just
-      // bypasses the ceiling, same as a 1.18c client would.
-      // 1.18d3c: also drives the per-joiner dedup tag (HMAC
-      // local) so a repeat from this joiner is caught
-      // server-side and surfaced as `already-consumed`.
-      if (props.invite.blobId !== null) {
-        const secrets = auth.identitySecrets();
-        if (secrets === null) {
-          // The Show wrapper above guards against this, but
-          // typescript wants the explicit check before reading
-          // `secrets.accountId`.
-          throw new KeyedError("common.error.session_ended");
-        }
-        const result = await props.discovery.consumeInvite(
-          props.invite.blobId,
-          props.invite.capabilityBytes,
-          secrets.accountId,
-        );
-        if (result.kind === "exhausted") {
-          setExhausted("exhausted");
-          return;
-        }
-        if (result.kind === "not-found") {
-          // Server's expiry filter folds expired into 404, so a
-          // not-found here means either the inviter revoked
-          // (1.18d2b) or expiry landed between page load and
-          // consume. Either way the user-visible copy is the
-          // same: this invite is no longer valid.
-          setExhausted("not-found");
-          return;
-        }
-        if (result.kind === "already-consumed") {
-          // Joiner has consumed this invite before; server
-          // returned the existing counter without bumping. We
-          // skip the ContactRequest send (a fresh CR would
-          // duplicate in the inviter's inbox) and surface a
-          // clear "you've already accepted this" state.
-          setExhausted("already-consumed");
-          return;
-        }
-        // result.kind === "consumed" — fall through to send.
-        if (
-          result.maxUses !== 0xffff_ffff &&
-          result.usedCount >= effectiveMaxUses(result.maxUses)
-        ) {
-          // This was the LAST use. We still send the
-          // ContactRequest, but surface the milestone in the
-          // notice copy below.
-          setNotice(() => t("invite.contact.sending", { name: labelOrFingerprint }));
-        }
+      if (live !== null) {
+        restoreRemovedContact({
+          signatureKey: base64Encode(cap.ownerSignaturePubkey),
+          accountIdHex: ownerHex,
+          groupIdB64: live.groupIdB64,
+          nowMs: Date.now(),
+        });
+        navigate(live.href);
+        return;
       }
-
-      const introBytes = new TextEncoder().encode(intro());
-      // ADR-0060 section 6: the request is written to the owner's closed
-      // mailbox under this link's `link` grant. Used for this one write and
-      // freed; never kept.
-      const linkGrant = cap.linkGrant;
-      try {
-        await props.client.sendContactRequestToBundle(
-          auth.identitySecrets(),
-          cap.ownerAccountId,
-          cap.ownerSignaturePubkey,
-          cap.ownerX25519Pubkey,
-          introBytes,
-          { writeGrant: linkGrant },
-        );
-      } finally {
-        linkGrant.free();
-      }
-      setNotice(() => t("invite.contact.sent", { name: labelOrFingerprint }));
-      // Brief pause so the user reads the notice; then navigate
-      // to /contacts where the accepted-state UI lives.
-      if (!disposed) doneTimer = window.setTimeout(props.onDone, 1500);
+      navigate(paths.pendingChat(ownerHex));
     } catch (err) {
-      // ADR-0054 S3: the consume spends an anonymous token; that failure,
-      // like every other, renders from its kind (`contacts/errors.ts`).
-      setError(
+      setError(() =>
         isDiscoveryRateLimited(err)
-          ? INVITE_LINK_RATE_LIMITED
-          : contactsErrorText(err, "contacts.error.send", labelOrFingerprint),
+          ? INVITE_LINK_RATE_LIMITED()
+          : t("invite.contact.page.add_failed", { name: props.name }),
       );
     } finally {
       setBusy(false);
@@ -470,137 +512,134 @@ function ConnectPanel(props: {
   }
 
   return (
-    <section class="lk-stack" style={{ gap: "12px" }}>
-      <h1>{t("invite.contact.title", { name: labelOrFingerprint })}</h1>
-      <dl>
-        <dt>{t("invite.contact.fingerprint")}</dt>
-        <dd>
-          <code>{props.invite.fingerprintShort}</code>
-        </dd>
-        <dt>{t("contacts.safety.number")}</dt>
-        <dd>
-          <code
-            style={{
-              "font-size": "0.9rem",
-              "letter-spacing": "0.02em",
-              "word-spacing": "0.3em",
-              "user-select": "all",
-            }}
-          >
-            {cap.ownerFingerprint}
-          </code>
-          <p
-            style={{
-              "margin-top": "0.4rem",
-              "margin-bottom": 0,
-              "font-size": "0.85rem",
-              opacity: 0.75,
-            }}
-          >
-            {tRich(
-              "common.sentence_pair",
-              { first: <strong>{t("invite.contact.check_title")}</strong> },
-              { second: t("invite.contact.check_body") },
-            )}
-          </p>
-        </dd>
-        <dt>{t("invite.contact.expiry")}</dt>
-        <dd>{describeExpiry(cap.expiryMs, nowMs)}</dd>
-        <dt>{t("invite.contact.uses")}</dt>
-        <dd>{describeMaxUses(cap.maxUses)}</dd>
-        <Show when={cap.bootstrapReferral}>
-          <dt>{t("invite.contact.type")}</dt>
-          <dd>{t("invite.contact.referral")}</dd>
-        </Show>
-      </dl>
-
-      <Show when={expired}>
-        <div class="form-error" role="alert">
-          {t("invite.contact.expired")}
+    <>
+      <InviterCard
+        name={props.name}
+        username={props.username}
+        label={props.label}
+        personKey={base64Encode(props.invite.cap.ownerSignaturePubkey)}
+      >
+        <div class="lk-actions">
+          <button class="primary" type="button" disabled={busy()} onClick={() => void onAdd()}>
+            <Show when={busy()} fallback={t("invite.contact.page.add")}>
+              <InlineSpinner />
+            </Show>
+          </button>
+          <button type="button" disabled={busy()} onClick={() => navigate(paths.home)}>
+            {t("invite.contact.page.not_now")}
+          </button>
         </div>
-      </Show>
+        <Show when={error()}>{(message) => <p class="form-error">{message()}</p>}</Show>
+      </InviterCard>
+    </>
+  );
+}
 
-      <Show when={exhausted() === "exhausted"}>
-        <div class="form-error" role="alert">
-          {t("invite.contact.used_up")}
-        </div>
-      </Show>
+/**
+ * The request carrying the link answer (ADR-0079 section 2): written to the
+ * owner's closed mailbox under the link's `link` grant (ADR-0060 section 6),
+ * used for this one write and freed. The inviter's device takes it by itself.
+ */
+async function sendLinkAnswer(
+  client: ContactsClient,
+  secrets: NonNullable<ReturnType<ReturnType<typeof useAuth>["identitySecrets"]>>,
+  invite: DecodedInvite,
+): Promise<void> {
+  const cap = invite.cap;
+  const linkGrant = cap.linkGrant;
+  try {
+    await client.sendContactRequestToBundle(
+      secrets,
+      cap.ownerAccountId,
+      cap.ownerSignaturePubkey,
+      cap.ownerX25519Pubkey,
+      new Uint8Array(0),
+      {
+        writeGrant: linkGrant,
+        linkAnswer: { linkId: cap.linkId, linkSecret: invite.linkSecret },
+      },
+    );
+  } finally {
+    linkGrant.free();
+  }
+}
 
-      <Show when={exhausted() === "not-found"}>
-        <div class="form-error" role="alert">
-          {t("invite.contact.no_longer_valid")}
-        </div>
-      </Show>
+/**
+ * "Anna is already in your contacts" and **Open chat**
+ * (`docs/ux/contact-invite-link.md` section 3, amended 2026-10-24). The link
+ * still delivers its answer: an inviter who removed the visitor and sent a
+ * new link gets them back on their device, with the conversation they have.
+ * Nothing is kept on this side; the chat opens once the answer is written,
+ * or at once when the link no longer works.
+ */
+function KnownContactPanel(props: {
+  invite: DecodedInvite;
+  name: string;
+  chatPath: string;
+  client: ContactsClient;
+  discovery: DiscoveryClient;
+}): JSX.Element {
+  const auth = useAuth();
+  const navigate = useNavigate();
+  const cap = props.invite.cap;
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createLiveText();
 
-      <Show when={exhausted() === "already-consumed"}>
-        <div class="form-notice" role="status">
-          {tRich("invite.contact.already_accepted", {
-            name: <strong>{labelOrFingerprint}</strong>,
-          })}
-        </div>
-      </Show>
+  async function onOpenChat(): Promise<void> {
+    const secrets = auth.identitySecrets();
+    if (secrets === null || busy()) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await props.client.refuseContactRequestToUnverifiedKeys(cap.ownerAccountId, cap.ownerSignaturePubkey);
+      const blobId = props.invite.blobId;
+      await answerAsKnownContact({
+        consume: async () =>
+          (await props.discovery.consumeInvite(blobId, props.invite.capabilityBytes, secrets.accountId)).kind,
+        sendRequest: () => sendLinkAnswer(props.client, secrets, props.invite),
+      });
+      navigate(props.chatPath);
+    } catch (err) {
+      setError(() =>
+        isDiscoveryRateLimited(err)
+          ? INVITE_LINK_RATE_LIMITED()
+          : t("invite.contact.page.answer_failed", { name: props.name }),
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
 
-      <label>
-        {t("invite.contact.intro_label")}
-        <input
-          type="text"
-          value={intro()}
-          onInput={(e) => setIntro(e.currentTarget.value)}
-          placeholder={t("contacts.add.intro_placeholder")}
-          disabled={expired || busy() || exhausted() !== null}
-        />
-      </label>
-
-      <Show when={error()}>{(message) => <div class="form-error">{message()}</div>}</Show>
-      {notice() !== null && <div class="form-notice">{notice()}</div>}
-
+  return (
+    <section class="lk-stack" style={{ gap: "12px", "align-items": "center", "text-align": "center" }}>
+      <h1>{t("invite.contact.page.already_title", { name: props.name })}</h1>
       <div class="lk-actions">
-        <button
-          class="primary"
-          type="button"
-          disabled={expired || busy() || exhausted() !== null}
-          onClick={() => {
-            void onAccept();
-          }}
-        >
-          {busy() ? t("common.sending") : t("contacts.request.accept")}
-        </button>
-        <button type="button" onClick={props.onDone} disabled={busy()}>
-          {t("contacts.request.decline")}
+        <button class="primary" type="button" disabled={busy()} onClick={() => void onOpenChat()}>
+          <Show when={busy()} fallback={t("invite.contact.page.open_chat")}>
+            <InlineSpinner />
+          </Show>
         </button>
       </div>
+      <Show when={error()}>{(message) => <p class="form-error">{message()}</p>}</Show>
     </section>
   );
 }
 
-/** Map the wire `max_uses` sentinels to the effective ceiling
- *  the server enforces. Mirrors `effective_max_uses` in
- *  `services/discovery/src/invite.rs` and the SQL CASE
- *  expression in the consume UPDATE. Drift between this and
- *  the server is a real-world bug worth pinning — but the
- *  function is tiny enough that the unit-test coverage on the
- *  server side (`effective_max_uses_maps_sentinels`) is
- *  sufficient. Used only to decide between "consumed
- *  successfully" and "this was the last use" UI copy. */
-function effectiveMaxUses(maxUses: number): number {
-  if (maxUses === 0) return 1; // SINGLE_USE
-  if (maxUses === 0xffff_ffff) return 0xffff_ffff; // unlimited
-  return maxUses;
-}
-
-// ---------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------
-
-/** 12-hex-char prefix of the Ed25519 pubkey — same shape as
- *  `contacts/local-store.ts::fingerprintShort`, but inlined here
- *  because that helper takes a Uint8Array and we already have
- *  one. Cheap to keep consistent: a future extraction into a
- *  shared helper is mechanical. */
-function shortFingerprintFor(pubkey: Uint8Array): string {
-  let hex = "";
-  for (let i = 0; i < pubkey.length && hex.length < 12; i++) {
-    hex += (pubkey[i] ?? 0).toString(16).padStart(2, "0");
-  }
-  return hex.slice(0, 12);
+/** The spinner shown in place of a button's label while it works. */
+function InlineSpinner(): JSX.Element {
+  return (
+    <svg class="lk-spinner" width={18} height={18} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-dasharray="40 60">
+        <animateTransform
+          attributeName="transform"
+          attributeType="XML"
+          type="rotate"
+          from="0 12 12"
+          to="360 12 12"
+          dur="0.8s"
+          repeatCount="indefinite"
+        />
+      </circle>
+    </svg>
+  );
 }

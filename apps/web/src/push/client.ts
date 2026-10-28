@@ -8,53 +8,46 @@
  * since ADR-0054 a group wake is the `x-lakko-wake` header of the signed DS
  * publish (`ds/wake.ts`), and the DS forwards it to push-gw internally.
  *
- *   * `POST /push/register` — bind a `(device_pseudonym, provider)`
- *     pair to a platform-specific token blob. Idempotent: re-register
- *     overwrites the prior token (clients rotate tokens after APNs
- *     rebuild / FCM token refresh / Web Push subscription change).
- *   * `POST /push/unregister` — drop a token. Called on logout +
- *     forget-device.
- *   * `POST /push/group/{subscribe,unsubscribe}` — (un)bind this device to
- *     a group's `push_gid`.
+ * Since ADR-0078 section 3 push-gw holds no device pseudonym and no token in
+ * the clear:
  *
- * ADR-0054 S3: each of the four routes spends one anonymous `push-register`
- * token (`../tokens/anon-token-pool.ts`) and carries no session - the device
- * pseudonym must never be linkable to an account (invariant #5). No proof of
- * work any more. A `429 anon-token-quota-exhausted` from the pool is silent
- * at the callers: registration is retried at the next launch and the app
- * keeps working by polling.
+ *   * `POST /push/subscribe` — store (or replace) one sealed subscription:
+ *     `{sub_id, push_gid, wake_pk, sealed}`, where `sealed` is this device's
+ *     provider tokens sealed under the group's unlock key (wasm
+ *     `sealPushSubscription`) and `sub_id` is 16 random bytes this device
+ *     keeps per subscription. Re-sending the same `sub_id` replaces the row,
+ *     which is how a new provider token reaches push-gw.
+ *   * `POST /push/unsubscribe` — drop one row by its `sub_id`.
+ *   * `GET /push/wake-key` — the X25519 key every wake is sealed to.
  *
- * Errors mirror the auth + discovery client surface:
- *
- *   * [`PushClientArgError`] — local input validation (wrong-length
- *     pseudonym, empty token) caught before any round-trip.
- *   * [`PushHttpError`] — server returned non-2xx; carries the status
- *     + endpoint so the UI can branch on 400 (rejection)
- *     vs 5xx.
- *   * [`PushNetworkError`] — DNS / TLS / transport failure.
+ * ADR-0054 S3: each subscription request spends one anonymous
+ * `push-register` token (`../tokens/anon-token-pool.ts`) and carries no
+ * session (invariant #5). A `429 anon-token-quota-exhausted` from the pool is
+ * silent at the callers: registration is retried later and the app keeps
+ * working by polling.
  */
-import { base64Encode } from "../auth/account-id";
+import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
 import {
   anonTokens,
   anonymousFetchInit,
   type AnonTokenPool,
 } from "../tokens/anon-token-pool";
 
-/** Default base URL — Vite dev proxy
- *  (`/api/push` → `127.0.0.1:8085`). Production nginx routes the
- *  same path. */
+/** Default base URL — Vite dev proxy (`/api/push` → `127.0.0.1:8085`).
+ *  Production nginx routes the same path. */
 export const DEFAULT_BASE_URL = "/api/push";
 
-/** Raw device pseudonym length — 32 bytes, 64 lowercase hex chars
- *  on the wire (mirror of the `services/push-gw` registry
- *  `DEVICE_LEN` constant). */
-export const DEVICE_PSEUDONYM_LEN = 32;
+/** Length of a subscription id (mirror of the Rust `PUSH_SUBSCRIPTION_ID_LEN`). */
+export const SUBSCRIPTION_ID_LEN = 16;
 
-/** Provider names — must match the snake_case `serde` rename on
- *  `ProviderKind` in `services/push-gw/src/provider.rs`. */
+/** Length of a `push_gid`, a wake public key and push-gw's wake key. */
+export const PUSH_KEY_LEN = 32;
+
+/** Provider names — must match the snake_case names of
+ *  `lakko_contacts::push_wake::PushProvider`. */
 export type ProviderKind = "apns" | "fcm" | "web_push" | "unified_push";
 
-/** Programmer error — wrong-length pseudonym, empty token, etc. */
+/** Programmer error — a wrong-length id or key, caught before any request. */
 export class PushClientArgError extends Error {
   override name = "PushClientArgError";
 }
@@ -79,45 +72,22 @@ export class PushNetworkError extends Error {
   }
 }
 
-interface RegisterRequest {
-  device_pseudonym: string;
-  provider: ProviderKind;
-  token: string;
+/** One sealed subscription as `POST /push/subscribe` takes it. */
+export interface SealedSubscription {
+  /** 16 random bytes this device keeps for this subscription. */
+  readonly subId: Uint8Array;
+  /** The group's ADR-0042 `push_gid`. */
+  readonly pushGid: Uint8Array;
+  /** The group's wake public key (wasm `derivePushWakePublicKey`). */
+  readonly wakePk: Uint8Array;
+  /** The token list sealed under the group's unlock key. */
+  readonly sealed: Uint8Array;
 }
 
-interface RegisterResponse {
-  ok: boolean;
-}
-
-interface UnregisterRequest {
-  device_pseudonym: string;
-  provider: ProviderKind;
-}
-
-interface UnregisterResponse {
-  ok: boolean;
-  removed: boolean;
-}
-
-/** Convert a 32-byte buffer to its lowercase-hex form. */
-function devicePseudonymHex(bytes: Uint8Array): string {
-  return pseudonymHex(bytes, "devicePseudonym");
-}
-
-/** Generic 32-byte → lowercase-hex with a typed error message
- *  carrying the named-arg the validation failed for. Used by
- *  both the device + group pseudonym paths (1.20e). */
-function pseudonymHex(bytes: Uint8Array, name: string): string {
-  if (bytes.length !== DEVICE_PSEUDONYM_LEN) {
-    throw new PushClientArgError(
-      `${name} must be ${DEVICE_PSEUDONYM_LEN} bytes (got ${bytes.length})`,
-    );
+function checkLen(bytes: Uint8Array, len: number, name: string): void {
+  if (bytes.length !== len) {
+    throw new PushClientArgError(`${name} must be ${len} bytes (got ${bytes.length})`);
   }
-  let out = "";
-  for (const b of bytes) {
-    out += b.toString(16).padStart(2, "0");
-  }
-  return out;
 }
 
 export class PushClient {
@@ -130,131 +100,59 @@ export class PushClient {
     this.tokens = options.tokens ?? anonTokens;
   }
 
-  /**
-   * Bind a push token to `(devicePseudonym, provider)`. Idempotent:
-   * re-registering with a fresh token overwrites the prior bytes,
-   * which is the canonical pattern for APNs / FCM / Web Push token
-   * rotation.
-   *
-   * @param devicePseudonym  32-byte stable per-device handle. Derive
-   *                         once per device and persist locally; see
-   *                         `apps/web/src/push/device-id.ts`.
-   * @param provider         Which delivery path this token is for.
-   * @param tokenBytes       Provider-opaque token blob. For Web Push,
-   *                         this is the JSON-serialised
-   *                         `PushSubscription` (endpoint + p256dh +
-   *                         auth keys) encoded as UTF-8.
-   */
-  async register(
-    devicePseudonym: Uint8Array,
-    provider: ProviderKind,
-    tokenBytes: Uint8Array,
-  ): Promise<void> {
-    if (tokenBytes.length === 0) {
-      throw new PushClientArgError("tokenBytes must be non-empty");
-    }
-    const deviceHex = devicePseudonymHex(devicePseudonym);
-
-    const req: RegisterRequest = {
-      device_pseudonym: deviceHex,
-      provider,
-      token: base64Encode(tokenBytes),
-    };
-    const resp = await this.post<RegisterRequest, RegisterResponse>(
-      "/push/register",
-      req,
-    );
+  /** Store (or replace) one sealed subscription. */
+  async subscribe(sub: SealedSubscription): Promise<void> {
+    checkLen(sub.subId, SUBSCRIPTION_ID_LEN, "subId");
+    checkLen(sub.pushGid, PUSH_KEY_LEN, "pushGid");
+    checkLen(sub.wakePk, PUSH_KEY_LEN, "wakePk");
+    if (sub.sealed.length === 0) throw new PushClientArgError("sealed must be non-empty");
+    const resp = await this.post<{ ok: boolean }>("/push/subscribe", {
+      sub_id: base64UrlEncodeNoPad(sub.subId),
+      push_gid: base64UrlEncodeNoPad(sub.pushGid),
+      wake_pk: base64UrlEncodeNoPad(sub.wakePk),
+      sealed: base64UrlEncodeNoPad(sub.sealed),
+    });
     if (!resp.ok) {
-      throw new PushHttpError(200, "/push/register", "server reported ok=false");
+      throw new PushHttpError(200, "/push/subscribe", "server reported ok=false");
     }
   }
 
-  /**
-   * Subscribe this device to wakes for `groupPseudonym` (the group's
-   * ADR-0042 `push_gid`). A publisher's DS publish carries an
-   * `x-lakko-wake` header (ADR-0054); the DS forwards it and push-gw fans
-   * out to every device with a row here.
-   *
-   * Idempotent — re-subscribing the same `(device, group)` pair
-   * returns `inserted: false` and is a no-op.
-   */
-  async subscribeGroup(
-    devicePseudonym: Uint8Array,
-    groupPseudonym: Uint8Array,
-  ): Promise<{ inserted: boolean }> {
-    const deviceHex = devicePseudonymHex(devicePseudonym);
-    const groupHex = pseudonymHex(groupPseudonym, "groupPseudonym");
-
-    const resp = await this.post<
-      { device_pseudonym: string; group_pseudonym: string },
-      { ok: boolean; inserted: boolean }
-    >("/push/group/subscribe", {
-      device_pseudonym: deviceHex,
-      group_pseudonym: groupHex,
+  /** Drop one subscription by its id. Idempotent. */
+  async unsubscribe(subId: Uint8Array): Promise<{ removed: boolean }> {
+    checkLen(subId, SUBSCRIPTION_ID_LEN, "subId");
+    const resp = await this.post<{ ok: boolean; removed: boolean }>("/push/unsubscribe", {
+      sub_id: base64UrlEncodeNoPad(subId),
     });
     if (!resp.ok) {
-      throw new PushHttpError(
-        200,
-        "/push/group/subscribe",
-        "server reported ok=false",
-      );
-    }
-    return { inserted: resp.inserted };
-  }
-
-  /** Drop a `(device, group)` subscription. Idempotent. */
-  async unsubscribeGroup(
-    devicePseudonym: Uint8Array,
-    groupPseudonym: Uint8Array,
-  ): Promise<{ removed: boolean }> {
-    const deviceHex = devicePseudonymHex(devicePseudonym);
-    const groupHex = pseudonymHex(groupPseudonym, "groupPseudonym");
-
-    const resp = await this.post<
-      { device_pseudonym: string; group_pseudonym: string },
-      { ok: boolean; removed: boolean }
-    >("/push/group/unsubscribe", {
-      device_pseudonym: deviceHex,
-      group_pseudonym: groupHex,
-    });
-    if (!resp.ok) {
-      throw new PushHttpError(
-        200,
-        "/push/group/unsubscribe",
-        "server reported ok=false",
-      );
+      throw new PushHttpError(200, "/push/unsubscribe", "server reported ok=false");
     }
     return { removed: resp.removed };
   }
 
-  /**
-   * Drop a previously-registered token. Idempotent: the server
-   * returns `removed: false` if the row was already gone (clients
-   * can call this on logout without checking the registry first).
-   */
-  async unregister(
-    devicePseudonym: Uint8Array,
-    provider: ProviderKind,
-  ): Promise<{ removed: boolean }> {
-    const deviceHex = devicePseudonymHex(devicePseudonym);
-
-    const req: UnregisterRequest = {
-      device_pseudonym: deviceHex,
-      provider,
-    };
-    const resp = await this.post<UnregisterRequest, UnregisterResponse>(
-      "/push/unregister",
-      req,
-    );
-    if (!resp.ok) {
-      throw new PushHttpError(200, "/push/unregister", "server reported ok=false");
+  /** push-gw's X25519 wake key. No token: it is public. */
+  async wakeKey(): Promise<Uint8Array> {
+    const endpoint = "/push/wake-key";
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}${endpoint}`, anonymousFetchInit({ method: "GET", headers: {} }));
+    } catch (err) {
+      throw new PushNetworkError(endpoint, err);
     }
-    return { removed: resp.removed };
+    if (!response.ok) {
+      throw new PushHttpError(response.status, endpoint, await safeReadBody(response));
+    }
+    const body = (await response.json()) as { key?: unknown };
+    if (typeof body.key !== "string") {
+      throw new PushHttpError(200, endpoint, "no key in the response");
+    }
+    const key = base64UrlDecodeNoPad(body.key);
+    checkLen(key, PUSH_KEY_LEN, "wake key");
+    return key;
   }
 
-  /** One registration request: spends one `push-register` token, carries
-   *  no session, retried once with another token on a spent / invalid one. */
-  private async post<Req, Res>(endpoint: string, body: Req): Promise<Res> {
+  /** One subscription request: spends one `push-register` token, carries no
+   *  session, retried once with another token on a spent / invalid one. */
+  private async post<Res>(endpoint: string, body: unknown): Promise<Res> {
     const url = `${this.baseUrl}${endpoint}`;
     const json = JSON.stringify(body);
     let response: Response;
@@ -274,8 +172,7 @@ export class PushClient {
       throw err;
     }
     if (!response.ok) {
-      const text = await safeReadBody(response);
-      throw new PushHttpError(response.status, endpoint, text);
+      throw new PushHttpError(response.status, endpoint, await safeReadBody(response));
     }
     return (await response.json()) as Res;
   }

@@ -2,10 +2,16 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Initials avatar. The tint is one of four, chosen by a hash of the id so the
- * same person always gets the same colour on every device.
+ * The one avatar circle. Initials, tinted by one of four colours chosen by a
+ * hash of the id so the same person always gets the same colour on every
+ * device; and, for a person (`personKey`), their profile photo when this
+ * device holds it (ADR-0084, docs/ux/profile-screen.md section 7). A profile
+ * video plays muted and looped only where the caller asks (`playVideo`: the
+ * large views); everywhere else its still is shown.
  */
-import type { JSX } from "solid-js";
+import { createSignal, Match, Switch, type JSX } from "solid-js";
+
+import { avatarMediaFor, type AvatarMedia } from "../profile/avatar-runtime";
 
 /** Up to two initials from a display label. */
 export function initialsOf(label: string): string {
@@ -30,16 +36,58 @@ export function Avatar(props: {
   label: string;
   /** What the tint comes from (defaults to the label). */
   id?: string;
-  size?: "sm" | "md" | "lg" | "xl";
+  size?: "sm" | "md" | "lg" | "xl" | "profile";
   class?: string;
+  /** The person's key (the one their profile is filed under), or `self` for
+   *  the signed-in account: the photo is looked up for it. */
+  personKey?: string | undefined;
+  /** Media to show instead of the looked-up photo (a pending change on the
+   *  profile screen); `null` forces the initials. */
+  media?: AvatarMedia | null | undefined;
+  /** Play a profile video (large views only). */
+  playVideo?: boolean;
 }): JSX.Element {
+  const [broken, setBroken] = createSignal<string | null>(null);
+  const media = (): AvatarMedia | null => {
+    if (props.media !== undefined) return props.media;
+    return avatarMediaFor(props.personKey, props.playVideo === true);
+  };
+  const video = (): string | null => {
+    const m = media();
+    return props.playVideo === true && m?.videoUrl !== null && m?.videoUrl !== undefined && broken() !== m.videoUrl
+      ? m.videoUrl
+      : null;
+  };
+  const still = (): string | null => {
+    const m = media();
+    return m?.stillUrl !== null && m?.stillUrl !== undefined && broken() !== m.stillUrl ? m.stillUrl : null;
+  };
   return (
     <span
       class={`lk-avatar ${props.size ?? ""} ${props.class ?? ""}`}
       data-tone={toneOf(props.id ?? props.label)}
+      data-photo={video() !== null || still() !== null ? "true" : undefined}
       aria-hidden="true"
     >
-      {initialsOf(props.label)}
+      <Switch fallback={initialsOf(props.label)}>
+        <Match when={video()}>
+          {(url) => (
+            <video
+              class="lk-avatar-media"
+              src={url()}
+              poster={still() ?? undefined}
+              muted
+              loop
+              autoplay
+              playsinline
+              onError={() => setBroken(url())}
+            />
+          )}
+        </Match>
+        <Match when={still()}>
+          {(url) => <img class="lk-avatar-media" src={url()} alt="" onError={() => setBroken(url())} />}
+        </Match>
+      </Switch>
     </span>
   );
 }

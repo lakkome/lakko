@@ -95,34 +95,6 @@ final class FreshPhraseKeepTests: XCTestCase {
     }
 }
 
-// MARK: - The keys of a co-publisher request
-
-final class CoPublishRequestKeysTests: XCTestCase {
-
-    private let groupId = Data(repeating: 0xA1, count: 32)
-
-    func testAFramedRowRestoresOnlyForItsOwnChannel() {
-        let snapshot = Data([1, 2, 3, 4])
-        let row = CoPublishRequestKeys.frame(groupId: groupId, snapshot: snapshot)
-        XCTAssertEqual(CoPublishRequestKeys.snapshot(in: row, groupId: groupId), snapshot)
-        XCTAssertNil(
-            CoPublishRequestKeys.snapshot(in: row, groupId: Data(repeating: 0xB2, count: 32)),
-            "a request for another channel starts from nothing")
-    }
-
-    func testNoRowOrAMalformedRowRestoresNothing() {
-        XCTAssertNil(CoPublishRequestKeys.snapshot(in: nil, groupId: groupId))
-        XCTAssertNil(CoPublishRequestKeys.snapshot(in: Data(), groupId: groupId))
-        XCTAssertNil(CoPublishRequestKeys.snapshot(in: Data([0x00]), groupId: groupId))
-        XCTAssertNil(CoPublishRequestKeys.snapshot(in: Data([0x00, 0x00, 0x01]), groupId: groupId))
-        // A length running past the end.
-        XCTAssertNil(CoPublishRequestKeys.snapshot(in: Data([0x00, 0x40]) + groupId, groupId: groupId))
-        // A row that names the group but carries no snapshot.
-        XCTAssertNil(CoPublishRequestKeys.snapshot(
-            in: CoPublishRequestKeys.frame(groupId: groupId, snapshot: Data()), groupId: groupId))
-    }
-}
-
 // MARK: - G-51: a publish counter that cannot be read is not a counter of 0
 
 final class PublishCounterFloorTests: XCTestCase {

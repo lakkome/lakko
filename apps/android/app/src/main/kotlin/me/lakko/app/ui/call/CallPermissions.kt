@@ -15,9 +15,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
@@ -27,6 +25,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoDialogAction
+import me.lakko.app.ui.components.LakkoDialogTone
 
 /**
  * Just-in-time runtime permissions for every way into a call.
@@ -181,43 +182,31 @@ public fun rememberCallPermissionGate(): CallPermissionGate {
 private fun CallPermissionDialogs(gate: CallPermissionGate, context: Context) {
     when (val denial = gate.denial) {
         null -> Unit
-        CallPermissionGate.Denial.Microphone -> AlertDialog(
+        CallPermissionGate.Denial.Microphone -> LakkoDialog(
             onDismissRequest = { gate.denial = null },
-            title = { Text(t("call.permission.microphone.title")) },
-            text = {
-                Text(t("call.permission.microphone.body"))
+            title = t("call.permission.microphone.title"),
+            body = t("call.permission.microphone.body"),
+            confirm = LakkoDialogAction(t("chat.record.open_app_settings")) {
+                gate.denial = null
+                openAppSettings(context)
             },
-            confirmButton = {
-                TextButton(onClick = {
-                    gate.denial = null
-                    openAppSettings(context)
-                }) { Text(t("chat.record.open_app_settings")) }
-            },
-            dismissButton = {
-                TextButton(onClick = { gate.denial = null }) { Text(t("common.not_now")) }
-            },
+            cancel = LakkoDialogAction(t("common.not_now"), LakkoDialogTone.Ghost) { gate.denial = null },
         )
-        is CallPermissionGate.Denial.Camera -> AlertDialog(
+        is CallPermissionGate.Denial.Camera -> LakkoDialog(
             onDismissRequest = { gate.denial = null },
-            title = { Text(t("call.permission.camera.title")) },
-            text = {
-                Text(t("call.permission.camera.body"))
+            title = t("call.permission.camera.title"),
+            body = t("call.permission.camera.body"),
+            confirm = LakkoDialogAction(t("chat.record.open_app_settings")) {
+                gate.denial = null
+                openAppSettings(context)
             },
-            confirmButton = {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = {
-                        gate.denial = null
-                        openAppSettings(context)
-                    }) { Text(t("chat.record.open_app_settings")) }
-                    TextButton(onClick = {
-                        gate.denial = null
-                        denial.onAudioOnly()
-                    }) { Text(t("call.permission.audio_only")) }
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { gate.denial = null }) { Text(t("common.cancel")) }
-            },
+            extraActions = listOf(
+                LakkoDialogAction(t("call.permission.audio_only"), LakkoDialogTone.Secondary) {
+                    gate.denial = null
+                    denial.onAudioOnly()
+                },
+            ),
+            cancel = LakkoDialogAction(t("common.cancel"), LakkoDialogTone.Ghost) { gate.denial = null },
         )
     }
 }

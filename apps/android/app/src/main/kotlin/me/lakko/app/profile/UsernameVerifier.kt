@@ -40,6 +40,15 @@ import kotlinx.coroutines.CompletableDeferred
  * path does not construct.
  */
 
+/** The waits before a check that could not complete is tried again: seconds at
+ *  first, so a rate limit or a dropped connection clears quickly, growing to
+ *  five minutes. Chosen, not measured; the same steps as web and iOS. */
+internal val USERNAME_RETRY_STEPS_MS: LongArray = longArrayOf(15_000, 30_000, 60_000, 120_000, 300_000)
+
+/** The wait before retry number [failures] (1 for the first). */
+internal fun usernameRetryDelayMs(failures: Int): Long =
+    USERNAME_RETRY_STEPS_MS[failures.coerceIn(1, USERNAME_RETRY_STEPS_MS.size) - 1]
+
 /** What resolving a claimed username through discovery produced. */
 public sealed interface UsernameResolution {
     /** The username is registered to an account whose bundle names this key. */

@@ -997,8 +997,8 @@ pub(crate) struct FinishReq {
 /// fresh-auth grant.
 #[derive(Serialize)]
 pub(crate) struct FinishRes {
-    /// URL-safe base64 of the 177-byte key-reset attestation the client
-    /// carries to discovery and to the DS, exactly as after a reset.
+    /// URL-safe base64 of the 145-byte key-reset attestation the client
+    /// carries to discovery, exactly as after a reset.
     pub(crate) key_reset_attest_b64: String,
     /// `key_generation`, `session_token`, `session_expires_at_ms`,
     /// `refresh_token`, `refresh_expires_at_ms`, at the new generation.
@@ -1157,7 +1157,6 @@ async fn replay_outcome(
     let grant =
         crate::session::issue_fresh_grant(state, &input.account_id, outcome.key_generation)?;
     tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(input.account_id),
         key_generation = outcome.key_generation,
         "recall finish answered again from its recorded outcome",
     );
@@ -1489,12 +1488,7 @@ pub(crate) async fn finish(
     .map_err(ApiError::Db)?;
     tx.commit().await.map_err(ApiError::Db)?;
 
-    tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(account_id),
-        key_generation,
-        anchor_seq = anchor.seq,
-        "account recalled",
-    );
+    tracing::info!(key_generation, anchor_seq = anchor.seq, "account recalled",);
     Ok(Json(FinishRes {
         key_reset_attest_b64: URL_SAFE_NO_PAD.encode(attestation),
         session,

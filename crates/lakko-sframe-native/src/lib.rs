@@ -848,6 +848,11 @@ pub const LAKKO_SFRAME_MEDIA_CODEC_OTHER: u8 = 0;
 pub const LAKKO_SFRAME_MEDIA_CODEC_VP8: u8 = 1;
 /// [`lakko_sframe_media_clear_prefix_len`] codec value: Opus audio.
 pub const LAKKO_SFRAME_MEDIA_CODEC_OPUS: u8 = 2;
+/// [`lakko_sframe_media_clear_prefix_len`] codec value: an RFC 2198 RED
+/// container of Opus frames (`audio/red`). Nothing is left clear, and
+/// [`lakko_sframe_seal_media_frame_for_codec`] marks the frame as RED in
+/// its trailer so a receiver without RED can take the primary frame out.
+pub const LAKKO_SFRAME_MEDIA_CODEC_RED_OPUS: u8 = 3;
 /// The most bytes [`lakko_sframe_seal_media_frame`] leaves in the clear.
 pub const LAKKO_SFRAME_MAX_CLEAR_PREFIX_LEN: usize = 16;
 
@@ -855,6 +860,7 @@ const _: () = {
     assert!(LAKKO_SFRAME_MEDIA_CODEC_OTHER == MediaCodec::Other as u8);
     assert!(LAKKO_SFRAME_MEDIA_CODEC_VP8 == MediaCodec::Vp8 as u8);
     assert!(LAKKO_SFRAME_MEDIA_CODEC_OPUS == MediaCodec::Opus as u8);
+    assert!(LAKKO_SFRAME_MEDIA_CODEC_RED_OPUS == MediaCodec::RedOpus as u8);
     assert!(LAKKO_SFRAME_MAX_CLEAR_PREFIX_LEN == lakko_calls::MAX_CLEAR_PREFIX_LEN);
 };
 
@@ -928,6 +934,58 @@ pub unsafe extern "C" fn lakko_sframe_seal_media_frame(
     // SAFETY: caller upheld the live-pointer contract.
     let pk = unsafe { &mut *participant_key };
     let wire = match pk.inner.seal_media_frame(frame, clear_prefix_len) {
+        Ok(w) => w,
+        Err(CallsError::CounterExhausted) => return LakkoSframeStatus::CounterExhausted,
+        Err(_) => return LakkoSframeStatus::AeadFailed,
+    };
+    let (ptr, len) = vec_into_raw(wire);
+    // SAFETY: out-pointers non-null per the guard above.
+    unsafe {
+        *out_wire_ptr = ptr;
+        *out_wire_len = len;
+    }
+    LakkoSframeStatus::Ok
+}
+
+/// Seal an encoded media frame of `codec` (one of the
+/// `LAKKO_SFRAME_MEDIA_CODEC_*` values; an unknown value is treated as
+/// `OTHER`) into the ADR-0071 layout, with the clear prefix the sender's
+/// rule gives that codec ([`lakko_sframe_media_clear_prefix_len`]) and the
+/// trailer stating what the frame holds: a RED container for
+/// [`LAKKO_SFRAME_MEDIA_CODEC_RED_OPUS`], the codec's own frame otherwise.
+/// Wraps [`core::ParticipantKey::seal_media_frame_for_codec`]. Otherwise as
+/// [`lakko_sframe_seal_media_frame`], whose buffer contract it shares.
+///
+/// # Safety
+///
+/// As [`lakko_sframe_seal_media_frame`].
+#[no_mangle]
+pub unsafe extern "C" fn lakko_sframe_seal_media_frame_for_codec(
+    participant_key: *mut ParticipantKey,
+    frame_ptr: *const u8,
+    frame_len: usize,
+    codec: u8,
+    out_wire_ptr: *mut *mut u8,
+    out_wire_len: *mut usize,
+) -> LakkoSframeStatus {
+    if participant_key.is_null() || out_wire_ptr.is_null() || out_wire_len.is_null() {
+        return LakkoSframeStatus::NullPointer;
+    }
+    if frame_ptr.is_null() && frame_len != 0 {
+        return LakkoSframeStatus::NullPointer;
+    }
+    // SAFETY: pointer + length guarded above.
+    let frame = if frame_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(frame_ptr, frame_len) }
+    };
+    // SAFETY: caller upheld the live-pointer contract.
+    let pk = unsafe { &mut *participant_key };
+    let wire = match pk
+        .inner
+        .seal_media_frame_for_codec(frame, MediaCodec::from_u8(codec))
+    {
         Ok(w) => w,
         Err(CallsError::CounterExhausted) => return LakkoSframeStatus::CounterExhausted,
         Err(_) => return LakkoSframeStatus::AeadFailed,

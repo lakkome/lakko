@@ -30,6 +30,7 @@ import uniffi.lakko_ffi_uniffi.ContactAck
 import uniffi.lakko_ffi_uniffi.ContactRequest
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.FfiProfile
+import uniffi.lakko_ffi_uniffi.FfiLinkAnswer
 import uniffi.lakko_ffi_uniffi.FfiReachGrant
 import uniffi.lakko_ffi_uniffi.composeContactAck
 import uniffi.lakko_ffi_uniffi.composeContactRequest
@@ -255,6 +256,7 @@ public class ContactsClient(
             recipientAccountId = recipientAccountId,
             messageId = publish.messageId,
             createdAt = publish.createdAt,
+            recipientSignaturePubkey = recipientSignaturePub,
         )
     }
 
@@ -664,6 +666,10 @@ public class ContactsClient(
          *  through search), its binding already verified against the
          *  recipient's account key. `null` writes nothing. */
         reach: MailboxDest? = null,
+        /** ADR-0079 section 2 — the answer to the recipient's own `/i/` link
+         *  this request is sent through, so their device accepts it by itself.
+         *  SECRET. `null` for every other request. */
+        linkAnswer: FfiLinkAnswer? = null,
     ): SendResult {
         // ADR-0074 section 3.5a rule 1 - resolve before addressing. A bundle
         // carried by a link or a search result may name a key its owner has
@@ -692,12 +698,14 @@ public class ContactsClient(
             senderProfile = senderProfile,
             replyGrant = replyGrant,
             dest = reach,
+            linkAnswer = linkAnswer,
         )
         return SendResult(
             recipientUsername = "",
             recipientAccountId = recipientAccountId,
             messageId = publish.messageId,
             createdAt = publish.createdAt,
+            recipientSignaturePubkey = toSignaturePub,
         )
     }
 
@@ -778,6 +786,7 @@ public class ContactsClient(
             recipientAccountId = recipientAccountId,
             messageId = publish.messageId,
             createdAt = publish.createdAt,
+            recipientSignaturePubkey = signaturePub,
         )
     }
 
@@ -1302,6 +1311,7 @@ public class ContactsClient(
         senderProfile: FfiProfile?,
         replyGrant: FfiReachGrant?,
         dest: MailboxDest?,
+        linkAnswer: FfiLinkAnswer? = null,
     ): PublishedRequest {
         // ADR-0074 3.5a rule 1 - resolve before addressing. A request is
         // SEALED to the X25519 key published with [recipientSignaturePubkey],
@@ -1350,6 +1360,9 @@ public class ContactsClient(
                 // write the accept (the 1:1 Welcome) and the ack back into the
                 // sender's closed mailbox.
                 replyGrant = replyGrant,
+                // ADR-0079 section 2 — `link_id || link_secret` of the
+                // recipient's link, sealed with the rest.
+                linkAnswer = linkAnswer,
                 introMessage = introMessage,
             )
         } catch (e: FfiException) {
@@ -1441,6 +1454,42 @@ public class ContactsClient(
         return PublishedAck(messageId = publish.id, createdAt = publish.createdAt)
     }
 
+    /**
+     * ADR-0079 amendment of 2026-10-19 — answer a request whose invite link
+     * no longer counts with a link refusal: signed by this account's key
+     * over the link id and the requester's account key, sealed as a
+     * LINK_REFUSAL row to the requester's mailbox through [reach] (the reply
+     * grant the request held, the path an ack takes). With no [reach]
+     * nothing is written. Throws when it was not written.
+     */
+    public suspend fun sendLinkRefusal(
+        inviterSigningSeed: ByteArray,
+        linkId: ByteArray,
+        originalRequest: IncomingContactRequest,
+        reach: MailboxDest? = null,
+    ) {
+        val target = reach ?: throw ContactsError.wrap(MailboxUnknown())
+        val wire = try {
+            uniffi.lakko_ffi_uniffi.composeLinkRefusal(inviterSigningSeed, linkId, originalRequest.fromPubkey)
+        } catch (e: FfiException) {
+            throw ContactsError.wrap(e)
+        }
+        val sealed = try {
+            mailboxCrypto.sealFor(target, MailboxRowKind.LINK_REFUSAL, wire)
+        } catch (e: FfiException) {
+            throw ContactsError.wrap(e)
+        }
+        try {
+            ds.publishMailbox(sealed.address, sealed.row, reach = target.auth)
+        } catch (e: DsHttpError) {
+            throw ContactsError.wrap(e)
+        } catch (e: DsNetworkError) {
+            throw ContactsError.wrap(e)
+        } catch (e: DsClientArgError) {
+            throw ContactsError.wrap(e)
+        }
+    }
+
     // -----------------------------------------------------------------
     // Poll: fetch stranger inbox + decode envelopes
     // -----------------------------------------------------------------
@@ -1503,6 +1552,10 @@ public class ContactsClient(
                     continue
                 }
 
+                MailboxRowKind.LINK_REFUSAL -> {
+                    events.add(IncomingMailboxEvent.LinkRefusal(env.body))
+                }
+
                 MailboxRowKind.WELCOME -> {
                     events.add(
                         IncomingMailboxEvent.Welcome(
@@ -1563,22 +1616,17 @@ public class ContactsClient(
                         // intact; the request is still authentic.
                         var senderProfile: me.lakko.app.profile.PeerProfile? = null
                         var replyGrant: FfiReachGrant? = null
+                        var linkAnswer: FfiLinkAnswer? = null
                         val intro: String? = try {
                             val opened = req.openEnvelope(myX25519Secret)
+                            // ADR-0079 section 2 — the answer to one of this
+                            // account's own invite links, when it carries one.
+                            linkAnswer = opened.linkAnswer
                             // ADR-0060 §6 — the requester's reply key, bound
                             // to the verified `from_pubkey`: kept by the
                             // repository for the accept and the ack.
                             replyGrant = opened.replyGrant
-                            senderProfile = opened.profile?.let { p ->
-                                me.lakko.app.profile.PeerProfile(
-                                    displayName = p.displayName,
-                                    username = p.username,
-                                    updatedAtMs = p.updatedAtMs,
-                                    accountIdHex = me.lakko.app.profile.accountIdHexOrNull(p.accountId),
-                    // ADR-0060 §5 — the username shows only on its certificate.
-                    usernameCertificateHex = p.usernameCertificate?.let { me.lakko.app.reach.reachHex(it) },
-                                )
-                            }
+                            senderProfile = opened.profile?.let { me.lakko.app.profile.peerProfileOf(it) }
                             // UTF-8 decode with replacement-on-
                             // error so malformed bytes still
                             // surface as the best-effort string
@@ -1603,6 +1651,7 @@ public class ContactsClient(
                             createdAt = message.createdAt,
                             profile = senderProfile,
                             replyGrant = replyGrant,
+                            linkAnswer = linkAnswer,
                         )
                     }
                     events.add(IncomingMailboxEvent.ContactRequest(request))
@@ -1637,6 +1686,9 @@ public data class SendResult(
     val messageId: Long,
     /** ISO-8601 timestamp from the DS. */
     val createdAt: String,
+    /** ADR-0084 — the recipient's verified signature key the request was
+     *  sealed to (the Sent row shows the photo held for it), or `null`. */
+    val recipientSignaturePubkey: ByteArray? = null,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -1685,7 +1737,20 @@ public data class IncomingContactRequest(
      *  bound to [fromPubkey]. SECRET: kept by the reach manager, never
      *  persisted with the pending row. `null` when none was carried. */
     val replyGrant: FfiReachGrant? = null,
+    /** ADR-0079 section 2 — the answer to one of this account's own invite
+     *  links the request was sent through. SECRET: decided on when the
+     *  request arrives and never persisted with the pending row. */
+    val linkAnswer: FfiLinkAnswer? = null,
 ) {
+    /** The DS stamp ([createdAt], server-set) as Unix ms, or `null` when it
+     *  does not parse. For a request through an invite link it decides the
+     *  link's expiry (ADR-0079 amendment of 2026-10-19). */
+    val createdAtMs: Long?
+        get() = runCatching { java.time.Instant.parse(createdAt).toEpochMilli() }
+            .recoverCatching { java.time.OffsetDateTime.parse(createdAt).toInstant().toEpochMilli() }
+            .getOrNull()
+            ?.takeIf { it >= 0 }
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is IncomingContactRequest) return false
@@ -1791,6 +1856,14 @@ public sealed interface IncomingMailboxEvent {
     }
     /** 1.9b1 — original recipient's accept-reply. */
     public data class ContactAck(val ack: IncomingContactAck) : IncomingMailboxEvent
+
+    /** ADR-0079 amendment of 2026-10-19 — a link refusal, NOT yet verified:
+     *  the receiver checks it against each pending contact
+     *  (`verifyLinkRefusal`) before it removes anything. */
+    public data class LinkRefusal(val refusal: ByteArray) : IncomingMailboxEvent {
+        override fun equals(other: Any?): Boolean = other is LinkRefusal && refusal.contentEquals(other.refusal)
+        override fun hashCode(): Int = refusal.contentHashCode()
+    }
 }
 
 /** Result of [ContactsClient.pollStrangerInbox]. */

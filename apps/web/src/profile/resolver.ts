@@ -111,10 +111,12 @@ export function resolveDisplay(inputs: DisplayInputs): ResolvedName {
   const claimed = inputs.profile?.username ?? null;
   const verified = claimed !== null && claimed.length > 0 && inputs.verification === "verified";
   const username = verified ? `@${claimed}` : null;
+  // Only a refusal earns the line. A check that could not reach the
+  // directory (a 429, the network) says nothing about the person: it reads
+  // as a check still running and is retried (2026-10-24, docs/ux/profile-names.md
+  // section 6).
   const usernameNotVerified =
-    claimed !== null &&
-    claimed.length > 0 &&
-    (inputs.verification === "mismatch" || inputs.verification === "error");
+    claimed !== null && claimed.length > 0 && inputs.verification === "mismatch";
 
   let name: string;
   let source: NameSource;
@@ -144,17 +146,3 @@ export function resolveDisplay(inputs: DisplayInputs): ResolvedName {
   return { name, source, username, listLabel, theirName, fingerprint, usernameNotVerified };
 }
 
-/**
- * The preview line for the viewer's OWN profile (UX spec §4 — "how others see
- * you"): `Alice Petrova · @alice`, just the name, just `@alice`, or `null`
- * when the viewer has neither.
- *
- * The viewer's own username needs no verification: it is the one this account
- * registered.
- */
-export function ownPreviewLabel(displayName: string | null, username: string | null): string | null {
-  const name = displayName !== null && displayName.trim().length > 0 ? displayName.trim() : null;
-  const handle = username !== null && username.length > 0 ? `@${username}` : null;
-  if (name !== null && handle !== null) return `${name}${NAME_USERNAME_SEPARATOR}${handle}`;
-  return name ?? handle;
-}

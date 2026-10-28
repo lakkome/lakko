@@ -71,6 +71,11 @@
 //!     [`crate::visibility::try_unwrap_reach_state`] — the owner's own
 //!     setting and reach-key versions, from another of their devices
 //!     (ADR-0060 §7).
+//!     (The device card of ADR-0080,
+//!     [`crate::device_card::try_unwrap_device_card`], and the link-request
+//!     claim of ADR-0079, [`crate::link_claim::try_unwrap_link_claim`], are
+//!     checked earlier, right after the key-rotation envelope; neither
+//!     separator prefixes another, so the position changes nothing.)
 //! 11. **Intro-message fallthrough** — plain free-text
 //!     `ContactRequest` (ADR-0005 scenario A; "add me as a
 //!     contact"). Caller renders the bytes as a UTF-8 intro
@@ -109,6 +114,7 @@ use crate::committer_beacon::{try_unwrap_committer_beacon, CommitterBeaconError}
 use crate::committer_delegation::{
     try_unwrap_committer_delegation, CommitterDelegationEnvelope, CommitterDelegationError,
 };
+use crate::device_card::{try_unwrap_device_card, DeviceCard, DeviceCardError};
 use crate::group_closed::{try_unwrap_group_closed, GroupClosedError, SUCCESSOR_GROUP_ID_LEN};
 use crate::group_name::{try_unwrap_group_name, GroupName, GroupNameError};
 use crate::introduction::{
@@ -116,6 +122,8 @@ use crate::introduction::{
     IntroductionsBundle,
 };
 use crate::key_rotation::{try_unwrap_key_rotation, KeyRotation, KeyRotationError};
+use crate::link_claim::{try_unwrap_link_claim, LinkClaim, LinkClaimError};
+use crate::link_founded::{try_unwrap_link_founded, LinkFounded, LinkFoundedError};
 use crate::media_state::{try_unwrap_media_state, MediaStateError};
 use crate::pin::{try_unwrap_pin, PinError, PinOp};
 use crate::profile::{try_unwrap_profile, Profile, ProfileError};
@@ -310,6 +318,32 @@ pub enum IncomingEnvelope<'a> {
     /// both FFI surfaces), store it as pending, and adopt only once the
     /// server-side change is visible. See [`crate::key_rotation`].
     KeyRotation(KeyRotation),
+    /// What another device of this account says about itself (ADR-0080):
+    /// platform, model, versions, city, last activity. Never a chat bubble,
+    /// and meaningful ONLY in the account's own DeviceGroup: a client that
+    /// meets one in any other group drops it. The caller stores it under the
+    /// sender's DeviceGroup leaf signature key resolved at receipt (C-68),
+    /// keeps it only when [`crate::device_card::device_card_is_newer`] than
+    /// the stored card for that key, and drops it when the leaf leaves.
+    DeviceCard(DeviceCard),
+    /// Another device of this account claims a contact request sent through
+    /// one of the account's invite links (ADR-0079, as reworked 2026-10-17).
+    /// Never a chat bubble, and meaningful ONLY in the account's own
+    /// DeviceGroup: a client that meets one in any other group drops it. The
+    /// caller honours it only from a resolvable DeviceGroup member (C-68),
+    /// keeps the earliest DS message id per request
+    /// ([`LinkClaim::request_key`]) and decides its own claim with
+    /// [`crate::link_claim::link_claim_outcome`] under its per-group lock
+    /// (C-62 sub-invariant 5).
+    LinkClaim(LinkClaim),
+    /// The device that won a link request founded its one-to-one and names it
+    /// here, with the founding Welcome, before delivering that Welcome to
+    /// anyone (ADR-0079, ordering of 2026-10-17). Never a chat bubble, and
+    /// meaningful ONLY in the account's own DeviceGroup. The caller keeps the
+    /// earliest note per request from a resolvable DeviceGroup member (C-68);
+    /// a device that holds one never founds for that request, it writes the
+    /// note's Welcome to the requester.
+    LinkFounded(LinkFounded),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -384,6 +418,15 @@ pub enum DispatchError {
     /// payload.
     #[error(transparent)]
     KeyRotation(#[from] KeyRotationError),
+    /// The device-card domain (ADR-0080) with a malformed payload.
+    #[error(transparent)]
+    DeviceCard(#[from] DeviceCardError),
+    /// The link-claim domain (ADR-0079) with a malformed payload.
+    #[error(transparent)]
+    LinkClaim(#[from] LinkClaimError),
+    /// The link-founded domain (ADR-0079) with a malformed payload.
+    #[error(transparent)]
+    LinkFounded(#[from] LinkFoundedError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -468,6 +511,18 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7h. Key rotation — ADR-0074 section 3.3.
     if let Some(rotation) = try_unwrap_key_rotation(plaintext)? {
         return Ok(IncomingEnvelope::KeyRotation(rotation));
+    }
+    // 7i. Device card — ADR-0080.
+    if let Some(card) = try_unwrap_device_card(plaintext)? {
+        return Ok(IncomingEnvelope::DeviceCard(card));
+    }
+    // 7j. Link-request claim — ADR-0079 (reworked 2026-10-17).
+    if let Some(claim) = try_unwrap_link_claim(plaintext)? {
+        return Ok(IncomingEnvelope::LinkClaim(claim));
+    }
+    // 7k. Link-founded note — ADR-0079 (ordering of 2026-10-17).
+    if let Some(note) = try_unwrap_link_founded(plaintext)? {
+        return Ok(IncomingEnvelope::LinkFounded(note));
     }
     // 8. Plain intro message — ADR-0005 scenario A.
     if let Some(record) = try_unwrap_introduction_offer(plaintext)? {
@@ -579,6 +634,60 @@ mod tests {
     }
 
     #[test]
+    fn dispatches_a_link_claim_and_never_renders_it() {
+        use crate::link_claim::{compose_link_claim, LINK_CLAIM_ENVELOPE_DOMAIN_V1};
+        let claim = LinkClaim {
+            link_id: [5; 16],
+            requester_account_key: [6; 32],
+        };
+        let wire = compose_link_claim(&claim);
+        assert_eq!(
+            dispatch_incoming_envelope(&wire).unwrap(),
+            IncomingEnvelope::LinkClaim(claim)
+        );
+        assert!(matches!(
+            dispatch_incoming_envelope(&wire[..wire.len() - 1]),
+            Err(DispatchError::LinkClaim(_))
+        ));
+        let mut bad = LINK_CLAIM_ENVELOPE_DOMAIN_V1.to_vec();
+        bad.push(0x7F);
+        assert_eq!(
+            dispatch_incoming_envelope(&bad),
+            Err(DispatchError::LinkClaim(LinkClaimError::UnknownVersion(
+                0x7F
+            )))
+        );
+    }
+
+    #[test]
+    fn dispatches_a_link_founded_note_and_never_renders_it() {
+        use crate::link_founded::{compose_link_founded, LINK_FOUNDED_ENVELOPE_DOMAIN_V1};
+        let note = LinkFounded {
+            link_id: [5; 16],
+            requester_account_key: [6; 32],
+            group_id: [7; 32],
+            welcome: vec![8; 40],
+        };
+        let wire = compose_link_founded(&note).unwrap();
+        assert_eq!(
+            dispatch_incoming_envelope(&wire).unwrap(),
+            IncomingEnvelope::LinkFounded(note)
+        );
+        assert!(matches!(
+            dispatch_incoming_envelope(&wire[..wire.len() - 1]),
+            Err(DispatchError::LinkFounded(_))
+        ));
+        let mut bad = LINK_FOUNDED_ENVELOPE_DOMAIN_V1.to_vec();
+        bad.push(0x7F);
+        assert_eq!(
+            dispatch_incoming_envelope(&bad),
+            Err(DispatchError::LinkFounded(
+                LinkFoundedError::UnknownVersion(0x7F)
+            ))
+        );
+    }
+
+    #[test]
     fn dispatches_call_welcome_envelope() {
         let welcome = vec![0xABu8; 256];
         let wrapped = wrap_call_welcome(&welcome);
@@ -631,6 +740,7 @@ mod tests {
             account_id: None,
             username_certificate: None,
             grants: Vec::new(),
+            avatar: None,
         };
         let wrapped = compose_profile(&profile).unwrap();
         assert_eq!(
@@ -643,15 +753,15 @@ mod tests {
     fn an_out_of_bounds_profile_is_an_error_not_an_intro_message() {
         // Fail-closed: a profile carrying a right-to-left override in
         // its name must be dropped, never rendered as chat text.
-        use crate::profile::{DisplayNameError, PROFILE_ENVELOPE_DOMAIN_V1, PROFILE_VERSION_V3};
+        use crate::profile::{DisplayNameError, PROFILE_ENVELOPE_DOMAIN_V1, PROFILE_VERSION_V4};
         let name = "Alice\u{202E}".as_bytes();
         let mut wrapped = PROFILE_ENVELOPE_DOMAIN_V1.to_vec();
-        wrapped.push(PROFILE_VERSION_V3);
+        wrapped.push(PROFILE_VERSION_V4);
         wrapped.extend_from_slice(&0u64.to_be_bytes());
         wrapped.push(u8::try_from(name.len()).unwrap());
         wrapped.extend_from_slice(name);
-        // No username, account id, certificate or grants.
-        wrapped.extend_from_slice(&[0, 0, 0, 0]);
+        // No username, account id, certificate, grants or avatar.
+        wrapped.extend_from_slice(&[0, 0, 0, 0, 0]);
         assert_eq!(
             dispatch_incoming_envelope(&wrapped),
             Err(DispatchError::Profile(ProfileError::DisplayName(

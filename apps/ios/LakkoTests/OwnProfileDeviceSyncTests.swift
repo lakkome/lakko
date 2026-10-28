@@ -58,17 +58,38 @@ final class OwnProfileDeviceSyncTests: XCTestCase {
 
     // MARK: - Settings > Profile draft
 
-    func testTheUneditedDraftFollowsANameFromAnotherDeviceAndAnEditedOneDoesNot() throws {
+    @MainActor
+    func testTheScreenFollowsANameFromAnotherDeviceAndKeepsWhatIsPending() throws {
         let d = try directory()
-        let vm = ProfileSettingsViewModel(directory: d, publishToAllGroups: {})
-        XCTAssertEqual(vm.draftName, "")
+        let ports = ProfileSavePorts(
+            upload: { _ in throw CancellationError() }, rename: { $0 },
+            publish: { _, _ in })
+        let model = ProfileEditModel(saved: ProfileSaved(name: nil, username: "valentin"), ports: ports)
+        model.savedMoved(ProfileSaved(name: "Alice", username: "valentin"))
+        XCTAssertEqual(model.shownName, "Alice", "an unedited row shows the name that arrived")
 
-        vm.followSavedName("Alice")
-        XCTAssertEqual(vm.draftName, "Alice", "an unedited field shows the name that arrived")
+        model.openName()
+        model.nameEdit.text = "Alicia"
+        model.nameTextChanged()
+        model.savedMoved(ProfileSaved(name: "Alice B", username: "valentin"))
+        XCTAssertEqual(model.shownName, "Alicia", "what the person typed is never replaced")
+        XCTAssertEqual(model.saved.name, "Alice B")
+        _ = d
+    }
 
-        vm.draftName = "Alicia"
-        vm.followSavedName("Alice B")
-        XCTAssertEqual(vm.draftName, "Alicia", "what the person is typing is never replaced")
+    func testTheAvatarTravelsToTheOtherDevices() throws {
+        let d = try directory()
+        let still = AvatarBlobRef(
+            blobId: Data(repeating: 1, count: 32), key: Data(repeating: 2, count: 32),
+            nonce: Data(repeating: 3, count: 12), size: 20_000, side: 640)
+        try d.setOwnProfile(displayName: "Alice", avatar: ProfileAvatar(still: still))
+        let envelope = try XCTUnwrap(d.ownDeviceEnvelope())
+        let decoded = try decodeProfileEnvelope(plaintext: envelope)
+        XCTAssertEqual(ProfileAvatar(decoded.avatar)?.still, still)
+
+        let other = try directory()
+        XCTAssertEqual(other.adoptOwnProfileFromDevice(envelope: envelope), .adopted)
+        XCTAssertEqual(other.ownProfile?.avatar?.still, still, "the photo comes with the name")
     }
 
     // MARK: - Receive

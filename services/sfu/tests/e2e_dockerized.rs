@@ -96,15 +96,10 @@ fn nibble(b: u8) -> Result<u8, &'static str> {
 }
 
 /// Mint a valid call-admission JWT signed by the fixture
-/// key. The account + call ids are 32-char lowercase hex,
-/// matching the on-wire contract `services/auth` enforces
-/// in production.
-fn mint_test_jwt(
-    signing: &CallSigningKey,
-    account_id: &str,
-    call_id: &str,
-    role: CallRole,
-) -> String {
+/// key: a 64-hex room and a 32-hex peer id, the on-wire
+/// contract `services/auth` enforces in production
+/// (ADR-0078 section 2: no account, no call id).
+fn mint_test_jwt(signing: &CallSigningKey, peer_id: &str, room: &str, role: CallRole) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock not before epoch")
@@ -112,8 +107,8 @@ fn mint_test_jwt(
     let claims = CallJwtClaims {
         iss: JWT_ISSUER.into(),
         aud: JWT_AUDIENCE.into(),
-        sub: account_id.into(),
-        call_id: call_id.into(),
+        room: room.into(),
+        peer_id: peer_id.into(),
         role,
         iat: now,
         exp: now + JWT_TTL_SECS,
@@ -127,7 +122,7 @@ fn mint_test_jwt(
 /// Asserts:
 /// - The WS upgrade completes (no HTTP 401).
 /// - The first outbound frame is a `ServerFrame::Welcome`
-///   with the inbound call_id echoed back.
+///   with the token's room and peer id echoed back.
 /// - The peer roster excludes the just-admitted peer
 ///   itself.
 ///
@@ -144,9 +139,11 @@ fn mint_test_jwt(
 async fn live_sfu_welcome_round_trip() {
     let seed = fixture_seed();
     let signing = CallSigningKey::from_seed(&seed);
-    let call_id = "deadbeef0000000000000000000000aa";
-    let account = "cafef00d0000000000000000000000bb";
-    let jwt = mint_test_jwt(&signing, account, call_id, CallRole::Participant);
+    let room = lakko_sfu_proto::room_hex(&[
+        0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xaa,
+    ]);
+    let peer_id = "cafef00d0000000000000000000000bb";
+    let jwt = mint_test_jwt(&signing, peer_id, &room, CallRole::Participant);
 
     // Build the WS request offering the Lakko subprotocol
     // and the token subprotocol (`lakko-sfu-token.<jwt>`)
@@ -196,15 +193,13 @@ async fn live_sfu_welcome_round_trip() {
 
     match frame {
         ServerFrame::Welcome {
-            peer_id: _,
-            call_id: echoed_call_id,
+            peer_id: echoed_peer_id,
+            room: echoed_room,
             server_ts: _,
             roster,
         } => {
-            assert_eq!(
-                echoed_call_id, call_id,
-                "Welcome must echo the call_id from the JWT"
-            );
+            assert_eq!(echoed_room, room, "Welcome must echo the room from the JWT");
+            assert_eq!(echoed_peer_id, peer_id, "the peer id is the token's own");
             assert!(
                 roster.is_empty(),
                 "fresh call: the just-admitted peer is the only member; \

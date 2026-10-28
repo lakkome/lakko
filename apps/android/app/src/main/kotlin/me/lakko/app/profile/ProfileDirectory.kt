@@ -165,11 +165,33 @@ public class ProfileDirectory internal constructor(
         }
     }
 
+    /** Pairs a retry loop is already waiting on, so a burst of profile
+     *  changes does not start several. */
+    private val retrying: MutableSet<String> = java.util.Collections.synchronizedSet(HashSet())
+
     private fun verifyInBackground(signatureKeyB64: String, username: String) {
         if (resolver == null) return
+        val pair = "$signatureKeyB64|$username"
         scope.launch {
-            val outcome = verifier.verify(signatureKeyB64, username)
-            if (outcome != VerifyOutcome.UNAVAILABLE) bump()
+            var failures = 0
+            try {
+                while (true) {
+                    val outcome = verifier.verify(signatureKeyB64, username)
+                    if (outcome != VerifyOutcome.UNAVAILABLE) {
+                        bump()
+                        return@launch
+                    }
+                    // A check that could not complete (a 429, the network) is
+                    // tried again by itself; the name shows without the
+                    // username meanwhile.
+                    if (failures == 0 && !retrying.add(pair)) return@launch
+                    failures += 1
+                    kotlinx.coroutines.delay(usernameRetryDelayMs(failures))
+                    if (profiles.get(signatureKeyB64)?.username != username) return@launch
+                }
+            } finally {
+                if (failures > 0) retrying.remove(pair)
+            }
         }
     }
 
@@ -376,6 +398,9 @@ internal class SharedPrefsProfilePersistence(private val context: Context) : Pro
         val accountIdHex: String? = null,
         /** ADR-0060 — the username certificate, hex; absent before v3. */
         val usernameCertificateHex: String? = null,
+        /** ADR-0084 — the profile photo references (they carry the AEAD
+         *  keys), sealed under the device's avatar key; absent before v4. */
+        val avatarSealed: String? = null,
     )
 
     private fun prefs() = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -392,6 +417,7 @@ internal class SharedPrefsProfilePersistence(private val context: Context) : Pro
                     s.updatedAtMs.toULong(),
                     s.accountIdHex,
                     s.usernameCertificateHex,
+                    me.lakko.app.avatar.openAvatarRefs(me.lakko.app.avatar.KeystoreAvatarSeal, s.avatarSealed),
                 )
             }
         } catch (_: Exception) {
@@ -405,7 +431,8 @@ internal class SharedPrefsProfilePersistence(private val context: Context) : Pro
             return
         }
         val stored = profiles.mapValues { (_, p) ->
-            StoredProfile(p.displayName, p.username, p.updatedAtMs.toLong(), p.accountIdHex, p.usernameCertificateHex)
+            StoredProfile(p.displayName, p.username, p.updatedAtMs.toLong(), p.accountIdHex, p.usernameCertificateHex,
+                me.lakko.app.avatar.sealAvatarRefs(me.lakko.app.avatar.KeystoreAvatarSeal, p.avatar))
         }
         prefs().edit().putString(profilesKey(account), json.encodeToString(stored)).apply()
     }

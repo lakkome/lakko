@@ -25,7 +25,14 @@
 import type { MailboxKey, MailboxKind as WasmMailboxKind } from "../../wasm/lakko_ffi_wasm";
 
 /** The kinds a mailbox row carries, by name. Mirrors the frozen core values. */
-export type MailboxRowKind = "contact-request" | "welcome" | "contact-ack" | "welcome-rendezvous";
+export type MailboxRowKind =
+  | "contact-request"
+  | "welcome"
+  | "contact-ack"
+  | "welcome-rendezvous"
+  /** ADR-0079 amendment of 2026-10-19: the inviter refused a request whose
+   *  invite link no longer counts. */
+  | "link-refusal";
 
 /** Where one write goes: the person's verified mailbox key and its address. */
 export interface MailboxTarget {
@@ -42,6 +49,7 @@ export interface MailboxRowWasm {
     readonly Welcome: WasmMailboxKind | number;
     readonly ContactAck: WasmMailboxKind | number;
     readonly WelcomeRendezvous: WasmMailboxKind | number;
+    readonly LinkRefusal: WasmMailboxKind | number;
   };
   sealMailboxRow(mailboxPk: Uint8Array, kind: WasmMailboxKind, body: Uint8Array): Uint8Array;
   openMailboxRow(key: MailboxKey, row: Uint8Array): {
@@ -62,6 +70,8 @@ export function wasmKindOf(wasm: MailboxRowWasm, kind: MailboxRowKind): WasmMail
       return wasm.MailboxKind.ContactAck as WasmMailboxKind;
     case "welcome-rendezvous":
       return wasm.MailboxKind.WelcomeRendezvous as WasmMailboxKind;
+    case "link-refusal":
+      return wasm.MailboxKind.LinkRefusal as WasmMailboxKind;
   }
 }
 
@@ -70,6 +80,7 @@ function nameOf(wasm: MailboxRowWasm, kind: number): MailboxRowKind | null {
   if (kind === wasm.MailboxKind.Welcome) return "welcome";
   if (kind === wasm.MailboxKind.ContactAck) return "contact-ack";
   if (kind === wasm.MailboxKind.WelcomeRendezvous) return "welcome-rendezvous";
+  if (kind === wasm.MailboxKind.LinkRefusal) return "link-refusal";
   return null;
 }
 

@@ -95,8 +95,9 @@ final class RotationPanelModel: ObservableObject {
     /// ADR-0051 §4 — where the publisher's record and keys live; `nil` only
     /// before `load`.
     private weak var state: ChannelsUiState?
-    private var identity: Identity?
-    private var publisherGroup: PublisherGroup?
+    /// The account's current phrase seed: the channel provider is built from
+    /// the lineage seed it implies, requests are signed by it.
+    private var accountIdentitySeed = Data()
     private var cron: RotationCron?
     private var cronTask: Task<Void, Never>?
 
@@ -113,15 +114,19 @@ final class RotationPanelModel: ObservableObject {
         self.channelIdHex = channelId
         self.state = state
         self.client = client
+        self.accountIdentitySeed = accountIdentitySeed
         if cron == nil {
             do {
-                let id = try Identity.fromSeed(seed: accountIdentitySeed)
+                guard let accountIdB64 = AcceptedContactsStore.boundAccountIdB64 else {
+                    throw ChannelPublisherIdentity.NotBound()
+                }
+                // The channel provider (durable since G-50); a group founded
+                // here is snapshotted at once.
+                let id = try ChannelPublisherIdentity.shared.identity(currentSeed: accountIdentitySeed)
                 let pg = try CoPublisher.openPublisherGroup(
-                    identity: id, accountIdB64: AcceptedContactsStore.boundAccountIdB64,
-                    channelIdHex: channelId)
-                identity = id
-                publisherGroup = pg
-                cron = makeCron(identity: id, publisherGroup: pg)
+                    identity: id, accountIdB64: accountIdB64, channelIdHex: channelId)
+                ChannelPublisherIdentity.shared.persist()
+                cron = makeCron(accountIdB64: accountIdB64)
                 // ADR-0057, live walk 2026-09-29 — the channel owner claims
                 // the publisher journal on open (idempotent; a co-publisher
                 // device never claims), so a rotation's epoch registration is
@@ -179,17 +184,13 @@ final class RotationPanelModel: ObservableObject {
 
     // MARK: - internals
 
-    private func makeCron(
-        identity: Identity,
-        publisherGroup: PublisherGroup
-    ) -> RotationCron {
+    private func makeCron(accountIdB64: String) -> RotationCron {
         let channelId = self.channelIdHex
-        let accountIdB64 = AcceptedContactsStore.boundAccountIdB64
         let context = RotationCron.Context(
-            publisherGroup: publisherGroup,
-            identity: identity,
-            channelIdHex: channelId,
-            channelsClient: client,
+            commits: ChannelPublisherCommits.Context(
+                channelIdHex: channelId, currentSeed: accountIdentitySeed,
+                accountIdB64: accountIdB64, channelsClient: client),
+            state: state,
             saveState: { newState in
                 ChannelRotationStateStore.save(
                     accountIdB64: accountIdB64, channelId: channelId, state: newState)
@@ -226,18 +227,13 @@ final class RotationPanelModel: ObservableObject {
         refreshStatus()
         // ADR-0051 §4 — after every rotation the newest epoch must hold a
         // record a late subscriber can read. The rotation advanced the
-        // PublisherGroup, so the content seed changed: write the new seed +
-        // epoch back first (every later post must seal under the seed the
-        // subscribers were just resealed to), then re-post the STORED record
-        // with its ORIGINAL stamp — never a fresh clock read, so the re-issue
-        // can never out-order an edit made in between.
-        guard let state, let identity, let publisherGroup else { return }
-        if let old = state.keysByChannel[channelIdHex],
-           let newSeed = try? publisherGroup.channelSeed(identity: identity) {
-            state.setKeys(
-                channelId: channelIdHex,
-                keys: ChannelPublisherKeys(seed: newSeed, signingKeySeed: old.signingKeySeed))
-        }
+        // PublisherGroup, so the content seed changed: the new seed + epoch
+        // were written back by the rotation's steps (every later post must
+        // seal under the seed the subscribers were just resealed to); then
+        // re-post the STORED record with its ORIGINAL stamp — never a fresh
+        // clock read, so the re-issue can never out-order an edit made in
+        // between.
+        guard let state, let identity = try? Identity.fromSeed(seed: accountIdentitySeed) else { return }
         state.setEpoch(channelId: channelIdHex, epoch: epoch)
         guard let record = state.sharedMeta(channelId: channelIdHex) else { return }
         let channelId = channelIdHex

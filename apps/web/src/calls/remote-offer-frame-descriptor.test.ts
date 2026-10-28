@@ -76,6 +76,8 @@ class FakeStream {
  *  has it. */
 class FakeTransceiver {
   readonly receiver: { track: { kind: string } | null };
+  /** Sealed by the session once the remote offer created it. */
+  readonly sender = {};
   private exts = [
     { uri: GENERIC_FRAME_DESCRIPTOR_URI, direction: "stopped" },
     { uri: "urn:ietf:params:rtp-hdrext:sdes:mid", direction: "sendrecv" },

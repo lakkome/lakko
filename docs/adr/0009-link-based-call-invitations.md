@@ -11,6 +11,14 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   and still in force.
 - **Date:** 2026-05-21
 
+> **AMENDED 2026-10-19 — the inline form is removed (maintainer; the note
+> is in [ADR-0028](0028-group-join-ticket.md)'s head).** A `/c/` link is
+> always `https://<host>/c/<8-char id>#<16-char secret>`; a failed upload,
+> a network failure included, mints no link, and an inline `/c/` slug opens
+> as a dead link. The pointer / inline split of the Decision below, the
+> inline fallback of Alternative A and the inline-URL trade-off under
+> Consequences are history.
+
 > **AMENDED 2026-09-28 — sealed links (the maintainer's decision on the
 > [ADR-0028](0028-group-join-ticket.md) security pass; the full construction
 > is in that ADR's head note).** A `/c/` link now reads

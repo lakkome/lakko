@@ -23,7 +23,6 @@ import { ReachSession } from "./reach-service";
 import {
   EMPTY_REACH_BOOK,
   REACH_RECOVERY_ACCOUNT_WIDE_VERSIONS,
-  REACH_RECOVERY_SCOPED_VERSIONS,
   applyVersionChecks,
   bookHoldsNoVersionState,
   bumpVersion,
@@ -78,8 +77,9 @@ describe("a restored device resumes from the keys the mailbox holds", () => {
     const empty = new Uint8Array(0);
     const contactV0 = reachPk(seed, wasm.ReachClass.Contact, empty, 0);
     const contactV1 = reachPk(seed, wasm.ReachClass.Contact, empty, 1);
-    const memberV0 = reachPk(seed, wasm.ReachClass.Member, GROUP, 0);
-    const memberV1 = reachPk(seed, wasm.ReachClass.Member, GROUP, 1);
+    // ADR-0078 section 9: the account's one member key, no group scope.
+    const memberV0 = reachPk(seed, wasm.ReachClass.Member, empty, 0);
+    const memberV1 = reachPk(seed, wasm.ReachClass.Member, empty, 1);
     const { ds, puts } = fakeDs(async () => ({
       keys: [
         { publicKey: contactV1, expiresAtMs: null },
@@ -107,11 +107,11 @@ describe("a restored device resumes from the keys the mailbox holds", () => {
     }
   });
 
-  it("a group joined AFTER the first sync is checked when it appears", async () => {
+  it("the account-wide member key is checked once, at the first sync, before any group (ADR-0078)", async () => {
     const account = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x72));
     const seed = account.ed25519Seed;
-    const memberV0 = reachPk(seed, wasm.ReachClass.Member, GROUP, 0);
-    const memberV2 = reachPk(seed, wasm.ReachClass.Member, GROUP, 2);
+    const memberV0 = reachPk(seed, wasm.ReachClass.Member, new Uint8Array(0), 0);
+    const memberV2 = reachPk(seed, wasm.ReachClass.Member, new Uint8Array(0), 2);
     const { ds, puts, reads } = fakeDs(async () => ({
       keys: [{ publicKey: memberV2, expiresAtMs: null }],
       open: false,
@@ -122,16 +122,14 @@ describe("a restored device resumes from the keys the mailbox holds", () => {
     try {
       await session.syncNow(true);
       expect(reads()).toBe(1);
-      // The re-admission Welcome arrives later.
+      expect(session.currentVersion("member")).toBe(2);
+      // The re-admission Welcome arrives later: nothing per group to check.
       groups = [GROUP_HEX];
       await session.syncNow(true);
-      expect(reads()).toBe(2);
+      expect(reads()).toBe(1);
       expect(session.currentVersion("member", GROUP)).toBe(2);
       const added = puts.flatMap((p) => (p.add ?? []).map((a) => hexOf(a.publicKey)));
       expect(added).not.toContain(hexOf(memberV0));
-      // Once checked, a later sync does not read again.
-      await session.syncNow(true);
-      expect(reads()).toBe(2);
     } finally {
       session.stop();
       account.free();
@@ -178,6 +176,69 @@ describe("a restored device resumes from the keys the mailbox holds", () => {
   });
 });
 
+describe("ADR-0078 section 9: one key per class, rotated on leaving", () => {
+  it("leaving a group rotates the member key, registers the new one and removes the old", async () => {
+    const account = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x75));
+    const seed = account.ed25519Seed;
+    const empty = new Uint8Array(0);
+    const memberV0 = reachPk(seed, wasm.ReachClass.Member, empty, 0);
+    const memberV1 = reachPk(seed, wasm.ReachClass.Member, empty, 1);
+    const { ds, puts } = fakeDs(async () => ({ keys: [], open: false }));
+    const other = journalHex(new Uint8Array(32).fill(0x0b));
+    let groups = [GROUP_HEX, other];
+    const session = await ReachSession.open("acc", seed, account.signaturePublicKey, {
+      ds,
+      accountMailbox: new Uint8Array(32).fill(0xaa),
+    });
+    session.setScopeProvider(() => ({ groupIdsHex: groups, channels: [] }));
+    try {
+      await session.syncNow(true);
+      expect(session.currentVersion("member")).toBe(0);
+      // Both groups are reached by ONE member key.
+      const firstAdds = puts.flatMap((p) => (p.add ?? []).map((a) => hexOf(a.publicKey)));
+      expect(firstAdds.filter((pk) => pk === hexOf(memberV0))).toHaveLength(1);
+      // The account leaves one group.
+      groups = [GROUP_HEX];
+      await session.syncNow(true);
+      expect(session.currentVersion("member")).toBe(1);
+      const last = puts[puts.length - 1];
+      expect((last?.add ?? []).map((a) => hexOf(a.publicKey))).toContain(hexOf(memberV1));
+      expect((last?.remove ?? []).map(hexOf)).toContain(hexOf(memberV0));
+      // The grant every remaining group's profile carries is the new one.
+      const grant = session.grant("member", GROUP);
+      expect(grant.version).toBe(1);
+      grant.free();
+      // Joining another group rotates nothing.
+      groups = [GROUP_HEX, other];
+      await session.syncNow(true);
+      expect(session.currentVersion("member")).toBe(1);
+    } finally {
+      session.stop();
+      account.free();
+    }
+  });
+
+  it("a setting change made on this device rotates the group and channel keys", async () => {
+    const account = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x76));
+    const { ds } = fakeDs(async () => ({ keys: [], open: false }));
+    const session = await ReachSession.open("acc", account.ed25519Seed, account.signaturePublicKey, {
+      ds,
+      accountMailbox: new Uint8Array(32).fill(0xaa),
+    });
+    session.setScopeProvider(() => ({ groupIdsHex: [GROUP_HEX], channels: [] }));
+    try {
+      await session.syncNow(true);
+      await session.rotateOnSettingChange();
+      expect(session.currentVersion("group")).toBe(1);
+      expect(session.currentVersion("channel")).toBe(1);
+      expect(session.currentVersion("member")).toBe(0);
+    } finally {
+      session.stop();
+      account.free();
+    }
+  });
+});
+
 describe("the pure rule", () => {
   const scopes = { groupIdsHex: ["aa"], channels: [{ idHex: "cc", epoch: 7 }] };
 
@@ -189,12 +250,13 @@ describe("the pure rule", () => {
 
   it("a recovering book checks every versioned class it could register, with the stated bounds", () => {
     const book = { ...EMPTY_REACH_BOOK, recovery: { checked: {} } };
+    // ADR-0078 section 9: every class is account-wide, one check each.
     expect(versionChecksDue(book, scopes)).toEqual([
       { cls: "contact", scopeHex: "", from: 0, to: REACH_RECOVERY_ACCOUNT_WIDE_VERSIONS },
+      { cls: "group", scopeHex: "", from: 0, to: REACH_RECOVERY_ACCOUNT_WIDE_VERSIONS },
+      { cls: "member", scopeHex: "", from: 0, to: REACH_RECOVERY_ACCOUNT_WIDE_VERSIONS },
+      { cls: "channel", scopeHex: "", from: 0, to: REACH_RECOVERY_ACCOUNT_WIDE_VERSIONS },
       { cls: "fof", scopeHex: "", from: 0, to: REACH_RECOVERY_ACCOUNT_WIDE_VERSIONS },
-      { cls: "group", scopeHex: "aa", from: 0, to: REACH_RECOVERY_SCOPED_VERSIONS },
-      { cls: "member", scopeHex: "aa", from: 0, to: REACH_RECOVERY_SCOPED_VERSIONS },
-      { cls: "channel", scopeHex: "cc", from: 7, to: 7 + REACH_RECOVERY_SCOPED_VERSIONS },
     ]);
   });
 

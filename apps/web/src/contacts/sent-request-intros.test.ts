@@ -87,6 +87,8 @@ describe("the links this device minted, listed for the spend round", () => {
     const link = (fill: number) => ({
       linkSecret: new Uint8Array(12).fill(fill),
       linkId: new Uint8Array(16).fill(fill),
+      revocationSeed: new Uint8Array(32).fill(fill),
+      facts: null,
     });
     await rememberMintedLink(ACCOUNT, "contact", "slugI", link(1), 1000);
     await rememberMintedLink(ACCOUNT, "call", "slugC", link(2), 2000);

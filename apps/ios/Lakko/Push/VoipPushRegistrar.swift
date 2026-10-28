@@ -28,9 +28,9 @@ import os
 ///     than left ringing — an abandoned reported call is the other way an app
 ///     loses its VoIP privileges.
 ///
-/// The VoIP token is registered with `services/push-gw` under its own provider
-/// (``PushTokenKind/voip``), never overwriting the alert token: they are
-/// different tokens for different push types.
+/// The VoIP token is sealed into every group subscription beside the alert
+/// token, under its own provider (``PushTokenKind/voip``): they are different
+/// tokens for different push types (ADR-0078 section 3, ``PushDeviceTokens``).
 @MainActor
 final class VoipPushRegistrar: NSObject {
 
@@ -58,8 +58,8 @@ final class VoipPushRegistrar: NSObject {
     /// (``decide(_:binding:routes:defaults:)``). A refused wake fetches nothing.
     var onWake: ((VoipWakeTarget) -> Void)?
 
-    /// The `(device pseudonym, account)` binding (ADR-0042, amended
-    /// 2026-09-30) every wake is checked against.
+    /// The bound account (ADR-0042, amended 2026-09-30, with ADR-0078) every
+    /// wake is checked against.
     private let bindingStore: PushAccountBindingStore
 
     private let provider: CallKitProvider
@@ -74,13 +74,13 @@ final class VoipPushRegistrar: NSObject {
     init(
         provider: CallKitProvider = .shared,
         registry: CallKitCallRegistry? = nil,
-        gateway: VoipPushGateway = .live(),
+        tokens: VoipTokenRegistration? = nil,
         bindingStore: PushAccountBindingStore = .live
     ) {
         self.provider = provider
         self.registry = registry ?? .shared
         self.bindingStore = bindingStore
-        self.tokens = VoipTokenRegistration(gateway: gateway, bindingStore: bindingStore)
+        self.tokens = tokens ?? VoipTokenRegistration()
         super.init()
     }
 
@@ -89,11 +89,8 @@ final class VoipPushRegistrar: NSObject {
     ///
     /// Called at launch rather than at sign-in: a VoIP token is device state,
     /// not account state, and the app has to be able to receive a push before
-    /// it knows whether anyone will send one. The REGISTRATION with the gateway
-    /// is what is account-scoped (``VoipTokenRegistration``): it is made only
-    /// for a pseudonym bound to a signed-in account, at launch for a restored
-    /// session and at each sign-in
-    /// (``registerForSignIn(devicePseudonym:)``).
+    /// it knows whether anyone will send one. What is account-scoped is the
+    /// subscriptions the token is sealed into (``PushDeviceTokens``).
     func start() {
         guard pushRegistry == nil else { return }
         // The main queue, so the delegate callbacks below can reach main-actor
@@ -105,21 +102,15 @@ final class VoipPushRegistrar: NSObject {
         pushRegistry = registry
     }
 
-    /// Forget the VoIP registration made under `devicePseudonym` (logout /
-    /// forget device). See ``VoipTokenRegistration/unregister(devicePseudonym:)``.
-    func unregister(devicePseudonym: Data) async {
-        await tokens.unregister(devicePseudonym: devicePseudonym)
-    }
-
-    /// Register the VoIP token under the pseudonym a sign-in has just been
-    /// bound under (``PushSubscriber/subscribe(accountIdB64:stillSignedIn:)``).
+    /// Store the token PushKit already holds, without waiting for its delegate
+    /// callback (``PushSubscriber/subscribe(accountIdB64:stillSignedIn:)``
+    /// runs this just before it sends the subscriptions).
     ///
     /// PushKit delivers the token once per launch, not once per sign-in, so
     /// without this a sign-in in a running app (the first one after install,
-    /// or one after Log out) had no VoIP registration until the next launch.
-    func registerForSignIn(devicePseudonym: Data) async {
+    /// or one after Log out) sealed no VoIP token until the next launch.
+    func noteCurrentToken() {
         if let token = pushRegistry?.pushToken(for: .voIP) { tokens.noteToken(token) }
-        await tokens.registerForSignIn(devicePseudonym: devicePseudonym)
     }
 
     // MARK: - Incoming
@@ -152,9 +143,9 @@ final class VoipPushRegistrar: NSObject {
     ///
     /// ## A wake for no one here is reported and ended the same way
     ///
-    /// ADR-0042 (amended 2026-09-30): a wake is acted on only for the account
-    /// this device's push pseudonym is bound to, and only when the wake's `d`
-    /// is that pseudonym. Apple's rule does not bend for a wake that is not
+    /// ADR-0042 (amended 2026-09-30, with ADR-0078): a wake is acted on only
+    /// for the bound account, and only when the wake's `s` is a subscription
+    /// that account holds for the wake's `g`. Apple's rule does not bend for a wake that is not
     /// ours, so it too is reported — as the nameless placeholder — and ended in
     /// the same completion handler. Unlike a muted call nothing is fetched: the
     /// wake belongs to no account signed in here, so there is nothing to
@@ -222,13 +213,13 @@ final class VoipPushRegistrar: NSObject {
 
     /// What to do with a VoIP wake, decided from the wake alone at report time.
     ///
-    /// First the account gate (ADR-0042, amended 2026-09-30): the wake's `d`
-    /// must equal the device pseudonym bound to the signed-in account
-    /// (``PushAccountBinding/boundAccount(wakeDevicePseudonymHex:binding:)``),
-    /// else ``VoipWakeDecision/refuse``. Every later read is for that bound
-    /// account and no other: the reverse index is looked up for
-    /// `(bound account, push_gid)`, a row another account wrote is a miss, and
-    /// the mute flag is the bound account's.
+    /// First the account gate (ADR-0042, amended 2026-09-30, with ADR-0078):
+    /// a binding must exist, the wake must carry a well-formed `s`
+    /// (``PushAccountBinding/boundAccount(wakeSubscriptionIdHex:binding:)``),
+    /// and the bound account's route row for the wake's `g` must hold that
+    /// same subscription id, else ``VoipWakeDecision/refuse``. Every later read
+    /// is for that bound account and no other, and the mute flag is the bound
+    /// account's.
     ///
     /// Then the mute rule, `docs/ux/calls.md` section 2.1, through the one rule
     /// (`LakkoCore.ringDecision`). The age argument is `0` and that is not a
@@ -240,12 +231,10 @@ final class VoipPushRegistrar: NSObject {
     /// on the real row, and ``armPlaceholderTimeout(uuid:)`` if the row never
     /// arrives.
     ///
-    /// For a wake that passed the gate, every failure to resolve the
-    /// conversation answers "not muted", so the call rings: a wake for the
-    /// signed-in account must ring rather than be swallowed. A route miss
-    /// falls back to reading `g` as a raw group id (the pre-ADR-0042 wake),
-    /// still for the bound account. `defaults` is the App Group suite the mute
-    /// mirror lives in, a parameter only so a test can supply its own.
+    /// A wake that passed the gate resolved its conversation, so the mute flag
+    /// can be read; a wake with no `g` cannot pass it. `defaults` is the App
+    /// Group suite the mute mirror lives in, a parameter only so a test can
+    /// supply its own.
     static func decide(
         _ wake: VoipWakePayload,
         binding: PushAccountBinding?,
@@ -253,12 +242,14 @@ final class VoipPushRegistrar: NSObject {
         defaults: UserDefaults? = SharedStorage.sharedDefaults()
     ) -> VoipWakeDecision {
         guard let accountIdB64 = PushAccountBinding.boundAccount(
-            wakeDevicePseudonymHex: wake.devicePseudonymHex, binding: binding) else {
+            wakeSubscriptionIdHex: wake.subscriptionIdHex, binding: binding),
+              let wakeHex = wake.groupHex?.lowercased(),
+              let groupIdHex = routes.lookupRoute(
+                accountIdB64: accountIdB64,
+                pushGidHex: wakeHex,
+                subscriptionIdHex: wake.subscriptionIdHex) else {
             return .refuse
         }
-        guard let wakeHex = wake.groupHex?.lowercased() else { return .ring(nil) }
-        let groupIdHex = routes.lookupRoute(accountIdB64: accountIdB64, pushGidHex: wakeHex)
-            ?? wakeHex
         let target = VoipWakeTarget(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         let muted = ConversationMuteMirror.isMuted(
             accountIdB64: accountIdB64, groupIdHex: groupIdHex, defaults: defaults)
@@ -282,193 +273,66 @@ final class VoipPushRegistrar: NSObject {
     }
 }
 
-// MARK: - Token registration
+// MARK: - Token storage
 
-/// The two `services/push-gw` calls the registration makes, as closures so a
-/// test can hold one open and watch the order they arrive in.
-struct VoipPushGateway {
-    var register: @MainActor (_ devicePseudonym: Data, _ token: Data) async throws -> Void
-    var unregister: @MainActor (_ devicePseudonym: Data) async throws -> Void
-
-    static func live(client: PushClient = PushClient()) -> VoipPushGateway {
-        VoipPushGateway(
-            register: { pseudonym, token in
-                try await client.register(
-                    devicePseudonym: pseudonym,
-                    provider: PushTokenKind.voip.provider,
-                    tokenBytes: token
-                )
-            },
-            unregister: { pseudonym in
-                _ = try await client.unregister(
-                    devicePseudonym: pseudonym, provider: PushTokenKind.voip.provider)
-            }
-        )
-    }
-}
-
-/// The VoIP token's registration with `services/push-gw`, kept apart from
-/// PushKit and CallKit so its ordering can be tested.
+/// The VoIP token's half of ``PushDeviceTokens``, kept apart from PushKit and
+/// CallKit so it can be tested.
 ///
-/// The token is device state and outlives a sign-out; the registration is
-/// made under the device pseudonym, which is minted per sign-in and cleared
-/// at Log out (``DevicePushId``). Three rules keep a sign-out and the sign-in
-/// after it from undoing each other:
-///
-///   * Every call names its pseudonym explicitly, read by the caller before
-///     it waited on anything. An unregister that is still in flight when the
-///     next account signs in names the OLD pseudonym, so it cannot take the
-///     new registration off the gateway.
-///   * A token is registered only under the pseudonym the push binding names
-///     (``VoipPushRegistration/isBound(devicePseudonym:binding:)``), asked
-///     again when the call's turn comes. Log out clears that binding first,
-///     so from then on nothing is registered for the session that ended.
-///   * Gateway calls run one after another in the order they were asked for,
-///     so a register and the unregister behind it (same pseudonym) reach the
-///     gateway in that order.
+/// The token is device state and outlives a sign-out. Since ADR-0078 there is
+/// no registration of its own: the token is sealed into every group
+/// subscription of the signed-in account, so a token that CHANGED while an
+/// account is bound sends every subscription again (``onChange``). Log out
+/// clears the binding first, so from then on a delivered token is only
+/// stored.
 @MainActor
 final class VoipTokenRegistration {
 
     private static let log = Logger(subsystem: "me.lakko", category: "voip-push")
 
-    private let gateway: VoipPushGateway
+    private let store: PushDeviceTokens
     private let bindingStore: PushAccountBindingStore
-    private let devicePseudonym: @MainActor () -> Data?
 
-    /// The newest VoIP token PushKit delivered.
-    private var currentToken: Data?
-
-    /// What the gateway holds as far as this process knows: the token, and
-    /// the pseudonym it is registered under. A new sign-in mints a new
-    /// pseudonym, so the same token is registered again for it.
-    private var lastRegistered: (devicePseudonym: Data, token: Data)?
-
-    /// The newest gateway call; each one runs after the one before it.
-    private var chain: Task<Void, Never>?
+    /// Sends every subscription of the bound account again. Defaults to
+    /// ``PushSubscriber/tokensChanged()``.
+    private let onChange: @MainActor () async -> Void
 
     init(
-        gateway: VoipPushGateway,
-        bindingStore: PushAccountBindingStore,
-        devicePseudonym: @escaping @MainActor () -> Data? = { (try? DevicePushId.peek()) ?? nil }
+        store: PushDeviceTokens = .shared,
+        bindingStore: PushAccountBindingStore = .live,
+        onChange: (@MainActor () async -> Void)? = nil
     ) {
-        self.gateway = gateway
+        self.store = store
         self.bindingStore = bindingStore
-        self.devicePseudonym = devicePseudonym
+        self.onChange = onChange ?? { await PushSubscriber.shared.tokensChanged() }
     }
 
-    /// Remember a token without registering it.
+    /// Store a token without sending anything (a sign-in sends next).
     func noteToken(_ token: Data) {
         guard !token.isEmpty else { return }
-        currentToken = token
+        store.setVoip(token)
     }
 
-    /// PushKit delivered a token (at launch, or because it changed). It is
-    /// registered now when an account is signed in; otherwise it is held for
-    /// ``registerForSignIn(devicePseudonym:)``.
+    /// PushKit delivered a token (at launch, or because it changed). Stored;
+    /// when it changed and an account is bound, every subscription is sent
+    /// again. Returns the task doing that, or `nil`.
     @discardableResult
     func tokenDelivered(_ token: Data) -> Task<Void, Never>? {
-        noteToken(token)
-        guard let pseudonym = boundPseudonym() else {
+        guard !token.isEmpty, store.setVoip(token) else { return nil }
+        guard bindingStore.current() != nil else {
             Self.log.info("voip token held: no signed-in account")
             return nil
         }
-        return Task { @MainActor [weak self] in
-            await self?.register(token: token, devicePseudonym: pseudonym)
-        }
+        let onChange = onChange
+        return Task { @MainActor in await onChange() }
     }
 
-    /// PushKit invalidated the token: nothing is held and nothing is known
-    /// to be registered.
-    func tokenInvalidated() {
-        currentToken = nil
-        lastRegistered = nil
-    }
-
-    /// Register the held token under the pseudonym a sign-in was just bound
-    /// under. Nothing to do when PushKit has not delivered a token yet:
-    /// ``tokenDelivered(_:)`` registers it when it arrives.
-    func registerForSignIn(devicePseudonym pseudonym: Data) async {
-        guard let token = currentToken else {
-            Self.log.info("voip token not delivered yet")
-            return
-        }
-        await register(token: token, devicePseudonym: pseudonym)
-    }
-
-    /// Forget the registration made under `pseudonym`. Best-effort: a
-    /// gateway that keeps the row only sends pushes this device will refuse
-    /// to turn into a call.
-    func unregister(devicePseudonym pseudonym: Data) async {
-        if lastRegistered?.devicePseudonym == pseudonym { lastRegistered = nil }
-        await enqueue { [gateway] in
-            do {
-                try await gateway.unregister(pseudonym)
-            } catch {
-                Self.log.warning("voip unregister failed: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    /// The device pseudonym, when it is the one bound to a signed-in account.
-    private func boundPseudonym() -> Data? {
-        guard let pseudonym = devicePseudonym() else { return nil }
-        return VoipPushRegistration.isBound(
-            devicePseudonym: pseudonym, binding: bindingStore.current()) ? pseudonym : nil
-    }
-
-    private func register(token: Data, devicePseudonym pseudonym: Data) async {
-        await enqueue { [weak self] in
-            guard let self else { return }
-            // Asked here, after every gateway call queued before this one:
-            // the sign-in this was started for may have ended.
-            guard self.boundPseudonym() == pseudonym else { return }
-            let last = self.lastRegistered
-            guard PushTokenRegistration.shouldRegister(
-                token: token,
-                lastRegistered: last?.devicePseudonym == pseudonym ? last?.token : nil
-            ) else {
-                return
-            }
-            do {
-                try await self.gateway.register(pseudonym, token)
-                // A sign-out during the round trip queued its unregister
-                // behind this call; the row is not remembered as held.
-                guard self.boundPseudonym() == pseudonym else { return }
-                self.lastRegistered = (pseudonym, token)
-                Self.log.info("voip token registered")
-            } catch {
-                // Expected until the gateway learns the provider — see the
-                // `apnsVoip` case in `PushClient.Provider`. Never fatal: the
-                // alert-push path keeps working, and the NSE keeps raising the
-                // call alert that stands in for a VoIP wake.
-                Self.log.warning("voip token register failed: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    /// Run `operation` after every gateway call asked for before it.
-    private func enqueue(_ operation: @escaping @MainActor () async -> Void) async {
-        let previous = chain
-        let task = Task { @MainActor in
-            await previous?.value
-            await operation()
-        }
-        chain = task
-        await task.value
-    }
-}
-
-/// When a VoIP token may be registered under a device pseudonym.
-enum VoipPushRegistration {
-    /// `true` when `devicePseudonym` is the one the push binding names, that
-    /// is, the pseudonym of a sign-in that has not ended.
-    static func isBound(devicePseudonym: Data, binding: PushAccountBinding?) -> Bool {
-        guard let binding, !binding.accountIdB64.isEmpty,
-              let bound = PushAccountBinding.normalizedPseudonymHex(binding.devicePseudonymHex)
-        else {
-            return false
-        }
-        return bound == PushAccountBinding.hex(devicePseudonym)
+    /// PushKit invalidated the token: it is dropped, and the subscriptions
+    /// of a bound account are sent again without it.
+    @discardableResult
+    func tokenInvalidated() -> Task<Void, Never>? {
+        guard store.setVoip(nil), bindingStore.current() != nil else { return nil }
+        let onChange = onChange
+        return Task { @MainActor in await onChange() }
     }
 }
 
@@ -478,17 +342,16 @@ enum VoipPushRegistration {
 struct VoipWakeTarget: Equatable {
     /// The account the wake is bound to (``PushAccountBinding``).
     let accountIdB64: String
-    /// The real group id (reverse-mapped from the wake's `push_gid`, or the
-    /// raw `g` of a pre-ADR-0042 wake).
+    /// The real group id (reverse-mapped from the wake's `push_gid`).
     let groupIdHex: String
 }
 
 /// What ``VoipPushRegistrar`` does with a VoIP wake. Every case reports a call
 /// to CallKit first — Apple's rule — and differs in what follows.
 enum VoipWakeDecision: Equatable {
-    /// Not for the signed-in account: no binding, no `d`, or a `d` that is not
-    /// the bound pseudonym. The nameless placeholder is ended at once and
-    /// nothing is fetched.
+    /// Not for the signed-in account: no binding, no `s`, or an `s` the bound
+    /// account does not hold for the wake's `g`. The nameless placeholder is
+    /// ended at once and nothing is fetched.
     case refuse
     /// Ring, and fetch the offer. `nil` when the wake names no conversation.
     case ring(VoipWakeTarget?)
@@ -520,7 +383,7 @@ extension VoipPushRegistrar: PKPushRegistryDelegate {
     ) {
         guard type == .voIP else { return }
         MainActor.assumeIsolated {
-            tokens.tokenInvalidated()
+            _ = tokens.tokenInvalidated()
             Self.log.warning("voip push token invalidated")
         }
     }

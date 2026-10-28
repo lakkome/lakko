@@ -311,7 +311,7 @@ export interface KeyResetFinishRequest {
  *  session pair at the new generation (the caller's old pair is superseded
  *  too; install this one at once). */
 export interface KeyResetFinishResponse extends SessionPairWire {
-  /** URL-safe base64 (no pad) of the 177-byte key-reset attestation the
+  /** URL-safe base64 (no pad) of the 145-byte key-reset attestation the
    *  client carries to discovery (the identity upload) and to the DS (the
    *  DeviceGroup journal reset). */
   key_reset_attest_b64: string;

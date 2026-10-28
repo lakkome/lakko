@@ -18,6 +18,7 @@ import org.webrtc.EglBase
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
+import org.webrtc.MediaStreamTrack
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpReceiver
@@ -56,6 +57,9 @@ import org.webrtc.VideoTrack
  *   single source of truth. This wrapper surfaces the raw
  *   [PeerConnection.PeerConnectionState] transitions; the
  *   session translates them into the user-visible state.
+ * - The ICE servers — the caller passes them, Lakko's own only
+ *   (`IceServers.kt`: the minted TURN entry and STUN on its host,
+ *   or none). There is no public STUN default.
  * - The MLS-derived call key — SFrame integration arrives
  *   in a follow-up sub-sprint (`G3-2-sframe`), at which
  *   point the wrapper grows an `installCallKey(...)` hook
@@ -81,7 +85,7 @@ import org.webrtc.VideoTrack
  */
 public class WebRtcPeerConnection(
     private val applicationContext: Context,
-    private val iceServers: List<PeerConnection.IceServer> = defaultIceServers(),
+    private val iceServers: List<PeerConnection.IceServer>,
 ) {
 
     /**
@@ -153,6 +157,12 @@ public class WebRtcPeerConnection(
 
     /** `RtpReceiver.id()` of the peer's video receiver, while it has one. */
     private var remoteVideoReceiverId: String? = null
+
+    /** The receiver of a remote shared screen's picture and the stream id it
+     *  arrived in (ADR-0083), kept apart from [remoteVideoReceiverId] so a
+     *  share starting or stopping never reads as the camera doing so. */
+    private var remoteScreenReceiverId: String? = null
+    private var remoteScreenStreamId: String? = null
 
     /**
      * The MSID stream id each incoming audio track arrived in, by track id.
@@ -270,6 +280,10 @@ public class WebRtcPeerConnection(
      */
     private var videoSenderSealed: Boolean = false
 
+    /** The "could not be set to VP8" line was logged once for this
+     *  connection ([preferVp8BeforeDescription]). */
+    private var vp8Warned: Boolean = false
+
     /**
      * The encryptor armed on the video sender, held for diagnosis only — the
      * strong reference that keeps it alive is [attachedEncryptors].
@@ -278,6 +292,16 @@ public class WebRtcPeerConnection(
      * frames carry, and whether libwebrtc ever took the pointer.
      */
     private var videoSenderEncryptor: me.lakko.sframe.LakkoFrameEncryptor? = null
+
+    /**
+     * The encryptor armed on the microphone's sender. Kept so
+     * [syncSenderCodecs] can tell it the negotiated codec: when the SFU's
+     * answer puts `red` first, libwebrtc hands the encryptor RFC 2198 RED
+     * containers, and the frame must say so in its trailer, or a receiver
+     * without RED (Firefox) cannot take the primary frame out (ADR-0071,
+     * amended 2026-10-26). Strongly held by [attachedEncryptors].
+     */
+    private var audioSenderEncryptor: me.lakko.sframe.LakkoFrameEncryptor? = null
 
     /** G3-sframe-native N-5 — the `RtpSender` returned by
      *  `peer.addTrack(audioTrack, ...)`. Captured so SFrame
@@ -367,6 +391,14 @@ public class WebRtcPeerConnection(
                     runCatching { track.id() }.getOrNull()?.let { remoteMiddleVideoTrackIds += it }
                 else -> Unit
             }
+            // A shared screen's picture (ADR-0083): its own receiver, so its
+            // removal clears the share's picture and not the camera.
+            if (isScreenStreamId(streamId)) {
+                remoteScreenReceiverId = runCatching { r.id() }.getOrNull()
+                remoteScreenStreamId = streamId
+                delegate?.onRemoteVideoTrack(track, streamId)
+                return
+            }
             // Remembered so `onRemoveTrack` can tell the peer's video receiver
             // from its audio one: by the time that callback runs, the track is
             // already detached and cannot be inspected.
@@ -388,6 +420,13 @@ public class WebRtcPeerConnection(
         override fun onRemoveTrack(receiver: RtpReceiver?) {
             val r = receiver ?: return
             val id = runCatching { r.id() }.getOrNull()
+            if (id != null && id == remoteScreenReceiverId) {
+                val screenStream = remoteScreenStreamId
+                remoteScreenReceiverId = null
+                remoteScreenStreamId = null
+                delegate?.onRemoteVideoTrack(null, screenStream)
+                return
+            }
             if (id == null || id != remoteVideoReceiverId) return
             remoteVideoReceiverId = null
             delegate?.onRemoteVideoTrack(null, null)
@@ -521,6 +560,7 @@ public class WebRtcPeerConnection(
         localVideoTransceiver = null
         videoSenderSealed = false
         videoSenderEncryptor = null
+        audioSenderEncryptor = null
         remoteAudioStreamByTrackId.clear()
         remoteTracks.clear()
         remoteReceivers.clear()
@@ -646,6 +686,9 @@ public class WebRtcPeerConnection(
          * [MediaWatchdog] needs.
          */
         public val mediaPacketsReceived: Long,
+        /** Every entry of the same report, with its id, for the one-to-one
+         *  call's receiver counters (`CallMediaCounters.kt`). */
+        internal val stats: List<RtcStat> = emptyList(),
     )
 
     public suspend fun sampleConnectionStats(): ConnectionStatsSnapshot? {
@@ -658,6 +701,7 @@ public class WebRtcPeerConnection(
             }
         } ?: return null
         val stats = report.statsMap
+        val entries = stats.values.map { RtcStat(type = it.type, members = it.members, id = it.id) }
         val mediaPackets = stats.values
             .filter { it.type == "inbound-rtp" }
             .sumOf { (it.members["packetsReceived"] as? Number)?.toLong() ?: 0L }
@@ -670,6 +714,7 @@ public class WebRtcPeerConnection(
                 rttMs = null, relayed = false, hasActivePair = false,
                 bytesReceived = 0L, bytesSent = 0L,
                 mediaPacketsReceived = mediaPackets,
+                stats = entries,
             )
         val rttSec = (active.members["currentRoundTripTime"] as? Number)?.toDouble()
         val rttMs = rttSec?.let { Math.round(it * 1000.0).toInt() }
@@ -683,6 +728,7 @@ public class WebRtcPeerConnection(
             rttMs = rttMs, relayed = relayed, hasActivePair = true,
             bytesReceived = bytesReceived, bytesSent = bytesSent,
             mediaPacketsReceived = mediaPackets,
+            stats = entries,
         )
     }
 
@@ -1090,11 +1136,13 @@ public class WebRtcPeerConnection(
         java.util.EnumMap<CameraSenderKind, RtpActivitySender>(CameraSenderKind::class.java)
 
     /**
-     * Tell every video sender's SFrame encryptor the codec its sender
-     * negotiated (ADR-0071): the first entry of the sender's codecs. The
-     * encryptor leaves that codec's frame header in the clear so a receiver
-     * without the generic frame descriptor still finds key frames; told
-     * nothing (or a codec with no rule) it keeps nothing clear.
+     * Tell every sender's SFrame encryptor the codec its sender negotiated
+     * (ADR-0071): the first entry of the sender's codecs. A video encryptor
+     * leaves that codec's frame header in the clear so a receiver without
+     * the generic frame descriptor still finds key frames; told nothing (or
+     * a codec with no rule) it keeps nothing clear. The microphone's
+     * encryptor keeps nothing clear either way, and told `red` it marks each
+     * frame as a RED container, which a receiver without RED needs.
      *
      * Called after every step that can change a sender's codec or give a
      * sender a new encryptor: the SFU's answer, an answer of this device's to
@@ -1113,6 +1161,9 @@ public class WebRtcPeerConnection(
      * usable, in either order.
      */
     public fun syncSenderCodecs() {
+        val audio = localAudioSender
+        val audioEnc = audioSenderEncryptor
+        if (audio != null && audioEnc != null) syncSenderCodec(audio, audioEnc)
         val main = localVideoSender
         val mainEnc = videoSenderEncryptor
         if (main != null && mainEnc != null) syncSenderCodec(main, mainEnc)
@@ -1317,6 +1368,7 @@ public class WebRtcPeerConnection(
                 videoSenderSealed = true
                 videoSenderEncryptor = enc
             }
+            if (streamIndex == SFRAME_STREAM_AUDIO) audioSenderEncryptor = enc
             Log.i(
                 TAG,
                 "sframe arm (connect): leaf=$localLeaf stream=$streamIndex " +
@@ -1640,11 +1692,69 @@ public class WebRtcPeerConnection(
                 )
             )
         }
+        if (video) ensureVideoTransceiverForOffer(peer)
+        preferVp8BeforeDescription(peer)
         val offer = createOfferSuspend(peer, constraints)
         requireStillOpen(peer)
         setLocalDescriptionSuspend(peer, offer)
         requireStillOpen(peer)
         return offer.description
+    }
+
+    /**
+     * Prefer VP8 on every video transceiver of [peer], before the description
+     * about to be built (see [VideoCodecPreference] for why a sealed frame
+     * travels only as VP8). Audio transceivers are untouched. When the factory
+     * offers no VP8 or libwebrtc refuses the list, the transceiver is left as
+     * it is and this says so once per connection.
+     */
+    private fun preferVp8BeforeDescription(peer: PeerConnection) {
+        val preferences = runCatching {
+            sharedFactory
+                ?.getRtpReceiverCapabilities(MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO)
+                ?.codecs
+                ?.let { VideoCodecPreference.vp8Preferences(it) }
+        }.getOrNull()
+        val transceivers = runCatching { peer.transceivers }.getOrElse { emptyList() }
+        val outcome = VideoCodecPreference.preferVp8(
+            transceivers = transceivers,
+            isVideo = { tr ->
+                runCatching {
+                    !tr.isStopped && tr.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
+                }.getOrDefault(false)
+            },
+            preferences = preferences,
+            set = { tr, list -> tr.setCodecPreferences(list) },
+        )
+        if (outcome.unsupported > 0 && !vp8Warned) {
+            vp8Warned = true
+            Log.w(
+                TAG,
+                "${outcome.unsupported} video transceiver(s) could not be set to VP8; " +
+                    "this device's video may not reach the other person",
+            )
+        }
+    }
+
+    /**
+     * An offer that asks to receive video when no video transceiver exists yet
+     * (a video call whose camera did not start): `OfferToReceiveVideo` would
+     * make a receive-only one inside `createOffer`, after
+     * [preferVp8BeforeDescription] ran. Make that same transceiver here
+     * instead, so it is told to prefer VP8 too.
+     */
+    private fun ensureVideoTransceiverForOffer(peer: PeerConnection) {
+        runCatching {
+            val hasVideo = peer.transceivers.any { tr ->
+                !tr.isStopped && tr.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
+            }
+            if (!hasVideo) {
+                peer.addTransceiver(
+                    MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO,
+                    RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.RECV_ONLY),
+                )
+            }
+        }.onFailure { cause -> Log.w(TAG, "could not add a receive-only video transceiver", cause) }
     }
 
     /**
@@ -1672,6 +1782,7 @@ public class WebRtcPeerConnection(
      */
     public suspend fun createRenegotiationOffer(): String {
         val peer = peer ?: throw WebRtcException("PeerConnection is not allocated")
+        preferVp8BeforeDescription(peer)
         val offer = createOfferSuspend(peer, MediaConstraints())
         requireStillOpen(peer)
         setLocalDescriptionSuspend(peer, offer)
@@ -1694,6 +1805,8 @@ public class WebRtcPeerConnection(
         val remoteOffer = SessionDescription(SessionDescription.Type.OFFER, remoteOfferSdp)
         setRemoteDescriptionSuspend(peer, remoteOffer)
         requireStillOpen(peer)
+        // After the remote offer: it may have made new video transceivers.
+        preferVp8BeforeDescription(peer)
         val answer = createAnswerSuspend(peer, MediaConstraints())
         requireStillOpen(peer)
         setLocalDescriptionSuspend(peer, answer)
@@ -2000,29 +2113,6 @@ public class WebRtcPeerConnection(
          */
         public fun sharedEglContext(): EglBase.Context? =
             sharedEglBase?.eglBaseContext
-
-        /**
-         * STUN + (placeholder) TURN config. Production wires
-         * these via the rendezvous bootstrap config; for now
-         * a single Google STUN server is enough to exercise
-         * the happy path on most networks.
-         */
-        public fun defaultIceServers(): List<PeerConnection.IceServer> = listOf(
-            PeerConnection.IceServer.builder(
-                listOf(
-                    "stun:stun.l.google.com:19302",
-                    "stun:stun1.l.google.com:19302",
-                )
-            ).createIceServer(),
-            // TURN servers (Lakko's coturn cluster) arrive via
-            // the rendezvous bootstrap config — see
-            // `crates/lakko-transport/src/rendezvous.rs`. For
-            // now we run STUN-only; on a NAT-symmetric
-            // network the call will fail to connect and
-            // surface as `DISCONNECTED`. The follow-up
-            // sub-sprint G3-2-turn wires the bootstrap config
-            // into here.
-        )
     }
 }
 

@@ -121,14 +121,16 @@ describe("discovery token routes carry the token and no session", () => {
 });
 
 describe("push-gw routes carry the token and no session", () => {
-  const DEVICE = new Uint8Array(32).fill(1);
-  const GROUP = new Uint8Array(32).fill(2);
+  const SUB = new Uint8Array(16).fill(1);
+  const KEY = new Uint8Array(32).fill(2);
 
   it.each([
-    ["/push/register", (c: PushClient) => c.register(DEVICE, "web_push", new Uint8Array([1]))],
-    ["/push/unregister", (c: PushClient) => c.unregister(DEVICE, "web_push")],
-    ["/push/group/subscribe", (c: PushClient) => c.subscribeGroup(DEVICE, GROUP)],
-    ["/push/group/unsubscribe", (c: PushClient) => c.unsubscribeGroup(DEVICE, GROUP)],
+    [
+      "/push/subscribe",
+      (c: PushClient) =>
+        c.subscribe({ subId: SUB, pushGid: KEY, wakePk: KEY, sealed: new Uint8Array([1]) }),
+    ],
+    ["/push/unsubscribe", (c: PushClient) => c.unsubscribe(SUB)],
   ])("POST %s", async (path, run) => {
     const seen = stubFetch(() => ({
       status: 200,

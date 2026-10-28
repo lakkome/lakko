@@ -18,9 +18,9 @@ private final class RepairSigner: DsStatementSignerProtocol, @unchecked Sendable
     func pushBinding(journalId: Data, pushGid: Data) throws -> DsStatementRequest {
         calls.append("push-binding"); return req("push-binding")
     }
-    func registerEpoch(journalId: Data, epoch: UInt64, epochKey: Data, revoke: [Data]) throws
+    func commit(journalId: Data, epoch: UInt64, epochKey: Data, revoke: [Data], row: Data) throws
         -> DsStatementRequest {
-        calls.append("append:\(epoch)"); return req("access")
+        calls.append("commit:\(epoch)"); return req("commit")
     }
     func registrars(journalId: Data, changes: [DsRegistrarChange]) throws -> DsStatementRequest {
         calls.append("registrars"); return req("registrars")

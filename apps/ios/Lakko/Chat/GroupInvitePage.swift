@@ -70,8 +70,9 @@ public enum GroupInviteLink {
 
 /// Why a `/g/` link resolved to nothing: both read as "invalid or expired".
 public enum GroupInviteLinkError: Error, Equatable {
-    /// The slug is neither a 6-byte pointer nor an inline capability (the
-    /// retired 43-character id included). Refused before any request.
+    /// The slug is not a 6-byte ledger id (the retired 43-character id and an
+    /// inline sealed blob, the form removed on 2026-10-19, included). Refused
+    /// before any request.
     case malformed
     /// The ledger has no row for the id (never issued, revoked or expired).
     case notFound
@@ -153,6 +154,10 @@ public struct GroupInviteHeadline: Equatable {
 /// The copy of the invalid / expired state (`invite.link.invalid`), in the
 /// interface language of the moment it is read.
 public var groupInviteInvalidMessage: String { Localization.text("invite.link.invalid") }
+/// The ledger could not be asked for a `/g/` or `/c/` link (the network, a
+/// server error): the link may be fine, so the page offers it again. The same
+/// sentence on web and Android.
+public var inviteLinkOpenFailedMessage: String { Localization.text("common.error.offline") }
 
 /// The copy of a `/g/` link whose fragment is present but whose preview does
 /// not open under it (or whose fragment is not a link secret at all). Since the

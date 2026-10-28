@@ -5,23 +5,23 @@ import XCTest
 @testable import Lakko
 
 /// ADR-0042, "A wake is shown only for the signed-in account (amended
-/// 2026-09-30)" — the iOS half.
+/// 2026-09-30)" with ADR-0078 section 3 — the iOS half.
 ///
 /// Covers the gate rule both background paths share
-/// (``PushAccountBinding/boundAccount(wakeDevicePseudonymHex:binding:)``), the
-/// persisted binding, the reverse index keyed by `(account, push_gid)` with
-/// two accounts in one group, and Log out / Forget device clearing the binding
-/// first and removing delivered notifications. The extension's use of the
-/// gate is covered in `NsePushDecryptTests`, the VoIP handler's in
-/// `MutedCallRingTests`.
+/// (``PushAccountBinding/boundAccount(wakeSubscriptionIdHex:binding:)`` plus
+/// the subscription-checked route lookup), the persisted binding, the reverse
+/// index keyed by `(account, push_gid)` with two accounts in one group, and
+/// Log out / Forget device clearing the binding first and removing delivered
+/// notifications. The extension's use of the gate is covered in
+/// `NsePushDecryptTests`, the VoIP handler's in `MutedCallRingTests`.
 @MainActor
 final class PushAccountBindingTests: XCTestCase {
 
     private var suiteName: String!
     private var defaults: UserDefaults!
 
-    private let pseudonym = Data((0..<32).map { UInt8($0) })
-    private var pseudonymHex: String { PushAccountBinding.hex(pseudonym) }
+    private let subId = Data((0..<16).map { UInt8($0) })
+    private var subIdHex: String { PushAccountBinding.hex(subId) }
     private let accountA = "AAAAAAAAAAAAAAAAAAAAAA=="
     private let accountB = "BBBBBBBBBBBBBBBBBBBBBB=="
 
@@ -42,40 +42,62 @@ final class PushAccountBindingTests: XCTestCase {
     // MARK: - The gate
 
     func testNoBindingRefusesEveryWake() {
-        XCTAssertNil(PushAccountBinding.boundAccount(wakeDevicePseudonymHex: pseudonymHex, binding: nil))
+        XCTAssertNil(PushAccountBinding.boundAccount(wakeSubscriptionIdHex: subIdHex, binding: nil))
     }
 
-    func testAWakeForAnotherPseudonymIsRefused() {
-        let binding = PushAccountBinding(devicePseudonymHex: pseudonymHex, accountIdB64: accountA)
-        let other = String(repeating: "e", count: 64)
-        XCTAssertNil(PushAccountBinding.boundAccount(wakeDevicePseudonymHex: other, binding: binding))
-    }
-
-    func testAWakeWithoutDOrWithAMalformedDIsRefused() {
-        let binding = PushAccountBinding(devicePseudonymHex: pseudonymHex, accountIdB64: accountA)
-        XCTAssertNil(PushAccountBinding.boundAccount(wakeDevicePseudonymHex: nil, binding: binding))
-        XCTAssertNil(PushAccountBinding.boundAccount(wakeDevicePseudonymHex: "", binding: binding))
+    func testAWakeWithoutSOrWithAMalformedSIsRefused() {
+        let binding = PushAccountBinding(accountIdB64: accountA)
+        XCTAssertNil(PushAccountBinding.boundAccount(wakeSubscriptionIdHex: nil, binding: binding))
+        XCTAssertNil(PushAccountBinding.boundAccount(wakeSubscriptionIdHex: "", binding: binding))
         XCTAssertNil(PushAccountBinding.boundAccount(
-            wakeDevicePseudonymHex: String(pseudonymHex.dropLast()), binding: binding))
+            wakeSubscriptionIdHex: String(subIdHex.dropLast()), binding: binding))
         XCTAssertNil(PushAccountBinding.boundAccount(
-            wakeDevicePseudonymHex: String(repeating: "z", count: 64), binding: binding))
+            wakeSubscriptionIdHex: String(repeating: "z", count: 32), binding: binding))
+        // A 32-byte device pseudonym (the retired `d`) is not a subscription id.
+        XCTAssertNil(PushAccountBinding.boundAccount(
+            wakeSubscriptionIdHex: String(repeating: "e", count: 64), binding: binding))
     }
 
-    func testTheBoundPseudonymYieldsTheBoundAccount() {
-        let binding = PushAccountBinding(devicePseudonymHex: pseudonymHex, accountIdB64: accountA)
+    func testAWellFormedSYieldsTheBoundAccount() {
+        let binding = PushAccountBinding(accountIdB64: accountA)
         XCTAssertEqual(
-            PushAccountBinding.boundAccount(wakeDevicePseudonymHex: pseudonymHex, binding: binding),
+            PushAccountBinding.boundAccount(wakeSubscriptionIdHex: subIdHex, binding: binding),
             accountA)
-        // Normalised hex: case and surrounding whitespace do not matter.
         XCTAssertEqual(
             PushAccountBinding.boundAccount(
-                wakeDevicePseudonymHex: " \(pseudonymHex.uppercased())\n", binding: binding),
+                wakeSubscriptionIdHex: " \(subIdHex.uppercased())\n", binding: binding),
             accountA)
     }
 
     func testABindingWithNoAccountRefuses() {
-        let binding = PushAccountBinding(devicePseudonymHex: pseudonymHex, accountIdB64: "")
-        XCTAssertNil(PushAccountBinding.boundAccount(wakeDevicePseudonymHex: pseudonymHex, binding: binding))
+        let binding = PushAccountBinding(accountIdB64: "")
+        XCTAssertNil(PushAccountBinding.boundAccount(wakeSubscriptionIdHex: subIdHex, binding: binding))
+    }
+
+    func testTheRouteLookupRequiresTheAccountsOwnSubscriptionId() {
+        let routes = PushRoutingStore(defaults: defaults)
+        let pushGid = String(repeating: "f", count: 64)
+        routes.putRouting(
+            accountIdB64: accountA, groupIdHex: "aa", secret: Data(repeating: 1, count: 32),
+            pushGidHex: pushGid, distributed: true, mintEpoch: 0)
+        let held = routes.ensureSubscriptionId(accountIdB64: accountA, pushGidHex: pushGid)
+        XCTAssertEqual(held.count, 16)
+        XCTAssertEqual(routes.ensureSubscriptionId(accountIdB64: accountA, pushGidHex: pushGid), held,
+                       "one id per subscription, kept")
+        XCTAssertEqual(
+            routes.lookupRoute(
+                accountIdB64: accountA, pushGidHex: pushGid,
+                subscriptionIdHex: PushAccountBinding.hex(held)),
+            "aa")
+        XCTAssertNil(routes.lookupRoute(
+            accountIdB64: accountA, pushGidHex: pushGid, subscriptionIdHex: subIdHex),
+            "a subscription this account does not hold is a miss")
+        XCTAssertNil(routes.lookupRoute(
+            accountIdB64: accountA, pushGidHex: pushGid, subscriptionIdHex: nil))
+        XCTAssertEqual(routes.subscriptionIds(accountIdB64: accountA), [held])
+
+        routes.clear(accountIdB64: accountA)
+        XCTAssertTrue(routes.subscriptionIds(accountIdB64: accountA).isEmpty)
     }
 
     // MARK: - The persisted binding
@@ -84,36 +106,30 @@ final class PushAccountBindingTests: XCTestCase {
         let store = PushAccountBindingStore(defaults: defaults)
         XCTAssertNil(store.current())
 
-        store.bind(devicePseudonym: pseudonym, accountIdB64: accountA)
-        XCTAssertEqual(
-            store.current(),
-            PushAccountBinding(devicePseudonymHex: pseudonymHex, accountIdB64: accountA))
+        store.bind(accountIdB64: accountA)
+        XCTAssertEqual(store.current(), PushAccountBinding(accountIdB64: accountA))
 
-        let next = Data(repeating: 0x7F, count: 32)
-        store.bind(devicePseudonym: next, accountIdB64: accountB)
+        store.bind(accountIdB64: accountB)
         XCTAssertEqual(
-            store.current(),
-            PushAccountBinding(devicePseudonymHex: PushAccountBinding.hex(next), accountIdB64: accountB),
+            store.current(), PushAccountBinding(accountIdB64: accountB),
             "a device has at most one active account")
 
         store.clear()
         XCTAssertNil(store.current())
     }
 
-    func testTheStoreRefusesAMalformedBinding() {
+    func testTheStoreRefusesAnEmptyAccount() {
         let store = PushAccountBindingStore(defaults: defaults)
-        store.bind(devicePseudonym: Data(repeating: 1, count: 31), accountIdB64: accountA)
-        XCTAssertNil(store.current())
-        store.bind(devicePseudonym: pseudonym, accountIdB64: "")
+        store.bind(accountIdB64: "")
         XCTAssertNil(store.current())
     }
 
     func testAnUnprovisionedSuiteStoresNothingSoEveryWakeIsRefused() {
         let store = PushAccountBindingStore(defaults: nil)
-        store.bind(devicePseudonym: pseudonym, accountIdB64: accountA)
+        store.bind(accountIdB64: accountA)
         XCTAssertNil(store.current())
         XCTAssertNil(PushAccountBinding.boundAccount(
-            wakeDevicePseudonymHex: pseudonymHex, binding: store.current()))
+            wakeSubscriptionIdHex: subIdHex, binding: store.current()))
     }
 
     // MARK: - The reverse index, per account
@@ -171,7 +187,7 @@ final class PushAccountBindingTests: XCTestCase {
 
     func testLogoutClearsTheBindingFirstAndRemovesDeliveredNotifications() {
         let store = PushAccountBindingStore(defaults: defaults)
-        store.bind(devicePseudonym: pseudonym, accountIdB64: accountA)
+        store.bind(accountIdB64: accountA)
         let persistence = FakePersistence()
         var bindingAtRemoval: PushAccountBinding?? = .none
         var tokensDeletedAtRemoval: [String]?
@@ -194,7 +210,7 @@ final class PushAccountBindingTests: XCTestCase {
 
     func testEndSessionAfterWipeClearsTheBindingFirstAndRemovesDeliveredNotifications() {
         let store = PushAccountBindingStore(defaults: defaults)
-        store.bind(devicePseudonym: pseudonym, accountIdB64: accountA)
+        store.bind(accountIdB64: accountA)
         let persistence = FakePersistence()
         let sessionStore = makeSessionStore()
         var bindingAtRemoval: PushAccountBinding?? = .none

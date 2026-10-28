@@ -341,63 +341,15 @@ final class DsJournalAccessTests: XCTestCase {
         XCTAssertNil(memory.observe(journal: "g", signer: FakeSigner(epoch: 4)))
     }
 
-    // MARK: Point 3 — register before publish (direct commit)
+    // MARK: ADR-0081 — which failed commit is lost (the sweep's classification)
 
-    func testADirectCommitRegistersTheNextEpochBeforeRecordAndPublish() async throws {
-        var log: [String] = []
-        var epoch: UInt64 = 6
-        var registered: UInt64?
-        var publishedUnder: UInt64?
-        let result = try await DirectCommitSteps(
-            currentSigner: { log.append("signer"); return FakeSigner(epoch: epoch) },
-            create: { () -> String in log.append("create"); epoch += 1; return "commit" },
-            register: { next in
-                log.append("register"); registered = next.epoch()
-            },
-            prepare: { created in log.append("record"); return created },
-            rollback: { log.append("rollback") },
-            publish: { prepared, signerN in
-                log.append("publish"); publishedUnder = signerN.epoch(); return prepared
-            }
-        ).run()
-        XCTAssertEqual(result, "commit")
-        XCTAssertEqual(log, ["signer", "create", "signer", "register", "record", "publish"])
-        XCTAssertEqual(registered, 7, "the epoch the commit moves to")
-        XCTAssertEqual(publishedUnder, 6, "the commit POST is signed under N")
-    }
-
-    func testAFailedRegistrationRollsBackAndPublishesNothing() async throws {
-        var log: [String] = []
-        struct Refused: Error {}
-        do {
-            _ = try await DirectCommitSteps(
-                currentSigner: { FakeSigner(epoch: 1) },
-                create: { () -> Int in log.append("create"); return 1 },
-                register: { _ in log.append("register"); throw Refused() },
-                prepare: { created in log.append("record"); return created },
-                rollback: { log.append("rollback") },
-                publish: { _, _ in log.append("publish") }
-            ).run()
-            XCTFail("a failed registration must abort")
-        } catch is Refused {}
-        XCTAssertEqual(log, ["create", "register", "rollback"])
-    }
-
-    func testAFailedRecordAfterRegistrationRollsBackToo() async throws {
-        var log: [String] = []
-        struct Disk: Error {}
-        do {
-            _ = try await DirectCommitSteps(
-                currentSigner: { FakeSigner(epoch: 1) },
-                create: { () -> Int in 1 },
-                register: { _ in log.append("register") },
-                prepare: { (_: Int) -> Int in log.append("record"); throw Disk() },
-                rollback: { log.append("rollback") },
-                publish: { _, _ in log.append("publish") }
-            ).run()
-            XCTFail("a failed record must abort")
-        } catch is Disk {}
-        XCTAssertEqual(log, ["register", "record", "rollback"])
+    func testLostCoversAConflictAndADefinitiveRefusalOnly() {
+        XCTAssertTrue(DsCommitFailure.isLost(DsStatementError.conflict))
+        XCTAssertTrue(DsCommitFailure.isLost(DsStatementError.unauthorized))
+        XCTAssertTrue(DsCommitFailure.isLost(
+            ChatError.wrapped("x", underlying: DsStatementError.conflict)))
+        XCTAssertFalse(DsCommitFailure.isLost(DsClientError.network(
+            endpoint: "/x", underlying: URLError(.timedOut))))
     }
 
     // MARK: Point 4 — heal on apply: gone under ADR-0057 (see

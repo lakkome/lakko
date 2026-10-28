@@ -25,14 +25,6 @@ use crate::access::now_ms;
 use crate::journal::{self, PSEUDONYM_LEN};
 use crate::AppState;
 
-/// The push-binding pepper every test app runs with.
-pub(crate) const TEST_PEPPER: [u8; 32] = [0x70; 32];
-
-/// The auth attest signing key every test app pins the verifying half of
-/// (ADR-0073); a test mints key-reset attestations with it.
-pub(crate) static TEST_ATTEST_KEY: std::sync::LazyLock<SigningKey> =
-    std::sync::LazyLock::new(|| SigningKey::from_seed(&[0x4b; 32]));
-
 /// Parallel tests share one database; sqlx's migrator does not tolerate
 /// two concurrent runs on it, so migrate once per process.
 pub(crate) static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
@@ -44,21 +36,11 @@ pub(crate) async fn app() -> Option<(Router, MySqlPool)> {
 /// [`app`], plus the (dormant) waker so a test can see which wakes fired.
 pub(crate) async fn app_with_waker(
 ) -> Option<(Router, MySqlPool, std::sync::Arc<crate::wake::Waker>)> {
-    app_configured(Some(TEST_PEPPER)).await
+    app_configured().await
 }
 
-/// The test app with a chosen push-binding pepper (`None`: bindings off).
+/// The test app with its waker.
 pub(crate) async fn app_configured(
-    binding_pepper: Option<[u8; 32]>,
-) -> Option<(Router, MySqlPool, std::sync::Arc<crate::wake::Waker>)> {
-    app_configured_with(binding_pepper, Some(TEST_ATTEST_KEY.verifying_key())).await
-}
-
-/// [`app_configured`] with a chosen pinned attest key (`None`: the attested
-/// reset arm answers 503).
-pub(crate) async fn app_configured_with(
-    binding_pepper: Option<[u8; 32]>,
-    attest_key: Option<lakko_ds_proof::VerifyingKey>,
 ) -> Option<(Router, MySqlPool, std::sync::Arc<crate::wake::Waker>)> {
     let Ok(url) = std::env::var("LAKKO_DS_TEST_DATABASE_URL") else {
         eprintln!("skipping: LAKKO_DS_TEST_DATABASE_URL unset");
@@ -90,8 +72,6 @@ pub(crate) async fn app_configured_with(
                 .unwrap(),
             ),
         ),
-        binding_pepper,
-        attest_key,
     };
     Some((crate::build_app(state), pool, waker))
 }
@@ -308,6 +288,14 @@ pub(crate) async fn claim(
 }
 
 /// Append `epoch_key` at `epoch` as `signer`, revoking `revoke`.
+///
+/// ADR-0081: a new epoch is registered only with its commit row, so this
+/// goes through `POST .../commit` with a test row (`row:<epoch>:<key hex>`,
+/// the same bytes for the same epoch and key, so a re-send is a re-send). The
+/// proof is signed under the key registered at `epoch - 1` (or, when there is
+/// none, at the newest registered epoch), found among the deterministic test
+/// keys [`key`] makes; a 200 or 201 reads as the `204` a registration
+/// answered before, every other status is passed through.
 pub(crate) async fn register(
     app: &Router,
     gid: &[u8; PSEUDONYM_LEN],
@@ -316,16 +304,73 @@ pub(crate) async fn register(
     epoch_key: &SigningKey,
     revoke: &[&StatementSigner],
 ) -> StatusCode {
-    register_as(
+    let (proof_key, proof_epoch) = proof_key_for(gid, epoch).await;
+    let epoch_pk = epoch_key.verifying_key().to_bytes();
+    let row = format!("row:{epoch}:{}", hex::encode(epoch_pk)).into_bytes();
+    let statement = signer
+        .sign_commit_at(
+            gid,
+            epoch,
+            epoch_pk,
+            revoke.iter().map(|s| s.public_key()).collect(),
+            now_ms(),
+            fresh_nonce(),
+        )
+        .expect("sign commit statement");
+    let body = lakko_ds_proof::commit_body_json(&statement, &row)
+        .expect("commit body")
+        .into_bytes();
+    let status = send(
         app,
-        gid,
-        signer,
-        RegisterMode::Append,
-        epoch,
-        epoch_key,
-        revoke,
+        Req {
+            method: "POST",
+            uri: &format!("/ds/group/{}/commit", hex::encode(gid)),
+            body,
+            proof: Some((&proof_key, proof_epoch)),
+        },
     )
     .await
+    .0;
+    if status == StatusCode::OK || status == StatusCode::CREATED {
+        StatusCode::NO_CONTENT
+    } else {
+        status
+    }
+}
+
+/// The test key (and its epoch) a commit to `epoch` of `gid` is proven under:
+/// the key at `epoch - 1`, else the newest registered one, else `key(0)` at
+/// `epoch - 1` (an unclaimed journal: the DS refuses it anyway).
+async fn proof_key_for(gid: &[u8; PSEUDONYM_LEN], epoch: u64) -> (SigningKey, u64) {
+    let url = std::env::var("LAKKO_DS_TEST_DATABASE_URL").expect("test db url");
+    let mut conn = <sqlx::MySqlConnection as sqlx::Connection>::connect(&url)
+        .await
+        .expect("connect test db");
+    let below = epoch.saturating_sub(1);
+    let row: Option<(u64, Vec<u8>)> = sqlx::query_as(
+        "SELECT epoch, access_pk FROM ds_group_access WHERE group_id = ? AND epoch = ?",
+    )
+    .bind(&gid[..])
+    .bind(below)
+    .fetch_optional(&mut conn)
+    .await
+    .expect("read access key");
+    let row = match row {
+        Some(r) => Some(r),
+        None => sqlx::query_as(
+            "SELECT epoch, access_pk FROM ds_group_access WHERE group_id = ? \
+             ORDER BY epoch DESC LIMIT 1",
+        )
+        .bind(&gid[..])
+        .fetch_optional(&mut conn)
+        .await
+        .expect("read newest access key"),
+    };
+    let Some((at, pk)) = row else {
+        return (key(0), below);
+    };
+    let found = (0..=u8::MAX).find(|seed| key(*seed).verifying_key().to_bytes()[..] == pk[..]);
+    (key(found.unwrap_or(0)), at)
 }
 
 /// Replace at `epoch` with `epoch_key` as `signer`, revoking `revoke`.

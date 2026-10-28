@@ -12,6 +12,10 @@
  * | One-to-one, voice or video | Microphone · Camera · Settings · End |
  * | Group | Microphone · Camera · Participants · Settings · End |
  *
+ * A browser that can send a screen share gets `Share screen` after Camera in
+ * a connected call (`docs/ux/screen-share.md` section 1); everywhere else the
+ * circle is absent, not disabled.
+ *
  * Nothing else. There is no Speaker control, no chat, no More menu. Which
  * microphone, camera and speaker the call uses is chosen in Settings, a sheet
  * of the app's own (`call-settings.ts`); the row itself stays short enough to
@@ -54,7 +58,7 @@ import type { CallPhaseKind, CallSurfaceKind } from "./call-screen-model";
 import { t } from "../l10n";
 
 /** The controls the row can carry, in the order §4.1's table lists them. */
-export type CallControlId = "mic" | "camera" | "participants" | "settings" | "end";
+export type CallControlId = "mic" | "camera" | "screen" | "participants" | "settings" | "end";
 
 /**
  * How a control is painted (§4.1.1).
@@ -71,6 +75,7 @@ export type CallControlIcon =
   | "micOff"
   | "video"
   | "videoOff"
+  | "monitor"
   | "groups"
   | "settings"
   | "phoneEnd";
@@ -122,6 +127,13 @@ export interface CallControlsInput {
   /** The camera is being acquired; the button shows a spinner and refuses a
    *  second press rather than queueing one. */
   readonly cameraBusy: boolean;
+  /**
+   * The screen share (`docs/ux/screen-share.md`): absent when this device
+   * cannot send one (iOS, Android, a phone or tablet browser, a browser with
+   * no screen capture). `sharing` is this device's own share; `busy` the
+   * picker is open or the share is being set up.
+   */
+  readonly screenShare?: { readonly sharing: boolean; readonly busy: boolean } | undefined;
 }
 
 /**
@@ -159,6 +171,21 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
     pressed: !input.cameraOn,
     disabled: inactive || input.cameraBusy,
   });
+
+  // Share screen: only inside a connected call, only where this device can
+  // send one (section 1). Sharing is the loud, filled state (section 3).
+  const share = input.screenShare;
+  if (share !== undefined && input.phase === "connected") {
+    out.push({
+      id: "screen",
+      label: t("call.screen_share.button"),
+      accessibleName: share.sharing ? t("call.screen_share.button_stop") : t("call.screen_share.button"),
+      icon: "monitor",
+      tone: share.sharing ? "solid" : "outline",
+      pressed: share.sharing,
+      disabled: share.busy,
+    });
+  }
 
   // Present when it has something to open: a call that can invite always
   // does; a call placed inside a conversation only once someone else is in

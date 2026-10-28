@@ -315,6 +315,14 @@ function host(hub: MediaHub, over: Partial<BubbleHost> = {}): BubbleHost {
     onCloseFullReactPicker: () => {},
     onReply: () => {},
     onJumpTo: () => {},
+    onForward: () => {},
+    pinLabelOf: () => "Pin",
+    onPin: () => {},
+    onOpenForwardOrigin: () => {},
+    selecting: false,
+    isSelected: () => false,
+    onToggleSelect: () => {},
+    onSelect: () => {},
     ...over,
   };
 }
@@ -631,13 +639,10 @@ export const cases: Record<string, () => JSX.Element | Promise<JSX.Element>> = {
   reply: () => replyCase(),
 };
 
-declare global {
-  interface Window {
-    __lakkoHarness: Harness;
-  }
-}
-
-window.__lakkoHarness = harness;
+// The spec side reads it through the ambient `LakkoHarness` declaration in
+// `playwright/globals.d.ts`; a second, page-side `Window` declaration here
+// would conflict with it when the two are type-checked together.
+(window as unknown as { __lakkoHarness: Harness }).__lakkoHarness = harness;
 window.Audio = RecordedAudio;
 
 /**

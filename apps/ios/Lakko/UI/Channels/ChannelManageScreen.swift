@@ -38,6 +38,7 @@ struct ChannelManageScreen: View {
                 )
                 CoPublishersPanel(
                     channelId: channelId,
+                    state: state,
                     client: client,
                     accountIdentitySeed: accountIdentitySeed
                 )

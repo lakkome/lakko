@@ -47,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -88,6 +89,9 @@ import me.lakko.app.calls.gridPage
 import me.lakko.app.calls.groupLayoutKind
 import me.lakko.app.calls.heavyTrackForGiven
 import me.lakko.app.calls.peerIdOfParticipant
+import me.lakko.app.calls.shareChipShown
+import me.lakko.app.calls.sharerParticipantId
+import me.lakko.app.calls.withShareTile
 import me.lakko.app.calls.physicalTileWidth
 import me.lakko.app.calls.stagePerson
 import me.lakko.app.calls.stageSize
@@ -144,8 +148,13 @@ internal fun GroupCallArea(
     val pinnedId by state.pinnedId.collectAsState()
     val choice by state.layoutChoice.collectAsState()
     val speech by state.speech.collectAsState()
+    val share by state.screenShare.collectAsState()
     var page by remember { mutableIntStateOf(0) }
-    val kind = groupLayoutKind(choice, pinnedId, participants)
+    // ADR-0083: a share is its own tile, laid out with everyone, but never
+    // counted as a person (the picture a tile asks for counts people).
+    val tiles = remember(participants, share) { withShareTile(participants, share) }
+    val shareTileId = tiles.firstOrNull { it.isScreen }?.id
+    val kind = groupLayoutKind(choice, pinnedId, tiles)
 
     // Section 6.2: a tile is never itself the pin control. A tap on someone
     // else's tile only brings that tile's controls up for a few seconds; the
@@ -154,7 +163,7 @@ internal fun GroupCallArea(
     val timers = host.timers
     val reveal = host.reveal
     val haptics = LocalHapticFeedback.current
-    val tiles = TileEnvironment(
+    val env = TileEnvironment(
         rules = rules,
         people = participants.size,
         timers = timers,
@@ -189,10 +198,10 @@ internal fun GroupCallArea(
         Column(modifier = Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
             when (kind) {
                 GroupLayoutKind.GRID -> {
-                    val grid = remember(rules, participants.size, width, height) {
-                        gridLayout(rules, participants.size, width, height)
+                    val grid = remember(rules, tiles.size, width, height) {
+                        gridLayout(rules, tiles.size, width, height)
                     }
-                    val shown = gridPage(participants, grid.perPage, page)
+                    val shown = gridPage(tiles, grid.perPage, page)
                     // A page that emptied because someone left falls back to
                     // the last one that still has people.
                     LaunchedEffect(shown.page) { if (page != shown.page) page = shown.page }
@@ -201,7 +210,7 @@ internal fun GroupCallArea(
                         tiles = shown.tiles,
                         state = state,
                         pinnedId = pinnedId,
-                        env = tiles,
+                        env = env,
                         page = shown.page,
                         pages = shown.pages,
                         onPage = { page = it },
@@ -212,8 +221,8 @@ internal fun GroupCallArea(
                     PageDots(page = shown.page, pages = shown.pages, onPage = { page = it })
                 }
                 GroupLayoutKind.FOCUS -> {
-                    val stage = stagePerson(rules, participants, pinnedId, speech)
-                    val strip = stripPeople(participants, stage)
+                    val stage = stagePerson(rules, tiles, pinnedId, speech)
+                    val strip = stripPeople(tiles, stage)
                     val metrics = stripMetrics(width)
                     val size = remember(rules, width, height) { stageSize(rules, width, height) }
                     Column(
@@ -240,23 +249,36 @@ internal fun GroupCallArea(
                                         heightDp = metrics.tileHeight,
                                         pinned = person.id == pinnedId,
                                         stage = false,
-                                        env = tiles,
+                                        env = env,
                                     )
                                 }
                             }
                         }
                         Spacer(Modifier.height(metrics.gap.dp))
                         if (stage != null) {
-                            key(stage.id) {
-                                GroupTile(
-                                    participant = stage,
-                                    state = state,
-                                    widthDp = size.width,
-                                    heightDp = size.height,
-                                    pinned = stage.id == pinnedId,
-                                    stage = true,
-                                    env = tiles,
-                                )
+                            Box(contentAlignment = Alignment.TopCenter) {
+                                key(stage.id) {
+                                    GroupTile(
+                                        participant = stage,
+                                        state = state,
+                                        widthDp = size.width,
+                                        heightDp = size.height,
+                                        pinned = stage.id == pinnedId,
+                                        stage = true,
+                                        env = env,
+                                    )
+                                }
+                                // Section 5.2: a pin holds while someone shares.
+                                // The share is offered, never forced.
+                                if (shareChipShown(shareTileId, pinnedId, stage.id)) {
+                                    val sharer = tiles.firstOrNull { it.isScreen }
+                                    ScreenShareOfferChip(
+                                        sharerName = sharer?.displayName?.takeIf { it.isNotEmpty() }
+                                            ?: LocalStrings.current["call.participant.unnamed"],
+                                        onView = { state.pin(null) },
+                                        modifier = Modifier.padding(top = 8.dp),
+                                    )
+                                }
                             }
                         }
                     }
@@ -402,7 +424,8 @@ internal fun GroupLayoutSwitch(
 ) {
     val pinnedId by state.pinnedId.collectAsState()
     val choice by state.layoutChoice.collectAsState()
-    val kind = groupLayoutKind(choice, pinnedId, participants)
+    val share by state.screenShare.collectAsState()
+    val kind = groupLayoutKind(choice, pinnedId, withShareTile(participants, share))
     val label = t(if (kind == GroupLayoutKind.GRID) "call.layout.focus_a11y" else "call.layout.grid_a11y")
     Box(
         modifier = modifier
@@ -478,6 +501,10 @@ private fun GroupTile(
     env: TileEnvironment,
     modifier: Modifier = Modifier,
 ) {
+    if (participant.isScreen) {
+        ShareGroupTile(participant, state, widthDp, heightDp, pinned, stage, env, modifier)
+        return
+    }
     val localVideoTrack by state.localVideoTrack.collectAsState()
     val remoteVideoTracks by state.remoteVideoTracks.collectAsState()
     val remoteLightVideoTracks by state.remoteLightVideoTracks.collectAsState()
@@ -645,7 +672,25 @@ private fun GroupTile(
                     .padding(top = if (short) 10.dp else 0.dp),
                 contentAlignment = if (short) Alignment.TopCenter else Alignment.Center,
             ) {
-                Text(
+                // ADR-0084 — the person's profile photo when this device holds
+                // it (their still, never a video in a tile), else initials.
+                // The own tile shows the owner's own photo.
+                val ownAvatar = if (participant.isLocal) me.lakko.app.ui.components.rememberOwnAvatar() else null
+                val still = me.lakko.app.ui.components.rememberPersonStill(
+                    me.lakko.app.ui.components.personKeyBytes(participant.personKeyB64),
+                    avatar = ownAvatar,
+                )
+                if (still != null) {
+                    val photo = remember(still) { still.asImageBitmap() }
+                    androidx.compose.foundation.Image(
+                        bitmap = photo,
+                        contentDescription = null,
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                        modifier = Modifier
+                            .size(if (short) 44.dp else (minOf(widthDp, heightDp) * 0.5f).dp)
+                            .clip(androidx.compose.foundation.shape.CircleShape),
+                    )
+                } else Text(
                     text = initialsOf(name),
                     color = tint.foreground,
                     // Scaled to the tile, so a strip tile and a full-screen
@@ -752,6 +797,86 @@ private fun GroupTile(
                 )
             }
         }
+    }
+}
+
+/**
+ * A shared screen's tile (`docs/ux/group-call-grid.md` sections 6.3 and 7.1,
+ * state Screen): the share uncropped on black, a screen glyph in the name
+ * strip instead of a mic glyph, and the same pin control as a person's tile.
+ * It asks the SFU for nothing: a share is sent to every subscriber, always
+ * (ADR-0083 section 3), so it is never part of `video-wants`. Zoomable on
+ * the stage only; the zoom resets when it leaves it.
+ */
+@Composable
+@Suppress("LongParameterList")
+private fun ShareGroupTile(
+    participant: CallUiState.Participant,
+    state: CallUiState,
+    widthDp: Int,
+    heightDp: Int,
+    pinned: Boolean,
+    stage: Boolean,
+    env: TileEnvironment,
+    modifier: Modifier,
+) {
+    val screenTracks by state.remoteScreenVideoTracks.collectAsState()
+    val strings = LocalStrings.current
+    val name = participant.displayName.takeIf { it.isNotEmpty() } ?: strings["call.participant.unnamed"]
+    val tileLabel = strings.format("call.screen_share.tile", mapOf("name" to name))
+    val pinLabel = strings.format(
+        if (pinned) "call.participant.unpin_a11y" else "call.participant.pin_a11y",
+        mapOf("name" to tileLabel),
+    )
+    val controlsShown = env.revealedId == participant.id
+    val shape = RoundedCornerShape(12.dp)
+    val short = heightDp <= SHORT_TILE_HEIGHT_DP
+    Box(
+        modifier = modifier
+            .size(width = widthDp.dp, height = heightDp.dp)
+            .clip(shape)
+            .background(androidx.compose.ui.graphics.Color.Black)
+            .border(width = 1.dp, color = LakkoDark.border, shape = shape)
+            .pointerInput(participant.id) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        if (event.type == PointerEventType.Press) env.onPressBegan(participant.id)
+                    }
+                }
+            }
+            .semantics {
+                customActions = listOf(
+                    CustomAccessibilityAction(pinLabel) {
+                        env.onPin(participant.id)
+                        true
+                    },
+                )
+            },
+    ) {
+        ScreenSharePicture(
+            track = screenTracks[sharerParticipantId(participant.id)],
+            sharerName = name,
+            zoomable = stage,
+            compact = short,
+            onTap = { env.onTap(participant.id) },
+            modifier = Modifier.fillMaxSize(),
+        )
+        if (pinned) {
+            PinnedChip(
+                label = strings["call.participant.pinned"],
+                actionLabel = pinLabel,
+                onUnpin = { env.onPin(participant.id) },
+                modifier = Modifier.align(Alignment.TopEnd),
+            )
+        } else if (controlsShown) {
+            PinButton(
+                actionLabel = pinLabel,
+                onPin = { env.onPin(participant.id) },
+                modifier = Modifier.align(Alignment.TopEnd),
+            )
+        }
+        ScreenShareNameStrip(sharerName = name, short = short, modifier = Modifier.align(Alignment.BottomCenter))
     }
 }
 

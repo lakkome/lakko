@@ -8,6 +8,7 @@
 	<array>
 		<string>applinks:lakko.me</string>
 		<string>applinks:test.lakko.me</string>
+		<string>applinks:test.lakko.me?mode=developer</string>
 	</array>
 	<key>com.apple.security.application-groups</key>
 	<array>

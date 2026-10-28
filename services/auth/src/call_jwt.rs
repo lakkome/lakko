@@ -1,33 +1,48 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Call-JWT HTTP handlers (Phase 3b4) — companion to
-//! 3b1a's SFU scaffolding.
+//! Call-JWT HTTP handlers (Phase 3b4, anonymous since ADR-0078 section 2).
 //!
-//! The crypto + wire-format logic lives in
-//! [`lakko_call_jwt`]; this module is the **server-side
-//! integration** — the keypair persistence + the two HTTP
+//! The crypto + wire-format logic lives in [`lakko_call_jwt`]; this module is
+//! the **server-side integration** — the keypair persistence + the two HTTP
 //! handlers (`POST /call/jwt` + `GET /.well-known/jwks.json`).
 //!
+//! ## Anonymous admission (ADR-0078 section 2)
+//!
+//! `POST /call/jwt` takes no session. It spends one anonymous token of the
+//! `call-join` context (`x-lakko-anon-token`, the ADR-0054 gate) and mints a
+//! token whose claims are the requested `room`, a fresh random `peer_id`, the
+//! role and the times: no `sub`, no `call_id`. The client computes the room
+//! itself (`BLAKE3_derive_key("lakko/sfu/room/v1", call_id)`), so this
+//! service never sees a call id and never learns which account joins which
+//! room. Beside the token the response carries a TURN credential minted in
+//! the same exchange, its username tag random (`turn.rs`).
+//!
+//! What this service still learns: that some holder of a `call-join` token
+//! asked for some room, from some address, at some time (the class (c)
+//! residual of ADR-0078 section 12). Nothing of it is stored: the spent-set
+//! row holds a spend id, and the per-room cap (`room_cap.rs`) is in memory.
+//!
 //! Audit anchor: invariants C-15..C-23 in
-//! [`docs/security/calls.md`](../../../docs/security/calls.md)
-//! cite this module's tests for the issuance shape.
+//! [`docs/security/calls.md`](../../../docs/security/calls.md).
 
-use std::fmt::Write as _;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::Json;
-use axum::Extension;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Json, Response};
+use lakko_anon_token::TokenContext;
+use lakko_anon_token_server::TokenVerifier;
 use lakko_call_jwt::{
-    mint_jwt, CallJwtClaims, CallRole, CallSigningKey, Jwk, Jwks, JWT_AUDIENCE, JWT_ISSUER,
-    JWT_TTL_SECS,
+    is_lower_hex, mint_jwt, CallJwtClaims, CallRole, CallSigningKey, Jwk, Jwks, JWT_AUDIENCE,
+    JWT_ISSUER, JWT_TTL_SECS, ROOM_HEX_LEN,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::MySqlPool;
 
-use crate::webauthn::AuthenticatedAccount;
+use crate::room_cap::RoomAdmission;
+use crate::turn::TurnCredentialResponse;
 use crate::AppState;
 
 /// Load (or generate + persist on first run) the Ed25519
@@ -97,100 +112,126 @@ pub(crate) async fn load_or_init_call_signing_key(
 
 /// `POST /call/jwt` request body.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct IssueCallJwtReq {
-    /// 16-byte random call_id, lower-case hex (32 chars).
-    /// The caller (Lakko client) mints this with
-    /// `SecRandomCopyBytes` / `SecureRandom.nextBytes` /
-    /// `crypto.getRandomValues` before opening the call.
-    pub call_id: String,
+    /// The room, 64 lower-case hex characters: the client's
+    /// `BLAKE3_derive_key("lakko/sfu/room/v1", call_id)`.
+    pub room: String,
     /// Requested role. Defaults to `participant` when omitted.
     #[serde(default = "default_role")]
     pub role: CallRole,
 }
 
-fn default_role() -> CallRole {
+const fn default_role() -> CallRole {
     CallRole::Participant
 }
 
-/// `POST /call/jwt` response body. `Deserialize` is for
-/// the integration test that parses the handler's output;
-/// no other consumer reads this shape in-process.
+/// `POST /call/jwt` response body. `Deserialize` is for the tests that parse
+/// the handler's output.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct IssueCallJwtRes {
     /// JWS Compact representation of the token.
     pub jwt: String,
-    /// `exp` field for client-side caching / refresh
-    /// scheduling. Duplicates the value embedded in the
-    /// JWT for convenience — clients should NOT trust this
-    /// (the JWT itself is the source of truth) but it
-    /// saves a parse on the happy path.
+    /// `exp` of the token, for refresh scheduling. Duplicates the value
+    /// inside the JWT; the JWT is the source of truth.
     pub expires_at_unix_secs: u64,
+    /// A TURN credential minted in the same exchange, its username tag
+    /// random; `null` when TURN is not configured (the client calls on STUN
+    /// alone).
+    pub turn: Option<TurnCredentialResponse>,
 }
 
-/// Issue a call JWT for the authenticated account + the
-/// requested call_id / role. Bearer-auth required (the
-/// `webauthn::require_session` middleware stamps the
-/// `AuthenticatedAccount`).
-#[axum::debug_handler]
+/// The 32 raw bytes of a validated room id.
+fn decode_room(hex: &str) -> Option<[u8; 32]> {
+    if !is_lower_hex(hex, ROOM_HEX_LEN) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// 16 random bytes as 32 lower-case hex characters: a fresh SFU peer id.
+fn random_peer_id() -> String {
+    use rand::RngCore as _;
+    use std::fmt::Write as _;
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let mut out = String::with_capacity(32);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+fn refusal(status: StatusCode, code: &'static str) -> Response {
+    (status, Json(json!({ "error": code }))).into_response()
+}
+
+/// Issue a call admission token for the requested room, paid for by one
+/// anonymous `call-join` token.
+///
+/// Order: validate the body (a malformed request spends nothing), spend the
+/// token (the ADR-0054 gate answers `401` / `503` with its own codes), count
+/// the admission against the room's cap (`429 room-admission-limit`), mint.
 pub(crate) async fn issue_call_jwt(
     State(state): State<AppState>,
-    Extension(auth): Extension<AuthenticatedAccount>,
-    Json(req): Json<IssueCallJwtReq>,
-) -> Result<Json<IssueCallJwtRes>, (StatusCode, &'static str)> {
-    // Strict 32-char hex; we don't accept upper-case or
-    // separators. Matches what the clients emit.
-    if req.call_id.len() != 32 {
-        return Err((StatusCode::BAD_REQUEST, "call_id must be 32 hex chars"));
-    }
-    if !req.call_id.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err((StatusCode::BAD_REQUEST, "call_id must be hex"));
-    }
-    let call_id_lower = req.call_id.to_ascii_lowercase();
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let Ok(req) = serde_json::from_slice::<IssueCallJwtReq>(&body) else {
+        return refusal(StatusCode::BAD_REQUEST, "bad-request");
+    };
+    let Some(room) = decode_room(&req.room) else {
+        return refusal(StatusCode::BAD_REQUEST, "bad-room");
+    };
 
-    // ADR-0033 — call-admission anti-spam throttle. Runs AFTER call_id
-    // validation, BEFORE minting. Disabled by default; fails OPEN on a store
-    // error (see `throttle::check_admission`). The 32-hex string is already
-    // validated above, so the decode is a defence-in-depth guard.
-    let call_id_bytes = crate::throttle::decode_call_id(&call_id_lower)
-        .ok_or((StatusCode::BAD_REQUEST, "call_id must be hex"))?;
-    if crate::throttle::check_admission(&state.db, state.throttle, &call_id_bytes, &auth.0).await
-        == crate::throttle::ThrottleDecision::Throttled
+    let verifier = TokenVerifier::new(
+        state.db.clone(),
+        state.anon_tokens.as_ref().map(|i| i.server.clone()),
+    );
+    if let Err(refused) = verifier
+        .spend_header(&headers, TokenContext::CallJoin)
+        .await
     {
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            "this call is not accepting new participants — try later",
-        ));
+        return refused.into_response();
     }
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "clock before epoch"))?
-        .as_secs();
-
-    let mut account_hex = String::with_capacity(32);
-    for b in &auth.0 {
-        let _ = write!(account_hex, "{b:02x}");
+    if state.room_cap.try_admit(&room, Instant::now()) == RoomAdmission::Full {
+        return refusal(StatusCode::TOO_MANY_REQUESTS, "room-admission-limit");
     }
+
+    let Ok(since_epoch) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return refusal(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+    };
+    let now = since_epoch.as_secs();
 
     let claims = CallJwtClaims {
         iss: JWT_ISSUER.into(),
         aud: JWT_AUDIENCE.into(),
-        sub: account_hex,
-        call_id: call_id_lower,
+        room: req.room,
+        peer_id: random_peer_id(),
         role: req.role,
         iat: now,
         exp: now + JWT_TTL_SECS,
     };
+    let jwt = match mint_jwt(&state.call_jwt_signing, &claims) {
+        Ok(jwt) => jwt,
+        Err(e) => {
+            tracing::error!(error = %e, "call jwt mint failed");
+            return refusal(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        },
+    };
+    let turn = state.turn.as_ref().and_then(|t| t.mint_random(now));
 
-    let jwt = mint_jwt(&state.call_jwt_signing, &claims).map_err(|e| {
-        tracing::error!(error = %e, "mint_jwt failed");
-        (StatusCode::INTERNAL_SERVER_ERROR, "mint failed")
-    })?;
-
-    Ok(Json(IssueCallJwtRes {
+    Json(IssueCallJwtRes {
         jwt,
         expires_at_unix_secs: claims.exp,
-    }))
+        turn,
+    })
+    .into_response()
 }
 
 /// Anonymous handler — publishes the current public key
@@ -218,65 +259,42 @@ mod tests {
     use axum::routing::{get, post};
     use axum::Router;
     use http_body_util::BodyExt as _;
+    use lakko_anon_token::{MasterSecret, TokenContext};
+    use lakko_anon_token_server::{current_epoch, AnonTokenServerConfig};
     use lakko_auth_token::TokenSecret;
     use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
     use tower::ServiceExt as _;
 
     use super::*;
-    use lakko_call_jwt::{parse_unverified, verify_jwt, verify_with_jwks, Jwks};
+    use lakko_call_jwt::{verify_jwt, verify_with_jwks, Jwks};
 
-    /// Smoke test that the auth-service-side wiring (claim
-    /// shape, hex normalization, role default) round-trips
-    /// through the `lakko_call_jwt` mint + verify. The full
-    /// crypto-side property tests live in that crate.
-    #[test]
-    fn auth_side_issuance_round_trips() {
-        let key = CallSigningKey::from_seed(&[0xAB; 32]);
-        let now = 1_700_000_000;
-        let claims = CallJwtClaims {
-            iss: JWT_ISSUER.into(),
-            aud: JWT_AUDIENCE.into(),
-            sub: "00112233445566778899aabbccddeeff".into(),
-            call_id: "0102030405060708090a0b0c0d0e0f10".into(),
-            role: CallRole::Participant,
-            iat: now,
-            exp: now + JWT_TTL_SECS,
-        };
-        let jwt = mint_jwt(&key, &claims).unwrap();
-        let (_header, parsed_unverified) = parse_unverified(&jwt).unwrap();
-        assert_eq!(parsed_unverified, claims);
-        let parsed = verify_jwt(&key.verifying, &key.kid, &jwt, now + 1).unwrap();
-        assert_eq!(parsed, claims);
+    const MASTER_HEX: &str = "4242424242424242424242424242424242424242424242424242424242424242";
+
+    fn room_hex() -> String {
+        lakko_sfu_proto::room_hex(&[0x01; 16])
     }
 
-    // ====================================================
-    // HTTP integration tests — drive the actual axum router
-    // through `tower::ServiceExt::oneshot`. Covers the
-    // middleware → handler → JSON pipeline that the
-    // primitive-level tests in `lakko-call-jwt` and the
-    // smoke test above don't exercise.
-    //
-    // The handlers don't touch the DB (only
-    // `load_or_init_call_signing_key` does, and that runs
-    // at bootstrap), but since ADR-0073 the bearer
-    // middleware reads the account's key generation, so
-    // every test that presents a bearer runs against the
-    // test database (`LAKKO_AUTH_TEST_DATABASE_URL`, skipped
-    // when unset) with the account row inserted; the two
-    // tests refused before that read keep a lazy pool.
-    // ====================================================
+    fn token_header(context: TokenContext) -> String {
+        let master = MasterSecret::from_hex(MASTER_HEX).expect("master");
+        lakko_anon_token_server::testing::mint_header(
+            &master,
+            context,
+            current_epoch(lakko_anon_token::DEFAULT_WINDOW_SECS),
+        )
+    }
 
-    /// A lazy pool that never opens a connection, for the tests the
-    /// middleware refuses before its DB read.
+    /// A lazy pool that never opens a connection, for the tests refused
+    /// before the spent-set is touched.
     fn lazy_pool() -> MySqlPool {
         MySqlPoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(200))
             .connect_lazy_with(
                 MySqlConnectOptions::new()
-                .host("127.0.0.1")
-                .port(0) // never actually dialed
-                .username("test")
-                .database("test"),
+                    .host("127.0.0.1")
+                    .port(1) // never actually dialed
+                    .username("test")
+                    .database("test"),
             )
     }
 
@@ -296,36 +314,18 @@ mod tests {
         Some(pool)
     }
 
-    /// The bearer middleware passes only an account that exists (it reads
-    /// the key generation); fixed ids are re-inserted idempotently.
-    async fn insert_account(pool: &MySqlPool, account_id: &[u8; 16]) {
-        sqlx::query("INSERT IGNORE INTO accounts (id) VALUES (?)")
-            .bind(&account_id[..])
-            .execute(pool)
-            .await
-            .expect("insert account");
-    }
-
-    /// Test-only AppState builder over the given pool (the keypair was
-    /// already loaded at bootstrap in production; here we inject a fixture
-    /// key directly).
-    ///
-    /// `token_secret` is shared by reference so successive
-    /// builds (one per `oneshot` consumer) accept tokens
-    /// minted under the same secret.
-    fn test_app_state(token_secret: &TokenSecret, pool: MySqlPool) -> AppState {
+    fn test_app_state(pool: MySqlPool, room_limit: u32, turn: bool) -> AppState {
         use opaque_ke::ServerSetup;
         use rand::rngs::OsRng;
         let signing = Arc::new(CallSigningKey::from_seed(&[0xAB; 32]));
-        // OPAQUE ServerSetup is not used by the call_jwt
-        // routes but is non-optional on AppState. Mint a
-        // throwaway one from OsRng (same pattern as the
-        // production bootstrap path).
         let opaque_setup = ServerSetup::<crate::opaque::LakkoCipherSuite>::new(&mut OsRng);
+        let server = AnonTokenServerConfig::from_values(Some(MASTER_HEX), None)
+            .expect("config")
+            .expect("enabled");
         AppState {
             db: pool,
             opaque_setup: Arc::new(opaque_setup),
-            session_token_secret: Arc::new(token_secret.clone()),
+            session_token_secret: Arc::new(TokenSecret::new(vec![0u8; 64]).expect("secret")),
             session_token_ttl_ms: 86_400_000,
             refresh_token_ttl_ms: 30 * 86_400_000,
             fresh_grant_ttl_ms: 600_000,
@@ -333,346 +333,302 @@ mod tests {
             webauthn_action_core: None,
             call_jwt_signing: signing.clone(),
             attest_key: signing,
-            turn: None,
+            turn: turn.then(|| Arc::new(crate::turn::TurnConfig::for_test())),
             totp_enc_key: None,
             vault_enc_key: None,
-            throttle: crate::throttle::ThrottleConfig::disabled(),
+            room_cap: Arc::new(crate::room_cap::RoomAdmissionCap::new(
+                room_limit,
+                std::time::Duration::from_secs(60),
+            )),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
-            anon_tokens: None,
+            anon_tokens: Some(Arc::new(crate::anon_tokens::AnonTokenIssuer::for_test(
+                server,
+            ))),
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
             recovery_email: None,
             limits: Arc::new(crate::limits::Limits::defaults()),
         }
     }
 
-    /// Convenience — builds a fresh `(token_secret, AppState)`
-    /// pair for tests that don't need to share the secret
-    /// with anything external.
-    fn fresh_app_state(pool: MySqlPool) -> (AppState, TokenSecret) {
-        let token_secret = TokenSecret::new(vec![0u8; 64]).expect("64-byte HMAC key");
-        let state = test_app_state(&token_secret, pool);
-        (state, token_secret)
-    }
-
-    /// Build a router with ONLY the call-JWT routes wired
-    /// up — same middleware chain as production, but no
-    /// other routes mixed in (keeps the tests focused).
-    fn test_call_jwt_router(state: AppState) -> Router {
-        let call_jwt_routes = Router::new()
-            .route("/call/jwt", post(issue_call_jwt))
-            .route_layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                crate::webauthn::require_session,
-            ));
+    fn router(state: AppState) -> Router {
         Router::new()
             .route("/.well-known/jwks.json", get(jwks_handler))
-            .merge(call_jwt_routes)
+            .route("/call/jwt", post(issue_call_jwt))
             .with_state(state)
     }
 
-    /// Issue a session token valid for one hour, ready for
-    /// the `Authorization: Bearer …` header.
-    fn issue_test_session_token(secret: &TokenSecret, account_id: &[u8; 16]) -> String {
-        let now_ms: i64 = i64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis(),
+    fn mint_request(token: Option<&str>, body: &serde_json::Value) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/call/jwt")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(t) = token {
+            builder = builder.header(lakko_anon_token::TOKEN_HEADER, t);
+        }
+        builder
+            .body(Body::from(serde_json::to_vec(body).expect("json")))
+            .expect("request")
+    }
+
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_secs()
+    }
+
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    /// ADR-0078 section 2: a `call-join` token buys a JWT naming the room
+    /// and a random peer id, with no account (`sub`) and no call id, and a
+    /// TURN credential whose tag is random. No bearer is read.
+    #[tokio::test]
+    async fn a_minted_jwt_names_no_account() {
+        let Some(pool) = test_pool("a_minted_jwt_names_no_account").await else {
+            return;
+        };
+        let state = test_app_state(pool, 0, true);
+        let signing = state.call_jwt_signing.clone();
+        let resp = router(state)
+            .oneshot(mint_request(
+                Some(&token_header(TokenContext::CallJoin)),
+                &json!({ "room": room_hex(), "role": "participant" }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let jwt = body["jwt"].as_str().expect("jwt").to_owned();
+        let claims =
+            verify_jwt(&signing.verifying, &signing.kid, &jwt, now_secs()).expect("verifies");
+        assert_eq!(claims.room, room_hex());
+        assert_eq!(claims.peer_id.len(), 32);
+        assert_eq!(claims.role, CallRole::Participant);
+        assert_eq!(body["expires_at_unix_secs"], claims.exp);
+
+        let payload_b64 = jwt.split('.').nth(1).expect("payload");
+        let payload = base64::Engine::decode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            payload_b64,
         )
-        .unwrap();
-        secret
-            .issue(account_id, 1, &[0u8; 32], 0, now_ms + 3_600_000)
-            .expect("issue session token")
+        .expect("b64");
+        let object: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&payload).expect("object");
+        assert!(!object.contains_key("sub"), "the token names an account");
+        assert!(!object.contains_key("call_id"), "the token names the call");
+
+        let username = body["turn"]["username"].as_str().expect("turn username");
+        let (_, tag) = username.split_once(':').expect("expiry:tag");
+        assert_eq!(tag.len(), 32);
     }
 
-    /// Happy path: valid bearer token, valid call_id →
-    /// 200 OK + a JWT that verifies under the same
-    /// signing key the AppState was built with. The JWT's
-    /// `sub` matches the bearer token's account_id (the
-    /// middleware → handler boundary stamps it from the
-    /// token, NOT from the request body).
+    /// Two mints for the same room get two different peer ids.
     #[tokio::test]
-    async fn issue_call_jwt_happy_path_round_trips() {
-        let Some(pool) = test_pool("issue_call_jwt_happy_path_round_trips").await else {
+    async fn every_mint_draws_a_fresh_peer_id() {
+        let Some(pool) = test_pool("every_mint_draws_a_fresh_peer_id").await else {
             return;
         };
-        let account_id: [u8; 16] = [
-            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
-            0xee, 0xff,
-        ];
-        insert_account(&pool, &account_id).await;
-        let (state, token_secret) = fresh_app_state(pool);
+        let state = test_app_state(pool, 0, false);
         let signing = state.call_jwt_signing.clone();
-        let app = test_call_jwt_router(state);
-
-        let session_token = issue_test_session_token(&token_secret, &account_id);
-
-        let body = serde_json::json!({
-            "call_id": "0102030405060708090a0b0c0d0e0f10",
-            "role": "participant",
-        });
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/call/jwt")
-                    .header(header::AUTHORIZATION, format!("Bearer {session_token}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let parsed: IssueCallJwtRes = serde_json::from_slice(&bytes).expect("parse response");
-
-        // Verify the JWT under the same signing key. The
-        // middleware → handler path ran for real; if the
-        // signature verifies, the whole pipeline worked.
-        let now_secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let claims = verify_jwt(&signing.verifying, &signing.kid, &parsed.jwt, now_secs)
-            .expect("verify minted JWT");
-        // The `sub` must be the bearer-token account_id, NOT
-        // anything from the request body. This is the
-        // C-21 invariant.
-        let mut expected_sub = String::new();
-        for b in &account_id {
-            use std::fmt::Write as _;
-            let _ = write!(expected_sub, "{b:02x}");
-        }
-        assert_eq!(claims.sub, expected_sub);
-        assert_eq!(claims.call_id, "0102030405060708090a0b0c0d0e0f10");
-        assert_eq!(claims.role, CallRole::Participant);
-        assert_eq!(claims.exp, claims.iat + JWT_TTL_SECS);
-        assert_eq!(parsed.expires_at_unix_secs, claims.exp);
-    }
-
-    /// Same shape as the happy path, but the `role` field
-    /// is omitted from the request body — handler should
-    /// default it to `Participant`.
-    #[tokio::test]
-    async fn issue_call_jwt_defaults_role_to_participant() {
-        let Some(pool) = test_pool("issue_call_jwt_defaults_role_to_participant").await else {
-            return;
-        };
-        let account_id = [0xAA; 16];
-        insert_account(&pool, &account_id).await;
-        let (state, token_secret) = fresh_app_state(pool);
-        let signing = state.call_jwt_signing.clone();
-        let app = test_call_jwt_router(state);
-
-        let session_token = issue_test_session_token(&token_secret, &account_id);
-        let body = serde_json::json!({
-            "call_id": "11111111111111112222222222222222",
-            // role omitted on purpose
-        });
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/call/jwt")
-                    .header(header::AUTHORIZATION, format!("Bearer {session_token}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let parsed: IssueCallJwtRes = serde_json::from_slice(&bytes).unwrap();
-        let now_secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let claims = verify_jwt(&signing.verifying, &signing.kid, &parsed.jwt, now_secs).unwrap();
-        assert_eq!(claims.role, CallRole::Participant);
-    }
-
-    /// No `Authorization` header → middleware rejects with
-    /// 401 BEFORE the handler runs. The body is never
-    /// parsed.
-    #[tokio::test]
-    async fn issue_call_jwt_without_bearer_rejects_401() {
-        let (state, _token_secret) = fresh_app_state(lazy_pool());
-        let app = test_call_jwt_router(state);
-        let body = serde_json::json!({
-            "call_id": "11111111111111112222222222222222",
-            "role": "participant",
-        });
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/call/jwt")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    /// Forged bearer token (different HMAC secret) → 401.
-    /// Defence against an attacker who got the wire shape
-    /// right but doesn't have the secret.
-    #[tokio::test]
-    async fn issue_call_jwt_with_wrong_secret_rejects_401() {
-        let (state, _real_secret) = fresh_app_state(lazy_pool());
-        let app = test_call_jwt_router(state);
-
-        // Mint a token with a DIFFERENT secret — same shape,
-        // wrong tag.
-        let attacker_secret = TokenSecret::new(vec![0xFFu8; 64]).unwrap();
-        let account_id = [0x11; 16];
-        let forged = issue_test_session_token(&attacker_secret, &account_id);
-
-        let body = serde_json::json!({
-            "call_id": "11111111111111112222222222222222",
-            "role": "participant",
-        });
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/call/jwt")
-                    .header(header::AUTHORIZATION, format!("Bearer {forged}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    /// Malformed call_id (wrong length, not hex) → 400.
-    /// Bearer-auth passes; the handler-side validation
-    /// catches the shape. Each iteration builds a fresh
-    /// router (because `oneshot` consumes) sharing the
-    /// same `TokenSecret` so the bearer token stays valid.
-    #[tokio::test]
-    async fn issue_call_jwt_with_malformed_call_id_rejects_400() {
-        let Some(pool) = test_pool("issue_call_jwt_with_malformed_call_id_rejects_400").await
-        else {
-            return;
-        };
-        let token_secret = TokenSecret::new(vec![0u8; 64]).expect("64-byte HMAC key");
-        let account_id = [0x33; 16];
-        insert_account(&pool, &account_id).await;
-        let session_token = issue_test_session_token(&token_secret, &account_id);
-
-        for bad_call_id in [
-            "too-short",
-            "wayyyytoolongtobesixteenbyteshexencodedstring",
-            "nothexnothexnothexnothexnothexno", // 32 chars but not hex
-            "0102030405060708090a0b0c0d0e0f1G", // 32 chars but trailing non-hex
-        ] {
-            let body = serde_json::json!({
-                "call_id": bad_call_id,
-                "role": "participant",
-            });
-            let app = test_call_jwt_router(test_app_state(&token_secret, pool.clone()));
-            let response = app
-                .oneshot(
-                    Request::builder()
-                        .method(Method::POST)
-                        .uri("/call/jwt")
-                        .header(header::AUTHORIZATION, format!("Bearer {session_token}"))
-                        .header(header::CONTENT_TYPE, "application/json")
-                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                        .unwrap(),
-                )
+        let mut peers = Vec::new();
+        for _ in 0..2 {
+            let resp = router(state.clone())
+                .oneshot(mint_request(
+                    Some(&token_header(TokenContext::CallJoin)),
+                    &json!({ "room": room_hex() }),
+                ))
                 .await
-                .unwrap();
-            assert_eq!(
-                response.status(),
-                StatusCode::BAD_REQUEST,
-                "expected 400 for call_id={bad_call_id:?}"
-            );
+                .expect("response");
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = body_json(resp).await;
+            assert!(body["turn"].is_null());
+            let claims = verify_jwt(
+                &signing.verifying,
+                &signing.kid,
+                body["jwt"].as_str().expect("jwt"),
+                now_secs(),
+            )
+            .expect("verifies");
+            assert_eq!(claims.role, CallRole::Participant);
+            peers.push(claims.peer_id);
+        }
+        assert_ne!(peers[0], peers[1]);
+    }
+
+    /// No token: `401 anon-token-required`, whatever bearer is offered.
+    #[tokio::test]
+    async fn a_mint_without_a_token_is_refused() {
+        let state = test_app_state(lazy_pool(), 0, false);
+        let mut req = mint_request(None, &json!({ "room": room_hex() }));
+        req.headers_mut().insert(
+            header::AUTHORIZATION,
+            "Bearer v3.anything".parse().expect("header"),
+        );
+        let resp = router(state).oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_json(resp).await["error"], "anon-token-required");
+    }
+
+    /// A token of another context does not pay for a call.
+    #[tokio::test]
+    async fn a_token_of_another_context_is_refused() {
+        let state = test_app_state(lazy_pool(), 0, false);
+        let resp = router(state)
+            .oneshot(mint_request(
+                Some(&token_header(TokenContext::DsKnock)),
+                &json!({ "room": room_hex() }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_json(resp).await["error"], "anon-token-wrong-context");
+    }
+
+    /// A malformed body is refused before any token is read, so it spends
+    /// nothing.
+    #[tokio::test]
+    async fn a_malformed_body_spends_nothing() {
+        for body in [
+            json!({ "room": "ab" }),
+            json!({ "room": "AB".repeat(32) }),
+            json!({ "room": room_hex(), "call_id": "00112233445566778899aabbccddeeff" }),
+            json!({ "call_id": "00112233445566778899aabbccddeeff" }),
+        ] {
+            let state = test_app_state(lazy_pool(), 0, false);
+            let resp = router(state)
+                .oneshot(mint_request(None, &body))
+                .await
+                .expect("response");
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{body}");
         }
     }
 
-    /// `GET /.well-known/jwks.json` is anonymous — no bearer
-    /// needed, returns the JWK Set holding the public key.
-    /// The fetched JWKS doc verifies a JWT minted by the
-    /// same service (full client-side cache-then-verify
-    /// round-trip).
+    /// The per-room cap refuses past its limit, room by room.
+    #[tokio::test]
+    async fn the_room_cap_refuses_past_its_limit() {
+        let Some(pool) = test_pool("the_room_cap_refuses_past_its_limit").await else {
+            return;
+        };
+        let state = test_app_state(pool, 2, false);
+        for expected in [
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            let resp = router(state.clone())
+                .oneshot(mint_request(
+                    Some(&token_header(TokenContext::CallJoin)),
+                    &json!({ "room": room_hex() }),
+                ))
+                .await
+                .expect("response");
+            assert_eq!(resp.status(), expected);
+        }
+        let other = lakko_sfu_proto::room_hex(&[0x02; 16]);
+        let resp = router(state)
+            .oneshot(mint_request(
+                Some(&token_header(TokenContext::CallJoin)),
+                &json!({ "room": other }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// A token is spent once: the same header a second time is refused.
+    #[tokio::test]
+    async fn a_call_join_token_is_spent_once() {
+        let Some(pool) = test_pool("a_call_join_token_is_spent_once").await else {
+            return;
+        };
+        let state = test_app_state(pool, 0, false);
+        let token = token_header(TokenContext::CallJoin);
+        let first = router(state.clone())
+            .oneshot(mint_request(Some(&token), &json!({ "room": room_hex() })))
+            .await
+            .expect("response");
+        assert_eq!(first.status(), StatusCode::OK);
+        let second = router(state)
+            .oneshot(mint_request(Some(&token), &json!({ "room": room_hex() })))
+            .await
+            .expect("response");
+        assert_eq!(second.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_json(second).await["error"], "anon-token-spent");
+    }
+
+    #[test]
+    fn the_spent_set_migration_is_the_shared_crate_schema_byte_for_byte() {
+        assert_eq!(
+            include_str!("../migrations/0034_anon_token_spent.sql"),
+            lakko_anon_token_server::SPENT_SET_MIGRATION_SQL
+        );
+    }
+
+    /// ADR-0078 section 2: no table of this service pairs a call with an
+    /// account any more - the ADR-0033 tables are dropped.
+    #[tokio::test]
+    async fn the_call_admission_tables_are_gone() {
+        let Some(pool) = test_pool("the_call_admission_tables_are_gone").await else {
+            return;
+        };
+        let left: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_schema = DATABASE() \
+             AND table_name IN ('call_admission_events', 'throttled_calls')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("information_schema");
+        assert_eq!(left, 0);
+    }
+
+    /// `GET /.well-known/jwks.json` is anonymous and verifies a JWT minted
+    /// by the same service.
     #[tokio::test]
     async fn jwks_endpoint_full_chain() {
         let Some(pool) = test_pool("jwks_endpoint_full_chain").await else {
             return;
         };
-        let account_id = [0x55; 16];
-        insert_account(&pool, &account_id).await;
-        let (state, token_secret) = fresh_app_state(pool);
+        let state = test_app_state(pool, 0, false);
         let expected_kid = state.call_jwt_signing.kid.clone();
-        let app = test_call_jwt_router(state);
-
-        // Step 1: mint a JWT via /call/jwt.
-        let session_token = issue_test_session_token(&token_secret, &account_id);
-        let body = serde_json::json!({
-            "call_id": "abababababababababababababababab",
-            "role": "publisher",
-        });
-        let response = app
+        let app = router(state);
+        let resp = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/call/jwt")
-                    .header(header::AUTHORIZATION, format!("Bearer {session_token}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
+            .oneshot(mint_request(
+                Some(&token_header(TokenContext::CallJoin)),
+                &json!({ "room": room_hex(), "role": "publisher" }),
+            ))
             .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let mint_res: IssueCallJwtRes = serde_json::from_slice(&bytes).unwrap();
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let mint: IssueCallJwtRes =
+            serde_json::from_value(body_json(resp).await).expect("response shape");
 
-        // Step 2: fetch the JWKS doc.
         let jwks_response = app
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
                     .uri("/.well-known/jwks.json")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("request"),
             )
             .await
-            .unwrap();
+            .expect("response");
         assert_eq!(jwks_response.status(), StatusCode::OK);
-        let jwks_bytes = jwks_response
+        let bytes = jwks_response
             .into_body()
             .collect()
             .await
-            .unwrap()
+            .expect("body")
             .to_bytes();
-        let jwks: Jwks = serde_json::from_slice(&jwks_bytes).expect("parse JWKS");
+        let jwks: Jwks = serde_json::from_slice(&bytes).expect("parse JWKS");
         assert_eq!(jwks.keys.len(), 1);
         assert_eq!(jwks.keys[0].kid, expected_kid);
-        assert_eq!(jwks.keys[0].kty, "OKP");
-        assert_eq!(jwks.keys[0].crv, "Ed25519");
-        assert_eq!(jwks.keys[0].alg, "EdDSA");
-
-        // Step 3: verify the minted JWT using the fetched
-        // JWKS doc — the same path a real SFU process would
-        // take. This is the production end-to-end smoke
-        // test for invariant C-22.
-        let now_secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let claims = verify_with_jwks(&jwks, &mint_res.jwt, now_secs).expect("verify via JWKS");
+        let claims = verify_with_jwks(&jwks, &mint.jwt, now_secs()).expect("verify via JWKS");
         assert_eq!(claims.role, CallRole::Publisher);
-        assert_eq!(claims.call_id, "abababababababababababababababab");
+        assert_eq!(claims.room, room_hex());
     }
 }

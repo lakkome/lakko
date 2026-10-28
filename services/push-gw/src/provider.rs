@@ -34,8 +34,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Mapping between the integer column value in `push_tokens.provider`
-/// and the platform name. Wire-format-stable: never renumber.
+/// The platform a token belongs to. Its byte is the
+/// `lakko_contacts::push_wake::PushProvider` byte a sealed subscription
+/// carries (the former `push_tokens.provider` column values, ADR-0078).
+/// Wire-format-stable: never renumber.
 ///
 /// ## Two token classes, not five platforms
 ///
@@ -81,11 +83,11 @@ pub(crate) enum ProviderKind {
 }
 
 impl ProviderKind {
-    /// Integer stored in `push_tokens.provider`.
+    /// The byte a sealed subscription carries for this provider.
     ///
-    /// **Never renumber.** Rows written under the four original values
-    /// are live; a new kind takes the next free integer and nothing
-    /// else moves.
+    /// **Never renumber.** A new kind takes the next free integer and
+    /// nothing else moves.
+    #[cfg(test)]
     pub(crate) const fn as_db(self) -> u8 {
         match self {
             ProviderKind::Apns => 1,
@@ -96,6 +98,7 @@ impl ProviderKind {
         }
     }
 
+    /// Parse a provider byte from an opened sealed subscription.
     pub(crate) const fn from_db(value: u8) -> Option<Self> {
         match value {
             1 => Some(ProviderKind::Apns),
@@ -202,11 +205,14 @@ impl WakeKind {
 /// OS-level notification on-device.
 #[derive(Clone, Debug)]
 pub(crate) struct WakePayload {
-    /// 32-byte device pseudonym — the addressee.
-    pub(crate) device_pseudonym: [u8; 32],
-    /// Optional: which group's queue advanced. Lets the client jump
-    /// straight to the right journal cursor instead of polling all
-    /// of its groups.
+    /// The 16-byte id of the subscription row this delivery comes from
+    /// (ADR-0078). The receiving device handles the wake only when it
+    /// holds that subscription for the `push_gid`; it replaces the device
+    /// pseudonym, which no longer exists.
+    pub(crate) subscription_id: [u8; 16],
+    /// Which group's queue advanced (its ADR-0042 `push_gid`). Lets the
+    /// client jump straight to the right journal cursor instead of polling
+    /// all of its groups. `None` only in provider unit tests.
     pub(crate) group_pseudonym: Option<[u8; 32]>,
     /// Optional: server-assigned cursor id past which the client
     /// should fetch (`?after=<envelope_pointer>`).
@@ -249,7 +255,7 @@ pub(crate) trait Provider: Send + Sync {
     fn kind(&self) -> ProviderKind;
 
     /// Deliver a wake-up to the device that owns `token`. `token` is
-    /// the bytes we previously stored in `push_tokens.token` — the
+    /// the bytes a sealed subscription carried for it (ADR-0078) — the
     /// provider knows how to interpret them.
     async fn deliver(&self, token: &[u8], payload: &WakePayload) -> Result<(), DeliverError>;
 }
@@ -281,18 +287,13 @@ impl Provider for LogOnlyProvider {
     }
 
     async fn deliver(&self, token: &[u8], payload: &WakePayload) -> Result<(), DeliverError> {
-        // Never log the full token at info level — even though it's
-        // not PII per se, treating it as sensitive is a good habit.
-        // Length + first 4 bytes is enough for ops debugging.
-        let token_prefix = hex::encode(&token[..token.len().min(4)]);
+        // ADR-0078: no token, subscription id, push_gid or prefix of one in
+        // a log line - only what kind of delivery would have happened.
         tracing::info!(
             provider = self.kind.as_str(),
             wake_kind = payload.kind.as_str(),
             token_len = token.len(),
-            token_prefix = %token_prefix,
-            device_prefix = %hex::encode(&payload.device_pseudonym[..4]),
             has_group = payload.group_pseudonym.is_some(),
-            envelope_pointer = ?payload.envelope_pointer,
             "[stub] would deliver wake-up",
         );
         Ok(())
@@ -354,7 +355,7 @@ pub(crate) mod tests {
 
     #[test]
     fn provider_kind_db_values_are_stable() {
-        // The four original values are live in `push_tokens.provider`.
+        // The provider bytes are frozen in every sealed subscription.
         // Renumbering any of them re-points every stored row at the
         // wrong platform, so they are pinned literally.
         assert_eq!(ProviderKind::Apns.as_db(), 1);
@@ -410,7 +411,7 @@ pub(crate) mod tests {
             kind: ProviderKind::Apns,
         };
         let payload = WakePayload {
-            device_pseudonym: [0xAB; 32],
+            subscription_id: [0xAB; 16],
             group_pseudonym: Some([0xCD; 32]),
             envelope_pointer: Some(42),
             kind: WakeKind::Message,
@@ -424,7 +425,7 @@ pub(crate) mod tests {
             kind: ProviderKind::Fcm,
         };
         let payload = WakePayload {
-            device_pseudonym: [0; 32],
+            subscription_id: [0; 16],
             group_pseudonym: None,
             envelope_pointer: None,
             kind: WakeKind::Message,
@@ -439,7 +440,7 @@ pub(crate) mod tests {
             kind: ProviderKind::WebPush,
         };
         let payload = WakePayload {
-            device_pseudonym: [0; 32],
+            subscription_id: [0; 16],
             group_pseudonym: None,
             envelope_pointer: None,
             kind: WakeKind::Message,

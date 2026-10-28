@@ -35,7 +35,7 @@ use tracing::warn;
 
 use crate::peer::{Peer, PeerId, PeerRegistry};
 use crate::prom::names;
-use crate::protocol::{peer_tag, ClientFrame, ErrorCode, PeerSnapshot, RelayTarget, ServerFrame};
+use crate::protocol::{ClientFrame, ErrorCode, PeerSnapshot, RelayTarget, ServerFrame};
 
 /// Failure modes of a single relay attempt.
 #[derive(Debug, Error)]
@@ -118,14 +118,6 @@ impl RouterError {
     }
 }
 
-/// Pseudonymise the sender's account id for inclusion in
-/// `peer-joined` broadcasts. First 8 hex chars match the
-/// audit-pack pseudonym shape used in log lines.
-fn pseudonymise(account_id: &str) -> String {
-    let n = account_id.len().min(8);
-    account_id[..n].to_owned()
-}
-
 /// Router. Stateless aside from the [`PeerRegistry`] it
 /// borrows; constructed per-request, not per-call.
 pub struct Router<'a> {
@@ -164,21 +156,17 @@ impl<'a> Router<'a> {
     pub async fn welcome_for(&self, peer: &Peer, server_ts: u64) -> ServerFrame {
         let roster = self
             .registry
-            .peers_in_call(&peer.call_id)
+            .peers_in_call(&peer.room)
             .await
             .into_iter()
             .filter(|p| p.id != peer.id)
             .map(|p| PeerSnapshot {
                 peer_id: p.id.to_string(),
-                account_pseudonym: pseudonymise(&p.account_id),
-                // ADR-0021 — per-call tag over the (JWT-verified)
-                // account_id; the client resolves it to a contact name.
-                peer_tag: peer_tag(&peer.call_id, &p.account_id),
             })
             .collect();
         ServerFrame::Welcome {
             peer_id: peer.id.to_string(),
-            call_id: peer.call_id.clone(),
+            room: peer.room.clone(),
             roster,
             server_ts,
         }
@@ -191,11 +179,8 @@ impl<'a> Router<'a> {
     pub async fn announce_join(&self, peer: &Peer) {
         let frame = ServerFrame::PeerJoined {
             peer_id: peer.id.to_string(),
-            account_pseudonym: pseudonymise(&peer.account_id),
-            // ADR-0021 — per-call tag for the joining peer.
-            peer_tag: peer_tag(&peer.call_id, &peer.account_id),
         };
-        self.broadcast_to_call(&peer.call_id, Some(&peer.id), frame)
+        self.broadcast_to_call(&peer.room, Some(&peer.id), frame)
             .await;
     }
 
@@ -205,7 +190,7 @@ impl<'a> Router<'a> {
         let frame = ServerFrame::PeerLeft {
             peer_id: peer.id.to_string(),
         };
-        self.broadcast_to_call(&peer.call_id, Some(&peer.id), frame)
+        self.broadcast_to_call(&peer.room, Some(&peer.id), frame)
             .await;
     }
 
@@ -239,7 +224,7 @@ impl<'a> Router<'a> {
                 match to {
                     RelayTarget::Peer { peer_id } => {
                         let target = PeerId::from_string(peer_id);
-                        let peers = self.registry.peers_in_call(&sender.call_id).await;
+                        let peers = self.registry.peers_in_call(&sender.room).await;
                         let Some(dst) = peers.into_iter().find(|p| p.id == target) else {
                             return Err(RouterError::UnknownPeer);
                         };
@@ -247,7 +232,7 @@ impl<'a> Router<'a> {
                         Ok(None)
                     },
                     RelayTarget::Call => {
-                        self.broadcast_to_call(&sender.call_id, Some(&sender.id), relay)
+                        self.broadcast_to_call(&sender.room, Some(&sender.id), relay)
                             .await;
                         Ok(None)
                     },
@@ -257,19 +242,22 @@ impl<'a> Router<'a> {
                 sdp,
                 light_mids,
                 middle_mids,
+                screen_mids,
             } => {
                 let Some(media) = self.media else {
                     return Err(RouterError::MediaNotWired);
                 };
-                // `light_mids` and `middle_mids` are within the protocol's
-                // bounds: the frame would not have decoded otherwise.
+                // `light_mids`, `middle_mids` and `screen_mids` are within
+                // the protocol's bounds: the frame would not have decoded
+                // otherwise.
                 let answer = media
-                    .accept_offer_with_copies(
+                    .accept_offer_with_screen(
                         sender.id.clone(),
-                        sender.call_id.clone(),
+                        sender.room.clone(),
                         sdp,
                         light_mids,
                         middle_mids,
+                        screen_mids,
                     )
                     .await
                     .map_err(RouterError::from)?;
@@ -327,11 +315,11 @@ impl<'a> Router<'a> {
         }
     }
 
-    /// Send `frame` to every peer in `call_id`, excluding
+    /// Send `frame` to every peer in `room`, excluding
     /// `except` (typically the originator). Per-recipient
     /// backpressure is logged + counted, never propagated.
-    async fn broadcast_to_call(&self, call_id: &str, except: Option<&PeerId>, frame: ServerFrame) {
-        let recipients = self.registry.peers_in_call(call_id).await;
+    async fn broadcast_to_call(&self, room: &str, except: Option<&PeerId>, frame: ServerFrame) {
+        let recipients = self.registry.peers_in_call(room).await;
         let mut delivered = 0usize;
         let mut dropped = 0usize;
         for p in recipients {
@@ -342,7 +330,7 @@ impl<'a> Router<'a> {
                 Ok(()) => delivered += 1,
                 Err(RouterError::Backpressure) => {
                     dropped += 1;
-                    warn!(peer = %p.id, "router: broadcast drop due to backpressure");
+                    warn!(peer = %p.id.log_tag(), "router: broadcast drop due to backpressure");
                 },
                 Err(RouterError::UnknownPeer) => {
                     // Peer dropped between the registry read
@@ -374,10 +362,8 @@ impl<'a> Router<'a> {
         }
         if dropped > 0 {
             warn!(
-                call = %call_id,
                 dropped,
-                delivered,
-                "router: partial broadcast — some peers behind on their queue"
+                delivered, "router: partial broadcast — some peers behind on their queue"
             );
         }
     }
@@ -404,22 +390,21 @@ mod tests {
     /// Construct a fully-registered peer with an outbound
     /// channel hooked up. Returns both the peer record (for
     /// the registry) and the receiver end (for assertions).
-    fn make_peer(id: &str, call_id: &str, account_id: &str) -> (Peer, mpsc::Receiver<ServerFrame>) {
+    fn make_peer(id: &str, room: &str) -> (Peer, mpsc::Receiver<ServerFrame>) {
         let (tx, rx) = mpsc::channel::<ServerFrame>(16);
         let peer = Peer {
             id: PeerId::from_str_for_test(id),
-            call_id: call_id.into(),
-            account_id: account_id.into(),
+            room: room.into(),
             outbound: Some(tx),
         };
         (peer, rx)
     }
 
     #[tokio::test]
-    async fn welcome_excludes_self_and_pseudonymises() {
+    async fn welcome_excludes_self_and_names_no_account() {
         let reg = PeerRegistry::new();
-        let (alice, _alice_rx) = make_peer("p1", "call-a", "deadbeefdeadbeefdeadbeefdeadbeef");
-        let (bob, _bob_rx) = make_peer("p2", "call-a", "cafebabecafebabecafebabecafebabe");
+        let (alice, _alice_rx) = make_peer("p1", "call-a");
+        let (bob, _bob_rx) = make_peer("p2", "call-a");
         reg.register(alice.clone()).await;
         reg.register(bob.clone()).await;
 
@@ -428,16 +413,19 @@ mod tests {
         match frame {
             ServerFrame::Welcome {
                 peer_id,
-                call_id,
+                room,
                 roster,
                 server_ts,
             } => {
                 assert_eq!(peer_id, "p1");
-                assert_eq!(call_id, "call-a");
+                assert_eq!(room, "call-a");
                 assert_eq!(server_ts, 1_700_000_000);
-                assert_eq!(roster.len(), 1);
-                assert_eq!(roster[0].peer_id, "p2");
-                assert_eq!(roster[0].account_pseudonym, "cafebabe");
+                assert_eq!(
+                    roster,
+                    vec![PeerSnapshot {
+                        peer_id: "p2".into()
+                    }]
+                );
             },
             other => panic!("expected Welcome, got {other:?}"),
         }
@@ -446,8 +434,8 @@ mod tests {
     #[tokio::test]
     async fn join_broadcast_reaches_existing_peers_only() {
         let reg = PeerRegistry::new();
-        let (alice, mut alice_rx) = make_peer("p1", "call-a", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        let (bob, mut bob_rx) = make_peer("p2", "call-a", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let (alice, mut alice_rx) = make_peer("p1", "call-a");
+        let (bob, mut bob_rx) = make_peer("p2", "call-a");
         reg.register(alice.clone()).await;
         reg.register(bob.clone()).await;
 
@@ -456,16 +444,8 @@ mod tests {
         // Alice should see bob-joined; bob should not see
         // his own join announcement.
         match alice_rx.try_recv().unwrap() {
-            ServerFrame::PeerJoined {
-                peer_id,
-                account_pseudonym,
-                peer_tag: tag,
-            } => {
+            ServerFrame::PeerJoined { peer_id } => {
                 assert_eq!(peer_id, "p2");
-                assert_eq!(account_pseudonym, "bbbbbbbb");
-                // ADR-0021 — the join announcement now carries the
-                // canonical per-call tag the client resolves.
-                assert_eq!(tag, peer_tag("call-a", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
             },
             other => panic!("expected PeerJoined, got {other:?}"),
         }
@@ -475,8 +455,8 @@ mod tests {
     #[tokio::test]
     async fn leave_broadcast_reaches_remaining_peers() {
         let reg = PeerRegistry::new();
-        let (alice, mut alice_rx) = make_peer("p1", "call-a", "aa");
-        let (bob, _bob_rx) = make_peer("p2", "call-a", "bb");
+        let (alice, mut alice_rx) = make_peer("p1", "call-a");
+        let (bob, _bob_rx) = make_peer("p2", "call-a");
         reg.register(alice.clone()).await;
         reg.register(bob.clone()).await;
 
@@ -491,9 +471,9 @@ mod tests {
     #[tokio::test]
     async fn signal_relay_targets_named_peer() {
         let reg = PeerRegistry::new();
-        let (alice, _alice_rx) = make_peer("p1", "call-a", "aa");
-        let (bob, mut bob_rx) = make_peer("p2", "call-a", "bb");
-        let (carol, mut carol_rx) = make_peer("p3", "call-a", "cc");
+        let (alice, _alice_rx) = make_peer("p1", "call-a");
+        let (bob, mut bob_rx) = make_peer("p2", "call-a");
+        let (carol, mut carol_rx) = make_peer("p3", "call-a");
         reg.register(alice.clone()).await;
         reg.register(bob.clone()).await;
         reg.register(carol.clone()).await;
@@ -526,9 +506,9 @@ mod tests {
     #[tokio::test]
     async fn signal_relay_broadcast_skips_sender() {
         let reg = PeerRegistry::new();
-        let (alice, mut alice_rx) = make_peer("p1", "call-a", "aa");
-        let (bob, mut bob_rx) = make_peer("p2", "call-a", "bb");
-        let (carol, mut carol_rx) = make_peer("p3", "call-a", "cc");
+        let (alice, mut alice_rx) = make_peer("p1", "call-a");
+        let (bob, mut bob_rx) = make_peer("p2", "call-a");
+        let (carol, mut carol_rx) = make_peer("p3", "call-a");
         reg.register(alice.clone()).await;
         reg.register(bob.clone()).await;
         reg.register(carol.clone()).await;
@@ -559,7 +539,7 @@ mod tests {
     #[tokio::test]
     async fn signal_relay_to_unknown_peer_errors() {
         let reg = PeerRegistry::new();
-        let (alice, _alice_rx) = make_peer("p1", "call-a", "aa");
+        let (alice, _alice_rx) = make_peer("p1", "call-a");
         reg.register(alice.clone()).await;
 
         let router = Router::new(&reg);
@@ -581,7 +561,7 @@ mod tests {
     #[tokio::test]
     async fn video_wants_without_a_media_task_are_taken_in_silence() {
         let reg = PeerRegistry::new();
-        let (alice, mut alice_rx) = make_peer("p1", "call-a", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let (alice, mut alice_rx) = make_peer("p1", "call-a");
         reg.register(alice.clone()).await;
         let router = Router::new(&reg);
         let frame = crate::protocol::ClientFrame::VideoWants {
@@ -601,7 +581,7 @@ mod tests {
     #[tokio::test]
     async fn ping_yields_matching_pong() {
         let reg = PeerRegistry::new();
-        let (alice, _alice_rx) = make_peer("p1", "call-a", "aa");
+        let (alice, _alice_rx) = make_peer("p1", "call-a");
         reg.register(alice.clone()).await;
 
         let router = Router::new(&reg);
@@ -618,9 +598,9 @@ mod tests {
     #[tokio::test]
     async fn cross_call_isolation() {
         let reg = PeerRegistry::new();
-        let (alice, mut alice_rx) = make_peer("p1", "call-a", "aa");
-        let (bob, mut bob_rx) = make_peer("p2", "call-a", "bb");
-        let (eve, mut eve_rx) = make_peer("p9", "call-b", "ee");
+        let (alice, mut alice_rx) = make_peer("p1", "call-a");
+        let (bob, mut bob_rx) = make_peer("p2", "call-a");
+        let (eve, mut eve_rx) = make_peer("p9", "call-b");
         reg.register(alice.clone()).await;
         reg.register(bob.clone()).await;
         reg.register(eve.clone()).await;
@@ -636,12 +616,5 @@ mod tests {
         assert!(eve_rx.try_recv().is_err());
         // Sanity — bob still does not see his own join.
         assert!(bob_rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn pseudonymise_truncates() {
-        assert_eq!(pseudonymise("deadbeefxxxx"), "deadbeef");
-        assert_eq!(pseudonymise("abc"), "abc");
-        assert_eq!(pseudonymise(""), "");
     }
 }

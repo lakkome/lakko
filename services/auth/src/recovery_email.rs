@@ -774,10 +774,7 @@ pub(crate) async fn enrol_start(
             CODE_MAIL_SEND_FAILED,
         ));
     }
-    tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(account_id),
-        "recovery email: enrol code sent"
-    );
+    tracing::info!("recovery email: enrol code sent");
     Ok(Json(EnrolStartRes {
         challenge_id: URL_SAFE_NO_PAD.encode(id),
         vault_salt: B64.encode(vault_salt),
@@ -952,7 +949,6 @@ pub(crate) async fn enrol_finish(
     tx.commit().await.map_err(ApiError::Db)?;
 
     tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(account_id),
         vault = body_enc.is_some(),
         replaced = had.is_some(),
         "recovery email: enrolled"
@@ -1223,11 +1219,7 @@ pub(crate) async fn remove(
             .map_err(ApiError::Db)?;
     }
     tx.commit().await.map_err(ApiError::Db)?;
-    tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(account_id),
-        removed,
-        "recovery email: removed"
-    );
+    tracing::info!(removed, "recovery email: removed");
     Ok(Json(serde_json::json!({ "removed": removed })))
 }
 
@@ -1380,10 +1372,7 @@ pub(crate) async fn put_vault(
         .await
         .map_err(ApiError::Db)?;
     tx.commit().await.map_err(ApiError::Db)?;
-    tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(account_id),
-        "recovery email: vault stored again for the confirmed address"
-    );
+    tracing::info!("recovery email: vault stored again for the confirmed address");
     Ok(Json(serde_json::json!({ "vault": true })))
 }
 
@@ -1431,7 +1420,6 @@ pub(crate) async fn remove_vault(
         .map_err(ApiError::Db)?;
     tx.commit().await.map_err(ApiError::Db)?;
     tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(account_id),
         vault_removed,
         "recovery email: account marked phrase-protected"
     );
@@ -1679,11 +1667,7 @@ pub(crate) async fn recover_verify(
         tracing::debug!(error = %e, "recovery email: ticket not stored");
         return Err(code_refused());
     }
-    tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(account_id),
-        totp_required,
-        "recovery email: code accepted"
-    );
+    tracing::info!(totp_required, "recovery email: code accepted");
     Ok(Json(RecoverVerifyRes {
         ticket: URL_SAFE_NO_PAD.encode(ticket),
         totp_required,
@@ -1906,10 +1890,7 @@ pub(crate) async fn recover_open(
     .map_err(ApiError::Db)?;
     tx.commit().await.map_err(ApiError::Db)?;
 
-    tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(account_id),
-        "recovery email: vault released"
-    );
+    tracing::info!("recovery email: vault released");
     Ok(Json(serde_json::json!({
         "mode": "vault",
         "vault_salt": B64.encode(vault_salt),
@@ -2095,7 +2076,7 @@ pub(crate) async fn password_finish(
     tx.commit().await.map_err(ApiError::Db)?;
 
     let account_id_b64 = URL_SAFE_NO_PAD.encode(account_id);
-    tracing::info!(account_id = %account_id_b64, "recovery email: password replaced");
+    tracing::info!("recovery email: password replaced");
     let session = crate::session::issue_pair_at(&state, &account_id, key_generation, &device_id)?;
     Ok(Json(PasswordFinishRes {
         account_id_b64,

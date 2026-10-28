@@ -54,10 +54,10 @@ public data class PeerProfile(
     /**
      * The sender's self-stated 16-byte auth account id as lowercase hex, or
      * `null` (a profile that carried none, or a row stored before the field
-     * existed). What the group-call roster derives the ADR-0021 peer tag from
-     * (`me.lakko.app.calls.buildPeerTagLabels`); a claim, like the id on a
-     * contact acknowledgement, and defended the same way — two keys claiming
-     * one id hide the tag for both.
+     * existed). A claim, like the id on a contact acknowledgement: what binds
+     * it is a username certificate (ADR-0060 section 5), which names an
+     * account id. (A group-call tile is no longer named through it: since
+     * ADR-0078 section 2 each peer announces itself, sealed and signed.)
      */
     val accountIdHex: String? = null,
     /**
@@ -67,6 +67,8 @@ public data class PeerProfile(
      * and that account's published key is the sender's.
      */
     val usernameCertificateHex: String? = null,
+    /** ADR-0084 — the person's profile photo references, or `null`. */
+    val avatar: AvatarRefs? = null,
 )
 
 /** The auth account id length, bytes. */
@@ -87,6 +89,7 @@ public fun peerProfileOf(profile: uniffi.lakko_ffi_uniffi.FfiProfile): PeerProfi
         updatedAtMs = profile.updatedAtMs,
         accountIdHex = accountIdHexOrNull(profile.accountId),
         usernameCertificateHex = profile.usernameCertificate?.let { me.lakko.app.reach.reachHex(it) },
+        avatar = avatarRefsOf(profile.avatar),
     )
 
 /**

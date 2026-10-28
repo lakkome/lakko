@@ -8,8 +8,14 @@
 //! the "TURN REST API" — draft-uberti-rtcweb-turn-rest-00).
 //! Shape:
 //!
-//!   username = `<unix_expiry_seconds>:<account_id_hex>`
+//!   username = `<unix_expiry_seconds>:<random_hex>`
 //!   password = base64(HMAC-SHA1(secret, username))
+//!
+//! The tag after the colon is 16 random bytes drawn per credential
+//! (ADR-0078 section 2): coturn sees, and may log, the username, so it
+//! names no account. A credential is issued only beside a call admission
+//! token, in the same anonymous `POST /call/jwt` exchange that spends a
+//! `call-join` token; there is no bearer route for it any more.
 //!
 //! The TURN server (coturn or pion/turn) verifies the
 //! credential by recomputing the HMAC against its own copy
@@ -38,28 +44,15 @@
 //! restart) lines up with how the SFU verifies its own
 //! JWT-side `kid` rotation.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::Json;
-use axum::Extension;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 
-use crate::webauthn::AuthenticatedAccount;
-use crate::AppState;
-
 type HmacSha1 = Hmac<Sha1>;
 
 /// Lowercase-hex encode without pulling in the `hex` crate.
-/// The TURN-username "tag" field accepts any opaque ASCII
-/// string; we use hex so the coturn-side audit log can be
-/// grep'd for an account_id without an additional decode
-/// step.
 fn hex_lower(bytes: &[u8]) -> String {
     const TABLE: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -85,9 +78,8 @@ pub(crate) const TURN_CRED_TTL_SECS: u64 = 600;
 /// Wrapped in `Arc` inside `AppState` (alongside the OPAQUE
 /// + WebAuthn fields).
 ///
-/// `None` when `LAKKO_TURN_SHARED_SECRET` is unset; the
-/// `/call/turn-credential` route then returns 503 instead
-/// of synthesising fake credentials.
+/// `None` when `LAKKO_TURN_SHARED_SECRET` is unset; `POST /call/jwt`
+/// then answers with `turn: null` and the client calls on STUN alone.
 #[derive(Clone)]
 pub(crate) struct TurnConfig {
     /// TURN server URIs the issued credential authenticates
@@ -161,29 +153,44 @@ impl TurnConfig {
         Ok(Some(Self { uris, secret }))
     }
 
-    /// Mint a credential for `account_id` valid for the next
-    /// [`TURN_CRED_TTL_SECS`] seconds.
-    fn mint(&self, account_id: &[u8], now_secs: u64) -> TurnCredentialResponse {
+    /// A fixed configuration for other modules' tests.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            uris: vec!["turn:turn.lakko.test:3478?transport=udp".to_owned()],
+            secret: vec![0xAA; 32],
+        }
+    }
+
+    /// Mint a credential valid for the next [`TURN_CRED_TTL_SECS`]
+    /// seconds, its username tag 16 fresh random bytes.
+    pub(crate) fn mint_random(&self, now_secs: u64) -> Option<TurnCredentialResponse> {
+        use rand::RngCore as _;
+        let mut tag = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut tag);
+        self.mint_with_tag(&tag, now_secs)
+    }
+
+    /// Mint a credential under the username tag `tag`. `None` only if the
+    /// HMAC refused the key, which it never does for HMAC.
+    fn mint_with_tag(&self, tag: &[u8], now_secs: u64) -> Option<TurnCredentialResponse> {
         let expiry = now_secs.saturating_add(TURN_CRED_TTL_SECS);
-        // coturn's "static-auth-secret" expects username in
-        // the form `<unix_expiry>:<arbitrary user tag>`.
-        // We use the hex-encoded account_id as the tag so a
-        // TURN-server-side audit log entry can be tied back
-        // to the issuing account.
-        let username = format!("{expiry}:{}", hex_lower(account_id));
+        // coturn's "static-auth-secret" expects username in the form
+        // `<unix_expiry>:<arbitrary user tag>`. The tag is random: it names
+        // no account (ADR-0078 section 2).
+        let username = format!("{expiry}:{}", hex_lower(tag));
 
-        let mut mac = HmacSha1::new_from_slice(&self.secret).expect("HMAC accepts any key length");
+        let mut mac = HmacSha1::new_from_slice(&self.secret).ok()?;
         mac.update(username.as_bytes());
-        let tag = mac.finalize().into_bytes();
-        let password = B64.encode(tag);
+        let password = B64.encode(mac.finalize().into_bytes());
 
-        TurnCredentialResponse {
+        Some(TurnCredentialResponse {
             urls: self.uris.clone(),
             username,
             password,
             ttl_secs: TURN_CRED_TTL_SECS,
             expiry_unix_secs: expiry,
-        }
+        })
     }
 }
 
@@ -193,7 +200,7 @@ pub(crate) struct TurnCredentialResponse {
     /// against. Clients pass these verbatim to
     /// `RTCIceServer.urls`.
     pub urls: Vec<String>,
-    /// HMAC-username, in the form `<unix_expiry>:<account_id_hex>`.
+    /// HMAC-username, in the form `<unix_expiry>:<random_hex>`.
     pub username: String,
     /// `base64(HMAC-SHA1(secret, username))`.
     pub password: String,
@@ -206,45 +213,6 @@ pub(crate) struct TurnCredentialResponse {
     /// allocation made under this credential after this
     /// timestamp.
     pub expiry_unix_secs: u64,
-}
-
-/// `POST /call/turn-credential` — bearer-auth'd; returns
-/// fresh credentials in the [`TurnCredentialResponse`]
-/// shape.
-///
-/// Returns 503 with a typed JSON body when TURN is not
-/// configured on this service instance. Returns 500 only on
-/// system-clock failure (UNIX_EPOCH underflow — would
-/// indicate hardware clock corruption).
-pub(crate) async fn issue_turn_credential(
-    State(state): State<AppState>,
-    Extension(account): Extension<AuthenticatedAccount>,
-) -> Result<Json<TurnCredentialResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let Some(turn) = state.turn.as_ref() else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "error": "turn_not_configured",
-                "detail": "LAKKO_TURN_URIS / LAKKO_TURN_SHARED_SECRET not set on this service instance",
-            })),
-        ));
-    };
-
-    let now_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "clock_error",
-                    "detail": "system clock is before UNIX epoch",
-                })),
-            )
-        })?
-        .as_secs();
-
-    let cred = turn.mint(&account.0, now_secs);
-    Ok(Json(cred))
 }
 
 #[cfg(test)]
@@ -264,10 +232,11 @@ mod tests {
     #[test]
     fn mint_shape_matches_coturn_rest_api() {
         let turn = test_turn();
-        let account_id = b"\x01\x02\x03\x04\x05\x06";
-        let cred = turn.mint(account_id, 1_700_000_000);
+        let cred = turn
+            .mint_with_tag(b"\x01\x02\x03\x04\x05\x06", 1_700_000_000)
+            .expect("mint");
 
-        // Username = `<expiry>:<account_hex>`. Expiry =
+        // Username = `<expiry>:<tag_hex>`. Expiry =
         // now + TTL = 1_700_000_000 + 600 = 1_700_000_600.
         assert_eq!(cred.username, "1700000600:010203040506");
         assert_eq!(cred.ttl_secs, TURN_CRED_TTL_SECS);
@@ -285,20 +254,27 @@ mod tests {
         assert_eq!(cred.password, expected);
     }
 
+    /// ADR-0078 section 2: every credential carries a fresh random tag of
+    /// 16 bytes, so two credentials minted in the same second share nothing
+    /// a TURN log could tie together.
     #[test]
-    fn mint_distinct_accounts_get_distinct_passwords() {
+    fn every_credential_has_a_fresh_random_tag() {
         let turn = test_turn();
-        let a = turn.mint(b"\x01", 1_700_000_000);
-        let b = turn.mint(b"\x02", 1_700_000_000);
+        let a = turn.mint_random(1_700_000_000).expect("mint");
+        let b = turn.mint_random(1_700_000_000).expect("mint");
         assert_ne!(a.username, b.username);
         assert_ne!(a.password, b.password);
+        let (expiry, tag) = a.username.split_once(':').expect("expiry:tag");
+        assert_eq!(expiry, "1700000600");
+        assert_eq!(tag.len(), 32);
+        assert!(tag.bytes().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
-    fn mint_same_account_different_time_distinct_password() {
+    fn mint_different_time_distinct_password() {
         let turn = test_turn();
-        let a = turn.mint(b"\x01", 1_700_000_000);
-        let b = turn.mint(b"\x01", 1_700_000_001);
+        let a = turn.mint_with_tag(b"\x01", 1_700_000_000).expect("mint");
+        let b = turn.mint_with_tag(b"\x01", 1_700_000_001).expect("mint");
         assert_ne!(a.username, b.username);
         assert_ne!(a.password, b.password);
     }
@@ -310,7 +286,7 @@ mod tests {
         // use saturating_add so this caps at MAX rather
         // than wrapping into a credential that
         // accidentally validates in the past.
-        let cred = turn.mint(b"\x01", u64::MAX);
+        let cred = turn.mint_with_tag(b"\x01", u64::MAX).expect("mint");
         assert_eq!(cred.expiry_unix_secs, u64::MAX);
     }
 

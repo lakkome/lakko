@@ -3,6 +3,7 @@
 
 import Combine
 import Foundation
+import LakkoCore
 
 /// State + dispatcher for ``ContactsScreen``.
 ///
@@ -12,7 +13,7 @@ import Foundation
 ///   * `apps/android/.../ui/contacts/ContactsViewModel.kt`
 ///     (1.15e6 + 1.15e7's `pollOnceLongPoll`)
 ///
-/// **Scope**: search/send + pull-to-refresh + accept/decline +
+/// **Scope**: pull-to-refresh + accept/decline +
 /// requires-reauth panel (1.14e4), the invite generate/revoke
 /// surface (1.14e7; 1.15e10 on Android), and continuous
 /// `pollOnceLongPoll` (1.14e5) — all wired.
@@ -20,21 +21,16 @@ import Foundation
 /// `@MainActor` because every mutation writes to a `@Published`
 /// slot that SwiftUI reads on the main runloop. The repository's
 /// own `@Published var state` is mirrored here through a Combine
-/// subscription so the view can observe one ObservableObject; the
-/// VM-owned form fields (`usernameInput`, `introInput`) round out
-/// the picture.
+/// subscription so the view can observe one ObservableObject.
+///
+/// There is no add-by-username form any more (`docs/ux/who-can-find-me.md`
+/// section 6.1): a person is found through the search field
+/// (``PeopleSearchModel``), which sends the request from its row.
 @MainActor
 public final class ContactsViewModel: ObservableObject {
 
-    // MARK: - Form fields
-
-    @Published public var usernameInput: String = ""
-    @Published public var introInput: String = ""
-
     // MARK: - Ephemeral status
 
-    @Published public private(set) var sending: Bool = false
-    @Published public private(set) var sendError: UiText?
     @Published public private(set) var generatingInvite: Bool = false
     @Published public private(set) var inviteError: UiText?
     /// The last invite link the user generated this session.
@@ -42,19 +38,6 @@ public final class ContactsViewModel: ObservableObject {
     /// Contacts screen; cleared once the user dismisses or
     /// generates another one.
     @Published public var lastGeneratedInvite: GeneratedInvite?
-    /// Bumped once per successful ``onSendClicked()``; the add-by-username
-    /// sheet dismisses on it (UX spec section 5.3).
-    @Published public private(set) var sendSucceededCount: Int = 0
-
-    /// `docs/ux/navigation.md` section 4.3 — bumped when the conversation
-    /// list's ONE network lookup found a person and handed their name here.
-    /// The Contacts screen watches it and opens the add-contact sheet with the
-    /// name already filled.
-    ///
-    /// A counter rather than a flag, because the same name looked up twice has
-    /// to reopen the sheet the second time, and a flag that is already `true`
-    /// changes nothing.
-    @Published public private(set) var addByUsernameRequests: Int = 0
 
     // MARK: - Mirror of the repository's state
 
@@ -64,6 +47,17 @@ public final class ContactsViewModel: ObservableObject {
     /// the view can subscribe to just the VM and still see every
     /// repository update.
     @Published public private(set) var repositoryState: ContactsState = ContactsState()
+
+    /// ADR-0079 section 4 — the people added through their invite link whose
+    /// app has not answered yet, mirrored from ``ContactsRepository/invited``.
+    @Published public private(set) var invited: [PendingContact] = []
+
+    /// The pending contacts the list shows: those not yet an accepted
+    /// contact on this device.
+    public var shownInvited: [PendingContact] {
+        PendingContacts.shown(
+            invited, oneToOnePeerKeys: Set(repositoryState.accepted.map(\.request.fromPubkey)))
+    }
 
     // MARK: - Wiring
 
@@ -94,6 +88,11 @@ public final class ContactsViewModel: ObservableObject {
                 self?.repositoryState = newState
             }
             .store(in: &cancellables)
+        self.invited = repository.invited
+        repository.$invited
+            .receive(on: RunLoop.main)
+            .sink { [weak self] list in self?.invited = list }
+            .store(in: &cancellables)
         // A one-to-one conversation IS a contact: whenever the set of
         // conversations this device holds changes, every one-to-one peer
         // without a contact row gets one (`ContactsRepository.adoptOneToOnePeer`).
@@ -107,8 +106,8 @@ public final class ContactsViewModel: ObservableObject {
 
     /// Give every one-to-one peer a contact row (see
     /// `ContactsRepository.adoptOneToOnePeer`). The account id, when a profile
-    /// has carried one (ADR-0048 v2), rides along so the row can name the
-    /// person in a group call like an accepted one does.
+    /// has carried one (ADR-0048 v2), rides along as it does on an accepted
+    /// row.
     public func adoptOneToOnePeers() {
         guard let chatRepository else { return }
         var accountIds: [String: Data] = [:]
@@ -130,81 +129,6 @@ public final class ContactsViewModel: ObservableObject {
     }
 
     // MARK: - Actions
-
-    /// Send a contact request. Surfaces success by clearing the
-    /// form; failures land in ``sendError``.
-    public func onSendClicked() {
-        guard !sending else { return }
-        // ADR-0048 §4 — no lookup is sent for a name that fails the rule.
-        let username: String
-        switch checkUsername(usernameInput) {
-        case .empty:
-            sendError = .key("username.error.empty")
-            return
-        case .invalid(let reason):
-            sendError = UiText { reason.message }
-            return
-        case .valid(let canonical):
-            username = canonical
-        }
-
-        sending = true
-        sendError = nil
-        let intro = introInput
-
-        // The handle the user typed, prefixed with `@`, as the subject
-        // of a reset-aware ``SupersessionRefused`` message (KT-log S4).
-        let peerLabel = "@\(username)"
-
-        Task {
-            do {
-                _ = try await repository.sendContactRequest(
-                    recipientUsername: username,
-                    introMessage: intro
-                )
-                sending = false
-                sendError = nil
-                usernameInput = ""
-                introInput = ""
-                sendSucceededCount += 1
-            } catch let refused as SupersessionRefused {
-                // The peer's AccountIdentity key changed and the change is
-                // neither a proven rotation (ADR-0016) nor an attested reset
-                // (ADR-0073 R.2, accepted silently before this point is ever
-                // reached): the fail-closed refusal, with the copy the
-                // verdict names.
-                sending = false
-                let loggedReset = refused.loggedReset
-                sendError = UiText {
-                    Self.supersessionRefusedMessage(loggedReset: loggedReset, peerLabel: peerLabel)
-                }
-            } catch {
-                sending = false
-                sendError = Self.contactsErrorText(
-                    for: error, fallbackKey: "contacts.error.send",
-                    quotaKey: "tokens.lookup_allowance_used")
-            }
-        }
-    }
-
-    /// ADR-0048 §4 — the inline reason under the add-contact field, or `nil`.
-    public var usernameHint: String? {
-        checkUsername(usernameInput).inlineMessage
-    }
-
-    /// Fill the add-contact form with a name the lookup resolved and ask the
-    /// Contacts screen to open it.
-    ///
-    /// The lookup only ever hands over a name the discovery service confirmed
-    /// exists, so the form opens ready to send rather than ready to be
-    /// re-typed — but it stays a form, because the contact request asks for an
-    /// introduction and sending one silently on the person's behalf is not
-    /// what they asked for by typing a name into a search field.
-    public func prefillAddByUsername(_ username: String) {
-        usernameInput = username
-        sendError = nil
-        addByUsernameRequests += 1
-    }
 
     /// Pull-to-refresh: one immediate inbox fetch plus the live-invites
     /// list. The long-poll loop keeps running regardless.
@@ -319,6 +243,63 @@ public final class ContactsViewModel: ObservableObject {
         repositoryState.accepted.first { $0.request.messageId == messageId }
     }
 
+    /// The person behind a detail screen: the accepted contact, else a person
+    /// the viewer removed whose one-to-one remains
+    /// (`docs/ux/conversation-info.md` section 2.1, amended 2026-10-24) — read
+    /// off the live conversation, as the one-to-one rule reads it, under the
+    /// row id the rule would give them (``ContactsRepository/syntheticContactMessageId(signatureKey:)``).
+    /// Never listed; its card offers `Add to contacts`.
+    public func person(messageId: Int64) -> AcceptedContact? {
+        contact(messageId: messageId) ?? oneToOnePeerWithoutRow(messageId: messageId)
+    }
+
+    /// Whether the person behind a detail screen is on the contact list.
+    public func isContact(messageId: Int64) -> Bool {
+        contact(messageId: messageId) != nil
+    }
+
+    /// The row id a conversation header opens the person card under: the
+    /// contact's, else — a person the viewer removed, whose conversation
+    /// remains — the id ``person(messageId:)`` reads them back under. `nil`
+    /// when the other person cannot be read.
+    public func personMessageId(forOneToOneChat groupIdHex: String) -> Int64? {
+        if let contact = contact(forOneToOneChat: groupIdHex) { return contact.request.messageId }
+        guard let peer = chatRepository?.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) else { return nil }
+        return ContactsRepository.syntheticContactMessageId(signatureKey: peer)
+    }
+
+    /// The other person of a one-to-one this device holds who has no contact
+    /// row and whose synthetic row id is `messageId`, as a row the card can
+    /// draw.
+    private func oneToOnePeerWithoutRow(messageId: Int64) -> AcceptedContact? {
+        guard messageId < 0, let chatRepository else { return nil }
+        let have = Set(repositoryState.accepted.map(\.request.fromPubkey))
+        for groupIdHex in chatRepository.conversationHeadIdHexes {
+            guard let peer = chatRepository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex),
+                  !have.contains(peer),
+                  ContactsRepository.syntheticContactMessageId(signatureKey: peer) == messageId
+            else { continue }
+            let accountId = ProfileDirectory.shared.profilesWithAccountId()
+                .first { $0.signatureKeyB64 == base64Encode(peer) }?.accountId
+            return ContactsRepository.adopting(
+                [], signatureKey: peer, accountId: accountId, groupIdHex: groupIdHex,
+                nowMs: 0, createdAt: "")?.first
+        }
+        return nil
+    }
+
+    /// `Add to contacts` on the card of a person the viewer removed: back on
+    /// the list with the conversation they have. Local; sends nothing.
+    public func onAddContactClicked(person: AcceptedContact) {
+        guard let groupIdHex = chatGroupIdHex(for: person) else { return }
+        repository.restoreRemovedContact(
+            signatureKey: person.request.fromPubkey,
+            accountId: person.request.fromAccountId,
+            groupIdHex: groupIdHex,
+            nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
+            createdAt: ISO8601DateFormatter().string(from: Date()))
+    }
+
     /// The 1x1 chat with this contact: the one linked on the contact record
     /// while this device still holds it, else the one-to-one whose two people
     /// are this account and the contact (the case where the OTHER side
@@ -397,24 +378,22 @@ public final class ContactsViewModel: ObservableObject {
         chatRepository?.deleteChat(groupIdHex: groupIdHex) ?? false
     }
 
-    // MARK: - Invite link actions (1.14e7)
+    // MARK: - Invite link actions (1.14e7; `docs/ux/contact-invite-link.md` section 9)
 
-    /// Generate a fresh single-use 7-day invite link. Surfaces the
-    /// resulting ``GeneratedInvite`` in ``lastGeneratedInvite``;
-    /// failures land in ``inviteError``.
-    public func onGenerateInviteClicked() {
-        guard !generatingInvite else { return }
+    /// **Create link**: a link with the default terms (no label, 7 days, one
+    /// person) at once, no form before it. Surfaces the resulting
+    /// ``GeneratedInvite`` in ``lastGeneratedInvite``; a failure lands in
+    /// ``inviteError``.
+    func onCreateLinkClicked() {
+        guard !generatingInvite, let params = InviteCreateForm().params else { return }
         generatingInvite = true
         inviteError = nil
+        inviteNotice = nil
         Task {
             do {
-                let invite = try await repository.generateInviteLink()
+                let invite = try await mint(params)
                 generatingInvite = false
-                inviteError = nil
                 lastGeneratedInvite = invite
-                // The sheet lists the server-side set; pull it so the new
-                // link shows with its server row rather than only the
-                // session copy.
                 await loadActiveInvites()
             } catch {
                 generatingInvite = false
@@ -423,17 +402,102 @@ public final class ContactsViewModel: ObservableObject {
         }
     }
 
-    /// Revoke an outstanding invite by `blobId`. On success the
-    /// row is dropped from ``ContactsState/outstandingInvites``
-    /// automatically by ``ContactsRepository/revokeInviteLink(blobId:)``.
-    public func onRevokeInviteClicked(blobId: Data) {
+    /// **Save** on the edit form of the link at `slug`: a NEW link with
+    /// `params` first, then the old one deleted by the path of **Delete
+    /// link** (old first would leave nothing on a failure). A failed mint
+    /// leaves the old link and keeps the form open; `onSaved` runs once the
+    /// new link exists. A failed mint says `invite.links.error.edit`, a
+    /// failed delete of the old link `invite.links.error.delete` (as web and
+    /// Android).
+    func onSaveLinkTermsClicked(
+        slug: String, params: InviteCreateForm.Params, onSaved: @escaping () -> Void
+    ) {
+        guard !generatingInvite, revokingActiveInviteSlug == nil else { return }
+        generatingInvite = true
+        inviteError = nil
+        inviteNotice = nil
         Task {
+            let invite: GeneratedInvite
             do {
-                _ = try await repository.revokeInviteLink(blobId: blobId)
+                invite = try await mint(params)
             } catch {
-                inviteError = Self.contactsErrorText(for: error, fallbackKey: "chat.error.revoke_link")
+                generatingInvite = false
+                NSLog("[contacts] link terms: the new link was not made: \(error)")
+                inviteError = .key("invite.links.error.edit")
+                return
+            }
+            generatingInvite = false
+            lastGeneratedInvite = invite
+            onSaved()
+            do {
+                try await deleteLink(slug: slug)
+            } catch {
+                // The new link exists; the old one still works and stays
+                // listed, with its own Delete.
+                NSLog("[contacts] link terms: the old link was not deleted: \(error)")
+                inviteError = .key("invite.links.error.delete")
+            }
+            await loadActiveInvites()
+        }
+    }
+
+    private func mint(_ params: InviteCreateForm.Params) async throws -> GeneratedInvite {
+        // The sender does not decide whether the other person has an
+        // account: the invite page handles both.
+        try await repository.generateInviteLink(
+            label: params.label, expiry: params.expiry, maxUses: params.maxUses,
+            bootstrapReferral: false)
+    }
+
+    /// Drop the create / edit error when a form opens or closes.
+    func clearInviteError() { inviteError = nil }
+
+    /// The synced record of the contact link at `slug`, when the register
+    /// holds one.
+    func linkRecord(slug: String) -> LinkRecord? {
+        LinkRecords.contactRecord(slug: slug, in: linkRecords)
+    }
+
+    /// **Copy**, before the clipboard: the link is marked copied in the
+    /// account's synced state (and sent to the other devices), so no device
+    /// offers to edit it any more. Showing the QR code does not mark it.
+    func onCopyLinkClicked(slug: String) async {
+        await repository.markInviteLinkShared(slug: slug)
+    }
+
+    /// **Delete link** (the old Revoke), once confirmed when it had to be
+    /// (``LinkRecords/deleteNeedsConfirmation(_:)``): the register marks it
+    /// revoked, the ledger row is deleted with the link's revocation seed and
+    /// its reach key goes. `Link deleted.` after it; a failure says so.
+    func onDeleteLinkClicked(slug: String) {
+        guard revokingActiveInviteSlug == nil, !generatingInvite else { return }
+        revokingActiveInviteSlug = slug
+        activeInvitesError = nil
+        inviteError = nil
+        inviteNotice = nil
+        Task {
+            defer { revokingActiveInviteSlug = nil }
+            do {
+                try await deleteLink(slug: slug)
+                inviteNotice = .key("invite.links.deleted")
+            } catch {
+                NSLog("[contacts] delete link failed: \(error)")
+                activeInvitesError = .key("invite.links.error.delete")
             }
         }
+    }
+
+    /// The one delete path, shared by **Delete link** and the edit form's
+    /// **Save** (``ContactsRepository/revokeInviteLink(blobId:)``). The row
+    /// leaves the list on success and when the ledger row was already gone
+    /// (the same end state).
+    private func deleteLink(slug: String) async throws {
+        guard let blobId = base64UrlDecodeNoPad(slug) else {
+            throw ContactsError.simple("not an invite link id")
+        }
+        _ = try await repository.revokeInviteLink(blobId: blobId)
+        activeInvites = activeInvites.filter { $0.blobIdSlug != slug }
+        deletedLinkSlugs.insert(slug)
     }
 
     /// Dismiss the "just generated this link" sheet without
@@ -458,9 +522,38 @@ public final class ContactsViewModel: ObservableObject {
     /// The screen disables the Revoke button on that row + shows
     /// a spinner.
     @Published public private(set) var revokingActiveInviteSlug: String?
+    /// The notice under the list after a delete (`Link deleted.`).
+    @Published public private(set) var inviteNotice: UiText?
+    /// The account's synced link records (ADR-0079 section 4), live: whether
+    /// a row offers Edit and whether Delete asks first are read from them.
+    @Published public private(set) var linkRecords: [LinkRecord] = []
+    /// Links deleted from this sheet: the session copy of one
+    /// (``ContactsState/outstandingInvites``) whose ledger row was already
+    /// gone stays in the repository and must not come back as a row.
+    @Published public private(set) var deletedLinkSlugs: Set<String> = []
+    private var linkRecordsSubscription: AnyCancellable?
+
+    /// Follow the register once it is wired (at app start, which may come
+    /// after this view model): a copy, use or delete on any device of the
+    /// account changes the rows at once.
+    private func followLinkRecords() {
+        guard linkRecordsSubscription == nil,
+              let publisher = repository.linkRecordsPublisher else { return }
+        linkRecords = repository.linkRecords
+        linkRecordsSubscription = publisher
+            .dropFirst()
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] records in
+                guard let self else { return }
+                self.linkRecords = records
+                Task { await self.loadActiveInvites() }
+            }
+    }
 
     /// Load the owner-side active-invites list.
     public func loadActiveInvites() async {
+        followLinkRecords()
         guard !loadingActiveInvites else { return }
         loadingActiveInvites = true
         activeInvitesError = nil
@@ -484,31 +577,6 @@ public final class ContactsViewModel: ObservableObject {
             // of the load. The next visit loads it again.
             if Cancellation.endedByCancellation(error) { return }
             activeInvitesError = Self.contactsErrorText(for: error, fallbackKey: "invite.links.error.load")
-        }
-    }
-
-    /// Revoke an active invite from the loaded list. Drops the
-    /// row locally on success or on a 404 (server-side already
-    /// gone — same terminal state).
-    public func onRevokeActiveInviteClicked(slug: String) {
-        guard revokingActiveInviteSlug == nil else { return }
-        guard let row = activeInvites.first(where: { $0.blobIdSlug == slug }) else {
-            return
-        }
-        guard let blobId = base64UrlDecodeNoPad(row.blobIdSlug) else {
-            activeInvitesError = .key("chat.error.revoke_link")
-            return
-        }
-        revokingActiveInviteSlug = slug
-        activeInvitesError = nil
-        Task {
-            defer { revokingActiveInviteSlug = nil }
-            do {
-                _ = try await repository.revokeInviteLink(blobId: blobId)
-                activeInvites = activeInvites.filter { $0.blobIdSlug != slug }
-            } catch {
-                activeInvitesError = Self.contactsErrorText(for: error, fallbackKey: "chat.error.revoke_link")
-            }
         }
     }
 

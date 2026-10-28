@@ -18,8 +18,8 @@ import {
   encodeReachBook,
   fofRotationDue,
   isEmptyDiff,
+  departuresOf,
   pruneExpired,
-  raiseVersion,
   reachClassName,
   reachDiff,
   rotateFof,
@@ -50,23 +50,46 @@ describe("the wanted reach keys", () => {
     expect(classes()).toEqual(["contact::0"]);
   });
 
-  it("wants a member key per group whatever the setting, a group key only where allowed", () => {
+  it("wants ONE member key while in any group, ONE group key while any group is allowed (ADR-0078 section 9)", () => {
     expect(
       classes(EMPTY_REACH_BOOK, { groupIdsHex: ["aa", "bb"], allowsGroup: (g) => g === "bb" }),
-    ).toEqual(["contact::0", "member:aa:0", "member:bb:0", "group:bb:0"]);
+    ).toEqual(["contact::0", "member::0", "group::0"]);
+    expect(classes(EMPTY_REACH_BOOK, { groupIdsHex: ["aa"] })).toEqual(["contact::0", "member::0"]);
   });
 
-  it("versions a channel key by the channel epoch, never backwards", () => {
-    const book = raiseVersion(EMPTY_REACH_BOOK, "channel", "cc", 9);
+  it("wants ONE channel key while any channel is allowed, whatever the channels' epochs", () => {
     expect(
-      classes(book, { channels: [{ idHex: "cc", epoch: 4 }], allowsChannel: () => true }),
-    ).toContain("channel:cc:9");
-    expect(
-      classes(EMPTY_REACH_BOOK, { channels: [{ idHex: "cc", epoch: 4 }], allowsChannel: () => true }),
-    ).toContain("channel:cc:4");
-    expect(classes(EMPTY_REACH_BOOK, { channels: [{ idHex: "cc", epoch: 4 }] })).not.toContain(
-      "channel:cc:4",
-    );
+      classes(EMPTY_REACH_BOOK, {
+        channels: [
+          { idHex: "cc", epoch: 4 },
+          { idHex: "dd", epoch: 9 },
+        ],
+        allowsChannel: () => true,
+      }),
+    ).toEqual(["contact::0", "channel::0"]);
+    expect(classes(EMPTY_REACH_BOOK, { channels: [{ idHex: "cc", epoch: 4 }] })).toEqual(["contact::0"]);
+  });
+
+  it("leaving a group rotates the group and member keys; leaving a channel the channel key", () => {
+    const first = departuresOf(EMPTY_REACH_BOOK, { groupIdsHex: ["aa", "bb"], channels: [{ idHex: "cc" }] });
+    expect(first).toMatchObject({ leftGroup: false, leftChannel: false });
+    const book = { ...EMPTY_REACH_BOOK, memberOf: first.memberOf };
+    expect(departuresOf(book, { groupIdsHex: ["aa", "bb", "ee"], channels: [{ idHex: "cc" }] })).toMatchObject({
+      leftGroup: false,
+      leftChannel: false,
+    });
+    expect(departuresOf(book, { groupIdsHex: ["bb"], channels: [{ idHex: "cc" }] })).toMatchObject({
+      leftGroup: true,
+      leftChannel: false,
+    });
+    expect(departuresOf(book, { groupIdsHex: ["aa", "bb"], channels: [{ idHex: "ff" }] })).toMatchObject({
+      leftGroup: false,
+      leftChannel: true,
+    });
+    // An empty list (not loaded yet) is never "left everything".
+    const empty = departuresOf(book, { groupIdsHex: [], channels: [] });
+    expect(empty).toMatchObject({ leftGroup: false, leftChannel: false });
+    expect(empty.memberOf).toEqual(first.memberOf);
   });
 
   it("wants the fof key only while contacts of contacts may find the owner", () => {
@@ -149,7 +172,7 @@ describe("the fof schedule and the persisted form", () => {
   });
 
   it("round-trips and reads garbage as empty", () => {
-    const book = addReply(bumpVersion(EMPTY_REACH_BOOK, "member", "aa"), {
+    const book = addReply(bumpVersion(EMPTY_REACH_BOOK, "member", ""), {
       scopeHex: "bb",
       expiresAtMs: 7,
       purpose: "call-join",

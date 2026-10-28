@@ -442,7 +442,6 @@ pub(crate) async fn finish(
     tx.commit().await.map_err(ApiError::Db)?;
 
     tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(account_id),
         key_generation,
         revoked = revoke_ids.len(),
         "account keys rotated",

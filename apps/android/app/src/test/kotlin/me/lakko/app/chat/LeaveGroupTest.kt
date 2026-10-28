@@ -15,7 +15,7 @@ import org.junit.Test
  *
  * `ChatRepository` needs an Android `Context` and the FFI `Group` needs the JNI
  * native library, which a JVM unit test cannot load — the same constraint that
- * put [runSplitPoll], [runCrashSafeCommit] and `runApproveExternalJoin` behind
+ * put [runSplitPoll], [prepareCrashSafeCommit] and `runApproveExternalJoin` behind
  * injected steps. The **live-MLS half** — that a member's leave really does
  * produce a proposal rather than a commit, that the owner's is really refused
  * before anything reaches the wire, that the roster really keeps the leaving

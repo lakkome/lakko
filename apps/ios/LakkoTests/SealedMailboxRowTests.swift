@@ -64,7 +64,7 @@ final class SealedMailboxRowTests: XCTestCase {
         let request = try composeContactRequest(
             senderSigningSeed: bob.ed25519Seed(), senderAccountId: Data(repeating: 0xB0, count: 16),
             recipientX25519Pub: alice.x25519PublicKey(), fromPseudonym: Data(repeating: 0xB1, count: 32),
-            validAfterMs: 1, privacyPassToken: Data(), profile: nil, replyGrant: nil,
+            validAfterMs: 1, privacyPassToken: Data(), profile: nil, replyGrant: nil, linkAnswer: nil,
             introMessage: Data("hello".utf8))
         let ack = try composeContactAck(
             accepterSigningSeed: bob.ed25519Seed(), accepterAccountId: Data(repeating: 0xB0, count: 16),
@@ -93,7 +93,7 @@ final class SealedMailboxRowTests: XCTestCase {
         }
         XCTAssertEqual(welcomeId, 1)
         XCTAssertEqual(welcomeBytes, welcome)
-        guard case .contactRequest(let req, _) = result.events[1] else {
+        guard case .contactRequest(let req, _, _) = result.events[1] else {
             return XCTFail("second event: \(result.events[1])")
         }
         XCTAssertEqual(req.messageId, 5)
@@ -299,7 +299,7 @@ final class SealedMailboxRowTests: XCTestCase {
         let c = try center()
         let sender = try identity(0x73), impostor = try identity(0x74)
         let member = try deriveReachGrant(
-            accountSeed: impostor.ed25519Seed(), class: .member, scopeId: Data(repeating: 2, count: 32), version: 0)
+            accountSeed: impostor.ed25519Seed(), class: .member, scopeId: Data(), version: 0)
         XCTAssertFalse(c.keep(
             member, carrier: .groupProfile,
             fromAccountKeyB64: sender.signaturePublicKey().base64EncodedString(), scopeHex: "aa"),

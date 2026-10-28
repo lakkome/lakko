@@ -5,13 +5,18 @@
 //!
 //! Phase 1.6 — token registry + dispatch scaffold.
 //!
-//! The server bridges between an internal "wake this device" event and
+//! The server bridges between an internal "wake this group" event and
 //! the external platform push services (APNs, FCM, Web Push,
 //! UnifiedPush). Payload carried to providers is strictly metadata
-//! pointers — `(group_pseudonym, envelope_pointer)`. Apple, Google
-//! and Mozilla never see plaintext: the recipient client wakes up,
+//! pointers — `(subscription_id, push_gid, envelope_pointer)`. Apple,
+//! Google and Mozilla never see plaintext: the recipient client wakes up,
 //! fetches ciphertext from `services/ds`, decrypts locally and builds
 //! the OS notification on-device.
+//!
+//! Since ADR-0078 section 3 this service holds no device pseudonym and no
+//! token in the clear: a subscription row is `(sub_id, push_gid, wake_pk,
+//! sealed tokens)`, the tokens sealed under a group key that arrives only
+//! inside each sealed wake (`src/registry.rs`, `src/notify.rs`).
 //!
 //! ## Phase 1.6 scope
 //!
@@ -45,6 +50,12 @@
 //! - `LAKKO_PUSH_GW_INTERNAL_SECRET` — base64, >= 16 bytes; the shared
 //!   secret the DS presents (its `LAKKO_DS_PUSH_GW_SECRET`). Unset: the
 //!   internal listener is not started and no group wake is delivered.
+//! - `LAKKO_PUSH_GW_WAKE_BURST` / `LAKKO_PUSH_GW_WAKE_PER_MINUTE` — the
+//!   per-group wake cap (defaults 30 / 60; chosen, not measured). Moved here
+//!   from the DS, which no longer sees a `push_gid` (ADR-0078).
+//!
+//! The X25519 wake key is generated at first boot and stored in this
+//! service's database (`src/wake_key.rs`), not taken from the environment.
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec.
 //!
 //! ## Endpoints
@@ -54,20 +65,20 @@
 //! - `GET    /health`                — liveness, 200 OK
 //! - `GET    /ready`                 — readiness (DB ping), 200 / 503
 //! - `GET    /version`
-//! - `POST   /push/register`         — bind `(device_pseudonym, provider) → token`
-//! - `POST   /push/unregister`       — drop a token
-//! - `POST   /push/group/subscribe`  — subscribe a device to a `push_gid`
-//! - `POST   /push/group/unsubscribe`
+//! - `GET    /push/wake-key`         — the X25519 key wakes are sealed to
+//! - `POST   /push/subscribe`        — store (or replace) a sealed subscription
+//! - `POST   /push/unsubscribe`      — drop one by its `sub_id`
 //!
-//! The four registration routes each spend one `push-register` anonymous
-//! token (ADR-0054 S3, header `x-lakko-anon-token`); none asks for a proof
-//! of work any more.
+//! The two subscription routes each spend one `push-register` anonymous
+//! token (ADR-0054 S3, header `x-lakko-anon-token`). The per-device
+//! `/push/register` / `/push/unregister` and the `/push/group/*` routes are
+//! gone with the tables they wrote (ADR-0078).
 //!
 //! Internal listener (`LAKKO_PUSH_GW_INTERNAL_BIND`, shared-secret gated,
 //! ADR-0054 decision 1 — see `src/internal.rs`):
 //!
-//! - `POST   /push/notify-group`     — the DS forwards a wake after a signed
-//!   publish
+//! - `POST   /push/notify-group`     — the DS forwards a sealed wake, unread,
+//!   after a signed publish
 //!
 //! The per-device `/push/notify` is gone (ADR-0054: no caller on any
 //! client), and no route on the public listener can wake a device.
@@ -79,6 +90,8 @@ mod notify;
 mod provider;
 mod providers;
 mod registry;
+mod wake_guard;
+mod wake_key;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -135,6 +148,10 @@ pub(crate) struct AppState {
     /// Dormant (those routes answer 503) when
     /// `LAKKO_ANON_TOKEN_MASTER_SECRET` is unset.
     pub(crate) anon_tokens: TokenVerifier,
+    /// ADR-0078 - the X25519 key every wake is sealed to.
+    pub(crate) wake_key: Arc<lakko_contacts::push_wake::PushGwKey>,
+    /// ADR-0078 - freshness, nonce dedup and the per-group cap.
+    pub(crate) wake_guard: Arc<wake_guard::WakeGuard>,
 }
 
 #[tokio::main]
@@ -184,12 +201,16 @@ async fn main() -> Result<()> {
     );
     anon_tokens.log_startup("push-gw");
 
+    let (wake_key, wake_guard) = load_wake(&pool).await?;
+
     let providers = resolve_providers();
     let state = AppState {
         db: pool.clone(),
         providers: Arc::new(providers),
         internal_secret,
         anon_tokens,
+        wake_key: Arc::new(wake_key),
+        wake_guard: Arc::new(wake_guard),
     };
 
     let _spent_pruner = state.anon_tokens.spawn_pruner();
@@ -251,6 +272,24 @@ async fn main() -> Result<()> {
     pool.close().await;
     tracing::info!("push-gw service stopped cleanly");
     Ok(())
+}
+
+/// ADR-0078: the X25519 wake key (generated at first boot) and the guard
+/// with its per-group cap from the environment.
+async fn load_wake(
+    pool: &MySqlPool,
+) -> Result<(lakko_contacts::push_wake::PushGwKey, wake_guard::WakeGuard)> {
+    let key = wake_key::load_or_init_wake_key(pool)
+        .await
+        .context("wake key")?;
+    let guard = wake_guard::WakeGuard::new(
+        wake_guard::knob("LAKKO_PUSH_GW_WAKE_BURST", wake_guard::DEFAULT_BURST)?,
+        wake_guard::knob(
+            "LAKKO_PUSH_GW_WAKE_PER_MINUTE",
+            wake_guard::DEFAULT_PER_MINUTE,
+        )?,
+    );
+    Ok((key, guard))
 }
 
 /// Pick a provider implementation per [`ProviderKind`].
@@ -366,16 +405,12 @@ fn resolve_providers() -> HashMap<ProviderKind, Box<dyn Provider>> {
 /// without binding a TCP listener.
 pub(crate) fn build_app(state: AppState) -> Router {
     // ADR-0054 S3 - every registration route spends one `push-register`
-    // anonymous token before its handler runs.
+    // anonymous token before its handler runs. The wake itself is NOT here:
+    // since ADR-0054 it is the DS's forward to the internal listener
+    // (`src/internal.rs`), never a public route.
     let registration = Router::new()
-        .route("/push/register", post(registry::register))
-        .route("/push/unregister", post(registry::unregister))
-        // 1.20e — group fan-out. Devices subscribe to the groups
-        // they care about. The wake itself is NOT here: since
-        // ADR-0054 it is the DS's forward to the internal
-        // listener (`src/internal.rs`), never a public route.
-        .route("/push/group/subscribe", post(registry::group_subscribe))
-        .route("/push/group/unsubscribe", post(registry::group_unsubscribe))
+        .route("/push/subscribe", post(registry::subscribe))
+        .route("/push/unsubscribe", post(registry::unsubscribe))
         .route_layer(axum::middleware::from_fn_with_state(
             state.anon_tokens.gate(TokenContext::PushRegister),
             require_token,
@@ -384,9 +419,10 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/version", get(version))
+        .route("/push/wake-key", get(wake_key::wake_key_handler))
         .merge(registration)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }
 
@@ -451,12 +487,19 @@ async fn shutdown_signal() {
 mod anon_token_route_tests;
 
 #[cfg(test)]
+mod sealed_wake_tests;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt as _;
     use tower::ServiceExt as _;
+
+    /// sqlx's migrator does not tolerate two concurrent runs on one
+    /// database, so the DB-gated tests migrate once per process.
+    pub(crate) static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
     /// An `AppState` whose pool never connects - for routes and gates that
     /// must answer before any query runs.
@@ -470,6 +513,10 @@ pub(crate) mod tests {
             db,
             providers: Arc::new(HashMap::new()),
             internal_secret,
+            wake_key: Arc::new(lakko_contacts::push_wake::PushGwKey::from_secret_bytes(
+                [0x77; 32],
+            )),
+            wake_guard: Arc::new(wake_guard::WakeGuard::new(30, 60)),
         }
     }
 

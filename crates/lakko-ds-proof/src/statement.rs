@@ -39,7 +39,7 @@
 //! | 3 register epoch | `epoch(8) epoch_key(32) mode(1) count(2) revoke_key(32)*` |
 //! | 4 registrars | `count(2) (key(32) change(1))*` - change 0 removes |
 //! | 5 root transfer | `new_root(32)` |
-//! | 6 push binding | `push_gid(32)` |
+//! | 6 | retired (the ADR-0057 push binding, removed by ADR-0078 section 3); refused |
 //! | 7 registrars set | `count(2) (key(32) rank(1))*` - the whole set |
 //!
 //! Ranks: `1` member, `2` admin (the root is not a registrar and outranks
@@ -48,7 +48,7 @@
 //! [`MAX_LIST_ENTRIES`] distinct keys, except a registrars set, which holds
 //! at most [`MAX_REGISTRARS`] (the whole set a journal may carry) and may be
 //! empty; a registrars set never names its own signer (the root is not a
-//! registrar). Every key except a `push_gid` and a revoked key must be a
+//! registrar). Every key except a revoked key must be a
 //! valid Ed25519 point. The decoder is bounded ([`MAX_STATEMENT_LEN`], sized
 //! by the largest registrars set) and requires the input to be consumed
 //! exactly, so one statement has one encoding.
@@ -76,7 +76,7 @@ pub const JOURNAL_ROOT_DOMAIN: &str = "lakko/ds/journal-root/v1";
 pub const JOURNAL_REGISTRAR_DOMAIN: &str = "lakko/ds/journal-registrar/v1";
 /// A journal id: the 32-byte group id the DS path names.
 pub const JOURNAL_ID_LEN: usize = 32;
-/// An Ed25519 public key, a seed, or a `push_gid`.
+/// An Ed25519 public key or a seed.
 pub const KEY_LEN: usize = 32;
 /// Most keys in one statement list (a registrar set, a change list, a
 /// revocation list). Chosen, not measured: an owner appointing registrars for
@@ -135,21 +135,6 @@ pub fn journal_registrar_seed(
     let out = hash::blake3_derive_key_from_material(JOURNAL_REGISTRAR_DOMAIN, &material);
     material.fill(0);
     out
-}
-
-/// The message a push binding is keyed over, ahead of the `push_gid`.
-pub const PUSH_BINDING_DOMAIN: &[u8] = b"lakko/ds/push-binding/v1\x00";
-
-/// What the Delivery Service stores for a journal's push binding:
-/// `keyed-BLAKE3(pepper, PUSH_BINDING_DOMAIN || push_gid)`, with `pepper` the
-/// server-only `LAKKO_DS_BINDING_PEPPER`. A server-side helper, here so the
-/// domain is defined next to the statement that carries the `push_gid`.
-#[must_use]
-pub fn push_binding_key(pepper: &[u8; KEY_LEN], push_gid: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
-    let mut message = Vec::with_capacity(PUSH_BINDING_DOMAIN.len() + KEY_LEN);
-    message.extend_from_slice(PUSH_BINDING_DOMAIN);
-    message.extend_from_slice(push_gid);
-    hash::blake3_keyed(pepper, &message)
 }
 
 /// The Ed25519 signing key of a root or registrar seed.
@@ -262,8 +247,6 @@ pub enum StatementKind {
     Registrars,
     /// The root names a new root.
     RootTransfer,
-    /// The root or an admin binds the journal to one push routing id.
-    PushBinding,
     /// The root replaces the journal's whole registrar set.
     RegistrarsSet,
 }
@@ -278,7 +261,6 @@ impl StatementKind {
             Self::RegisterEpoch => 3,
             Self::Registrars => 4,
             Self::RootTransfer => 5,
-            Self::PushBinding => 6,
             Self::RegistrarsSet => 7,
         }
     }
@@ -290,7 +272,6 @@ impl StatementKind {
             3 => Some(Self::RegisterEpoch),
             4 => Some(Self::Registrars),
             5 => Some(Self::RootTransfer),
-            6 => Some(Self::PushBinding),
             7 => Some(Self::RegistrarsSet),
             _ => None,
         }
@@ -306,7 +287,6 @@ impl StatementKind {
             Self::RegisterEpoch => "access",
             Self::Registrars => "registrars",
             Self::RootTransfer => "root",
-            Self::PushBinding => "push-binding",
             Self::RegistrarsSet => "registrars-set",
         }
     }
@@ -354,11 +334,6 @@ pub enum StatementBody {
         /// The new root's public key.
         new_root: [u8; KEY_LEN],
     },
-    /// Bind the journal to one push routing id.
-    PushBinding {
-        /// The ADR-0042 `push_gid`.
-        push_gid: [u8; KEY_LEN],
-    },
     /// Replace the journal's whole registrar set: every registrar not
     /// listed is removed. Empty removes them all.
     RegistrarsSet {
@@ -378,7 +353,6 @@ impl StatementBody {
             Self::RegisterEpoch { .. } => StatementKind::RegisterEpoch,
             Self::Registrars { .. } => StatementKind::Registrars,
             Self::RootTransfer { .. } => StatementKind::RootTransfer,
-            Self::PushBinding { .. } => StatementKind::PushBinding,
             Self::RegistrarsSet { .. } => StatementKind::RegistrarsSet,
         }
     }
@@ -494,7 +468,6 @@ fn validate_body(body: &StatementBody, signer: &[u8; KEY_LEN]) -> Result<(), Sta
                 return Err(StatementError::InvalidKey);
             }
         },
-        StatementBody::PushBinding { .. } => {},
         StatementBody::RegistrarsSet { registrars } => {
             if registrars.len() > MAX_REGISTRARS {
                 return Err(StatementError::ListBounds);
@@ -562,8 +535,7 @@ fn encode_fields(body: &StatementBody, out: &mut Vec<u8>) {
                 out.push(c.rank.map_or(0, Rank::to_byte));
             }
         },
-        StatementBody::RootTransfer { new_root: key }
-        | StatementBody::PushBinding { push_gid: key } => {
+        StatementBody::RootTransfer { new_root: key } => {
             out.extend_from_slice(key);
         },
         StatementBody::RegistrarsSet { registrars } => {
@@ -731,9 +703,6 @@ fn decode_fields(kind: StatementKind, r: &mut Reader<'_>) -> Result<StatementBod
         },
         StatementKind::RootTransfer => StatementBody::RootTransfer {
             new_root: r.array()?,
-        },
-        StatementKind::PushBinding => StatementBody::PushBinding {
-            push_gid: r.array()?,
         },
         StatementKind::RegistrarsSet => {
             let n = r.count(ENTRY_LEN, MAX_REGISTRARS)?;
@@ -966,9 +935,6 @@ mod tests {
                 ],
             },
             StatementBody::RootTransfer { new_root: pk(9) },
-            StatementBody::PushBinding {
-                push_gid: [0xEE; 32],
-            },
             StatementBody::RegistrarsSet { registrars: vec![] },
             StatementBody::RegistrarsSet {
                 registrars: vec![
@@ -1025,7 +991,7 @@ mod tests {
         let s = signer()
             .sign_at(
                 &JOURNAL,
-                StatementBody::PushBinding { push_gid: [1; 32] },
+                StatementBody::RootTransfer { new_root: pk(1) },
                 1_000_000,
                 [0; NONCE_LEN],
             )
@@ -1169,7 +1135,7 @@ mod tests {
         let s = signer()
             .sign_at(
                 &JOURNAL,
-                StatementBody::PushBinding { push_gid: [3; 32] },
+                StatementBody::RootTransfer { new_root: pk(3) },
                 1,
                 [4; NONCE_LEN],
             )
@@ -1178,7 +1144,7 @@ mod tests {
             s.body_json(),
             format!("{{\"statement_b64\":\"{}\"}}", B64_STD.encode(s.encode()))
         );
-        assert_eq!(s.path_segment(), "push-binding");
+        assert_eq!(s.path_segment(), "root");
     }
 
     #[test]
@@ -1189,7 +1155,6 @@ mod tests {
             StatementKind::RegisterEpoch,
             StatementKind::Registrars,
             StatementKind::RootTransfer,
-            StatementKind::PushBinding,
             StatementKind::RegistrarsSet,
         ]
         .iter()
@@ -1203,10 +1168,12 @@ mod tests {
                 (3, "access"),
                 (4, "registrars"),
                 (5, "root"),
-                (6, "push-binding"),
                 (7, "registrars-set"),
             ]
         );
+        // Byte 6 was the ADR-0057 push binding, retired by ADR-0078
+        // section 3: never reused, refused on decode.
+        assert_eq!(StatementKind::from_byte(6), None);
         assert_eq!(RegisterMode::Append.to_byte(), 1);
         assert_eq!(RegisterMode::Replace.to_byte(), 2);
         for byte in [0u8, 3, 0xFF] {
@@ -1424,17 +1391,6 @@ mod tests {
             StatementSigner::root(&[0x01; 32], &[0x02; 32]).public_key(),
             SigningKey::from_seed(&root).verifying_key().to_bytes()
         );
-    }
-
-    #[test]
-    fn a_push_binding_key_depends_on_the_pepper_and_the_gid() {
-        let a = push_binding_key(&[1; 32], &[2; 32]);
-        assert_eq!(a, push_binding_key(&[1; 32], &[2; 32]));
-        assert_ne!(a, push_binding_key(&[3; 32], &[2; 32]));
-        assert_ne!(a, push_binding_key(&[1; 32], &[4; 32]));
-        let mut message = b"lakko/ds/push-binding/v1\x00".to_vec();
-        message.extend_from_slice(&[2; 32]);
-        assert_eq!(a, hash::blake3_keyed(&[1; 32], &message));
     }
 
     #[test]

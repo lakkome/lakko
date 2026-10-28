@@ -102,10 +102,24 @@ struct InitialsAvatar: View {
     /// An SF Symbol drawn when the name yields no initials (a person nothing
     /// is known about), e.g. `person.fill`. `nil` leaves the circle blank.
     var placeholderSymbol: String? = nil
+    /// ADR-0084 — whose profile photo to show, when this device holds it.
+    /// `nil` (a group, a channel, someone with no key) draws initials only.
+    var photo: AvatarPhoto? = nil
+    /// Play a profile video muted and looped (the large views only, UX spec
+    /// section 7); elsewhere its still is shown.
+    var playsVideo: Bool = false
 
     var body: some View {
+        if let photo {
+            AvatarPhotoView(photo: photo, size: size, playsVideo: playsVideo) { initialsCircle }
+        } else {
+            initialsCircle
+        }
+    }
+
+    private var initialsCircle: some View {
         let tint = Self.tint(for: identity ?? name)
-        ZStack {
+        return ZStack {
             Circle().fill(tint.background)
             if isGroup && initials.isEmpty {
                 Image(systemName: "person.3.fill")

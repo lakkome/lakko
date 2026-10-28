@@ -64,6 +64,14 @@ interface WireEdit {
   readonly s?: number;
   readonly p?: readonly WireRef[];
   readonly o?: readonly string[];
+  /** ADR-0065 saved: message id, saved-at, author, excerpt, kind, blob ids. */
+  readonly m?: string;
+  readonly at?: string;
+  readonly st?: string;
+  readonly a?: string;
+  readonly x?: string;
+  readonly ak?: string;
+  readonly b?: readonly string[];
 }
 interface WirePayload {
   readonly v: number;
@@ -123,6 +131,21 @@ function editToWire(e: StampedEdit): WireEdit {
       return { t: e.t, h, f: e.folderIdHex };
     case "order":
       return { t: e.t, h, o: [...e.folderIdsHex] };
+    case "saved":
+      return {
+        t: e.t,
+        h,
+        r: refToWire(e.ref),
+        m: e.messageId.toString(),
+        at: e.savedAtMs.toString(),
+        st: e.sentAtMs.toString(),
+        a: e.author,
+        x: e.excerpt,
+        ak: e.attachmentKind,
+        b: [...e.blobIdsHex],
+      };
+    case "saved-removed":
+      return { t: e.t, h, r: refToWire(e.ref), m: e.messageId.toString() };
   }
 }
 
@@ -154,6 +177,43 @@ function editFromWire(raw: unknown): StampedEdit | null {
     case "order":
       if (!Array.isArray(w.o) || w.o.some((x) => typeof x !== "string")) return null;
       return { t: "order", hlc, folderIdsHex: w.o as string[] };
+    case "saved": {
+      const ref = refFromWire(w.r);
+      const messageId = bigOf(w.m);
+      const savedAtMs = bigOf(w.at);
+      const sentAtMs = w.st === undefined ? 0n : bigOf(w.st);
+      if (
+        sentAtMs === null ||
+        ref === null ||
+        messageId === null ||
+        savedAtMs === null ||
+        typeof w.a !== "string" ||
+        typeof w.x !== "string" ||
+        typeof w.ak !== "string" ||
+        !Array.isArray(w.b) ||
+        w.b.some((id) => typeof id !== "string" || !/^[0-9a-f]{64}$/.test(id))
+      ) {
+        return null;
+      }
+      return {
+        t: "saved",
+        hlc,
+        ref,
+        messageId,
+        savedAtMs,
+        sentAtMs,
+        author: w.a,
+        excerpt: w.x,
+        attachmentKind: w.ak,
+        blobIdsHex: w.b as string[],
+      };
+    }
+    case "saved-removed": {
+      const ref = refFromWire(w.r);
+      const messageId = bigOf(w.m);
+      if (ref === null || messageId === null) return null;
+      return { t: "saved-removed", hlc, ref, messageId };
+    }
     default:
       return null;
   }

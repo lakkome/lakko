@@ -74,7 +74,7 @@
 //!
 //! **A VoIP push carries no `aps` alert.** PushKit hands the whole
 //! dictionary to the app and displays nothing, so an `alert` body there
-//! would be dead weight; the payload is the same `d` / `g` / `p` / `k`
+//! would be dead weight; the payload is the same `s` / `g` / `p` / `k`
 //! metadata the alert body carries, and nothing more.
 //!
 //! Lakko uses the **mutable-alert** model, NOT a silent `content-available`
@@ -88,8 +88,8 @@
 //! `apns-push-type` MUST be `alert` for this: a `background` push must omit
 //! the alert and carry `content-available: 1`, which would not fire the NSE
 //! (and Apple may reject the alert+`background` combination outright). Wake
-//! payload metadata (`group_pseudonym`, `envelope_pointer`) rides as custom
-//! keys (`d`/`g`/`p`) alongside `aps` so the extension can decide which cursor
+//! payload metadata (subscription id, `push_gid`, `envelope_pointer`) rides as custom
+//! keys (`s`/`g`/`p`) alongside `aps` so the extension can decide which cursor
 //! to fetch without parsing the whole DS journal.
 //!
 //! ## ES256 JWT cache
@@ -544,8 +544,9 @@ struct ApnsErrorBody {
 #[derive(Serialize)]
 struct ApsBody {
     aps: Aps,
-    /// Hex device pseudonym — receiver matches against its own.
-    d: String,
+    /// Hex subscription id (ADR-0078): the receiver handles the wake only
+    /// when it holds this subscription for the `push_gid` in `g`.
+    s: String,
     /// Hex group pseudonym (optional). Lets the receiver jump to
     /// the right journal without polling every group it belongs to.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -605,7 +606,7 @@ impl ApsBody {
                 mutable_content: 1,
                 thread_id: p.group_pseudonym.map(hex::encode),
             },
-            d: hex::encode(p.device_pseudonym),
+            s: hex::encode(p.subscription_id),
             g: p.group_pseudonym.map(hex::encode),
             p: p.envelope_pointer,
             k: p.kind.wire_tag(),
@@ -623,18 +624,19 @@ impl ApsBody {
 ///
 /// The receiving side reads `g`, `p` and `k`
 /// (`VoipWakePayload.parse` in `apps/ios/Lakko/Calls/IncomingCallWake.swift`);
-/// `d` rides along so the device can confirm the wake is for the
-/// account it is signed into, the same check the alert path makes.
+/// `s` (ADR-0078) lets the device confirm the wake is for a subscription
+/// the signed-in account holds, the same check the alert path makes.
 ///
 /// Opacity is unchanged from the alert body and from every wake before
-/// calls existed: a pseudonym, a group pseudonym, a journal cursor, and
+/// calls existed: a subscription id, a group pseudonym, a journal cursor, and
 /// a one-letter kind tag. No caller, no call id, no media kind — those
 /// live in the E2EE journal row the woken device fetches for itself
 /// (invariants #2 and #5).
 #[derive(Serialize)]
 struct VoipBody {
-    /// Hex device pseudonym — receiver matches against its own.
-    d: String,
+    /// Hex subscription id (ADR-0078): the receiver handles the wake only
+    /// when it holds this subscription for the `push_gid` in `g`.
+    s: String,
     /// Hex group pseudonym (optional): which journal to read.
     #[serde(skip_serializing_if = "Option::is_none")]
     g: Option<String>,
@@ -651,7 +653,7 @@ struct VoipBody {
 impl VoipBody {
     fn from_payload(p: &WakePayload) -> Self {
         Self {
-            d: hex::encode(p.device_pseudonym),
+            s: hex::encode(p.subscription_id),
             g: p.group_pseudonym.map(hex::encode),
             p: p.envelope_pointer,
             k: p.kind.wire_tag(),
@@ -681,7 +683,7 @@ mod tests {
 
     fn wake(kind: WakeKind) -> WakePayload {
         WakePayload {
-            device_pseudonym: [0xAB; 32],
+            subscription_id: [0xAB; 16],
             group_pseudonym: Some([0xCD; 32]),
             envelope_pointer: Some(42),
             kind,
@@ -727,7 +729,7 @@ mod tests {
         // grouping when the NSE isn't reachable.
         assert!(json.contains(r#""thread-id":"cdcdcd"#));
         // Per-row metadata uses short single-letter keys.
-        assert!(json.contains(r#""d":""#));
+        assert!(json.contains(r#""s":""#));
         assert!(json.contains(r#""g":""#));
         assert!(json.contains(r#""p":42"#));
         // A message wake carries no kind tag at all — the shape is
@@ -758,7 +760,7 @@ mod tests {
     #[test]
     fn aps_body_omits_thread_id_when_group_absent() {
         let body = ApsBody::from_payload(&WakePayload {
-            device_pseudonym: [0u8; 32],
+            subscription_id: [0u8; 16],
             group_pseudonym: None,
             envelope_pointer: None,
             kind: WakeKind::Message,
@@ -824,7 +826,7 @@ mod tests {
         assert!(json.contains(r#""k":"c""#), "got {json}");
         assert!(json.contains(r#""g":""#), "got {json}");
         assert!(json.contains(r#""p":42"#), "got {json}");
-        assert!(json.contains(r#""d":""#), "got {json}");
+        assert!(json.contains(r#""s":""#), "got {json}");
     }
 
     #[test]
@@ -852,7 +854,7 @@ mod tests {
     #[test]
     fn a_voip_body_omits_the_optional_fields_when_absent() {
         let json = serde_json::to_string(&VoipBody::from_payload(&WakePayload {
-            device_pseudonym: [0u8; 32],
+            subscription_id: [0u8; 16],
             group_pseudonym: None,
             envelope_pointer: None,
             kind: WakeKind::Call,

@@ -32,7 +32,7 @@ class CallStartCancellationTest {
      */
     @Test
     fun `a cancelled start is not answered with no TURN`() = runBlocking {
-        val client = TurnCredentialClient(baseUrl = "http://127.0.0.1:1")
+        val client = TurnCredentialClient.forCall(ByteArray(16)) { error("a cancelled start mints nothing") }
         var answered = false
         val start = launch(start = CoroutineStart.UNDISPATCHED) {
             // The call ended: its scope is cancelled while the fetch is due.

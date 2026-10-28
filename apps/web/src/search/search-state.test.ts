@@ -3,12 +3,18 @@
 
 import { describe, expect, it } from "vitest";
 
-import { AnonTokenQuotaExhaustedError } from "../tokens/anon-token-pool";
-import { LOOKUP_ALLOWANCE_USED } from "../tokens/token-copy";
 import {
+  AnonTokenQuotaExhaustedError,
+  AnonTokenUnavailableError,
+  POOL_EMPTY_REASON,
+} from "../tokens/anon-token-pool";
+import {
+  REQUEST_FAILED,
   REQUEST_REFUSED,
+  REQUEST_SENT,
   SEARCH_FAILED,
   SEARCH_NOT_FOUND,
+  SEARCH_OUT_OF_SEARCHES,
   foldSearch,
   legOutcomeOf,
   searchStateMessage,
@@ -25,6 +31,12 @@ describe("the copy (docs/ux/who-can-find-me.md section 6.1, verbatim)", () => {
 
   it("says a request was refused without saying why", () => {
     expect(REQUEST_REFUSED()).toBe("Couldn't send the request. They may have changed who can find them.");
+  });
+
+  it("says when the searches ran out, and what a row reads after a request", () => {
+    expect(SEARCH_OUT_OF_SEARCHES()).toBe("Too many searches for now. Try again later.");
+    expect(REQUEST_FAILED()).toBe("Couldn't send the request. Try again.");
+    expect(REQUEST_SENT()).toBe("Request sent");
   });
 });
 
@@ -52,13 +64,21 @@ describe("legOutcomeOf", () => {
     expect(legOutcomeOf(new AnonTokenQuotaExhaustedError("discovery-lookup", null))).toBe("allowance-used");
     expect(legOutcomeOf(new Error("offline"))).toBe("failed");
   });
+
+  it("reads an empty token pool as out of searches, never as a network failure", () => {
+    expect(legOutcomeOf(new AnonTokenUnavailableError("discovery-lookup", POOL_EMPTY_REASON))).toBe(
+      "allowance-used",
+    );
+    // Any other missing token (no session, a refill that failed) is the network line.
+    expect(legOutcomeOf(new AnonTokenUnavailableError("discovery-lookup", "refill timed out"))).toBe("failed");
+  });
 });
 
 describe("searchStateMessage", () => {
   it("maps each state to its line", () => {
     expect(searchStateMessage({ kind: "not-found" })).toBe(SEARCH_NOT_FOUND());
     expect(searchStateMessage({ kind: "failed" })).toBe(SEARCH_FAILED());
-    expect(searchStateMessage({ kind: "allowance-used" })).toBe(LOOKUP_ALLOWANCE_USED());
+    expect(searchStateMessage({ kind: "allowance-used" })).toBe(SEARCH_OUT_OF_SEARCHES());
   });
 
   it("says nothing in words while searching, when found, or idle", () => {

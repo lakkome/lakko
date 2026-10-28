@@ -434,6 +434,9 @@ pub enum MediaForward {
 /// upstream side of a forwarded RTP flow. Subscribed
 /// peers carry a matching [`TrackOutEntry`] pointing
 /// back through the same key.
+// Four independent facts about one track (simulcast, light, middle,
+// screen), each a yes or a no; `role` says which of them decides.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrackIn {
     /// The `mid` str0m assigned to this incoming media
@@ -464,14 +467,23 @@ pub struct TrackIn {
     /// as a main track. Never set together with `simulcast` or
     /// `light`.
     pub middle: bool,
+    /// The track is a **screen share** of this peer, its picture or its
+    /// sound (ADR-0083): an ordinary sender the peer declared in its
+    /// offer ([`MediaPeer::declare_screen_tracks`]). A subscriber gets it
+    /// as the peer's screen track ([`TrackRole::Screen`]) and never as a
+    /// main track. Never set together with `simulcast`, `light` or
+    /// `middle`.
+    pub screen: bool,
 }
 
 impl TrackIn {
-    /// What a subscriber gets this track as: the publisher's light
-    /// companion, its middle track, or a main track.
+    /// What a subscriber gets this track as: the publisher's screen
+    /// share, its light companion, its middle track, or a main track.
     #[must_use]
     pub const fn role(&self) -> TrackRole {
-        if self.light {
+        if self.screen {
+            TrackRole::Screen
+        } else if self.light {
             TrackRole::LightCompanion
         } else if self.middle {
             TrackRole::Middle
@@ -492,6 +504,21 @@ pub const LIGHT_STREAM_SUFFIX: &str = "~light";
 /// ([`TrackRole::Middle`]): the stream id is the source peer id
 /// followed by this.
 pub const MIDDLE_STREAM_SUFFIX: &str = "~mid";
+
+/// Suffix of the MSID stream id of a screen-share track
+/// ([`TrackRole::Screen`], ADR-0083): the stream id is the source peer id
+/// followed by this. The same suffix as
+/// `lakko_calls::screen_share::SCREEN_STREAM_SUFFIX`, which the clients
+/// read; kept here as a constant of its own because the SFU does not
+/// depend on `lakko-calls`.
+pub const SCREEN_STREAM_SUFFIX: &str = "~screen";
+
+/// Most lines one publisher may declare, over its whole life, as carrying
+/// a screen share ([`MediaPeer::declare_screen_tracks`]): a share that
+/// stops and starts again may come on new lines. Chosen: a handful of
+/// shares with their sound, with room to spare; a declaration beyond it
+/// is refused.
+pub const MAX_SCREEN_MIDS: usize = 8;
 
 /// Which of the downstream tracks of one publisher video
 /// track a [`TrackOutEntry`] is.
@@ -538,6 +565,18 @@ pub const MIDDLE_STREAM_SUFFIX: &str = "~mid";
 /// subscriber's to say ([`MediaPeer::set_video_wants`]): the main
 /// track unless it asks for the middle one or for neither. The
 /// light companion is forwarded always.
+///
+/// ## The screen share (ADR-0083)
+///
+/// A publisher that shares its screen sends it as one more ordinary
+/// video sender, and its sound, when there is any, as one more ordinary
+/// audio sender, and names both lines in its offer
+/// ([`MediaPeer::declare_screen_tracks`], [`TrackIn::screen`]). Each
+/// reaches every subscriber as a **screen** track (MSID stream id = the
+/// source peer id + [`SCREEN_STREAM_SUFFIX`]), forwarded always: a
+/// subscriber's video wants never pause it, it has no light or middle
+/// variant, and under downlink control it is given the link before any
+/// camera.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TrackRole {
     /// The one downstream track every publisher track has.
@@ -551,6 +590,10 @@ pub enum TrackRole {
     /// middle sender, forwarded only to a subscriber that asks
     /// for it.
     Middle,
+    /// A publisher's screen share, its picture or its sound: a
+    /// declared screen line, forwarded to every subscriber always
+    /// (ADR-0083).
+    Screen,
 }
 
 impl TrackRole {
@@ -561,6 +604,7 @@ impl TrackRole {
             Self::Main => "main",
             Self::LightCompanion => "light",
             Self::Middle => "middle",
+            Self::Screen => "screen",
         }
     }
 }
@@ -597,11 +641,11 @@ pub struct SimulcastLayout {
 ///   destination peer now has a send stream for
 ///   `local_mid` and the fanout can write packets to it.
 ///
-/// The two `ToStop` / `NegotiatingStop` states mirror
-/// chat.rs's cleanup path but are deferred — the
-/// current SFU drops the entire `MediaPeer` on
-/// disconnect, so per-track stop renegotiation is not
-/// needed today.
+/// A track the publisher stops (a port-0 line in its offer: a screen share
+/// that ended, ADR-0083) has no state here: its entry is removed outright
+/// and the local mid it had is stopped by the subscriber's next
+/// renegotiation ([`MediaPeer::retire_track_out`]). A peer that leaves
+/// stops nothing: its `MediaPeer` is dropped whole.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackOutState {
     /// Track registered; SDP renegotiation not started.
@@ -1124,9 +1168,12 @@ impl RelayPacket {
 /// *their* `MediaPeer` instances, not by this one.
 pub struct MediaPeer {
     id: MediaPeerId,
-    /// The call this peer is admitted to. Set from the
-    /// signaling-layer admission (`crate::peer::Peer::call_id`)
-    /// when the peer's first SDP offer creates it. Media is
+    /// The call this peer is admitted to: the room id of its
+    /// admission token (`crate::peer::Peer::room`, ADR-0078
+    /// section 2 - a one-way function of the call id, so the
+    /// media half never sees the call id either; the field keeps
+    /// its old name). Set when the peer's first SDP offer
+    /// creates it. Media is
     /// fanned out ONLY between peers sharing a `call_id`
     /// (cross-call isolation — a hard SFU invariant); an
     /// empty value (a peer created by a stray pre-offer ICE
@@ -1171,6 +1218,10 @@ pub struct MediaPeer {
     /// concurrent change without applying the first
     /// would tangle str0m's internal SDP state.
     pending_offer: Option<SdpPendingOffer>,
+    /// Local mids of downstream lines whose source track the publisher
+    /// stopped ([`Self::retire_track_out`]): stopped (port 0) by the next
+    /// renegotiation, so the subscriber's track ends.
+    pending_stops: Vec<Mid>,
     /// Latest egress bandwidth estimate (bits/second) str0m produced for
     /// SENDING to this peer, from `Event::EgressBitrateEstimate`. `None` until
     /// BWE converges. Read by [`drive_layer_selection`] as this subscriber's
@@ -1260,6 +1311,11 @@ pub struct MediaPeer {
     /// ([`MediaPeer::declare_middle_tracks`]). At most one, the first
     /// that was accepted, and never changed afterwards.
     middle_mid: Option<Mid>,
+    /// The mids of the lines THIS peer declared to carry a screen share,
+    /// its picture and its sound (ADR-0083,
+    /// [`MediaPeer::declare_screen_tracks`]). A mid once taken stays a
+    /// screen line; at most [`MAX_SCREEN_MIDS`].
+    screen_mids: Vec<Mid>,
     /// Which picture of each publisher THIS (subscribing) peer shows
     /// ([`MediaPeer::set_video_wants`]). A publisher without an entry
     /// is [`VideoQuality::Main`]. At most [`MAX_VIDEO_WANTS`] entries.
@@ -1348,8 +1404,11 @@ pub enum LightDeclarationRefused {
     /// another mid.
     AlreadyDeclared,
     /// The mid is already the peer's other declared copy: its light
-    /// track when a middle one is being declared, and the reverse.
+    /// track when a middle one is being declared, and the reverse; or
+    /// one of its screen lines, or the reverse.
     DeclaredOtherwise,
+    /// The peer has already declared [`MAX_SCREEN_MIDS`] screen lines.
+    TooManyScreenLines,
 }
 
 impl LightDeclarationRefused {
@@ -1363,6 +1422,7 @@ impl LightDeclarationRefused {
             Self::AlreadyMain => "already-a-main-track",
             Self::AlreadyDeclared => "another-track-of-this-kind-declared",
             Self::DeclaredOtherwise => "declared-as-the-other-copy",
+            Self::TooManyScreenLines => "too-many-screen-lines",
         }
     }
 }
@@ -1619,6 +1679,26 @@ fn red_negotiated(
         .is_some_and(|media| media.remote_pts().contains(&matched.pt()));
     let inner = |params: &PayloadParams| params.spec().format.red.map(|red| red.pt);
     on_track && inner(matched).is_some() && inner(matched) == inner(source)
+}
+
+/// The Opus payload type a subscriber's track `local_mid` negotiated, when
+/// that track negotiated no `red` (the subscriber's `red` entry `red` is not
+/// among its payload types): where an audio RED packet goes to it, sealed
+/// whole and marked as RED by its trailer, for the subscriber's client to
+/// take the primary frame out. `None` when the track did negotiate `red`
+/// (then [`red_negotiated`] decides alone) or has no Opus.
+fn opus_for_red_without_red(
+    rtc: &Rtc,
+    local_mid: Mid,
+    red: &PayloadParams,
+) -> Option<str0m::media::Pt> {
+    let pts = rtc.media(local_mid)?.remote_pts();
+    if pts.contains(&red.pt()) {
+        return None;
+    }
+    rtc.codec_config()
+        .find(|p| p.spec().codec == Codec::Opus && pts.contains(&p.pt()))
+        .map(PayloadParams::pt)
 }
 
 /// The `red` and `ulpfec` payload types of this peer for the track
@@ -3010,8 +3090,13 @@ pub struct PublishedRates {
     /// Its light video (a declared light track, or the light layer of a
     /// simulcast track).
     pub light_bps: u64,
-    /// Its audio.
+    /// Its audio (its microphone; the sound of a screen share is
+    /// `screen_audio_bps`).
     pub audio_bps: u64,
+    /// The picture of its screen share (ADR-0083).
+    pub screen_bps: u64,
+    /// The sound of its screen share.
+    pub screen_audio_bps: u64,
 }
 
 /// One change of what a subscriber is given of a publisher's video, for
@@ -3573,6 +3658,7 @@ impl MediaPeer {
             tracks_in: Vec::new(),
             tracks_out: Vec::new(),
             pending_offer: None,
+            pending_stops: Vec::new(),
             egress_estimate_bps: None,
             layer_meters: HashMap::new(),
             last_keyframe_request: HashMap::new(),
@@ -3600,6 +3686,7 @@ impl MediaPeer {
             light_rids: HashMap::new(),
             light_mid: None,
             middle_mid: None,
+            screen_mids: Vec::new(),
             video_wants: HashMap::new(),
             protection,
             fast_nack_ssrcs: Vec::new(),
@@ -3683,6 +3770,48 @@ impl MediaPeer {
         &self.tracks_out
     }
 
+    /// The upstream tracks whose media line this peer stopped in its
+    /// latest offer (a port-0 m-line: a screen share that ended,
+    /// ADR-0083), removed from [`Self::tracks_in`] and returned so the
+    /// router can stop the lines that carry them on every subscriber
+    /// ([`retire_tracks_out`]). A line merely set `inactive` stays: the
+    /// peer may send on it again, and nothing announces it a second time.
+    pub fn retire_stopped_tracks_in(&mut self) -> Vec<TrackIn> {
+        let rtc = &self.rtc;
+        let (retired, kept): (Vec<TrackIn>, Vec<TrackIn>) = self
+            .tracks_in
+            .iter()
+            .copied()
+            .partition(|t| rtc.media(t.mid).map_or(true, str0m::media::Media::stopped));
+        self.tracks_in = kept;
+        retired
+    }
+
+    /// The publisher `source` stopped the track it sent on `source_mid`:
+    /// nothing is forwarded on its downstream line here from now on, and
+    /// the line is stopped by the next renegotiation
+    /// ([`Self::negotiate_if_needed`]), so this peer's track ends instead
+    /// of standing beside a later share of the same publisher under the
+    /// same stream id. A line not negotiated yet is dropped outright.
+    /// Returns whether this peer had such a line.
+    pub fn retire_track_out(&mut self, source: &MediaPeerId, source_mid: Mid) -> bool {
+        let mut found = false;
+        let mut stops = Vec::new();
+        self.tracks_out.retain(|t| {
+            if t.source_peer != *source || t.source_mid != source_mid {
+                return true;
+            }
+            found = true;
+            match t.state {
+                TrackOutState::ToOpen => {},
+                TrackOutState::Negotiating(mid) | TrackOutState::Open(mid) => stops.push(mid),
+            }
+            false
+        });
+        self.pending_stops.extend(stops);
+        found
+    }
+
     /// Record an upstream track this peer just announced
     /// via `Event::MediaAdded`. Returns the [`TrackIn`] so
     /// the caller (the router) can propagate matching
@@ -3705,6 +3834,7 @@ impl MediaPeer {
             simulcast: false,
             light: kind == MediaKind::Video && self.light_mid == Some(mid),
             middle: kind == MediaKind::Video && self.middle_mid == Some(mid),
+            screen: self.screen_mids.contains(&mid),
         };
         self.tracks_in.push(track);
         // The negotiation may already list the track's rids.
@@ -3792,7 +3922,7 @@ impl MediaPeer {
         declared: Option<Mid>,
         other: Option<Mid>,
     ) -> Option<LightDeclarationRefused> {
-        if other == Some(mid) {
+        if other == Some(mid) || self.screen_mids.contains(&mid) {
             return Some(LightDeclarationRefused::DeclaredOtherwise);
         }
         if declared.is_some() {
@@ -3804,6 +3934,17 @@ impl MediaPeer {
         if media.kind() != MediaKind::Video {
             return Some(LightDeclarationRefused::NotVideo);
         }
+        self.line_problem(mid)
+    }
+
+    /// Why the line `mid` of this peer cannot become one of its declared
+    /// lines (light, middle or screen), if it cannot: there is no such
+    /// line, it is not a line the peer sends on, or it was already
+    /// announced as an ordinary track.
+    fn line_problem(&self, mid: Mid) -> Option<LightDeclarationRefused> {
+        let Some(media) = self.rtc.media(mid) else {
+            return Some(LightDeclarationRefused::UnknownMid);
+        };
         // One of the SFU's own lines to this peer, or a line the peer
         // only receives on.
         let downstream = self.tracks_out.iter().any(|t| {
@@ -3816,6 +3957,108 @@ impl MediaPeer {
             return Some(LightDeclarationRefused::AlreadyMain);
         }
         None
+    }
+
+    /// Take the `screen_mids` of an SDP offer THIS peer sent and the
+    /// SFU has just accepted (ADR-0083): the mids of the offer's lines
+    /// that carry its screen share, the picture on a video line and its
+    /// sound, when there is any, on an audio line.
+    ///
+    /// A mid is taken when it names a line of this peer that the peer
+    /// sends on, that has not been announced as an ordinary track and
+    /// that is not its light or middle line; the track is then announced
+    /// with [`TrackIn::screen`] set and reaches every subscriber as the
+    /// peer's screen track only ([`TrackRole::Screen`]). One offer
+    /// declares at most one new video line and one new audio line; a
+    /// second of a kind in the same offer is refused. A mid taken stays a
+    /// screen line for good, and naming it again is a no-op, so a client
+    /// may repeat the list in every offer. A share that starts again on
+    /// new lines is declared again in its own offer, up to
+    /// [`MAX_SCREEN_MIDS`] lines over the peer's life.
+    ///
+    /// Returns what was refused and why, for the caller's log. A refused
+    /// mid changes nothing.
+    pub fn declare_screen_tracks(
+        &mut self,
+        screen_mids: &[String],
+    ) -> Vec<(Mid, LightDeclarationRefused)> {
+        let mut refused = Vec::new();
+        let mut video_taken = false;
+        let mut audio_taken = false;
+        for raw in screen_mids {
+            let mid = Mid::from(raw.as_str());
+            if self.screen_mids.contains(&mid) {
+                continue;
+            }
+            if let Some(why) = self.screen_declaration_problem(mid, video_taken, audio_taken) {
+                refused.push((mid, why));
+                continue;
+            }
+            match self.rtc.media(mid).map(str0m::media::Media::kind) {
+                Some(MediaKind::Video) => video_taken = true,
+                _ => audio_taken = true,
+            }
+            self.screen_mids.push(mid);
+        }
+        refused
+    }
+
+    /// Why `mid` cannot become one of this peer's screen lines, if it
+    /// cannot. `video_taken` and `audio_taken` say whether the offer
+    /// being declared has already given a line of that kind.
+    fn screen_declaration_problem(
+        &self,
+        mid: Mid,
+        video_taken: bool,
+        audio_taken: bool,
+    ) -> Option<LightDeclarationRefused> {
+        if self.light_mid == Some(mid) || self.middle_mid == Some(mid) {
+            return Some(LightDeclarationRefused::DeclaredOtherwise);
+        }
+        let Some(kind) = self.rtc.media(mid).map(str0m::media::Media::kind) else {
+            return Some(LightDeclarationRefused::UnknownMid);
+        };
+        if let Some(why) = self.line_problem(mid) {
+            return Some(why);
+        }
+        let taken = match kind {
+            MediaKind::Video => video_taken,
+            MediaKind::Audio => audio_taken,
+        };
+        if taken {
+            return Some(LightDeclarationRefused::AlreadyDeclared);
+        }
+        if self.screen_mids.len() >= MAX_SCREEN_MIDS {
+            return Some(LightDeclarationRefused::TooManyScreenLines);
+        }
+        None
+    }
+
+    /// Whether `mid` is one of the lines THIS peer declared to carry its
+    /// screen share ([`Self::declare_screen_tracks`]).
+    #[must_use]
+    pub fn is_screen_mid(&self, mid: Mid) -> bool {
+        self.screen_mids.contains(&mid)
+    }
+
+    /// The lines THIS peer declared to carry its screen share, in the
+    /// order they were declared.
+    #[must_use]
+    pub fn screen_mids(&self) -> &[Mid] {
+        &self.screen_mids
+    }
+
+    /// Whether THIS peer sends a screen picture now: one of its declared
+    /// screen lines is a video line it still sends on (a share that
+    /// stopped leaves its line inactive or removes it). Negotiation state
+    /// only.
+    #[must_use]
+    pub fn sends_screen_video(&self) -> bool {
+        self.screen_mids.iter().any(|mid| {
+            self.rtc.media(*mid).is_some_and(|media| {
+                media.kind() == MediaKind::Video && media.direction().is_receiving()
+            })
+        })
     }
 
     /// The mid of the light copy of its camera THIS peer declared,
@@ -3863,7 +4106,12 @@ impl MediaPeer {
     pub fn note_simulcast_track_in(&mut self, mid: Mid) -> Option<TrackIn> {
         let idx = self.tracks_in.iter().position(|t| t.mid == mid)?;
         let track = self.tracks_in[idx];
-        if track.simulcast || track.light || track.middle || track.kind != MediaKind::Video {
+        if track.simulcast
+            || track.light
+            || track.middle
+            || track.screen
+            || track.kind != MediaKind::Video
+        {
             return None;
         }
         if self.simulcast_rids(mid).len() < 2 {
@@ -3937,7 +4185,8 @@ impl MediaPeer {
     ///
     /// A publisher's declared light track (`source.light`) gets a
     /// companion entry **only**: it is never opened as a main
-    /// track.
+    /// track. A declared screen line (`source.screen`, video or audio)
+    /// gets a screen entry only.
     ///
     /// Idempotent on `(source_peer, source_mid, role)` so the
     /// router's broadcast-to-everyone-else pass cannot
@@ -3946,7 +4195,10 @@ impl MediaPeer {
     pub fn observe_remote_track_in(&mut self, source_peer: MediaPeerId, source: TrackIn) -> bool {
         let mut added = false;
         let video = source.kind == MediaKind::Video;
-        let roles: &[TrackRole] = if source.light && video {
+        let roles: &[TrackRole] = if source.screen {
+            // Its picture and its sound alike (ADR-0083).
+            &[TrackRole::Screen]
+        } else if source.light && video {
             &[TrackRole::LightCompanion]
         } else if source.middle && video {
             &[TrackRole::Middle]
@@ -3982,13 +4234,15 @@ impl MediaPeer {
 
     /// The MSID stream id of a downstream track: the source peer
     /// id, followed by [`LIGHT_STREAM_SUFFIX`] for a light
-    /// companion and by [`MIDDLE_STREAM_SUFFIX`] for a middle track.
+    /// companion, by [`MIDDLE_STREAM_SUFFIX`] for a middle track and
+    /// by [`SCREEN_STREAM_SUFFIX`] for a screen track.
     #[must_use]
     pub fn downstream_stream_id(source_peer: &MediaPeerId, role: TrackRole) -> String {
         match role {
             TrackRole::Main => source_peer.to_string(),
             TrackRole::LightCompanion => format!("{source_peer}{LIGHT_STREAM_SUFFIX}"),
             TrackRole::Middle => format!("{source_peer}{MIDDLE_STREAM_SUFFIX}"),
+            TrackRole::Screen => format!("{source_peer}{SCREEN_STREAM_SUFFIX}"),
         }
     }
 
@@ -4086,6 +4340,8 @@ impl MediaPeer {
         if self.pending_offer.is_some() {
             return Ok(None);
         }
+        // Lines whose source the publisher stopped are stopped here too.
+        let stops = std::mem::take(&mut self.pending_stops);
         // Snapshot the indices of ToOpen entries — we
         // mutate `state` after the change-apply step
         // and a simultaneous iter+mut on the Vec would
@@ -4097,11 +4353,14 @@ impl MediaPeer {
             .filter(|(_, t)| matches!(t.state, TrackOutState::ToOpen))
             .map(|(i, _)| i)
             .collect();
-        if to_open.is_empty() {
+        if to_open.is_empty() && stops.is_empty() {
             return Ok(None);
         }
 
         let mut change = self.rtc.sdp_api();
+        for mid in stops {
+            change.stop_media(mid);
+        }
         // Allocate one outgoing media line per ToOpen
         // entry. `Direction::SendOnly` — the SFU's job
         // is to forward RTP **to** this peer, not to
@@ -4879,7 +5138,8 @@ impl MediaPeer {
                 }
                 let quality = self.video_quality_given(&t.source_peer);
                 match t.role {
-                    TrackRole::LightCompanion => None,
+                    // A screen share is sent always (ADR-0083).
+                    TrackRole::LightCompanion | TrackRole::Screen => None,
                     TrackRole::Main => Some(quality == VideoQuality::Main),
                     TrackRole::Middle => Some(quality == VideoQuality::Middle),
                 }
@@ -5080,6 +5340,28 @@ impl MediaPeer {
             .unwrap_or_else(|| self.forward_on_wire(idx, packet))
     }
 
+    /// Offer one packet of a publisher's **declared screen line**
+    /// ([`TrackIn::screen`], ADR-0083), picture or sound, to this
+    /// (subscribing) peer: it goes to the screen track that mirrors it,
+    /// every packet of it, through exactly the steps of
+    /// [`Self::forward_packet`] on that track's own stream. The
+    /// subscriber's video wants never pause it, and no layer is selected:
+    /// the source is one ordinary encoding.
+    ///
+    /// [`MediaForward::NoWriter`] while this peer has no open screen
+    /// track for it.
+    pub(crate) fn forward_screen_track(
+        &mut self,
+        source_peer: &MediaPeerId,
+        packet: &RelayPacket,
+    ) -> MediaForward {
+        let Some(idx) = self.open_track(source_peer, packet.mid, TrackRole::Screen) else {
+            return MediaForward::NoWriter;
+        };
+        self.forward_at_pending_switch(idx, packet)
+            .unwrap_or_else(|| self.forward_on_wire(idx, packet))
+    }
+
     /// Index in `tracks_out` of the open downstream track of the
     /// given role that mirrors `(source_peer, source_mid)`.
     fn open_track(
@@ -5131,8 +5413,9 @@ impl MediaPeer {
             let target = match entry.role {
                 TrackRole::LightCompanion => layout.light,
                 TrackRole::Main => layout.heaviest,
-                // A middle track mirrors one ordinary encoding.
-                TrackRole::Middle => None,
+                // A middle track and a screen track mirror one ordinary
+                // encoding.
+                TrackRole::Middle | TrackRole::Screen => None,
             };
             if let Some(rid) = target {
                 entry.chosen_rid = Some(rid);
@@ -5239,10 +5522,21 @@ impl MediaPeer {
         let Some(matched) = self.rtc.codec_config().match_params(packet.params).copied() else {
             return MediaForward::NoCodecMatch;
         };
+        // The payload type an unwrapped packet goes out under.
+        let mut out_pt = matched.pt();
         if packet.params.spec().codec == Codec::Red
             && !red_negotiated(&self.rtc, local_mid, &matched, &packet.params)
         {
-            return MediaForward::NoCodecMatch;
+            // A subscriber whose track negotiated no `red` at all (Firefox
+            // has none) is sent the sealed container under its Opus payload
+            // type: the frame's own trailer says it is RED, and that
+            // subscriber's client takes the primary frame out after opening
+            // (ADR-0071, amended 2026-10-26). One that negotiated `red` over
+            // another Opus number cannot be helped, as before.
+            let Some(opus_pt) = opus_for_red_without_red(&self.rtc, local_mid, &matched) else {
+                return MediaForward::NoCodecMatch;
+            };
+            out_pt = opus_pt;
         }
         let (pt, payload) = match packet.red {
             // Not RED-wrapped: the payload goes out as it came. A bare
@@ -5252,7 +5546,7 @@ impl MediaPeer {
                 if packet.params.spec().codec == Codec::RedVideo && fec_pts.is_none() {
                     return MediaForward::NoCodecMatch;
                 }
-                (matched.pt(), packet.payload.clone())
+                (out_pt, packet.payload.clone())
             },
             // `matched` is the peer's entry for the media codec inside.
             Some(RedBody::Media) => {
@@ -5715,6 +6009,7 @@ impl MediaPeer {
             TrackRole::Main,
             TrackRole::LightCompanion,
             TrackRole::Middle,
+            TrackRole::Screen,
         ] {
             if let Some(idx) = self.open_track(source_peer, packet.mid, role) {
                 // A track the subscriber is not being sent has no slot
@@ -6019,7 +6314,7 @@ impl MediaPeer {
         }
         for cut in uplink.estimator.take_cut_notes() {
             tracing::info!(
-                origin = %self.id,
+                origin = %self.id.log_tag(),
                 rule = cut.rule,
                 from_kbps = cut.from_bps / 1000,
                 to_kbps = cut.to_bps / 1000,
@@ -6154,7 +6449,9 @@ impl MediaPeer {
         }
         let nominal = match role {
             TrackRole::Middle => video_needed::NOMINAL_MIDDLE_BPS,
-            TrackRole::Main | TrackRole::LightCompanion => video_needed::NOMINAL_MAIN_BPS,
+            TrackRole::Main | TrackRole::LightCompanion | TrackRole::Screen => {
+                video_needed::NOMINAL_MAIN_BPS
+            },
         };
         let remembered = sender
             .last_rate
@@ -6171,7 +6468,13 @@ impl MediaPeer {
         for track in &self.tracks_in {
             let rate = self.track_rate_bps(track.mid, now);
             match (track.kind, track.role()) {
+                (MediaKind::Audio, TrackRole::Screen) => {
+                    rates.screen_audio_bps = rates.screen_audio_bps.saturating_add(rate);
+                },
                 (MediaKind::Audio, _) => rates.audio_bps = rates.audio_bps.saturating_add(rate),
+                (MediaKind::Video, TrackRole::Screen) => {
+                    rates.screen_bps = rates.screen_bps.saturating_add(rate);
+                },
                 (MediaKind::Video, TrackRole::LightCompanion) => {
                     rates.light_bps = rates.light_bps.saturating_add(rate);
                 },
@@ -6329,10 +6632,10 @@ impl MediaPeer {
             }
             uplink.estimator.estimate_bps()
         };
-        let audio_bps = self
-            .downlink
-            .is_some()
-            .then(|| self.published_rates(now).audio_bps);
+        let audio_bps = self.downlink.is_some().then(|| {
+            let rates = self.published_rates(now);
+            rates.audio_bps.saturating_add(rates.screen_audio_bps)
+        });
         let inputs = publish_budget::Inputs {
             estimate_bps,
             audio_bps,
@@ -6340,6 +6643,7 @@ impl MediaPeer {
             has_middle: self.middle_mid.is_some(),
             main_needed: self.told_needed(TrackRole::Main),
             middle_needed: self.told_needed(TrackRole::Middle),
+            has_screen: self.sends_screen_video(),
         };
         let (budget, why) = self.budget.update(inputs, now)?;
         Some(BudgetChange {
@@ -6352,10 +6656,11 @@ impl MediaPeer {
     /// The role of the heavy camera sender THIS peer publishes on `mid`:
     /// `Middle` for its declared middle track, `Main` for any other
     /// video track of one encoding that is not its light track. `None`
-    /// for audio, the light track, a simulcast track and an unknown mid.
+    /// for audio, the light track, a screen line (never a camera sender,
+    /// never told to stop), a simulcast track and an unknown mid.
     fn heavy_sender_role(&self, mid: Mid) -> Option<TrackRole> {
         let track = self.tracks_in.iter().find(|t| t.mid == mid)?;
-        if track.kind != MediaKind::Video || track.simulcast || track.light {
+        if track.kind != MediaKind::Video || track.simulcast || track.light || track.screen {
             return None;
         }
         Some(track.role())
@@ -6367,6 +6672,8 @@ impl MediaPeer {
         self.needs.tracker.told().map_or(true, |told| match role {
             TrackRole::Middle => told.middle,
             TrackRole::Main | TrackRole::LightCompanion => told.main,
+            // A screen sender is never told to stop.
+            TrackRole::Screen => true,
         })
     }
 
@@ -6412,6 +6719,7 @@ impl MediaPeer {
         let on = |role: TrackRole| match role {
             TrackRole::Middle => needed.middle,
             TrackRole::Main | TrackRole::LightCompanion => needed.main,
+            TrackRole::Screen => true,
         };
         let mut stopped = false;
         for (mid, role) in &heavy {
@@ -6432,7 +6740,7 @@ impl MediaPeer {
                 if let Some(bps) = self.needs.estimate_before_idle {
                     if uplink.estimator.restore_after_idle(bps, now) {
                         tracing::info!(
-                            origin = %self.id,
+                            origin = %self.id.log_tag(),
                             estimate_kbps = uplink.estimator.estimate_bps() / 1000,
                             "media: a publisher's bitrate estimate was put back as a sender is switched on again"
                         );
@@ -6482,7 +6790,7 @@ impl MediaPeer {
             }
             let given_up = self.give_up_missing(mid, None);
             tracing::info!(
-                origin = %self.id,
+                origin = %self.id.log_tag(),
                 mid = ?mid,
                 given_up,
                 "media: a sender nobody is being sent has stopped"
@@ -6559,7 +6867,7 @@ impl MediaPeer {
             && !packet.is_fec()
             && self.request_keyframe_limited(packet.mid, None, now);
         tracing::info!(
-            origin = %self.id,
+            origin = %self.id.log_tag(),
             mid = ?packet.mid,
             role = role.as_str(),
             needed = told_on,
@@ -6642,12 +6950,14 @@ impl MediaPeer {
     /// link of the e2e test: about 1500 retransmissions lost at the full
     /// queue in the second after the first cut). A picture that cannot be
     /// repaired is asked for again as a key frame by the subscriber. The
-    /// light tracks keep theirs.
+    /// light tracks and the screen tracks keep theirs.
     fn drop_heavy_retransmissions(&mut self) {
         let heavy: Vec<Mid> = self
             .tracks_out
             .iter()
-            .filter(|t| t.kind == MediaKind::Video && t.role != TrackRole::LightCompanion)
+            .filter(|t| {
+                t.kind == MediaKind::Video && matches!(t.role, TrackRole::Main | TrackRole::Middle)
+            })
             .filter_map(|t| match t.state {
                 TrackOutState::Open(local_mid) => Some(local_mid),
                 _ => None,
@@ -7755,6 +8065,9 @@ pub enum MediaCommand {
         /// The mids the offer declares as carrying the middle copy
         /// (`ClientFrame::SdpOffer.middle_mids`).
         middle_mids: Vec<String>,
+        /// The mids the offer declares as carrying the peer's screen
+        /// share (`ClientFrame::SdpOffer.screen_mids`, ADR-0083).
+        screen_mids: Vec<String>,
         /// One-shot reply channel.
         reply: tokio::sync::oneshot::Sender<MediaResult<String>>,
     },
@@ -7927,6 +8240,35 @@ impl MediaTaskHandle {
         light_mids: Vec<String>,
         middle_mids: Vec<String>,
     ) -> std::result::Result<String, MediaCommandError> {
+        self.accept_offer_with_screen(
+            peer_id,
+            call_id,
+            offer_sdp,
+            light_mids,
+            middle_mids,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// As [`Self::accept_offer_with_copies`], for an offer that also
+    /// declares the lines carrying the peer's screen share
+    /// (`ClientFrame::SdpOffer.screen_mids`, ADR-0083, see
+    /// [`MediaPeer::declare_screen_tracks`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::accept_offer`]. A declaration the SFU does not take
+    /// is not an error: it is ignored and logged.
+    pub async fn accept_offer_with_screen(
+        &self,
+        peer_id: MediaPeerId,
+        call_id: String,
+        offer_sdp: String,
+        light_mids: Vec<String>,
+        middle_mids: Vec<String>,
+        screen_mids: Vec<String>,
+    ) -> std::result::Result<String, MediaCommandError> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         self.tx
             .try_send(MediaCommand::AcceptOffer {
@@ -7935,6 +8277,7 @@ impl MediaTaskHandle {
                 offer_sdp,
                 light_mids,
                 middle_mids,
+                screen_mids,
                 reply: reply_tx,
             })
             .map_err(|e| match e {
@@ -8269,6 +8612,7 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
             offer_sdp,
             light_mids,
             middle_mids,
+            screen_mids,
             reply,
         } => {
             let peer_id_for_backfill = peer_id.clone();
@@ -8289,7 +8633,7 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
             if let Some(addr) = advertise_addr {
                 if let Err(e) = peer.add_local_host_candidate(addr) {
                     tracing::error!(
-                        peer = %peer.id(),
+                        peer = %peer.id().log_tag(),
                         candidate_addr = %addr,
                         error = %e,
                         "media: SFU host candidate rejected; refusing SDP offer \
@@ -8304,10 +8648,10 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
             // been announced yet (str0m announces a track at the next
             // poll), so this is the moment a declared light track is
             // told from a main one.
-            if res.is_ok() {
-                declare_light_tracks(peer, &light_mids);
-                declare_middle_tracks(peer, &middle_mids);
-            }
+            let retired = res.as_ref().map_or_else(
+                |_| Vec::new(),
+                |_| settle_offer_lines(peer, &light_mids, &middle_mids, &screen_mids),
+            );
             // Lifecycle point 0. The four downstream lines describe how the
             // SFU routes tracks BETWEEN peers; they say nothing about the
             // answer to a peer's own offer — and that answer alone can hand
@@ -8322,7 +8666,7 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
             // peer's id, while this one is a random 30-char msid.
             if let Ok(answer) = &res {
                 tracing::info!(
-                    peer = %peer_id_for_backfill,
+                    peer = %peer_id_for_backfill.log_tag(),
                     media = %media_line_summary(answer),
                     "media: answered peer's own offer"
                 );
@@ -8336,7 +8680,7 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
             // only ever propagates FORWARD — see `backfill_existing_tracks`
             // for why that leaves a late joiner with nothing.
             if ok {
-                backfill_existing_tracks(router, &peer_id_for_backfill);
+                after_accepted_offer(router, &peer_id_for_backfill, &retired);
             }
         },
         MediaCommand::AddRemoteCandidate {
@@ -8372,7 +8716,7 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
             match &res {
                 Ok(opened) => {
                     tracing::info!(
-                        peer = %peer_id,
+                        peer = %peer_id.log_tag(),
                         opened = opened.len(),
                         "media: subscriber answered the downstream-track offer"
                     );
@@ -8386,7 +8730,7 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
                     request_keyframes_for_opened(router, &peer_id, opened, Instant::now());
                 },
                 Err(e) => tracing::warn!(
-                    peer = %peer_id,
+                    peer = %peer_id.log_tag(),
                     error = %e,
                     "media: subscriber's answer to the downstream-track offer was refused"
                 ),
@@ -8405,7 +8749,7 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
         MediaCommand::RemovePeer { peer_id } => {
             let removed = router.remove_peer(&peer_id);
             tracing::info!(
-                peer = %peer_id,
+                peer = %peer_id.log_tag(),
                 removed,
                 peers_left = router.len(),
                 "media: peer removed after its signaling socket closed"
@@ -8424,14 +8768,14 @@ fn declare_light_tracks(peer: &mut MediaPeer, light_mids: &[String]) {
     }
     for (mid, why) in peer.declare_light_tracks(light_mids) {
         tracing::warn!(
-            peer = %peer.id(),
+            peer = %peer.id().log_tag(),
             mid = ?mid,
             reason = why.as_str(),
             "media: light-track declaration ignored"
         );
     }
     tracing::info!(
-        peer = %peer.id(),
+        peer = %peer.id().log_tag(),
         declared = light_mids.len(),
         light_mid = ?peer.light_mid(),
         "media: offer declared light tracks"
@@ -8453,7 +8797,7 @@ fn take_video_wants(router: &mut MediaRouter, subscriber: &MediaPeerId, wants: &
     };
     let count = peer.set_video_wants(wants);
     tracing::info!(
-        subscriber = %subscriber,
+        subscriber = %subscriber.log_tag(),
         named = wants.len(),
         main = count.main,
         middle = count.middle,
@@ -8473,17 +8817,53 @@ fn declare_middle_tracks(peer: &mut MediaPeer, middle_mids: &[String]) {
     }
     for (mid, why) in peer.declare_middle_tracks(middle_mids) {
         tracing::warn!(
-            peer = %peer.id(),
+            peer = %peer.id().log_tag(),
             mid = ?mid,
             reason = why.as_str(),
             "media: middle-track declaration ignored"
         );
     }
     tracing::info!(
-        peer = %peer.id(),
+        peer = %peer.id().log_tag(),
         declared = middle_mids.len(),
         middle_mid = ?peer.middle_mid(),
         "media: offer declared middle tracks"
+    );
+}
+
+/// Hand the three declarations of an offer `peer` sent, and the SFU
+/// accepted, to the peer, in the order that decides a clash: light, then
+/// middle, then screen.
+fn declare_offer_lines(
+    peer: &mut MediaPeer,
+    light_mids: &[String],
+    middle_mids: &[String],
+    screen_mids: &[String],
+) {
+    declare_light_tracks(peer, light_mids);
+    declare_middle_tracks(peer, middle_mids);
+    declare_screen_tracks(peer, screen_mids);
+}
+
+/// As [`declare_light_tracks`], for the `screen_mids` of the offer
+/// ([`MediaPeer::declare_screen_tracks`], ADR-0083).
+fn declare_screen_tracks(peer: &mut MediaPeer, screen_mids: &[String]) {
+    if screen_mids.is_empty() {
+        return;
+    }
+    for (mid, why) in peer.declare_screen_tracks(screen_mids) {
+        tracing::warn!(
+            peer = %peer.id().log_tag(),
+            mid = ?mid,
+            reason = why.as_str(),
+            "media: screen-track declaration ignored"
+        );
+    }
+    tracing::info!(
+        peer = %peer.id().log_tag(),
+        declared = screen_mids.len(),
+        screen_lines = peer.screen_mids().len(),
+        "media: offer declared screen tracks"
     );
 }
 
@@ -8857,7 +9237,7 @@ fn drive_time(router: &mut MediaRouter, now: Instant) {
     for peer in router.peers_mut() {
         if let Err(e) = peer.handle_input(Input::Timeout(now)) {
             tracing::warn!(
-                peer = %peer.id(),
+                peer = %peer.id().log_tag(),
                 error = %e,
                 "media: timeout input failed; dropping peer"
             );
@@ -8921,8 +9301,8 @@ pub(crate) fn drive_playout_delay(router: &mut MediaRouter, now: Instant) -> usi
                 metrics::counter!(crate::prom::names::PLAYOUT_DELAY_RAISES_TOTAL).increment(1);
             }
             tracing::info!(
-                subscriber = %subscriber,
-                publisher = %publisher,
+                subscriber = %subscriber.log_tag(),
+                publisher = %publisher.log_tag(),
                 from_ms,
                 to_ms,
                 reason = reason.as_str(),
@@ -9019,7 +9399,7 @@ pub(crate) fn drive_burst_keyframes(
             // Packets stayed missing and none of them is taken for media
             // somebody needs: said, so the log shows every burst.
             tracing::info!(
-                origin = %publisher,
+                origin = %publisher.log_tag(),
                 mid = ?mid,
                 rid = ?rid,
                 lost = end.lost,
@@ -9068,7 +9448,7 @@ pub(crate) fn drive_burst_keyframes(
                 .map_or(0, |p| p.give_up_missing(mid, rid))
         };
         tracing::info!(
-            origin = %publisher,
+            origin = %publisher.log_tag(),
             mid = ?mid,
             rid = ?rid,
             lost = end.lost,
@@ -9218,7 +9598,7 @@ fn log_downlink_run(subscriber: &MediaPeerId, run: &DownlinkRun) {
         .increment(1);
         tracing::info!(
             %subscriber,
-            publisher = %change.publisher,
+            publisher = %change.publisher.log_tag(),
             from = change.from.as_str(),
             to = change.to.as_str(),
             wanted = change.wanted.as_str(),
@@ -9288,6 +9668,17 @@ pub(crate) fn drive_downlink_control(
                         .then_some(bps)
                 };
                 let audio = sub.has_open_track_of(&id, MediaKind::Audio, TrackRole::Main);
+                // A screen share, picture and sound, is given the link
+                // before any camera (ADR-0083).
+                let screen_video = sub.has_open_track_of(&id, MediaKind::Video, TrackRole::Screen);
+                let screen_audio = sub.has_open_track_of(&id, MediaKind::Audio, TrackRole::Screen);
+                let screen_bps = (if screen_video { rates.screen_bps } else { 0 }).saturating_add(
+                    if screen_audio {
+                        rates.screen_audio_bps
+                    } else {
+                        0
+                    },
+                );
                 Some(downlink_allocation::Publisher {
                     wanted: sub.video_quality_for(&id),
                     main_bps: video(TrackRole::Main, rates.main_bps),
@@ -9299,6 +9690,7 @@ pub(crate) fn drive_downlink_control(
                         rates.light_bps.saturating_mul(light_copies),
                     ),
                     audio_bps: if audio { rates.audio_bps } else { 0 },
+                    screen_bps,
                     publisher: id,
                 })
             })
@@ -9410,7 +9802,7 @@ pub(crate) fn drive_video_needed(
             continue;
         };
         tracing::info!(
-            publisher = %id,
+            publisher = %id.log_tag(),
             main = change.needed.main,
             middle = change.needed.middle,
             want_main = change.wanted.main,
@@ -9467,10 +9859,11 @@ pub(crate) fn drive_publish_budget(
         )
         .increment(1);
         tracing::info!(
-            publisher = %publisher.id(),
+            publisher = %publisher.id().log_tag(),
             estimate_kbps = change.inputs.estimate_bps / 1000,
             main_kbps = change.budget.main_kbps,
             middle_kbps = change.budget.middle_kbps,
+            screen_kbps = ?change.budget.screen_kbps,
             main_needed = change.inputs.main_needed,
             middle_needed = change.inputs.has_middle && change.inputs.middle_needed,
             why = change.why.as_str(),
@@ -9481,6 +9874,7 @@ pub(crate) fn drive_publish_budget(
             ServerFrame::PublishBudget {
                 main_kbps: change.budget.main_kbps,
                 middle_kbps: change.budget.middle_kbps,
+                screen_kbps: change.budget.screen_kbps,
             },
         ));
     }
@@ -9543,7 +9937,7 @@ fn log_downlinks(router: &MediaRouter, now: Instant) {
             continue;
         };
         tracing::info!(
-            subscriber = %peer.id(),
+            subscriber = %peer.id().log_tag(),
             budget_kbps = ?snap.budget_bps.map(|bps| bps / 1000),
             estimate_kbps = ?snap.estimate_bps.map(|bps| bps / 1000),
             carried_kbps = ?snap.carried_bps.map(|bps| bps / 1000),
@@ -9578,7 +9972,7 @@ fn log_uplink_estimates(router: &mut MediaRouter, now: Instant) {
             continue;
         };
         tracing::info!(
-            origin = %peer.id(),
+            origin = %peer.id().log_tag(),
             estimate_kbps = snap.estimate_bps / 1000,
             arriving_kbps = snap.arriving_bps / 1000,
             state = snap.state.as_str(),
@@ -9597,7 +9991,7 @@ fn log_uplink_estimates(router: &mut MediaRouter, now: Instant) {
 /// counters are cumulative as str0m keeps them.
 fn log_ingress_stats(peer: &MediaPeerId, st: &str0m::stats::MediaIngressStats) {
     tracing::info!(
-        peer = %peer,
+        peer = %peer.log_tag(),
         mid = ?st.mid,
         rid = ?st.rid,
         bytes = st.bytes,
@@ -9620,11 +10014,11 @@ fn log_egress_stats(
 ) {
     let upstream = media_peer.origin_for_downstream_mid(st.mid);
     tracing::info!(
-        peer = %peer,
+        peer = %peer.log_tag(),
         mid = ?st.mid,
         rid = ?st.rid,
-        origin = ?upstream.as_ref().map(|t| t.source_peer.to_string()),
         origin_mid = ?upstream.as_ref().map(|t| t.source_mid),
+        origin = ?upstream.as_ref().map(|t| t.source_peer.log_tag()),
         role = ?upstream.as_ref().map(|t| t.role.as_str()),
         bytes = st.bytes,
         packets = st.packets,
@@ -9640,7 +10034,7 @@ fn log_egress_stats(
 /// including the egress bandwidth estimate the layer policy reads.
 fn log_peer_stats(peer: &MediaPeerId, st: &str0m::stats::PeerStats) {
     tracing::info!(
-        peer = %peer,
+        peer = %peer.log_tag(),
         bwe_tx = ?st.bwe_tx,
         bytes_rx = st.bytes_rx,
         bytes_tx = st.bytes_tx,
@@ -9803,8 +10197,7 @@ async fn drain_outputs(
                         // publisher never got its media line negotiated and
                         // nothing downstream is worth looking at.
                         tracing::info!(
-                            peer = %origin,
-                            call = %peer.call_id(),
+                            peer = %origin.log_tag(),
                             mid = ?added.mid,
                             kind = ?added.kind,
                             direction = ?added.direction,
@@ -9832,12 +10225,12 @@ async fn drain_outputs(
                     // receiving for seconds at a time is either paced or
                     // disconnected, and only this line tells the two apart.
                     Event::IceConnectionStateChange(state) => {
-                        tracing::info!(peer = %origin, state = ?state, "media: ICE connection state");
+                        tracing::info!(peer = %origin.log_tag(), state = ?state, "media: ICE connection state");
                     },
                     Event::Connected => {
                         // From here on the fanout may write to this peer.
                         peer.mark_connected();
-                        tracing::info!(peer = %origin, "media: peer transport connected");
+                        tracing::info!(peer = %origin.log_tag(), "media: peer transport connected");
                     },
                     Event::MediaIngressStats(st) => log_ingress_stats(&origin, &st),
                     Event::MediaEgressStats(st) => log_egress_stats(&origin, peer, &st),
@@ -9853,7 +10246,7 @@ async fn drain_outputs(
                     // str0m does not flip for every error, so flip it
                     // here or the peer lives on and every later write
                     // to it fails.
-                    tracing::warn!(peer = %origin, error = %e, "media: poll_output failed; dropping peer");
+                    tracing::warn!(peer = %origin.log_tag(), error = %e, "media: poll_output failed; dropping peer");
                     peer.disconnect();
                     break;
                 },
@@ -9882,7 +10275,7 @@ fn late_simulcast_track(peer: &mut MediaPeer, packet: &RelayPacket) -> Option<Tr
     }
     let track = peer.note_simulcast_track_in(packet.mid)?;
     tracing::info!(
-        peer = %peer.id(),
+        peer = %peer.id().log_tag(),
         mid = ?track.mid,
         "media: track found to be simulcast from its packets"
     );
@@ -10207,7 +10600,7 @@ impl FanoutLedger {
         origins.sort_by(|a, b| a.0.cmp(&b.0));
         for ((origin, mid), t) in origins {
             tracing::info!(
-                origin = %origin,
+                origin = %origin.log_tag(),
                 mid = ?mid,
                 packets = t.packets,
                 frames = t.frames,
@@ -10225,8 +10618,8 @@ impl FanoutLedger {
         targets.sort_by(|a, b| a.0.cmp(&b.0));
         for ((target, origin, mid, role), o) in targets {
             tracing::info!(
-                target = %target,
-                origin = %origin,
+                target = %target.log_tag(),
+                origin = %origin.log_tag(),
                 origin_mid = ?mid,
                 role = role.as_str(),
                 sent = o.sent,
@@ -10365,6 +10758,9 @@ pub(crate) fn fanout_packets_into(
         // tracks and to nothing else.
         let middle_source = event.packet.kind == MediaKind::Video
             && origin.is_some_and(|p| p.middle_mid() == Some(event.packet.mid));
+        // A packet of one of its declared screen lines, picture or sound,
+        // goes to their screen tracks and to nothing else (ADR-0083).
+        let screen_source = origin.is_some_and(|p| p.is_screen_mid(event.packet.mid));
         let origin_call = origin.map(|p| p.call_id().to_owned());
         let Some(origin_call) = origin_call.filter(|c| !c.is_empty()) else {
             continue;
@@ -10402,7 +10798,10 @@ pub(crate) fn fanout_packets_into(
             if let Some(layout) = layout {
                 peer.apply_simulcast_layout(&event.origin, event.packet.mid, layout);
             }
-            let attempts: [Option<(TrackRole, MediaForward)>; 2] = if light_source {
+            let attempts: [Option<(TrackRole, MediaForward)>; 2] = if screen_source {
+                let forwarded = peer.forward_screen_track(&event.origin, &event.packet);
+                [Some((TrackRole::Screen, forwarded)), None]
+            } else if light_source {
                 let forwarded = peer.forward_light_track(&event.origin, &event.packet);
                 [Some((TrackRole::LightCompanion, forwarded)), None]
             } else if middle_source {
@@ -10428,7 +10827,7 @@ pub(crate) fn fanout_packets_into(
                 }
                 if let MediaForward::WriteFailed(detail) = &forwarded {
                     tracing::warn!(
-                        target_peer = %peer.id(),
+                        target_peer = %peer.id().log_tag(),
                         role = role.as_str(),
                         error = %detail,
                         "media: forward write failed"
@@ -10524,9 +10923,8 @@ fn backfill_existing_tracks(router: &mut MediaRouter, joiner: &MediaPeerId) {
             // than there, which is the difference between "the call had
             // nothing to give it" and "the call had tracks and withheld them".
             tracing::info!(
-                origin = %origin,
-                target = %joiner,
-                call = %call,
+                origin = %origin.log_tag(),
+                target = %joiner.log_tag(),
                 mid = ?track.mid,
                 kind = ?track.kind,
                 "media: opened pre-existing track on joining subscriber"
@@ -10605,7 +11003,7 @@ pub(crate) fn request_keyframe_from_publisher(
         // the subscriber is expected within the encoder's keyframe latency —
         // not at the publisher's next natural keyframe, whenever that is.
         tracing::info!(
-            origin = %track.source_peer,
+            origin = %track.source_peer.log_tag(),
             mid = ?track.source_mid,
             rid = ?track.rid,
             reason = reason.as_str(),
@@ -10623,7 +11021,7 @@ pub(crate) fn send_owed_keyframe_requests(router: &mut MediaRouter, now: Instant
         let requests = peer.send_owed_keyframe_requests(now);
         for (mid, rid) in &requests {
             tracing::info!(
-                origin = %peer.id(),
+                origin = %peer.id().log_tag(),
                 mid = ?mid,
                 rid = ?rid,
                 reason = KeyframeReason::Owed.as_str(),
@@ -11022,7 +11420,7 @@ fn poll_uplink_fallbacks(
                 )
                 .increment(1);
                 tracing::info!(
-                    origin = %origin,
+                    origin = %origin.log_tag(),
                     mid = ?mid,
                     from = t.direction.from_str(),
                     to = t.direction.to_str(),
@@ -11166,7 +11564,7 @@ fn send_fallback_keyframe_requests(
         if sent {
             sent_count += 1;
             tracing::info!(
-                origin = %key.0,
+                origin = %key.0.log_tag(),
                 mid = ?mid,
                 rid = ?rid,
                 reason = reason.as_str(),
@@ -11246,6 +11644,62 @@ fn note_uplink_fallback_states(router: &MediaRouter, ledger: &mut FanoutLedger) 
     }
 }
 
+/// `source` stopped the lines of `retired` (ADR-0083: a screen share that
+/// ended): every other peer stops forwarding them and stops its own lines
+/// for them at its next renegotiation ([`MediaPeer::retire_track_out`]).
+/// Returns how many downstream lines were retired.
+pub(crate) fn retire_tracks_out(
+    router: &mut MediaRouter,
+    source: &MediaPeerId,
+    retired: &[TrackIn],
+) -> usize {
+    let mut n = 0;
+    for peer in router.peers_mut() {
+        if peer.id() == source {
+            continue;
+        }
+        for track in retired {
+            if peer.retire_track_out(source, track.mid) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// After a peer's offer is accepted: declare the lines it names as its
+/// camera copies and screen ([`declare_offer_lines`]), and take out of its
+/// announced set the tracks whose line the offer stops (port 0), which carry
+/// nothing any more; the caller stops every subscriber's line for them
+/// ([`after_accepted_offer`]).
+fn settle_offer_lines(
+    peer: &mut MediaPeer,
+    light_mids: &[String],
+    middle_mids: &[String],
+    screen_mids: &[String],
+) -> Vec<TrackIn> {
+    declare_offer_lines(peer, light_mids, middle_mids, screen_mids);
+    peer.retire_stopped_tracks_in()
+}
+
+/// After `source`'s offer was accepted: every subscriber stops its lines for
+/// the tracks the offer stopped ([`retire_tracks_out`], said in one line when
+/// there were any), then `source` is given the tracks the call already has
+/// ([`backfill_existing_tracks`]).
+fn after_accepted_offer(router: &mut MediaRouter, source: &MediaPeerId, retired: &[TrackIn]) {
+    if !retired.is_empty() {
+        let lines = retire_tracks_out(router, source, retired);
+        tracing::info!(
+            peer = %source.log_tag(),
+            tracks = retired.len(),
+            screen = retired.iter().filter(|t| t.screen).count(),
+            downstream_lines = lines,
+            "media: publisher stopped tracks; stopping them on subscribers"
+        );
+    }
+    backfill_existing_tracks(router, source);
+}
+
 /// Walk `new_tracks` and push a matching
 /// [`TrackOutEntry::ToOpen`] onto every non-origin
 /// peer. The next renegotiation pass (S-3-B-tracks step
@@ -11289,9 +11743,8 @@ pub(crate) fn propagate_new_tracks_in(router: &mut MediaRouter, new_tracks: &[Pe
                 // against a present point 1 means cross-call isolation or the
                 // peer walk dropped it, not the negotiation.
                 tracing::info!(
-                    origin = %event.origin,
-                    target = %peer.id(),
-                    call = %origin_call,
+                    origin = %event.origin.log_tag(),
+                    target = %peer.id().log_tag(),
                     mid = ?event.track.mid,
                     kind = ?event.track.kind,
                     "media: opened downstream track on subscriber"
@@ -11332,7 +11785,7 @@ async fn drive_renegotiations(router: &mut MediaRouter, peers: &PeerRegistry) {
                 Ok(None) => None,
                 Err(e) => {
                     tracing::warn!(
-                        peer = %peer.id(),
+                        peer = %peer.id().log_tag(),
                         error = %e,
                         "media: negotiate_if_needed failed"
                     );
@@ -11345,14 +11798,14 @@ async fn drive_renegotiations(router: &mut MediaRouter, peers: &PeerRegistry) {
     for (peer_id, sdp) in pending {
         let Some(peer) = peers.peer(&peer_id).await else {
             tracing::warn!(
-                peer = %peer_id,
+                peer = %peer_id.log_tag(),
                 "media: cannot dispatch SdpOffer — peer not in registry"
             );
             continue;
         };
         let Some(tx) = peer.outbound.as_ref() else {
             tracing::warn!(
-                peer = %peer_id,
+                peer = %peer_id.log_tag(),
                 "media: cannot dispatch SdpOffer — peer has no outbound channel"
             );
             continue;
@@ -11368,7 +11821,7 @@ async fn drive_renegotiations(router: &mut MediaRouter, peers: &PeerRegistry) {
                 // without seeing the offer. It is a single compact field, not
                 // a line per extension.
                 tracing::info!(
-                    peer = %peer_id,
+                    peer = %peer_id.log_tag(),
                     extmaps = %extmaps,
                     "media: offered downstream track to subscriber"
                 );
@@ -11379,7 +11832,7 @@ async fn drive_renegotiations(router: &mut MediaRouter, peers: &PeerRegistry) {
                 // close. Log + move on; the next tick
                 // retries.
                 tracing::warn!(
-                    peer = %peer_id,
+                    peer = %peer_id.log_tag(),
                     "media: outbound channel full; renegotiation SdpOffer dropped"
                 );
             },
@@ -11605,6 +12058,7 @@ mod tests {
                         simulcast: false,
                         light: false,
                         middle: false,
+                        screen: false,
                     },
                 );
             }
@@ -12114,6 +12568,7 @@ mod tests {
                 offer_sdp: "never parsed".to_owned(),
                 light_mids: Vec::new(),
                 middle_mids: Vec::new(),
+                screen_mids: Vec::new(),
                 reply,
             },
             Some("0.0.0.0:43210".parse().unwrap()),
@@ -12603,6 +13058,7 @@ mod tests {
                 simulcast: false,
                 light: false,
                 middle: false,
+                screen: false,
             },
         );
         let local = Mid::new();
@@ -13709,6 +14165,7 @@ mod tests {
             simulcast: false,
             light: false,
             middle: false,
+            screen: false,
         };
         let inserted = p.observe_remote_track_in(pid("bob"), source);
         assert!(inserted);
@@ -13734,6 +14191,7 @@ mod tests {
             simulcast: false,
             light: false,
             middle: false,
+            screen: false,
         };
         assert!(p.observe_remote_track_in(pid("bob"), source));
         assert!(!p.observe_remote_track_in(pid("bob"), source));
@@ -13758,6 +14216,7 @@ mod tests {
                 simulcast: false,
                 light: false,
                 middle: false,
+                screen: false,
             },
         }];
 
@@ -13802,6 +14261,7 @@ mod tests {
                 simulcast: false,
                 light: false,
                 middle: false,
+                screen: false,
             },
         }];
         // Single peer → no non-origin destinations.
@@ -13832,6 +14292,7 @@ mod tests {
                 simulcast: false,
                 light: false,
                 middle: false,
+                screen: false,
             },
         );
         assert_eq!(
@@ -13871,6 +14332,7 @@ mod tests {
                 simulcast: false,
                 light: false,
                 middle: false,
+                screen: false,
             },
         );
 
@@ -13907,6 +14369,7 @@ mod tests {
                 simulcast: false,
                 light: false,
                 middle: false,
+                screen: false,
             },
         );
         let _ = p.negotiate_if_needed().unwrap().unwrap();
@@ -14056,6 +14519,7 @@ mod tests {
                 simulcast: false,
                 light: false,
                 middle: false,
+                screen: false,
             },
         );
         assert_eq!(p.tracks_out[0].chosen_rid, None, "starts un-latched");
@@ -14735,6 +15199,7 @@ mod tests {
             simulcast: true,
             light: false,
             middle: false,
+            screen: false,
         };
         assert!(sub.observe_remote_track_in(pid("pub"), simulcast));
         assert_eq!(
@@ -14757,6 +15222,7 @@ mod tests {
             simulcast: false,
             light: false,
             middle: false,
+            screen: false,
         };
         assert!(plain.observe_remote_track_in(pid("pub"), single));
         assert_eq!(roles(&plain), vec![TrackRole::Main]);
@@ -14767,6 +15233,7 @@ mod tests {
             simulcast: true,
             light: false,
             middle: false,
+            screen: false,
         };
         assert!(plain.observe_remote_track_in(pid("pub"), audio));
         assert_eq!(roles(&plain), vec![TrackRole::Main, TrackRole::Main]);
@@ -15197,7 +15664,7 @@ mod tests {
     fn the_companions_stream_id_carries_the_suffix_through_strs_filter() {
         let t0 = Instant::now();
         let mut sub = MediaPeer::new(pid("sub"), t0);
-        let source = crate::peer::PeerId::fresh();
+        let source = crate::peer::PeerId::from_string("00112233445566778899aabbccddeeff".into());
         assert_eq!(
             MediaPeer::downstream_stream_id(&source, TrackRole::Main),
             source.to_string()
@@ -15216,6 +15683,7 @@ mod tests {
                 simulcast: true,
                 light: false,
                 middle: false,
+                screen: false,
             },
         );
         let offer = sub
@@ -15463,6 +15931,7 @@ mod tests {
             simulcast: false,
             light: true,
             middle: false,
+            screen: false,
         };
         let main = TrackIn {
             mid: main_mid,
@@ -15470,6 +15939,7 @@ mod tests {
             simulcast: false,
             light: false,
             middle: false,
+            screen: false,
         };
         let mut sub = MediaPeer::new(pid("sub"), Instant::now());
         assert!(sub.observe_remote_track_in(pid("pub"), main));
@@ -15615,6 +16085,305 @@ mod tests {
         assert!(peer.tracks_in().iter().all(|t| !t.middle));
     }
 
+    // ============================================================
+    // ADR-0083: a screen share, its picture and its sound
+    // ============================================================
+
+    /// The SDP offer of a client sharing its screen: a microphone, a
+    /// camera, its light copy, the screen's picture, the screen's sound,
+    /// one more video sender and one video receiver, and the seven mids
+    /// in that order.
+    fn screen_offer() -> (String, [Mid; 7]) {
+        let mut rtc = Rtc::builder().build(Instant::now());
+        let mut change = rtc.sdp_api();
+        let mut add = |kind, dir| change.add_media(kind, dir, None, None, None);
+        let mids = [
+            add(MediaKind::Audio, Direction::SendOnly),
+            add(MediaKind::Video, Direction::SendOnly),
+            add(MediaKind::Video, Direction::SendOnly),
+            add(MediaKind::Video, Direction::SendOnly),
+            add(MediaKind::Audio, Direction::SendOnly),
+            add(MediaKind::Video, Direction::SendOnly),
+            add(MediaKind::Video, Direction::RecvOnly),
+        ];
+        let (offer, _pending) = change.apply().expect("an offer");
+        (offer.to_sdp_string(), mids)
+    }
+
+    #[test]
+    fn a_screen_declaration_takes_one_video_and_one_audio_line_of_the_offer() {
+        let (offer, [mic, camera, light, screen, sound, extra, receiving]) = screen_offer();
+        let mut peer = MediaPeer::new(pid("pub"), Instant::now());
+        peer.accept_offer(&offer).expect("the offer is accepted");
+        assert!(!peer.sends_screen_video());
+        // The light track is declared first, as the media task does.
+        assert!(peer.declare_light_tracks(&mids_of(&[light])).is_empty());
+
+        let refused = peer.declare_screen_tracks(&[
+            light.to_string(),
+            screen.to_string(),
+            extra.to_string(),
+            sound.to_string(),
+            receiving.to_string(),
+            "nope".to_owned(),
+        ]);
+        assert_eq!(
+            refused,
+            vec![
+                // Already the light copy of the camera.
+                (light, LightDeclarationRefused::DeclaredOtherwise),
+                // A second video line in the same offer.
+                (extra, LightDeclarationRefused::AlreadyDeclared),
+                (receiving, LightDeclarationRefused::NotSentByPeer),
+                (Mid::from("nope"), LightDeclarationRefused::UnknownMid),
+            ]
+        );
+        assert_eq!(peer.screen_mids(), &[screen, sound]);
+        assert!(peer.is_screen_mid(screen) && peer.is_screen_mid(sound));
+        assert!(peer.sends_screen_video());
+        // Named again, as a client that repeats the list does: a no-op.
+        assert!(peer
+            .declare_screen_tracks(&mids_of(&[screen, sound]))
+            .is_empty());
+        // A screen line is neither the middle nor the light copy.
+        assert_eq!(
+            peer.declare_middle_tracks(&mids_of(&[screen])),
+            vec![(screen, LightDeclarationRefused::DeclaredOtherwise)]
+        );
+        assert_eq!(peer.middle_mid(), None);
+
+        for (mid, kind) in [
+            (mic, MediaKind::Audio),
+            (camera, MediaKind::Video),
+            (light, MediaKind::Video),
+            (screen, MediaKind::Video),
+            (sound, MediaKind::Audio),
+            (extra, MediaKind::Video),
+        ] {
+            peer.register_local_track_in(mid, kind);
+        }
+        let track = |mid: Mid| {
+            *peer
+                .tracks_in()
+                .iter()
+                .find(|t| t.mid == mid)
+                .expect("the track was announced")
+        };
+        assert_eq!(track(screen).role(), TrackRole::Screen);
+        assert_eq!(track(sound).role(), TrackRole::Screen);
+        assert_eq!(track(sound).kind, MediaKind::Audio);
+        assert_eq!(track(mic).role(), TrackRole::Main);
+        assert_eq!(track(camera).role(), TrackRole::Main);
+        assert_eq!(track(light).role(), TrackRole::LightCompanion);
+        assert!(!track(screen).light && !track(screen).middle);
+        // A screen line is never taken for simulcast, and never for a
+        // camera sender the SFU may tell to stop.
+        assert_eq!(peer.note_simulcast_track_in(screen), None);
+        assert_eq!(peer.heavy_sender_role(screen), None);
+        assert_eq!(peer.heavy_sender_role(camera), Some(TrackRole::Main));
+    }
+
+    #[test]
+    fn a_screen_line_announced_without_the_declaration_stays_a_main_track() {
+        let (offer, mids) = screen_offer();
+        let screen = mids[3];
+        let mut peer = MediaPeer::new(pid("pub"), Instant::now());
+        peer.accept_offer(&offer).expect("the offer is accepted");
+        peer.register_local_track_in(screen, MediaKind::Video);
+        let refused = peer.declare_screen_tracks(&mids_of(&[screen]));
+        assert_eq!(
+            refused,
+            vec![(screen, LightDeclarationRefused::AlreadyMain)]
+        );
+        assert!(peer.screen_mids().is_empty());
+        assert!(peer.tracks_in().iter().all(|t| !t.screen));
+    }
+
+    #[test]
+    fn a_share_started_again_on_new_lines_is_declared_up_to_the_bound() {
+        let mut rtc = Rtc::builder().build(Instant::now());
+        let mut change = rtc.sdp_api();
+        let mids: Vec<Mid> = (0..=MAX_SCREEN_MIDS)
+            .map(|_| change.add_media(MediaKind::Video, Direction::SendOnly, None, None, None))
+            .collect();
+        let (offer, _pending) = change.apply().expect("an offer");
+        let mut peer = MediaPeer::new(pid("pub"), Instant::now());
+        peer.accept_offer(&offer.to_sdp_string())
+            .expect("the offer is accepted");
+        // One video line per offer, as a share that stops and starts again
+        // on a new line declares it.
+        for mid in &mids[..MAX_SCREEN_MIDS] {
+            assert!(peer.declare_screen_tracks(&mids_of(&[*mid])).is_empty());
+        }
+        assert_eq!(peer.screen_mids().len(), MAX_SCREEN_MIDS);
+        let last = mids[MAX_SCREEN_MIDS];
+        assert_eq!(
+            peer.declare_screen_tracks(&mids_of(&[last])),
+            vec![(last, LightDeclarationRefused::TooManyScreenLines)]
+        );
+        assert_eq!(
+            LightDeclarationRefused::TooManyScreenLines.as_str(),
+            "too-many-screen-lines"
+        );
+    }
+
+    #[test]
+    fn a_declared_screen_line_opens_as_a_screen_track_with_its_own_stream_id() {
+        let mut sub = MediaPeer::new(pid("sub"), Instant::now());
+        let picture = video_track_in("7", TrackRole::Screen);
+        let sound = TrackIn {
+            kind: MediaKind::Audio,
+            ..video_track_in("8", TrackRole::Screen)
+        };
+        assert!(sub.observe_remote_track_in(pid("pub"), video_track_in(MAIN_MID, TrackRole::Main)));
+        assert!(sub.observe_remote_track_in(pid("pub"), picture));
+        assert!(sub.observe_remote_track_in(pid("pub"), sound));
+        assert!(
+            !sub.observe_remote_track_in(pid("pub"), picture),
+            "idempotent"
+        );
+        let got: Vec<(MediaKind, TrackRole)> =
+            sub.tracks_out.iter().map(|t| (t.kind, t.role)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (MediaKind::Video, TrackRole::Main),
+                (MediaKind::Video, TrackRole::Screen),
+                (MediaKind::Audio, TrackRole::Screen),
+            ]
+        );
+        let offer = sub
+            .negotiate_if_needed()
+            .expect("negotiates")
+            .expect("an offer");
+        assert!(offer.contains("a=msid:pub "), "{offer}");
+        // str0m drops the `~`; the stream id leaves the SFU as the
+        // contract spells it.
+        assert!(offer.contains("a=msid:pub~screen "), "{offer}");
+        assert!(!offer.contains("a=msid:pubscreen "), "{offer}");
+        assert_eq!(
+            MediaPeer::downstream_stream_id(&pid("pub"), TrackRole::Screen),
+            "pub~screen"
+        );
+        assert_eq!(SCREEN_STREAM_SUFFIX, "~screen");
+        assert_eq!(TrackRole::Screen.as_str(), "screen");
+    }
+
+    #[test]
+    fn a_screen_track_is_never_paused_by_what_the_subscriber_shows() {
+        let mut sub = three_track_subscriber("pub");
+        assert!(sub.observe_remote_track_in(pid("pub"), video_track_in("7", TrackRole::Screen)));
+        open_all(&mut sub);
+        sub.apply_video_wants();
+        let screen_packet = || video_packet_on("7", 10, false);
+        for quality in [
+            VideoQuality::Light,
+            VideoQuality::Middle,
+            VideoQuality::Main,
+        ] {
+            sub.set_video_wants(&[want("pub", quality)]);
+            assert!(
+                !sub.track_paused(&pid("pub"), Mid::from("7"), TrackRole::Screen),
+                "{quality:?}"
+            );
+            // A unit peer has no transport: a packet that passed every
+            // gate ends as `NoWriter`, never as `NotWanted`.
+            assert_eq!(
+                sub.forward_screen_track(&pid("pub"), &screen_packet()),
+                MediaForward::NoWriter
+            );
+        }
+    }
+
+    #[test]
+    fn a_packet_of_a_declared_screen_line_is_offered_to_the_screen_track_alone() {
+        let t0 = Instant::now();
+        let screen_mid = Mid::from("7");
+        let sound_mid = Mid::from("8");
+        let mut publisher = peer_in_call("pub", "call");
+        publisher.screen_mids = vec![screen_mid, sound_mid];
+        let picture = publisher.register_local_track_in(screen_mid, MediaKind::Video);
+        let sound = publisher.register_local_track_in(sound_mid, MediaKind::Audio);
+        assert!(picture.screen && sound.screen);
+        let mut sub = peer_in_call("sub", "call");
+        assert!(sub.observe_remote_track_in(pid("pub"), picture));
+        assert!(sub.observe_remote_track_in(pid("pub"), sound));
+        open_all(&mut sub);
+        // The subscriber shows only the light picture of this publisher:
+        // the screen is sent all the same.
+        sub.set_video_wants(&[want("pub", VideoQuality::Light)]);
+        let mut router = MediaRouter::new();
+        router.add_peer(publisher);
+        router.add_peer(sub);
+
+        let mut packet = synthetic_video_packet();
+        packet.mid = screen_mid;
+        let pending = [PendingFanout {
+            origin: pid("pub"),
+            packet,
+        }];
+        let mut ledger = FanoutLedger::new(Duration::from_secs(5), t0);
+        let outcome = fanout_packets_into(&mut router, &pending, Some(&mut ledger));
+        // One attempt, on the screen track (no transport: `no_writer`).
+        assert_eq!(outcome.attempted(), 1);
+        assert_eq!(outcome.no_writer, 1);
+        let roles: Vec<TrackRole> = ledger.per_target.keys().map(|k| k.3).collect();
+        assert_eq!(roles, vec![TrackRole::Screen]);
+    }
+
+    #[test]
+    fn a_key_frame_request_on_a_screen_track_goes_to_the_publishers_screen_line() {
+        let t0 = Instant::now();
+        let mut sub = peer_in_call("sub", "call");
+        assert!(sub.observe_remote_track_in(pid("pub"), video_track_in("7", TrackRole::Screen)));
+        let local = Mid::new();
+        sub.tracks_out[0].state = TrackOutState::Open(local);
+        let target = sub
+            .subscriber_keyframe_request(local, t0)
+            .expect("relayed to the publisher");
+        assert_eq!(target.source_peer, pid("pub"));
+        assert_eq!(target.source_mid, Mid::from("7"));
+        assert_eq!(target.role, TrackRole::Screen);
+        assert_eq!(target.rid, None);
+        // The publisher's gate is keyed on its `(mid, rid)` alone, so a
+        // screen line is held to it as a camera is: one request goes out,
+        // a second at once is held back.
+        let mut publisher = peer_in_call("pub", "call");
+        let mid = Mid::from("7");
+        {
+            let mut api = publisher.rtc.direct_api();
+            api.declare_media(mid, MediaKind::Video);
+            api.expect_stream_rx(0x2000.into(), None, mid, None);
+        }
+        publisher.screen_mids = vec![mid];
+        assert!(
+            publisher
+                .register_local_track_in(mid, MediaKind::Video)
+                .screen
+        );
+        assert!(publisher.request_keyframe(target.source_mid, target.rid, t0, false));
+        assert!(!publisher.request_keyframe(target.source_mid, target.rid, t0, false));
+    }
+
+    #[test]
+    fn published_rates_count_a_screen_share_apart_from_the_cameras() {
+        let now = Instant::now();
+        let mut publisher = downlink_publisher("pub", "call");
+        let (screen, sound) = (Mid::from("7"), Mid::from("8"));
+        publisher.screen_mids = vec![screen, sound];
+        publisher.register_local_track_in(screen, MediaKind::Video);
+        publisher.register_local_track_in(sound, MediaKind::Audio);
+        publisher
+            .track_meters
+            .insert(screen, meter_with_bps(1_200_000));
+        publisher.track_meters.insert(sound, meter_with_bps(64_000));
+        let rates = publisher.published_rates(now);
+        assert_eq!(rates.screen_bps, 1_200_000);
+        assert_eq!(rates.screen_audio_bps, 64_000);
+        assert_eq!(rates.audio_bps, 0);
+        assert_eq!(rates.main_bps, DL_MAIN_BPS);
+    }
+
     const MAIN_MID: &str = "1";
     const LIGHT_MID: &str = "2";
     const MIDDLE_MID: &str = "3";
@@ -15626,6 +16395,7 @@ mod tests {
             simulcast: false,
             light: role == TrackRole::LightCompanion,
             middle: role == TrackRole::Middle,
+            screen: role == TrackRole::Screen,
         }
     }
 
@@ -16108,6 +16878,7 @@ mod tests {
                 simulcast: false,
                 light: true,
                 middle: false,
+                screen: false,
             },
         );
         open_all(&mut sub);
@@ -16134,6 +16905,7 @@ mod tests {
                 simulcast: false,
                 light: false,
                 middle: false,
+                screen: false,
             },
         );
         peer.negotiate_if_needed()
@@ -16185,6 +16957,7 @@ mod tests {
                 simulcast: false,
                 light: false,
                 middle: false,
+                screen: false,
             },
         );
         assert!(sub.update_playout_delays(t0, false, &[]).is_empty());
@@ -16880,6 +17653,7 @@ mod tests {
             middle_bps: Some(DL_MIDDLE_BPS),
             light_bps: Some(DL_LIGHT_BPS),
             audio_bps: 0,
+            screen_bps: 0,
         }
     }
 
@@ -18030,6 +18804,8 @@ mod tests {
                 middle_bps: DL_MIDDLE_BPS,
                 light_bps: DL_LIGHT_BPS,
                 audio_bps: 32_000,
+                screen_bps: 0,
+                screen_audio_bps: 0,
             }
         );
         assert_eq!(
@@ -19089,10 +19865,53 @@ mod tests {
                 ServerFrame::PublishBudget {
                     main_kbps,
                     middle_kbps,
+                    screen_kbps: None,
                 } => (id, main_kbps, middle_kbps),
                 other => panic!("expected publish-budget, got {other:?}"),
             })
             .collect()
+    }
+
+    /// While a publisher sends a screen, its budget reserves the screen's
+    /// room before the camera ceilings, and the frame carries the screen
+    /// ceiling.
+    #[test]
+    fn a_publisher_sharing_its_screen_is_told_a_screen_ceiling_first() {
+        let t0 = Instant::now();
+        let (offer, mids) = screen_offer();
+        let screen = mids[3];
+        let mut publisher = budget_publisher("pub", LossProtection::default(), t0);
+        publisher
+            .accept_offer(&offer)
+            .expect("the offer is accepted");
+        assert!(publisher
+            .declare_screen_tracks(&mids_of(&[screen]))
+            .is_empty());
+        assert!(publisher.sends_screen_video());
+        let mut router = MediaRouter::new();
+        router.add_peer(publisher);
+        publishing_at(&mut router, "pub", 3_000_000);
+        router.publish_budget_ran = None;
+        let frames = drive_publish_budget(&mut router, t0);
+        // 3000 -> video 2422: the screen 1500 (its plan), the cameras the
+        // 922 left (middle 500, main 422).
+        assert_eq!(
+            frames,
+            vec![(
+                pid("pub"),
+                ServerFrame::PublishBudget {
+                    main_kbps: 422,
+                    middle_kbps: 500,
+                    screen_kbps: Some(1500),
+                }
+            )]
+        );
+        assert_eq!(
+            find_peer(&router, "pub")
+                .publish_budget_told()
+                .and_then(|b| b.screen_kbps),
+            Some(1500)
+        );
     }
 
     #[test]
@@ -19109,7 +19928,8 @@ mod tests {
             find_peer(&router, "pub").publish_budget_told(),
             Some(publish_budget::Budget {
                 main_kbps: 1922,
-                middle_kbps: 500
+                middle_kbps: 500,
+                screen_kbps: None,
             })
         );
         // Every frame the rule makes is one the wire format accepts.
@@ -19184,7 +20004,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![ServerFrame::PublishBudget {
                 main_kbps: 1553,
-                middle_kbps: 500
+                middle_kbps: 500,
+                screen_kbps: None,
             }]
         );
     }

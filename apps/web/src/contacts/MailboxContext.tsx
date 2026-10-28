@@ -54,34 +54,36 @@ import { journalHex } from "../ds/access";
 import { installAddressRecheck } from "../reach/mailbox-write";
 import { reachSession, reachSessionSignal } from "../reach/reach-service";
 import { DiscoveryClient } from "../discovery/client";
-import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { waitingSentRequests } from "./contact-list-model";
 import { forgetInviteLinkSecret } from "./invite-link-secrets";
-import { forgetMintedLink, isInlineLinkSlug, listMintedLinks, mintedLinkFor } from "./minted-links";
+import { listMintedLinks } from "./minted-links";
+import {
+  deleteRevokedLinkRow,
+  forgetLinksRevokedElsewhere,
+  owedRowDeletions,
+  revokeMintedLink,
+  type OwnLinkRevokeOutcome,
+} from "./own-links";
 import { forgetSentRequest, loadSentRequests, recordSentRequest } from "./sent-requests";
 import { forgetSentIntro, sentIntroFor } from "./sent-request-intros";
 import {
   installSpentRunners,
-  linkRevokeOutcome,
   requestsToResend,
-  revocationSeedOrder,
   spentFailureOutcome,
-  localLinkRevokeOutcome,
   localLinkSpent,
   readSpendOwed,
   runOwedSpendRound,
-  type LocalRevokeAttempt,
-  type RevokeAttempt,
   type SpentOutcome,
 } from "./rotation-spent";
-import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
+import type { Group as WasmGroupHandle, Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import {
   createWakeLatch,
   LONG_POLL_WAIT_SECS,
   runLongPollLoop,
   sleepCancellable,
 } from "../ds/long-poll-loop";
-import { base64Encode } from "../auth/account-id";
+import { base64Decode, base64Encode } from "../auth/account-id";
 import {
   ContactsClient,
   ContactsError,
@@ -119,6 +121,36 @@ import {
 import { createPendingInbox, type FetchedRequest, type PendingInbox } from "./inbox-store";
 import { createMailboxPoller, type MailboxPoller } from "./mailbox-poller";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
+import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
+import { conversationKindOf } from "../chat/conversation-kind";
+import { personKeysOf } from "../chat/person-key";
+import { heldSends, persistHeldSends } from "../chat/held-send-queue";
+import { DIRECT_CHAT_STAND_IN } from "../chat/group-title";
+import {
+  restoreRemovedContact,
+  upsertAccepted as upsertAcceptedContact,
+  type AcceptedContact as AcceptedContactRow,
+} from "./local-store";
+import { readIsActive } from "../chat/membership-ended";
+import {
+  handOverPendingContact,
+  loadPendingContacts,
+  moveHeldToConversation,
+  pendingContactRefusedBy,
+  pendingContacts,
+  removePendingContact,
+} from "./pending-contacts";
+import {
+  type LinkClaimRecord as LinkClaimRecordHandle,
+  type ObservedClaim,
+  claimsToDecide,
+  runLinkBuild,
+  welcomeOrder,
+  linkClaimRecord,
+  linkRequestKeyHex,
+  linkRequestStep,
+} from "./link-claims";
+import { loadWasm } from "../wasm";
 
 /** Copy for a Welcome this device could not open. */
 export const JOIN_FAILURE_MESSAGE = (): string => t("contacts.mailbox.join_failed");
@@ -150,6 +182,31 @@ function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   return out;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
+function concatBytes(parts: readonly Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+}
+
+/** The claim decision's flat inputs: ids, and the authors' leaf keys
+ *  concatenated in the same order. */
+function claimInputs(claims: readonly ObservedClaim[]): { ids: BigUint64Array; authors: Uint8Array } {
+  return {
+    ids: BigUint64Array.from(claims.map((c) => BigInt(c.id))),
+    authors: concatBytes(claims.map((c) => hexToBytes(c.author))),
+  };
 }
 
 function readPredecessorMailboxCursor(accountIdB64: string, keyHex: string): number {
@@ -192,6 +249,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   const chats = useChats();
   const profiles = useProfiles();
   const groupNames = useGroupNames();
+  const sync = useDeviceGroupSync();
   const client = new ContactsClient(undefined, undefined, {
     identityProvider: () => chats.identity(),
     // ADR-0050: requests, acks and the account mailbox are the person's;
@@ -212,107 +270,36 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   // this account's keys is spent. The two owed steps of the rotation record
   // (`devices/key-rotation.ts`: `links`, `requests`) run here, where the
   // directory client and the contacts client are.
-  const spentDiscovery = new DiscoveryClient();
+  // The session token is read at request time: the ledger-row deletions this
+  // client makes (`DELETE /discovery/invite/...`) sit behind discovery's
+  // `require_session`, and a tokenless client made every one a 401.
+  const spentDiscovery = new DiscoveryClient(undefined, {
+    sessionToken: () => auth.identitySecrets()?.sessionToken ?? null,
+  });
   installSpentRunners({
     links: async (rotatedAtMs) => {
       const secrets = auth.identitySecrets();
-      const current = chats.accountIdentity();
-      const predecessors = chats.ownPredecessorIdentities();
-      if (secrets === null || current === null || predecessors.length === 0) return null;
+      if (secrets === null) return null;
       const accountIdB64 = base64Encode(secrets.accountId);
-      // The owner list is answered to the key the directory publishes NOW.
-      const currentSeed = current.ed25519Seed;
-      let listed;
-      try {
-        listed = await spentDiscovery.listInvitesByOwner(secrets.accountId, currentSeed);
-      } catch (err) {
-        return [spentFailureOutcome(err)];
-      } finally {
-        currentSeed.fill(0);
-      }
-      // A ledger that lists nothing for this owner still leaves the links
-      // this device keeps a row for (below).
-      const listedInvites = listed.kind === "list" ? listed.invites : [];
-      // A link is signed by the account key of the moment it was minted: a
-      // predecessor's. The current seed is never tried, so a link minted
-      // after the rotation is not this step's to revoke.
-      const seeds = revocationSeedOrder(predecessors.map((p) => p.ed25519Seed));
+      // ADR-0078 section 10: no ledger row names its owner, so there is no
+      // owner list to walk. Every device revokes the links IT minted before
+      // the keys changed, each with the link's own revocation seed from its
+      // record; a link with no record here is another device's to revoke (or
+      // lives until it expires).
       const outcomes: SpentOutcome[] = [];
-      const handled = new Set<string>();
-      try {
-        for (const invite of listedInvites) {
-          const blobId = base64UrlDecodeNoPad(invite.blobIdSlug);
-          const attempts: RevokeAttempt[] = [];
-          for (const seed of seeds) {
-            try {
-              const result = await spentDiscovery.revokeInvite(blobId, seed);
-              attempts.push(result.kind === "revoked" ? "revoked" : "not-owner");
-            } catch (err) {
-              attempts.push(spentFailureOutcome(err) === "unreachable" ? "unreachable" : "not-owner");
-            }
-            const last = attempts[attempts.length - 1];
-            if (last === "revoked" || last === "unreachable") break;
-          }
-          const outcome = linkRevokeOutcome(attempts);
-          outcomes.push(outcome);
-          if (outcome !== "done") continue;
-          // Out of every local list of own links: the link's reach key, the
-          // kept secret and the kept link id.
-          const local = await mintedLinkFor(accountIdB64, "contact", invite.blobIdSlug);
-          if (local !== null) await reachSession()?.revokeLink(local.linkId).catch(() => undefined);
-          await forgetMintedLink(accountIdB64, "contact", invite.blobIdSlug);
-          forgetInviteLinkSecret(base64UrlEncodeNoPad(secrets.accountId), invite.blobIdSlug);
-          handled.add(invite.blobIdSlug);
-        }
-        // The links THIS device minted before the keys changed and still
-        // keeps a row for. On the rotating device the pass above has taken
-        // its `/i/` links already; on a kept device the ledger no longer
-        // lists them (the rotating device revoked them), and the local rows
-        // and their reach keys are what is left. `/c/` call links are signed
-        // by the device key and are revoked at the call-invite ledger.
-        const deviceSeed = chats.identity()?.ed25519Seed ?? null;
+      for (const link of await listMintedLinks(accountIdB64)) {
+        if (!localLinkSpent(link.mintedAtMs, rotatedAtMs)) continue;
+        let outcome: OwnLinkRevokeOutcome;
         try {
-          for (const link of await listMintedLinks(accountIdB64)) {
-            if (!localLinkSpent(link.mintedAtMs, rotatedAtMs)) continue;
-            if (link.kind === "contact" && handled.has(link.blobIdSlug)) continue;
-            const attempts: LocalRevokeAttempt[] = [];
-            if (!isInlineLinkSlug(link.blobIdSlug)) {
-              const signers = link.kind === "contact" ? seeds : deviceSeed === null ? [] : [deviceSeed];
-              if (link.kind === "call" && deviceSeed === null) attempts.push("unreachable");
-              let blobId: Uint8Array | null = null;
-              try {
-                blobId = base64UrlDecodeNoPad(link.blobIdSlug);
-              } catch {
-                blobId = null;
-              }
-              for (const seed of blobId === null ? [] : signers) {
-                try {
-                  const result =
-                    link.kind === "contact"
-                      ? await spentDiscovery.revokeInvite(blobId as Uint8Array, seed)
-                      : await spentDiscovery.revokeCallInvite(blobId as Uint8Array, seed);
-                  attempts.push(result.kind === "revoked" ? "revoked" : "gone");
-                } catch (err) {
-                  attempts.push(spentFailureOutcome(err) === "unreachable" ? "unreachable" : "gone");
-                }
-                const last = attempts[attempts.length - 1];
-                if (last === "revoked" || last === "unreachable") break;
-              }
-            }
-            const outcome = localLinkRevokeOutcome(attempts);
-            outcomes.push(outcome);
-            if (outcome !== "done") continue;
-            await reachSession()?.revokeLink(link.linkId).catch(() => undefined);
-            await forgetMintedLink(accountIdB64, link.kind, link.blobIdSlug);
-            if (link.kind === "contact") {
-              forgetInviteLinkSecret(base64UrlEncodeNoPad(secrets.accountId), link.blobIdSlug);
-            }
-          }
-        } finally {
-          deviceSeed?.fill(0);
+          outcome = await revokeMintedLink(spentDiscovery, accountIdB64, link);
+        } catch (err) {
+          outcomes.push(spentFailureOutcome(err));
+          continue;
         }
-      } finally {
-        for (const seed of seeds) seed.fill(0);
+        outcomes.push(outcome === "unreachable" ? "unreachable" : "done");
+        if (outcome !== "unreachable" && link.kind === "contact") {
+          forgetInviteLinkSecret(base64UrlEncodeNoPad(secrets.accountId), link.blobIdSlug);
+        }
       }
       return outcomes;
     },
@@ -374,6 +361,58 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   const [error, setError] = createLiveText();
   const [acceptedVersion, setAcceptedVersion] = createSignal(0);
   const [joinFailure, setJoinFailure] = createLiveText();
+
+  // ADR-0079 section 4 (reworked 2026-10-17) - the device that revokes a
+  // link deletes its ledger row itself, once, with the seed the synced
+  // record carries (`InviteLinksPanel`). Re-run on every change of the
+  // register: a deletion this device still owes (the ledger was unreachable,
+  // or the app stopped in between) is tried again, and a link another device
+  // revoked only loses this device's local record of it; the ledger is not
+  // asked again.
+  createEffect(() => {
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    const account = s.account.accountId;
+    const revokedRecords = sync.linkRecords().filter((r) => r.revoked);
+    if (revokedRecords.length === 0) return;
+    void (async () => {
+      const owed = owedRowDeletions(account);
+      for (const r of revokedRecords) {
+        if (!owed.has(r.linkIdHex)) continue;
+        try {
+          await deleteRevokedLinkRow(spentDiscovery, account, r);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("owed ledger row deletion failed", err instanceof Error ? err.name : "");
+        }
+      }
+      await forgetLinksRevokedElsewhere(
+        spentDiscovery,
+        account,
+        revokedRecords.filter((r) => !owedRowDeletions(account).has(r.linkIdHex)),
+      );
+    })();
+  });
+
+  // ADR-0079 section 5 - a pending contact whose one-to-one already exists
+  // on this device (its Welcome was joined before the pending record was
+  // read, or on another tab): hand its messages over now. Re-run whenever
+  // the pending list or the conversations change; a contact with nothing to
+  // hand over is a no-op.
+  createEffect(() => {
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    const account = s.account.accountId;
+    void loadPendingContacts(account);
+    const waiting = pendingContacts();
+    if (waiting.length === 0) return;
+    const keys = new Set(waiting.map((p) => p.signaturePubkeyB64));
+    for (const g of chats.groups()) {
+      if (conversationKindOf(g.group) !== "chat") continue;
+      if (!personKeysOf(g.group).some((k) => keys.has(k))) continue;
+      void handOverToConversation(account, g.groupIdB64);
+    }
+  });
 
   // The signed-in account's mailbox cursor + pending requests, persisted
   // together (`inbox-store.ts`). `null` while signed out.
@@ -503,6 +542,363 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   });
   onCleanup(unsubscribeResetAccepted);
 
+  /**
+   * ADR-0079 section 3 - the winning device's accept of a request sent
+   * through a live invite link: the ordinary accept path, then one use of
+   * the link counted in the synced register (with the requester's key, so
+   * another device of the account treats the same request as answered).
+   * `false` when the accept did not complete; the won claim stays recorded
+   * and the next pass tries again.
+   */
+  /** Groups founded for a link request in this page and not yet held. */
+  const foundedLinkGroups = new Map<string, WasmGroupHandle>();
+
+  /**
+   * The winning device's accept of a request sent through one of this
+   * account's live invite links (ADR-0079 section 3, order of 2026-10-17,
+   * `runLinkBuild`): its own founding carried on; else a link-founded note
+   * from another device answered by writing the note's Welcome to the
+   * requester (never founding); else found in ONE commit with every other
+   * device of this account, record the founding, publish the note, and only
+   * then write the Welcome to this account's own mailbox and then the
+   * requester's. `false` when it did not complete; every record stays, and
+   * the next pass takes it up where it stopped.
+   */
+  async function acceptThroughLink(
+    request: IncomingContactRequest,
+    key: string,
+    claims: LinkClaimRecordHandle,
+    accountIdB64: string,
+  ): Promise<boolean> {
+    const identity = auth.identitySecrets();
+    const answer = request.linkAnswer;
+    const fromAccountId = request.fromAccountId;
+    if (identity === null || answer === null || fromAccountId === null) return false;
+    const keyB64 = base64Encode(request.fromPubkey);
+    const contact: AcceptedContactRow = {
+      signaturePubkeyB64: keyB64,
+      displayName: loadAccepted(accountIdB64).find((c) => c.signaturePubkeyB64 === keyB64)?.displayName ?? "",
+      acceptedAtMs: Date.now(),
+      accountIdHex: groupIdHex(fromAccountId),
+    };
+    try {
+      return await runLinkBuild({
+        founded: () => claims.own(key)?.founded ?? null,
+        note: () => claims.note(key),
+        prepare: async () => {
+          const prepared = await client.prepareGroupWith(identity, fromAccountId, "chat", request.fromPubkey);
+          const groupIdB64 = base64Encode(prepared.group.groupId);
+          foundedLinkGroups.set(groupIdB64, prepared.group);
+          return {
+            groupIdB64,
+            welcomeB64: base64Encode(prepared.welcome),
+            targets: welcomeOrder(
+              prepared.targets.map((t) => ({ accountKeyB64: base64Encode(t.accountKey), isRecipient: t.isRecipient })),
+            ),
+            notePosted: false,
+            delivered: false,
+          };
+        },
+        record: (founded) => claims.setFounded(key, founded),
+        postNote: async () => {
+          // Published once (a sealed note already recorded is not published
+          // again), then judged at its row: it counts only when sealed at the
+          // journal's epoch there, so every device can read it.
+          const own = claims.own(key);
+          if (own?.noteConfirmed === true) return true;
+          const founded = own?.founded ?? null;
+          if (founded === null) return false;
+          if (own?.noteWire == null) {
+            await sync.postLinkFounded(
+              answer.linkId,
+              request.fromPubkey,
+              base64Decode(founded.groupIdB64),
+              base64Decode(founded.welcomeB64),
+              (wireHex) => claims.setNoteWire(key, wireHex),
+            );
+          }
+          if ((await sync.catchUpJournal()) !== "read") return false;
+          if (claims.own(key)?.noteConfirmed === true) return true;
+          // Read past it and it did not count (straddled by a commit) or no
+          // row carried it: posted again at the next pass.
+          claims.dropUnlandedNote(key);
+          return false;
+        },
+        hold: async (founded) => {
+          let held = chats.get(founded.groupIdB64);
+          if (held === undefined) {
+            let group = foundedLinkGroups.get(founded.groupIdB64);
+            if (group === undefined) {
+              const device = chats.identity();
+              if (device === null) return null;
+              const wasm = await loadWasm();
+              // A restart between the founding and the delivery: the group
+              // is in the MLS snapshot the creation persisted.
+              const loaded = wasm.Group.load(device, base64Decode(founded.groupIdB64));
+              if (loaded === undefined) return null;
+              group = loaded;
+            }
+            foundedLinkGroups.delete(founded.groupIdB64);
+            held = chats.add({ label: DIRECT_CHAT_STAND_IN, group });
+            profiles.groupJoined(held.groupIdB64);
+            await chats.persistSnapshotDurable(accountIdB64);
+          }
+          return held.groupIdB64;
+        },
+        deliver: async (founded) => {
+          await client.deliverPreparedWelcomes(
+            base64Decode(founded.groupIdB64),
+            base64Decode(founded.welcomeB64),
+            founded.targets.map((t) => ({ accountKey: base64Decode(t.accountKeyB64), isRecipient: t.isRecipient })),
+            { replyGrantB64: request.replyGrantB64 },
+          );
+        },
+        forward: async (note) => {
+          // The founding device may have written this account's mailbox and
+          // left before writing the requester's: the note's Welcome is the
+          // same bytes for every added leaf, and a duplicate is ignored.
+          await client.deliverPreparedWelcomes(
+            base64Decode(note.groupIdB64),
+            base64Decode(note.welcomeB64),
+            [{ accountKey: request.fromPubkey, isRecipient: true }],
+            { replyGrantB64: request.replyGrantB64 },
+          );
+          return chats.get(note.groupIdB64)?.groupIdB64 ?? null;
+        },
+        finish: async (groupIdB64) => {
+          upsertAcceptedContact(groupIdB64 === null ? contact : { ...contact, groupIdB64 }, accountIdB64);
+          try {
+            await client.sendContactAck(identity, request);
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("sendContactAck failed", err instanceof Error ? err.name : "");
+          }
+          await sync.recordLinkUse(answer.linkId, request.fromPubkey);
+          setAcceptedVersion(acceptedVersion() + 1);
+        },
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "invite-link accept did not complete; retried at the next pass",
+        err instanceof Error ? err.name : "",
+      );
+      return false;
+    }
+  }
+
+  /** One decision pass at a time (C-62 sub-invariant 5): the read of the
+   *  claim record, the decision and the write of the outcome never
+   *  interleave with another pass on this page. */
+  let linkPass: Promise<void> = Promise.resolve();
+
+  /**
+   * ADR-0079 (reworked 2026-10-17) - decide every request this inbox holds
+   * that answers one of the account's invite links ({@link linkRequestStep}):
+   * no timer; a request waits, kept and unshown, until the synced state is
+   * loaded, and only the device whose claim is first in the DeviceGroup
+   * journal builds the one-to-one. Run after every mailbox pass, when the
+   * synced state loads, and when a claim from another device arrives.
+   */
+  function decideLinkRequests(): Promise<void> {
+    const run = async (): Promise<void> => {
+      const polled = scope;
+      if (polled === null) return;
+      const target = polled.inbox;
+      const accountIdB64 = polled.accountIdB64;
+      const claims = linkClaimRecord(accountIdB64);
+      const current = (): boolean => scope === polled;
+      const wasm = await loadWasm();
+      // Whether a device in the CURRENT roster claimed the request (a claim
+      // only from a device since removed answers nothing). `false` while
+      // the roster is not known.
+      const answeredElsewhere = (key: string): boolean => {
+        const seen = claims.seen(key);
+        const roster = sync.linkClaimRoster();
+        if (seen.length === 0 || roster === null) return false;
+        const { ids, authors } = claimInputs(seen);
+        return wasm.linkClaimAnsweredElsewhere(ids, authors, concatBytes(roster.roster));
+      };
+      // The live one-to-one this device holds with a person, if any: a
+      // requester who has one is put back on the contact list with it
+      // rather than given a second conversation (amended 2026-10-24).
+      const liveOneToOneWith = (keyB64: string): string | null => {
+        for (const g of chats.groups()) {
+          if (conversationKindOf(g.group) !== "chat") continue;
+          if (!personKeysOf(g.group).includes(keyB64)) continue;
+          if (readIsActive(g.group) !== true) continue;
+          return g.groupIdB64;
+        }
+        return null;
+      };
+      for (const req of target.undecidedLinkRequests()) {
+        if (!current()) return;
+        const answer = req.linkAnswer;
+        if (answer === null) {
+          target.remove(req.messageId);
+          continue;
+        }
+        const key = linkRequestKeyHex(answer.linkId, req.fromPubkey);
+        const requesterKeyB64 = base64Encode(req.fromPubkey);
+        const liveGroupIdB64 = liveOneToOneWith(requesterKeyB64);
+        // ADR-0079 amendment of 2026-10-19 - the moment the request was
+        // written decides the link's expiry: the time the DS stamped on the
+        // row, kept with the request across a restart.
+        const verdict = sync.linkAnswerVerdictAt(
+          answer.linkId,
+          answer.linkSecret,
+          req.fromPubkey,
+          Date.parse(req.createdAt),
+        );
+        let step = linkRequestStep({
+          own: claims.own(key),
+          answeredElsewhere: answeredElsewhere(key),
+          verdict,
+          noteHeld: claims.note(key) !== null,
+          liveOneToOne: liveGroupIdB64 !== null,
+        });
+        try {
+          if (step === "wait") continue;
+          if (step === "restore" && liveGroupIdB64 !== null) {
+            // A person removed and invited again: back on the list with the
+            // conversation they already have. Nothing is founded or sent; a
+            // live link records its use, as the requester's consume did.
+            restoreRemovedContact(
+              {
+                signatureKey: requesterKeyB64,
+                accountIdHex: req.fromAccountId === null ? null : groupIdHex(req.fromAccountId),
+                groupIdB64: liveGroupIdB64,
+                nowMs: Date.now(),
+              },
+              accountIdB64,
+            );
+            if (verdict === "accept") await sync.recordLinkUse(answer.linkId, req.fromPubkey);
+            if (!current()) return;
+            setAcceptedVersion(acceptedVersion() + 1);
+            claims.forgetOwn(key);
+            target.remove(req.messageId);
+            continue;
+          }
+          if (step === "drop") {
+            claims.forgetOwn(key);
+            target.remove(req.messageId);
+            continue;
+          }
+          if (step === "refuse") {
+            // The link does not count: no card. The requester is answered
+            // with a refusal and the request goes; a failed write keeps it
+            // for the next pass.
+            await client.sendLinkRefusal(auth.identitySecrets(), req);
+            if (!current()) return;
+            claims.forgetOwn(key);
+            target.remove(req.messageId);
+            continue;
+          }
+          if (step === "post-claim") {
+            // The sealed claim is recorded before the publish: whether or
+            // not the publish answers, the receive loop recognises its row
+            // by those bytes and files its id as this device's.
+            await sync.postLinkClaim(answer.linkId, req.fromPubkey, (wireHex) => claims.addOwnWire(key, wireHex));
+            step = "decide";
+          }
+          if (step === "decide" || step === "recheck") {
+            if (step === "decide") {
+              // Every row up to (and past) this device's claims is applied
+              // once a pass that started after them has read the journal to
+              // its head. A wait that times out or finds the device offline
+              // keeps the request undecided for the next pass.
+              if ((await sync.catchUpJournal()) !== "read" || !current()) continue;
+            }
+            // A re-check reads no journal: every claim of this device is
+            // known, a later claim cannot be earlier, and only the roster
+            // can have changed.
+            const roster = sync.linkClaimRoster();
+            if (roster === null) continue;
+            // A sealed claim no row carried did not land.
+            claims.dropUnlanded(key);
+            const { ids, authors } = claimInputs(
+              claimsToDecide(claims.own(key), claims.seen(key), bytesToHex(roster.ownKey)),
+            );
+            const decision = wasm.linkClaimOutcome(roster.ownKey, ids, authors, concatBytes(roster.roster));
+            const won = decision.won;
+            const lost = decision.lost;
+            const winnerId = Number(decision.messageId);
+            decision.free();
+            if (lost) {
+              // Another device's claim is first: it answers the request.
+              // Kept, unshown, until the register says it was answered; if
+              // that device is removed first, a re-check hands it on.
+              claims.setSettled(key);
+              continue;
+            }
+            if (!won) {
+              // No claim from the roster landed: post again next pass.
+              claims.forgetOwn(key);
+              continue;
+            }
+            claims.setWon(key, winnerId);
+            step = "build";
+          }
+          if (step === "build") {
+            if (await acceptThroughLink(req, key, claims, accountIdB64)) {
+              if (!current()) return;
+              target.remove(req.messageId);
+              claims.forgetOwn(key);
+            }
+          }
+        } catch (err) {
+          // A publish or a write that failed: the request stays undecided
+          // and the next pass picks it up where its record says.
+          // eslint-disable-next-line no-console
+          console.warn("link request not decided this pass", err instanceof Error ? err.name : "");
+        }
+      }
+    };
+    linkPass = linkPass.then(run, run);
+    return linkPass;
+  }
+
+  // Decide the waiting link requests when the synced state loads, when a
+  // claim from another device arrives, and when the link register moves.
+  createEffect(() => {
+    sync.ready();
+    sync.linkClaimsVersion();
+    sync.linkRecords();
+    void untrack(() => decideLinkRequests());
+  });
+
+  /**
+   * ADR-0079 section 5 - move the messages written to a pending contact into
+   * the held-send queue of the one-to-one just joined, then drop the pending
+   * record. Never throws.
+   */
+  async function handOverToConversation(accountIdB64: string, groupIdB64: string): Promise<void> {
+    const active = chats.groups().find((g) => g.groupIdB64 === groupIdB64);
+    if (active === undefined) return;
+    const conversationHex = groupIdHex(active.group.groupId);
+    try {
+      await handOverPendingContact(
+        accountIdB64,
+        {
+          oneToOne: conversationKindOf(active.group) === "chat",
+          personKeysB64: personKeysOf(active.group),
+        },
+        async (contact) => {
+          // The ONE held-send queue (ADR-0073 R.13b): what was written is
+          // kept under the inviter's account id until now; moved, in order,
+          // to the conversation's slot, from which the ordinary flush sends
+          // it (a failed send keeps the rest for the next attempt).
+          moveHeldToConversation(heldSends, contact, conversationHex, Date.now());
+          await persistHeldSends(accountIdB64);
+          return true;
+        },
+      );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("pending contact hand-over failed", err instanceof Error ? err.name : "");
+    }
+  }
+
   async function dispatch(
     events: readonly IncomingMailboxEvent[],
     polled: MailboxScope | null,
@@ -537,6 +933,15 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           // the sender's account, and the request is answered silently (the
           // conversation continues by itself) or dropped.
           if (await handleKnownContactRequest(ev.request, accountIdB64, ev.row)) continue;
+          // ADR-0079 section 3 (reworked 2026-10-17) - a request sent
+          // through one of this account's invite links is kept undecided
+          // (stored, not listed) and decided after this batch by
+          // `decideLinkRequests`: accepted with no card by the one device
+          // whose claim wins, answered, or a card with the dead-link note.
+          if (ev.request.linkAnswer !== null) {
+            fresh.push({ request: ev.request, row: ev.row, undecidedLink: true });
+            continue;
+          }
           // ADR-0074 section 3.5a rule 5 - one request per person: a request
           // from the proven successor of a pending request's key replaces
           // it, silently; a stale one from a superseded key is dropped.
@@ -583,6 +988,21 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             // eslint-disable-next-line no-console
             console.warn("joinGroupFromWelcome failed", ev.welcome.messageId, err);
           }
+        } else if (ev.kind === "link-refusal") {
+          // ADR-0079 amendment of 2026-10-19 - the inviter's app refused the
+          // request this account sent through their link (the link no longer
+          // counted): the pending contact and the messages held for it go,
+          // silently. Only a refusal signed by the key the link named, over
+          // that link and this account, removes anything.
+          const own = chats.accountIdentity();
+          if (own === null) continue;
+          const wasm = await loadWasm();
+          const refused = pendingContactRefusedBy(pendingContacts(), ev.refusal, own.signaturePublicKey, (w, k, l, o) =>
+            wasm.verifyLinkRefusal(w, k, l, o),
+          );
+          if (refused === null) continue;
+          await removePendingContact(accountIdB64, refused.accountIdHex);
+          void reachSession()?.closeRepliesTo(journalHex(base64Decode(refused.signaturePubkeyB64)));
         } else {
           // 1.9b1: contact-ack — the recipient of our ContactRequest pressed
           // Accept. The signature is verified, so even a stale ack is a
@@ -597,8 +1017,8 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
                 (c) => c.signaturePubkeyB64 === base64Encode(ev.ack.accepterPubkey),
               )?.displayName ?? "",
             acceptedAtMs: Date.now(),
-            // ADR-0021 — the peer's account_id (hex) so the SFU group-call
-            // roster can resolve to this contact's name.
+            // The peer's account_id (hex), kept with the contact (founding a
+            // one-to-one, the backup).
             accountIdHex: groupIdHex(ev.ack.accepterAccountId),
           };
           // Durable, and keyed by the captured account: recorded even when
@@ -630,7 +1050,12 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         // joined, once the join is durable. The members already there cannot
         // learn the newcomer's name any other way.
         for (const groupIdB64 of joinedGroupIds) profiles.groupJoined(groupIdB64);
+        // ADR-0079 section 5 - a one-to-one with a person this account added
+        // through their link: what was written to them before their app
+        // answered goes out now, in order, through the held-send queue.
+        for (const groupIdB64 of joinedGroupIds) await handOverToConversation(accountIdB64, groupIdB64);
       }
+      if (fresh.some((f) => f.undecidedLink === true)) void decideLinkRequests();
     } finally {
       // `stop()` cleared the banner when the session ended; a late failure of
       // the ended session must not put it back on the login screen or in the
@@ -752,6 +1177,9 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     // verify-and-open path before they are listed.
     void opened
       .restore((rows) => client.decodePendingRequestRows(auth.identitySecrets(), rows))
+      // ADR-0079: a link request kept undecided before the reload is
+      // decided now (or once the synced state loads).
+      .then(() => decideLinkRequests())
       .catch((err: unknown) => {
         // eslint-disable-next-line no-console
         console.warn("contacts inbox: restoring pending requests failed", err);
@@ -775,6 +1203,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         // then left. Nothing is registered or written there.
         await pollPredecessorMailboxes(accountIdB64, signal);
         await poller.poll(LONG_POLL_WAIT_SECS, signal);
+        // ADR-0079 (reworked 2026-10-17): a claim whose journal read did not
+        // finish, or a won claim whose build failed, is taken up again after
+        // every pass; a pass with nothing undecided costs nothing.
+        void decideLinkRequests();
         return 0;
       },
       classifyFailure: (err) => (isDsNetworkFailure(err) ? "network" : "other"),

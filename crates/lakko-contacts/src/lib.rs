@@ -103,6 +103,7 @@ pub mod call_welcome;
 pub mod channel_text;
 pub mod committer_beacon;
 pub mod committer_delegation;
+pub mod device_card;
 pub mod envelope;
 pub mod error;
 pub mod group_closed;
@@ -112,7 +113,11 @@ pub mod group_name;
 pub mod incoming_envelope;
 pub mod introduction;
 pub mod invite;
+pub mod journal_epoch;
 pub mod key_rotation;
+pub mod link_claim;
+pub mod link_founded;
+pub mod link_refusal;
 pub mod link_seal;
 pub mod mailbox;
 pub mod media_state;
@@ -121,6 +126,7 @@ pub mod profile;
 pub mod profile_request;
 pub mod pseudonym;
 pub mod push_routing;
+pub mod push_wake;
 pub mod reach;
 pub mod registrar_seed;
 pub mod request;
@@ -162,6 +168,13 @@ pub use committer_delegation::{
     COMMITTER_DELEGATION_ENVELOPE_MIN_LEN, COMMITTER_DELEGATION_VERSION_V2,
     MAX_COMMITTER_DELEGATIONS,
 };
+pub use device_card::{
+    compose_device_card, decode_device_card, device_card_is_newer, try_unwrap_device_card,
+    DeviceCard, DeviceCardError, DeviceCardField, DeviceCardFieldError, DevicePlatform,
+    DEVICE_CARD_APP_VERSION_MAX_BYTES, DEVICE_CARD_CITY_MAX_BYTES, DEVICE_CARD_COUNTRY_LEN,
+    DEVICE_CARD_ENVELOPE_DOMAIN_V1, DEVICE_CARD_ENVELOPE_MAX_LEN, DEVICE_CARD_ENVELOPE_MIN_LEN,
+    DEVICE_CARD_MODEL_MAX_BYTES, DEVICE_CARD_OS_MAX_BYTES, DEVICE_CARD_VERSION_V1,
+};
 pub use error::{ContactError, Result};
 pub use group_closed::{
     compose_group_closed, decode_group_closed, group_closed_is_newer, try_unwrap_group_closed,
@@ -195,16 +208,36 @@ pub use introduction::{
     MAX_INTRODUCTION_TERMS, OPRF_OUTPUT_LEN, WRAPPED_KEY_LEN,
 };
 pub use invite::{
-    compute_joiner_tag, generate_blob_id, generate_link_id, owner_list_canonical_bytes,
-    revoke_canonical_bytes, sign_owner_list, sign_revocation, InviteCapability, BLOB_ID_B64URL_LEN,
+    compute_joiner_tag, generate_blob_id, generate_link_id, revocation_public_key,
+    revoke_canonical_bytes, sign_revocation, InviteCapability, InvitePreview, BLOB_ID_B64URL_LEN,
     BLOB_ID_LEN, JOINER_TAG_LEN, JOINER_TAG_SALT_DOMAIN_V1, LINK_ID_LEN, MAX_LABEL_LEN,
-    NEVER_EXPIRES, OWNER_LIST_DOMAIN_V1, REVOKE_DOMAIN_V1, REVOKE_REPLAY_WINDOW_MS, SINGLE_USE,
+    MAX_PREVIEW_LEN, MAX_PREVIEW_NAME_BYTES, MAX_PREVIEW_USERNAME_BYTES, NEVER_EXPIRES,
+    OWNER_LIST_DOMAIN_V1, REVOCATION_KEY_LEN, REVOKE_DOMAIN_V1, REVOKE_REPLAY_WINDOW_MS,
+    SINGLE_USE,
 };
+pub use journal_epoch::{JournalEpochs, JOURNAL_EPOCHS_MAX_COMMITS};
 pub use key_rotation::{
     compose_key_rotation, decode_key_rotation, try_unwrap_key_rotation, KeyRotation,
     KeyRotationError, KEY_ROTATION_ENTROPY_LEN, KEY_ROTATION_ENVELOPE_DOMAIN_V1,
     KEY_ROTATION_ENVELOPE_LEN, KEY_ROTATION_PENDING_MAX_AGE_MS, KEY_ROTATION_PROOF_LEN,
     KEY_ROTATION_VERSION_V1,
+};
+pub use link_claim::{
+    compose_link_claim, decode_link_claim, link_claim_answered_elsewhere, link_claim_outcome,
+    link_claim_winner, try_unwrap_link_claim, LinkClaim, LinkClaimError, LinkClaimOutcome,
+    ObservedLinkClaim, LINK_CLAIM_AUTHOR_KEY_LEN, LINK_CLAIM_ENVELOPE_DOMAIN_V1,
+    LINK_CLAIM_ENVELOPE_LEN, LINK_CLAIM_REQUESTER_KEY_LEN, LINK_CLAIM_REQUEST_KEY_LEN,
+    LINK_CLAIM_VERSION_V1,
+};
+pub use link_founded::{
+    compose_link_founded, decode_link_founded, try_unwrap_link_founded, LinkFounded,
+    LinkFoundedError, LINK_FOUNDED_ENVELOPE_DOMAIN_V1, LINK_FOUNDED_ENVELOPE_MAX_LEN,
+    LINK_FOUNDED_ENVELOPE_MIN_LEN, LINK_FOUNDED_GROUP_ID_LEN, LINK_FOUNDED_MAX_WELCOME_LEN,
+    LINK_FOUNDED_VERSION_V1,
+};
+pub use link_refusal::{
+    compose_link_refusal, decode_link_refusal, verify_link_refusal, LinkRefusal, LinkRefusalError,
+    LINK_REFUSAL_DOMAIN_V1, LINK_REFUSAL_LEN, LINK_REFUSAL_VERSION_V1,
 };
 pub use mailbox::{
     bucket_for as mailbox_bucket_for, is_well_formed_row as is_well_formed_mailbox_row,
@@ -239,11 +272,21 @@ pub use profile_request::{
 pub use pseudonym::{Direction, IdentityPseudonym, PerRelationship, StrangerInbox, PSEUDONYM_LEN};
 pub use push_routing::{
     compose_push_routing_secret, decode_push_routing_secret, derive_push_gid,
+    derive_push_wake_public_key, derive_push_wake_signing_seed, derive_push_wake_unlock_key,
     push_routing_secret_is_newer, try_unwrap_push_routing_secret, PushRoutingSecretEnvelope,
     PushRoutingSecretError, PUSH_GID_DERIVE_DOMAIN_V1, PUSH_GID_LEN,
     PUSH_ROUTING_SECRET_ENVELOPE_DOMAIN_V1, PUSH_ROUTING_SECRET_LEN,
     PUSH_ROUTING_SECRET_MINT_EPOCH_LEN, PUSH_ROUTING_SECRET_PAYLOAD_LEN,
-    PUSH_ROUTING_SECRET_VERSION_V2,
+    PUSH_ROUTING_SECRET_VERSION_V2, PUSH_WAKE_KEY_LEN, PUSH_WAKE_SIGN_DERIVE_DOMAIN_V1,
+    PUSH_WAKE_UNLOCK_DERIVE_DOMAIN_V1,
+};
+pub use push_wake::{
+    is_well_formed_subscription_len, open_push_subscription, open_push_wake,
+    seal_push_subscription, seal_push_subscription_for_secret, seal_push_wake, OpenedPushWake,
+    PushGwKey, PushProvider, PushTokenEntry, PushWakeError, PushWakeKind,
+    MAX_PUSH_SUBSCRIPTION_LEN, MAX_PUSH_TOKENS, MAX_PUSH_TOKEN_LEN, MIN_PUSH_SUBSCRIPTION_LEN,
+    PUSH_GW_KEY_LEN, PUSH_SUBSCRIPTION_ID_LEN, PUSH_WAKE_HEADER_LEN, PUSH_WAKE_LEN,
+    PUSH_WAKE_NONCE_LEN,
 };
 pub use reach::{
     continuity_reach_seed, reach_seed, reach_verifying_key, ReachClass, ReachError, ReachGrant,
@@ -256,7 +299,8 @@ pub use registrar_seed::{
     REGISTRAR_SEED_ENVELOPE_DOMAIN_V1, REGISTRAR_SEED_ENVELOPE_LEN, REGISTRAR_SEED_VERSION_V2,
 };
 pub use request::{
-    compose, decode_and_verify, open_envelope, ContactRequest, OpenedRequest, ACCOUNT_ID_LEN,
+    compose, decode_and_verify, open_envelope, ContactRequest, LinkAnswer, OpenedRequest,
+    ACCOUNT_ID_LEN, LINK_ANSWER_LEN,
 };
 pub use safety::{
     safety_number, safety_number_bytes, SAFETY_NUMBER_DIGITS, SAFETY_NUMBER_DIGITS_PER_GROUP,
@@ -316,6 +360,15 @@ pub mod fuzz_api {
         crate::request::fuzz_split(plain)
     }
 
+    /// Decode an `/i/` capability's inviter preview (ADR-0079) directly: the
+    /// owner signature hides it from a fuzzer otherwise. `None` when the
+    /// decoder refuses; `Some(true)` when the accepted preview validates and
+    /// re-encodes to the same bytes, `Some(false)` on a disagreement (a bug).
+    #[must_use]
+    pub fn invite_preview(bytes: &[u8]) -> Option<bool> {
+        crate::invite::fuzz_preview(bytes)
+    }
+
     /// Open `row` as a mailbox row (ADR-0078) under a fixed key. `None` when
     /// the open refuses; `Some(true)` when what opened re-seals to a row
     /// that opens to the same kind and body, `Some(false)` otherwise (a bug).
@@ -338,5 +391,66 @@ pub mod fuzz_api {
     #[must_use]
     pub fn mailbox_binding_decode(bytes: &[u8]) -> Option<bool> {
         crate::mailbox::fuzz_binding(bytes)
+    }
+
+    /// Open `wire` as a sealed wake (ADR-0078 section 3) under a fixed
+    /// push-gw key. `None` when the open refuses; `Some(true)` when what
+    /// opened carries a known kind and a verified signature.
+    #[must_use]
+    pub fn push_wake_open(wire: &[u8]) -> Option<bool> {
+        crate::push_wake::fuzz_open_wake(wire)
+    }
+
+    /// Parse and verify a wake plaintext, which a fuzzer cannot reach
+    /// through the AEAD. `None` when it refuses; `Some(true)` when the
+    /// accepted wake names the `push_gid` it carried.
+    #[must_use]
+    pub fn push_wake_plaintext(plain: &[u8]) -> Option<bool> {
+        crate::push_wake::fuzz_wake_plaintext(plain)
+    }
+
+    /// Parse a subscription token-list plaintext, which a fuzzer cannot
+    /// reach through the AEAD. `None` when it refuses; `Some(true)` when
+    /// what parsed re-seals to a row that opens to the same entries.
+    #[must_use]
+    pub fn push_subscription_plaintext(plain: &[u8]) -> Option<bool> {
+        crate::push_wake::fuzz_subscription_plaintext(plain)
+    }
+
+    /// Decode `bytes` as a link-request claim (ADR-0079) and check that the
+    /// dispatcher agrees. `None` when the decoder refuses; `Some(true)` when
+    /// the accepted claim re-composes to the identical bytes and the
+    /// dispatcher classifies them as the same claim, `Some(false)` on a
+    /// disagreement (a bug).
+    #[must_use]
+    pub fn link_claim_decode(bytes: &[u8]) -> Option<bool> {
+        let claim = crate::link_claim::decode_link_claim(bytes).ok()?;
+        let recomposed = crate::link_claim::compose_link_claim(&claim) == bytes;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::LinkClaim(c)) if c == claim
+        );
+        Some(recomposed && dispatched)
+    }
+
+    /// `None` when `bytes` is not a well-formed link-founded note (ADR-0079);
+    /// else `Some(true)` when it re-composes to exactly `bytes`, lies within
+    /// the advertised lengths, and the dispatcher classifies it as the same
+    /// note, `Some(false)` on a disagreement (a bug).
+    #[must_use]
+    pub fn link_founded_decode(bytes: &[u8]) -> Option<bool> {
+        let note = crate::link_founded::decode_link_founded(bytes).ok()?;
+        let recomposed = crate::link_founded::compose_link_founded(&note)
+            .ok()
+            .as_deref()
+            == Some(bytes);
+        let within = (crate::link_founded::LINK_FOUNDED_ENVELOPE_MIN_LEN
+            ..=crate::link_founded::LINK_FOUNDED_ENVELOPE_MAX_LEN)
+            .contains(&bytes.len());
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::LinkFounded(n)) if n == note
+        );
+        Some(recomposed && within && dispatched)
     }
 }

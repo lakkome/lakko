@@ -40,7 +40,6 @@ import uniffi.lakko_ffi_uniffi.computeJoinerInviteTag
 import uniffi.lakko_ffi_uniffi.signCallInviteRevocation
 import uniffi.lakko_ffi_uniffi.signGroupInviteRevocation
 import uniffi.lakko_ffi_uniffi.signInviteRevocation
-import uniffi.lakko_ffi_uniffi.signOwnerListQuery
 
 /**
  * Ktor-based client for `lakko-svc-discovery`.
@@ -494,37 +493,6 @@ public class DiscoveryClient(
         )
     }
 
-    /** Wire-level `POST /discovery/invite/by-owner` (Phase
-     *  1.18d2b-list). Returns the wire response on 200, `null`
-     *  on 404, throws [DiscoveryHttpError] on other non-2xx.
-     *  Session-token middleware is the DoS gate; the body
-     *  signature is the actual ownership proof. The high-level
-     *  [listInvitesByOwner] wrapper builds the signed body. */
-    public suspend fun inviteOwnerList(req: InviteOwnerListRequest): InviteOwnerListResponse? {
-        val endpoint = "/discovery/invite/by-owner"
-        val url = "$baseUrl$endpoint"
-        val response: HttpResponse = try {
-            client.post(url) {
-                sessionToken?.let {
-                    header(io.ktor.http.HttpHeaders.Authorization, "Bearer $it")
-                }
-                contentType(ContentType.Application.Json)
-                setBody(req)
-            }
-        } catch (cause: Throwable) {
-            throw DiscoveryNetworkError("$endpoint (POST)", cause)
-        }
-        if (response.status == HttpStatusCode.NotFound) return null
-        if (!response.status.isSuccess()) {
-            throw DiscoveryHttpError(
-                status = response.status.value,
-                endpoint = "$endpoint (POST)",
-                body = response.safeReadBody(),
-            )
-        }
-        return response.body<InviteOwnerListResponse>()
-    }
-
     // -----------------------------------------------------------------
     // High-level: full register / lookup / upload flows
     // -----------------------------------------------------------------
@@ -594,13 +562,13 @@ public class DiscoveryClient(
     /**
      * ADR-0076 - replace the account's current username with [username]:
      * OPRF, then `POST /discovery/username/replace`. The old name is retired
-     * (nobody finds the account by it; nobody else takes it for 30 days), and
+     * (nobody finds the account by it; the account holds at most one retired
+     * name, and the server frees older ones on each rename; no minimum interval), and
      * the account leaves Everyone on the server until the client publishes
      * its public record again. Returns the claimed name and the NEW
      * username certificate.
      *
-     * @throws DiscoveryHttpError `409 no-username`, `409 username-taken`,
-     *   `429 rename-too-soon` (with `retry_after_secs`).
+     * @throws DiscoveryHttpError `409 no-username`, `409 username-taken`.
      */
     public suspend fun replaceUsername(accountId: ByteArray, username: String): RegisterResult {
         require(accountId.size == 16) { "accountId must be 16 bytes (got ${accountId.size})" }
@@ -999,11 +967,9 @@ public class DiscoveryClient(
         val resp = inviteUpload(
             InviteUploadRequest(
                 sealed = base64Encode(upload.sealed),
-                issuer_pubkey = base64Encode(upload.issuerPubkey),
+                revocation_pubkey = base64Encode(upload.revocationPubkey),
                 expiry_ms = upload.expiryMs,
                 max_uses = upload.maxUses,
-                label = upload.label,
-                bootstrap_referral = upload.bootstrapReferral,
             ),
         )
         // Server returns the 8-character base64url id; decode it
@@ -1168,7 +1134,7 @@ public class DiscoveryClient(
         val resp = callInviteUpload(
             CallInviteUploadRequest(
                 sealed = base64Encode(upload.sealed),
-                issuer_pubkey = base64Encode(upload.issuerPubkey),
+                revocation_pubkey = base64Encode(upload.revocationPubkey),
                 expiry_ms = upload.expiryMs,
                 max_uses = upload.maxUses,
             ),
@@ -1267,7 +1233,7 @@ public class DiscoveryClient(
         val resp = groupInviteUpload(
             GroupInviteUploadRequest(
                 sealed = base64Encode(upload.sealed),
-                issuer_pubkey = base64Encode(upload.issuerPubkey),
+                revocation_pubkey = base64Encode(upload.revocationPubkey),
                 expiry_ms = upload.expiryMs,
                 max_uses = upload.maxUses,
             ),
@@ -1277,7 +1243,7 @@ public class DiscoveryClient(
 
     /** Fail fast before the network on an upload the server refuses anyway:
      *  an empty sealed blob, one past the capability ceiling plus the seal's
-     *  overhead ([SEAL_OVERHEAD_MARGIN], a loose bound), or an issuer key
+     *  overhead ([SEAL_OVERHEAD_MARGIN], a loose bound), or a revocation key
      *  that is not 32 bytes. */
     private fun checkSealedUpload(upload: SealedInviteUpload, capabilityCeiling: Int?) {
         if (upload.sealed.isEmpty()) {
@@ -1289,8 +1255,8 @@ public class DiscoveryClient(
                 "sealed exceeds the $ceiling-byte ceiling (got ${upload.sealed.size} bytes)",
             )
         }
-        if (upload.issuerPubkey.size != SIGNING_SEED_LEN) {
-            throw DiscoveryClientArgError("issuerPubkey must be $SIGNING_SEED_LEN bytes")
+        if (upload.revocationPubkey.size != SIGNING_SEED_LEN) {
+            throw DiscoveryClientArgError("revocationPubkey must be $SIGNING_SEED_LEN bytes")
         }
     }
 
@@ -1470,63 +1436,6 @@ public class DiscoveryClient(
         } catch (e: DiscoveryHttpError) {
             if (e.status == 404) RevokeInviteResult.NotFoundOrNotOwner else throw e
         }
-    }
-
-    /**
-     * Owner-signed list of every live invite this account owns
-     * across all devices (Phase 1.18d2b-list).
-     *
-     * Driven by the same Ed25519 identity key the owner used to
-     * sign every [InviteCapability] they own. Distinct domain
-     * separator from [signInviteRevocation] ensures a captured
-     * revoke signature cannot be replayed against this endpoint.
-     * Replay window: server enforces ±10 min against its own
-     * clock — same constant as revoke.
-     *
-     * Returns a discriminated [ListInvitesResult]:
-     *   * `List(rows)` on 200 (empty list when the owner has no
-     *     live invites — distinct from a malformed-request
-     *     failure).
-     *   * `NotFoundOrNotOwner` on 404 (server folds "no
-     *     identity_bundle for `accountId`" / "signature mismatch"
-     *     / "stored pubkey malformed" into one status to deny
-     *     status-code probing).
-     *
-     * Other non-2xx still throw [DiscoveryHttpError].
-     */
-    public suspend fun listInvitesByOwner(
-        accountId: ByteArray,
-        signingSeed: ByteArray,
-    ): ListInvitesResult {
-        if (accountId.size != ACCOUNT_ID_LEN) {
-            throw DiscoveryClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
-        }
-        if (signingSeed.size != SIGNING_SEED_LEN) {
-            throw DiscoveryClientArgError("signingSeed must be $SIGNING_SEED_LEN bytes")
-        }
-
-        val signedAtMs = System.currentTimeMillis()
-        val signature = signOwnerListQuery(signingSeed, accountId, signedAtMs.toULong())
-        val raw = inviteOwnerList(
-            InviteOwnerListRequest(
-                owner_account_id = base64Encode(accountId),
-                signed_at_ms = signedAtMs,
-                signature = base64Encode(signature),
-            ),
-        ) ?: return ListInvitesResult.NotFoundOrNotOwner
-
-        val rows = raw.invites.map { entry ->
-            ActiveInvite(
-                blobIdSlug = entry.blob_id_slug,
-                expiryMs = entry.expiry_ms,
-                maxUses = entry.max_uses,
-                usedCount = entry.used_count,
-                label = entry.label,
-                bootstrapReferral = entry.bootstrap_referral,
-                createdAt = entry.created_at,
-            )
-        }
-        return ListInvitesResult.List(rows)
     }
 
     /**
@@ -1933,11 +1842,10 @@ public sealed interface RevokeInviteResult {
     public data object NotFoundOrNotOwner : RevokeInviteResult
 }
 
-/** One row in [DiscoveryClient.listInvitesByOwner]'s response —
- *  normalised TS-parity view of the wire shape (Phase
- *  1.18d2b-list). `blobIdSlug` is the URL-safe base64 the
- *  owner uses to reconstruct the share URL or feed back into
- *  [DiscoveryClient.revokeInvite]. */
+/** One row of the owner's "Invite links" list. Since ADR-0078 section 10
+ *  it is built from this device's own records
+ *  ([me.lakko.app.contacts.OwnLinkStore]), not from a server query: no
+ *  ledger row names its owner. `usedCount` is therefore not known (0). */
 public data class ActiveInvite(
     /** URL-safe base64 (no padding) of the 6-byte blob_id —
      *  same `/i/<slug>` segment that appears in the share URL. */
@@ -1949,7 +1857,7 @@ public data class ActiveInvite(
      *  `0xFFFFFFFF` = unlimited, any other N = N consumes
      *  allowed. */
     val maxUses: Long,
-    /** Server-counted consumes. */
+    /** Consumes, when known; 0 for a row from this device's records. */
     val usedCount: Long,
     /** Owner-supplied free-text label; empty string when not
      *  set. */
@@ -1957,18 +1865,16 @@ public data class ActiveInvite(
     /** `true` if the capability flags the link as a referral
      *  signup-deep-link (Phase 1.9b4). */
     val bootstrapReferral: Boolean,
-    /** RFC 3339 timestamp the server recorded on first upload. */
-    val createdAt: String,
+    /** When this device minted the link (UNIX ms). */
+    val createdAtMs: Long,
 )
 
-/** Result of [DiscoveryClient.listInvitesByOwner]. */
+/** Result of `ContactsRepository.listActiveInvites`. */
 public sealed interface ListInvitesResult {
-    /** Server returned the live-invite list (possibly empty). */
+    /** The links this device minted and still keeps (possibly empty). */
     public data class List(val invites: kotlin.collections.List<ActiveInvite>) :
         ListInvitesResult
-    /** 404. Server folds "no identity_bundle for `accountId`" /
-     *  "signature mismatch" / "stored pubkey malformed" into one
-     *  status to deny status-code probing. */
+    /** Kept for the callers; the local list never answers it. */
     public data object NotFoundOrNotOwner : ListInvitesResult
 }
 

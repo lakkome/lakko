@@ -4,7 +4,7 @@
 /**
  * The recovery phrase as numbered slots, one per word (12, ADR-0072).
  *
- * Every slot autocompletes from the BIP39 English list (the first four
+ * Every slot suggests words from the BIP39 English list (`WordSuggest`, the app's own list) (the first four
  * letters of a word are unique, so four keystrokes usually settle it), space /
  * Enter move to the next slot, a paste of the whole phrase fills the slots
  * from the current one, and a word that is not in the list is outlined at
@@ -18,9 +18,10 @@
  * signup; the rule is in `phrase-grid.ts`.
  */
 import { Index, type JSX } from "solid-js";
-import { BIP39_ENGLISH, isBip39Word } from "../recovery/bip39-words";
+import { isBip39Word } from "../recovery/bip39-words";
 import { RECOVERY_PHRASE_WORDS } from "../recovery/phrase-shape";
 import { t } from "../l10n";
+import { createWordSuggest } from "./WordSuggest";
 
 export const PHRASE_WORDS = RECOVERY_PHRASE_WORDS;
 
@@ -64,7 +65,15 @@ export function PhraseInput(props: {
     commit(next);
     focusSlot(i + parts.length);
   };
+  const suggest = createWordSuggest({
+    word: (i) => words()[i] ?? "",
+    accept: (i, word) => {
+      setWord(i, word);
+      if (i < PHRASE_WORDS - 1) focusSlot(i + 1);
+    },
+  });
   const onKeyDown = (i: number, e: KeyboardEvent & { currentTarget: HTMLInputElement }): void => {
+    if (suggest.onKeyDown(i, e)) return;
     if (e.key === " " || e.key === "Enter") {
       if (e.currentTarget.value.length > 0) {
         e.preventDefault();
@@ -96,7 +105,11 @@ export function PhraseInput(props: {
                   inputs[i] = el;
                 }}
                 type="text"
-                list="lk-bip39-words"
+                role="combobox"
+                aria-autocomplete="list"
+                aria-expanded={suggest.expanded(i)}
+                aria-controls={suggest.controls(i)}
+                aria-activedescendant={suggest.activeDescendant(i)}
                 value={w()}
                 classList={{ invalid: w().length > 0 && !isBip39Word(w()) }}
                 autocomplete="off"
@@ -105,17 +118,20 @@ export function PhraseInput(props: {
                 spellcheck={false}
                 disabled={props.disabled?.() === true}
                 aria-label={t("recovery_phrase.word_label", { position: String(i + 1) })}
-                onInput={(e) => setWord(i, e.currentTarget.value)}
+                onInput={(e) => {
+                  setWord(i, e.currentTarget.value);
+                  suggest.onInput();
+                }}
+                onFocus={() => suggest.onFocus(i)}
+                onBlur={() => suggest.onBlur(i)}
                 onPaste={(e) => onPaste(i, e)}
                 onKeyDown={(e) => onKeyDown(i, e)}
               />
+              <suggest.List slot={i} />
             </li>
           )}
         </Index>
       </ol>
-      <datalist id="lk-bip39-words">
-        <Index each={BIP39_ENGLISH}>{(w) => <option value={w()} />}</Index>
-      </datalist>
     </div>
   );
 }

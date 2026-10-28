@@ -44,6 +44,8 @@ import {
   putMemberCard,
 } from "./api";
 import { bytesToHex, channelIdFromHex, type ChannelSubscriberKeys } from "./composer";
+import { avatarFromWasm, avatarToWasm, bytesToB64, type AvatarData } from "../profile/avatar-model";
+import { OWN_AVATAR_KEY, rememberCardAvatar } from "../profile/avatar-runtime";
 import {
   cardContent,
   cardFingerprint,
@@ -88,6 +90,8 @@ export interface OwnCardInput {
   /** ADR-0060 section 5 — this account's username certificate, carried with
    *  the username so a member can verify it without a lookup. */
   readonly usernameCertificate?: Uint8Array | null;
+  /** ADR-0084 — the saved profile photo, or `null`. */
+  readonly avatar?: AvatarData | null;
 }
 
 export type OwnCardOutcome =
@@ -140,7 +144,9 @@ async function uploadOwnCard(input: OwnCardInput): Promise<OwnCardOutcome> {
       reachAvailable: session !== null,
     });
     if (content.includeGrant && session !== null) {
-      await session.channelEpoch(idBytes, input.epoch);
+      // ADR-0078 section 9: the account's one `channel` key, the same in
+      // every channel; the sync registers it while any channel is allowed.
+      session.requestSync();
       grant = session.grant("channel", idBytes);
     }
     const pkHex = bytesToHex(input.keys.public);
@@ -155,6 +161,9 @@ async function uploadOwnCard(input: OwnCardInput): Promise<OwnCardOutcome> {
       input.accountId ?? undefined,
       content.username === null ? undefined : (input.usernameCertificate ?? undefined),
       grant === null ? undefined : [grant],
+      input.avatar === undefined || input.avatar === null
+        ? undefined
+        : avatarToWasm<InstanceType<typeof wasm.ProfileAvatar>>(wasm, input.avatar),
     );
     // The card is bound to the account (ADR-0060 section 3): without a reach
     // session there is no account seed to sign with, and a reader drops an
@@ -245,6 +254,9 @@ export interface ChannelMemberRow {
    *  card carried a `channel` grant this device verified and keeps). */
   readonly username: string | null;
   readonly isSelf: boolean;
+  /** ADR-0084 - the key the member's photo is looked up under (the account
+   *  key the card is bound to, standard base64; `self` for the viewer). */
+  readonly personKeyB64?: string;
 }
 
 export interface ChannelMembersResult {
@@ -393,7 +405,11 @@ export async function loadChannelMembers(input: LoadMembersInput): Promise<Chann
         }
         if (seen.has(row.key)) continue;
         seen.add(row.key);
-        rows.push(row);
+        // ADR-0084 - the card's profile photo, filed under the account key
+        // the card is bound to, so the member row's circle can show it.
+        const personKeyB64 = row.isSelf ? OWN_AVATAR_KEY : bytesToB64(identityPk);
+        if (!row.isSelf) rememberCardAvatar(personKeyB64, avatarFromWasm(profile.avatar));
+        rows.push({ ...row, personKeyB64 });
       } finally {
         profile.free();
       }

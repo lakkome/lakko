@@ -57,6 +57,7 @@ fn saved_to_proto(s: &Stamped<SavedMessage>) -> pb::SavedMessage {
         excerpt: String::new(),
         attachment_kind: String::new(),
         blob_ids: Vec::new(),
+        sent_at_ms: 0,
     };
     if let SavedValue::Present {
         saved_at_ms,
@@ -68,6 +69,7 @@ fn saved_to_proto(s: &Stamped<SavedMessage>) -> pb::SavedMessage {
         out.author.clone_from(&snapshot.author);
         out.excerpt.clone_from(&snapshot.excerpt);
         out.attachment_kind.clone_from(&snapshot.attachment_kind);
+        out.sent_at_ms = snapshot.sent_at_ms;
         out.blob_ids = blob_ids.iter().map(|b| b.to_vec()).collect();
     }
     out
@@ -196,6 +198,7 @@ fn saved_from_proto(m: pb::SavedMessage) -> Result<Stamped<SavedMessage>> {
                 || !m.author.is_empty()
                 || !m.excerpt.is_empty()
                 || !m.attachment_kind.is_empty()
+                || m.sent_at_ms != 0
                 || !m.blob_ids.is_empty()
             {
                 return Err(bounds(BoundsError::SavedRemovedCarriesValue));
@@ -226,6 +229,7 @@ fn saved_from_proto(m: pb::SavedMessage) -> Result<Stamped<SavedMessage>> {
                     author: m.author,
                     excerpt: m.excerpt,
                     attachment_kind: m.attachment_kind,
+                    sent_at_ms: m.sent_at_ms,
                 },
                 blob_ids,
             }
@@ -549,6 +553,7 @@ mod tests {
                     } else {
                         "photo".into()
                     },
+                    sent_at_ms: 1_699_000_000_000 + i as u64,
                 },
                 blob_ids: (0..blobs)
                     .map(|b| {
@@ -744,6 +749,7 @@ mod tests {
                 *saved_at_ms = u64::MAX;
                 snapshot.author = "a".repeat(SAVED_AUTHOR_MAX_BYTES);
                 snapshot.attachment_kind = "k".repeat(SAVED_ATTACHMENT_KIND_MAX_BYTES);
+                snapshot.sent_at_ms = u64::MAX;
             }
             assert!(c.push(u64::MAX, SyncEntry::Saved(m)));
         }
@@ -852,6 +858,7 @@ mod tests {
             excerpt: "see you at nine".into(),
             attachment_kind: "photo".into(),
             blob_ids: vec![vec![1; 32], vec![2; 32]],
+            sent_at_ms: 1_699_999_000_000,
         }
     }
 
@@ -968,6 +975,10 @@ mod tests {
                 changes_with(|c| c.saved[1].blob_ids = vec![vec![1; 32]]),
                 B::SavedRemovedCarriesValue,
             ),
+            (
+                changes_with(|c| c.saved[1].sent_at_ms = 1),
+                B::SavedRemovedCarriesValue,
+            ),
             // Saved registers count against the 1024-register cap (the
             // base change set already holds seven).
             (
@@ -1003,7 +1014,9 @@ mod tests {
         assert!(matches!(
             &c.saved[0].value.value,
             SavedValue::Present { blob_ids, snapshot, .. }
-                if blob_ids.len() == 128 && snapshot.excerpt.len() == 512
+                if blob_ids.len() == 128
+                    && snapshot.excerpt.len() == 512
+                    && snapshot.sent_at_ms == 1_699_999_000_000
         ));
         assert_eq!(c.saved[0].value.message_id, u64::MAX);
         assert_eq!(c.saved[1].value.value, SavedValue::Removed);

@@ -154,6 +154,18 @@ public final class ProfileDirectory: ObservableObject {
     /// Throws ``DisplayNameRuleViolation`` with the reason copy.
     @discardableResult
     public func setOwnDisplayName(_ input: String, accountIdB64: String? = nil) throws -> OwnProfile {
+        let account = accountIdB64 ?? self.accountIdB64
+        let avatar = account.flatMap { ownStore.load(accountIdB64: $0)?.avatar }
+        return try setOwnProfile(displayName: input, avatar: avatar, accountIdB64: account)
+    }
+
+    /// ADR-0084 — set the own display name and profile photo together, as one
+    /// new profile with a fresh stamp (a new or removed photo is an update
+    /// exactly like a new name). Throws ``DisplayNameRuleViolation``.
+    @discardableResult
+    public func setOwnProfile(
+        displayName input: String, avatar: ProfileAvatar?, accountIdB64: String? = nil
+    ) throws -> OwnProfile {
         guard let account = accountIdB64 ?? self.accountIdB64 else {
             throw DisplayNameRuleViolation(message: Localization.text("display_name.error.signed_out"))
         }
@@ -165,7 +177,8 @@ public final class ProfileDirectory: ObservableObject {
             throw DisplayNameRuleViolation(message: Localization.text("display_name.error.signed_out"))
         }
         let nowMs = UInt64(max(0, Date().timeIntervalSince1970 * 1000))
-        let saved = ownStore.save(displayName: normalized, accountIdB64: account, nowMs: nowMs)
+        let saved = ownStore.save(
+            displayName: normalized, avatar: avatar, accountIdB64: account, nowMs: nowMs)
         gate.leave()
         if account == self.accountIdB64 {
             ownProfile = saved
@@ -201,7 +214,8 @@ public final class ProfileDirectory: ObservableObject {
             updatedAtMs: own.updatedAtMs,
             accountId: Data(base64Encoded: accountIdB64).flatMap { $0.count == 16 ? $0 : nil },
             usernameCertificate: nil,
-            grants: []
+            grants: [],
+            avatar: own.avatar?.ffi
         )
         do {
             return try composeProfileEnvelope(profile: profile)
@@ -255,7 +269,11 @@ public final class ProfileDirectory: ObservableObject {
             incomingUpdatedAtMs: incoming.updatedAtMs,
             storedUpdatedAtMs: ownProfile?.updatedAtMs ?? 0)
         else { return .notNewer }
-        let adopted = OwnProfile(displayName: incoming.displayName, updatedAtMs: incoming.updatedAtMs)
+        // ADR-0084 — the photo travels with the name between the account's
+        // devices: the newer profile carries both.
+        let adopted = OwnProfile(
+            displayName: incoming.displayName, updatedAtMs: incoming.updatedAtMs,
+            avatar: ProfileAvatar(incoming.avatar))
         ownStore.store(adopted, accountIdB64: accountIdB64)
         ownProfile = adopted
         bump()
@@ -314,11 +332,9 @@ public final class ProfileDirectory: ObservableObject {
 
     /// The own profile for a contact request, or `nil` without an account.
     ///
-    /// Carries the account's 16 raw bytes (profile envelope v2) so a receiver
-    /// can match this device's owner to a group-call tile: the SFU's per-call
-    /// `peer_tag` (ADR-0021) is derived over the account id, which a signature
-    /// key alone cannot produce. The id is already public to every peer that
-    /// holds the identity bundle; here it only travels inside the E2EE
+    /// Carries the account's 16 raw bytes (profile envelope v2), the account
+    /// a username certificate names. The id is already public to every peer
+    /// that holds the identity bundle; here it only travels inside the E2EE
     /// envelope. An account id that is not exactly 16 bytes is sent as none —
     /// `composeProfileEnvelope` refuses any other length.
     ///
@@ -335,7 +351,8 @@ public final class ProfileDirectory: ObservableObject {
             updatedAtMs: ownProfile?.updatedAtMs ?? 0,
             accountId: Data(base64Encoded: accountIdB64).flatMap { $0.count == 16 ? $0 : nil },
             usernameCertificate: username == nil ? nil : cert,
-            grants: []
+            grants: [],
+            avatar: ownProfile?.avatar?.ffi
         )
     }
 
@@ -377,9 +394,8 @@ public final class ProfileDirectory: ObservableObject {
     }
 
     /// Every received profile that names an account id, as
-    /// `(signature key, account id)`. What a group-call roster folds into its
-    /// per-call `peer_tag` map alongside the accepted contacts, so a member
-    /// who is not a contact is still named on their tile.
+    /// `(signature key, account id)`: the account id a one-to-one peer's
+    /// contact row carries.
     func profilesWithAccountId() -> [(signatureKeyB64: String, accountId: Data)] {
         received.profilesWithAccountId()
     }
@@ -444,6 +460,19 @@ public final class ProfileDirectory: ObservableObject {
             profile: profile,
             verification: UsernameVerificationStateView(state)
         )
+    }
+
+    /// ADR-0084 — the profile photo the person holding `signatureKey` set,
+    /// through the same aliases a name resolves through, or `nil`.
+    public func avatar(signatureKey: Data) -> ProfileAvatar? {
+        let keyB64 = base64Encode(signatureKey)
+        if let current = aliases[keyB64], current != keyB64, let currentKey = Data(base64Encoded: current) {
+            return avatar(signatureKey: currentKey)
+        }
+        if let alias = provenAlias(of: keyB64), let aliasKey = Data(base64Encoded: alias) {
+            return avatar(signatureKey: aliasKey)
+        }
+        return received.profile(signatureKeyB64: keyB64)?.avatar
     }
 
     /// The account id a member's own profile claimed (profile envelope v2), or

@@ -86,8 +86,12 @@ class HostedCallsTest {
         val rows = mutableListOf<Pair<String, CallTranscriptEntry>>()
         var synced = 0
 
-        override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry) {
+        /** When each recorded call started, in the order of [rows]. */
+        val rowStarts = mutableListOf<Long?>()
+
+        override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?) {
             rows += groupIdHex to entry
+            rowStarts += startedAtMs
         }
 
         override fun sfuBaseUrl(): String = "wss://sfu.test"
@@ -106,14 +110,28 @@ class HostedCallsTest {
         val names = mutableMapOf<String, String>()
         override fun personName(personKeyB64: String): String? = names[personKeyB64]
         override suspend fun readSettledGroup(groupIdHex: String, callId: ByteArray): SettledGroupRead = read
-        override suspend fun mintCallJwt(sessionToken: String, callIdHex: String): String = "jwt"
+        /** The call ids a call token was minted for. */
+        val mintedFor = mutableListOf<ByteArray>()
+        override suspend fun mintCallJwt(callId: ByteArray): MintCallJwtResult {
+            mintedFor += callId
+            return MintCallJwtResult(
+                jwt = "jwt",
+                expiresAtUnixSecs = 0uL,
+                claims = ParsedCallJwt(
+                    iss = "lakko-auth", aud = "lakko-sfu",
+                    room = "0".repeat(64), peerId = "1".repeat(32),
+                    role = CallRole.PARTICIPANT, iat = 0uL, exp = 0uL, kid = "k",
+                ),
+            )
+        }
+        /** A stand-in for `sfuRoomForCall`, which needs the native core. */
+        override fun sfuRoom(callId: ByteArray): String =
+            "room-" + callId.joinToString("") { "%02x".format(it.toInt() and 0xff) }
         /** What the SFU's state route answers; `null` = unreachable. */
         var sfuCallStateBody: String? = null
         val probedUrls = mutableListOf<String>()
-        val probedAuthorizations = mutableListOf<String>()
-        override suspend fun fetchSfuCallState(url: String, authorization: String): String? {
+        override suspend fun fetchSfuCallState(url: String): String? {
             probedUrls += url
-            probedAuthorizations += authorization
             return sfuCallStateBody
         }
         /** When set, a Join publish suspends here BEFORE it is recorded. */
@@ -195,9 +213,10 @@ class HostedCallsTest {
         h.host.probeCallState(groupA, callHex)
         runCurrent()
         assertEquals(1, h.port.probedUrls.size)
-        // The token rides `Authorization`, never the URL (invariant #5).
-        assertEquals("https://sfu.test/v1/calls/$callHex", h.port.probedUrls.first())
-        assertEquals("Bearer jwt", h.port.probedAuthorizations.first())
+        // ADR-0078 section 2: the probe names the room derived from the call
+        // id, never the call id, and no call token is minted to ask.
+        assertEquals("https://sfu.test/v1/rooms/room-$callHex", h.port.probedUrls.first())
+        assertTrue(h.port.mintedFor.isEmpty())
         val end = h.port.published.single().second as FfiCallSignalingBody.End
         assertEquals(FfiCallEndReason.HUNG_UP, end.reason)
     }

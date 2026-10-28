@@ -7,11 +7,10 @@
  *
  *   * A **pointer** slug is the server-assigned ledger id: 6 random bytes,
  *     8 base64url characters, no padding.
- *   * An **inline** slug is the whole SEALED blob, never shorter than the
- *     per-kind floor (always >= 100 bytes). Used only when the upload failed
- *     on a transport error.
- *   * Anything else is refused, including the pre-amendment 32-byte /
- *     43-character content-addressed id.
+ *   * Anything else is refused: the pre-amendment 32-byte / 43-character
+ *     content-addressed id, and the inline form that carried the whole sealed
+ *     blob in the path (removed 2026-10-19: every link is a ledger pointer,
+ *     and a failed upload mints no link), which opens as a dead link.
  *   * Every link carries the 12-byte link secret as its fragment, exactly 16
  *     base64url characters (sealed-link amendment of ADR-0028, 2026-09-28):
  *     the capability is encrypted under it, so a link whose fragment is
@@ -62,45 +61,37 @@ export function inviteLinkWidths(wasm: InviteLinkWidthSource): InviteLinkWidths 
   return widths;
 }
 
-/** The floor every inline capability clears, whatever its kind. Each kind
- *  pins its own (higher or equal) floor; none is ever below this. */
-export const INVITE_INLINE_FLOOR = 100;
-
 /** The base64url alphabet, no padding. A slug or fragment with any other
  *  character is refused before it is decoded. */
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 
-/** What a slug turned out to be. */
-export type ClassifiedInviteSlug =
-  | { readonly kind: "pointer"; readonly blobId: Uint8Array }
-  | { readonly kind: "inline"; readonly sealed: Uint8Array };
+/** What a slug turned out to be: always a ledger pointer. */
+export interface ClassifiedInviteSlug {
+  readonly kind: "pointer";
+  readonly blobId: Uint8Array;
+}
 
 /** Classify a `/i/`, `/c/` or `/g/` slug. A pointer is exactly
- *  `widths.blobIdUrlLen` characters decoding to `widths.blobIdLen` bytes;
- *  an inline sealed blob decodes to at least `inlineMinLen` bytes. Throws on
- *  anything else, fail-closed, so an old 43-character id is refused rather
- *  than fetched. */
+ *  `widths.blobIdUrlLen` characters decoding to `widths.blobIdLen` bytes.
+ *  Throws on anything else, fail-closed, before any request: an old
+ *  43-character id and an inline sealed blob (the removed form) are refused,
+ *  and every landing page shows its dead-link state for them. */
 export function classifyInviteSlug(
   slug: string,
   widths: InviteLinkWidths,
-  inlineMinLen: number,
   what: string,
 ): ClassifiedInviteSlug {
   if (!BASE64URL.test(slug)) {
     throw new Error(`${what} slug is not base64url`);
   }
+  if (slug.length !== widths.blobIdUrlLen) {
+    throw new Error(`${what} slug is ${slug.length} characters, not a ${widths.blobIdUrlLen}-character ledger id`);
+  }
   const bytes = base64UrlDecodeNoPad(slug);
-  if (slug.length === widths.blobIdUrlLen && bytes.length === widths.blobIdLen) {
-    return { kind: "pointer", blobId: bytes };
+  if (bytes.length !== widths.blobIdLen) {
+    throw new Error(`${what} slug decoded to ${bytes.length} bytes, not a ${widths.blobIdLen}-byte ledger id`);
   }
-  const floor = Math.max(inlineMinLen, INVITE_INLINE_FLOOR);
-  if (bytes.length >= floor) {
-    return { kind: "inline", sealed: bytes };
-  }
-  throw new Error(
-    `${what} slug decoded to ${bytes.length} bytes: neither a ${widths.blobIdLen}-byte ` +
-      `pointer nor a >= ${floor}-byte inline capability`,
-  );
+  return { kind: "pointer", blobId: bytes };
 }
 
 /** Refuse a ledger id of the wrong width before it reaches a URL or a
@@ -187,22 +178,57 @@ export class InviteLinkDamagedError extends Error {
   }
 }
 
-/** `true` when `err` is the damaged-link refusal: ours, or the wasm core's
- *  (`Error` carrying `inviteLinkError: "damaged"`), possibly wrapped. */
-export function isInviteLinkDamaged(err: unknown): boolean {
+/** Whether `err` or anything it wraps (`cause`, or a `ContactsError`'s
+ *  `variant.cause`) satisfies `test`. */
+function errorChainHas(err: unknown, test: (current: object) => boolean): boolean {
   let current: unknown = err;
   for (let depth = 0; depth < 8 && current !== undefined && current !== null; depth += 1) {
-    if (current instanceof InviteLinkDamagedError) return true;
     if (typeof current !== "object") return false;
-    const record = current as {
-      inviteLinkError?: unknown;
-      cause?: unknown;
-      variant?: { cause?: unknown };
-    };
-    if (record.inviteLinkError === "damaged") return true;
+    if (test(current)) return true;
+    const record = current as { cause?: unknown; variant?: { cause?: unknown } };
     current = record.cause ?? record.variant?.cause;
   }
   return false;
+}
+
+/** `true` when `err` is the damaged-link refusal: ours, or the wasm core's
+ *  (`Error` carrying `inviteLinkError: "damaged"`), possibly wrapped. */
+export function isInviteLinkDamaged(err: unknown): boolean {
+  return errorChainHas(
+    err,
+    (current) =>
+      current instanceof InviteLinkDamagedError ||
+      (current as { inviteLinkError?: unknown }).inviteLinkError === "damaged",
+  );
+}
+
+/** The ledger could not be asked for the link: the network failed, or the
+ *  server answered with an error other than "no such link". Says nothing
+ *  about the link, so the page offers it again instead of calling it dead
+ *  (seen on a local stack 2026-10-23). A 429 travels inside as the `cause`;
+ *  callers test for it first. */
+export class InviteLinkUnreachableError extends Error {
+  override name = "InviteLinkUnreachableError";
+  constructor(cause: unknown) {
+    super("the invite link could not be fetched", { cause });
+  }
+}
+
+/** `true` when `err` is, or wraps, {@link InviteLinkUnreachableError}. */
+export function isInviteLinkUnreachable(err: unknown): boolean {
+  return errorChainHas(err, (current) => current instanceof InviteLinkUnreachableError);
+}
+
+/** Ask the ledger for a sealed link; any failure of the asking itself is
+ *  {@link InviteLinkUnreachableError}. `null` (no such link) passes through. */
+export async function fetchLedgerLink(
+  fetchPointer: () => Promise<Uint8Array | null>,
+): Promise<Uint8Array | null> {
+  try {
+    return await fetchPointer();
+  } catch (err) {
+    throw new InviteLinkUnreachableError(err);
+  }
 }
 
 /** Open a sealed blob with the fragment's secret through the kind's
@@ -224,63 +250,46 @@ export function openSealedInvite<T>(
 /** What {@link openInviteLinkFromUrl} found. `not-found` is the ledger's 404
  *  (never issued, expired or revoked). */
 export type OpenedInviteLink<T> =
-  | { readonly kind: "opened"; readonly capability: T; readonly blobId: Uint8Array | null }
+  | { readonly kind: "opened"; readonly capability: T; readonly blobId: Uint8Array }
   | { readonly kind: "not-found" };
 
 /**
  * The joiner-side open of any link kind: classify the slug (throws on a
  * malformed one, before any request), refuse a missing or malformed fragment
- * as damaged BEFORE any request, resolve the sealed blob (ledger fetch for a
- * pointer, the slug itself inline), and open it with the fragment's secret.
- * Throws {@link InviteLinkDamagedError} for every damaged case; a ledger
- * error (429, network) propagates unchanged.
+ * as damaged BEFORE any request, fetch the sealed blob from the ledger, and
+ * open it with the fragment's secret.
+ * Throws {@link InviteLinkDamagedError} for every damaged case and
+ * {@link InviteLinkUnreachableError} when the ledger could not be asked
+ * (a 429 inside it as the cause).
  */
 export async function openInviteLinkFromUrl<T>(args: {
   readonly slug: string;
   readonly hash: string | null | undefined;
   readonly widths: InviteLinkWidths;
-  readonly inlineMinLen: number;
   readonly what: string;
   readonly fetchPointer: (blobId: Uint8Array) => Promise<Uint8Array | null>;
   readonly open: (sealed: Uint8Array, secret: Uint8Array) => T;
 }): Promise<OpenedInviteLink<T>> {
-  const parsed = classifyInviteSlug(args.slug, args.widths, args.inlineMinLen, args.what);
+  const parsed = classifyInviteSlug(args.slug, args.widths, args.what);
   const fragment = parseInviteLinkFragment(args.hash, args.widths);
   if (fragment.kind !== "secret") throw new InviteLinkDamagedError();
-  let sealed: Uint8Array;
-  let blobId: Uint8Array | null = null;
-  if (parsed.kind === "pointer") {
-    const fetched = await args.fetchPointer(parsed.blobId);
-    if (fetched === null) return { kind: "not-found" };
-    sealed = fetched;
-    blobId = parsed.blobId;
-  } else {
-    sealed = parsed.sealed;
-  }
-  return { kind: "opened", capability: openSealedInvite(args.open, sealed, fragment), blobId };
+  const sealed = await fetchLedgerLink(() => args.fetchPointer(parsed.blobId));
+  if (sealed === null) return { kind: "not-found" };
+  return { kind: "opened", capability: openSealedInvite(args.open, sealed, fragment), blobId: parsed.blobId };
 }
 
-/** The shareable link for a freshly minted invite: the pointer form when the
- *  upload returned a ledger id, the inline sealed form otherwise, both with
- *  the secret as the fragment. */
+/** The shareable link for a freshly minted invite: the ledger id the upload
+ *  returned, with the secret as the fragment. There is no link without a
+ *  ledger id: a failed upload mints nothing. */
 export function composeSealedInviteLink(args: {
   readonly origin: string;
   readonly prefix: string;
-  readonly blobId: Uint8Array | null;
-  readonly sealed: Uint8Array;
+  readonly blobId: Uint8Array;
   readonly secret: Uint8Array;
   readonly widths: InviteLinkWidths;
 }): string {
-  let slug: string;
-  if (args.blobId !== null) {
-    requireBlobId(args.blobId, args.widths);
-    slug = base64UrlEncodeNoPad(args.blobId);
-  } else {
-    if (args.sealed.length < INVITE_INLINE_FLOOR) {
-      throw new Error(`sealed blob must be >= ${INVITE_INLINE_FLOOR} bytes`);
-    }
-    slug = base64UrlEncodeNoPad(args.sealed);
-  }
+  requireBlobId(args.blobId, args.widths);
+  const slug = base64UrlEncodeNoPad(args.blobId);
   return appendInviteLinkSecret(`${args.origin}${args.prefix}${slug}`, args.secret, args.widths);
 }
 
@@ -296,6 +305,11 @@ export const INVITE_LINK_DAMAGED = (): string => t("invite.link.damaged");
 /** The discovery service answered 429 on fetch or consume: the link may be
  *  fine, this network asked too often. Never reported as an invalid link. */
 export const INVITE_LINK_RATE_LIMITED = (): string => t("invite.link.rate_limited");
+
+/** The ledger could not be asked for the link (the network, a server
+ *  error): the link may be fine. Shown with {@link INVITE_LINK_TRY_AGAIN} on
+ *  the group and call link pages, the same sentence iOS and Android show. */
+export const INVITE_LINK_OPEN_FAILED = (): string => t("common.error.offline");
 
 /** The button under {@link INVITE_LINK_RATE_LIMITED}; it re-runs the fetch. */
 export const INVITE_LINK_TRY_AGAIN = (): string => t("common.try_again");

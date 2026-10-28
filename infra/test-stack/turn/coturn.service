@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+#
+# /etc/systemd/system/coturn.service on the test host.
+
+[Unit]
+Description=coturn TURN Server (TCP/TLS for edge.lakko.me, behind HAProxy)
+After=network.target
+
+[Service]
+Type=simple
+User=turnserver
+Group=turnserver
+ExecStart=/usr/bin/turnserver -c /etc/turnserver.conf
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

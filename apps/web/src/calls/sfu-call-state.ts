@@ -10,8 +10,10 @@
  * "in progress" on every other phone for the freshness window, and whoever
  * taps Join lands in an empty room. The one party that knows a room is empty
  * is the SFU: the call ends there five seconds after the last socket goes,
- * and `GET /v1/calls/{call_id}` (`Authorization: Bearer <call jwt>`) says
- * so. A member showing the
+ * and `GET /v1/rooms/{room}` says so. No token (ADR-0078 section 2): the
+ * room is `BLAKE3_derive_key("lakko/sfu/room/v1", call_id)`, which only the
+ * call's members can compute, so knowing it is the capability, and no
+ * admission token is minted just to ask. A member showing the
  * call as joinable asks every {@link SFU_CALL_STATE_PROBE_MS} and, on `ended`,
  * closes the chat's record itself by publishing the End signal — so the banner
  * goes on every device, not only its own.
@@ -23,24 +25,17 @@
  *  lives at most this long past the SFU's own five-second grace. */
 export const SFU_CALL_STATE_PROBE_MS = 10_000;
 
-/** What the SFU knows about a call id. */
+/** What the SFU knows about a room. */
 export type SfuCallState = "unknown" | "live" | "closing" | "ended";
 
 /**
- * The state route for `callIdHex`, on the HTTP origin behind the SFU's
- * WebSocket base (`wss://host/sfu` -> `https://host/sfu`). The token never
- * rides the URL (invariant #5: a request line in a log must not name who
- * asked about which call); it goes in the header of {@link sfuCallStateInit}.
+ * The state route for `roomHex` (`sfuRoomForCall(callId)`), on the HTTP
+ * origin behind the SFU's WebSocket base (`wss://host/sfu` ->
+ * `https://host/sfu`). The request carries no token and no credentials.
  */
-export function sfuCallStateUrl(sfuBaseUrl: string, callIdHex: string): string {
+export function sfuRoomStateUrl(sfuBaseUrl: string, roomHex: string): string {
   const base = sfuBaseUrl.replace(/^wss:/i, "https:").replace(/^ws:/i, "http:").replace(/\/+$/, "");
-  return `${base}/v1/calls/${callIdHex}`;
-}
-
-/** The request for the state route: the same call-admission JWT the socket
- *  uses, bound to this call id, as a bearer token. */
-export function sfuCallStateInit(jwt: string): RequestInit {
-  return { headers: { Authorization: `Bearer ${jwt}` } };
+  return `${base}/v1/rooms/${roomHex}`;
 }
 
 /** The route's answer, or `null` for anything that is not one of the four

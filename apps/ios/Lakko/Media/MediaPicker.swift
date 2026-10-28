@@ -36,11 +36,11 @@ struct MediaPickerSheet: View {
         NavigationStack {
             VStack(spacing: 0) {
                 if showGifTab {
-                    Picker(Localization.text("chat.composer.emoji_gifs"), selection: $tab) {
-                        Text(Localization.text("chat.emoji.tab")).tag(Tab.emoji)
-                        Text(Localization.text("chat.media.gif")).tag(Tab.gif)
-                    }
-                    .pickerStyle(.segmented)
+                    LakkoSegmentedPicker(selection: $tab, options: [
+                        LakkoPickerOption(value: Tab.emoji, label: Localization.text("chat.emoji.tab")),
+                        LakkoPickerOption(value: Tab.gif, label: Localization.text("chat.media.gif")),
+                    ])
+                    .accessibilityLabel(Localization.text("chat.composer.emoji_gifs"))
                     .padding(.horizontal, 16)
                     .padding(.bottom, 8)
                 }
@@ -85,6 +85,9 @@ struct EmojiTab: View {
     @State private var query = ""
     @State private var recent: [String]
     @State private var tones: [String: String]
+    /// The emoji whose tone row is open above it (Lakko's own popover row,
+    /// never the system context menu).
+    @State private var toneRowFor: String?
 
     init(onPick: @escaping (String) -> Void) {
         self.onPick = onPick
@@ -207,25 +210,55 @@ struct EmojiTab: View {
 
     private func cell(_ entry: EmojiEntry) -> some View {
         let shown = EmojiIndex.displayEmoji(entry, prefs: tones)
-        return Button { pick(shown) } label: {
-            Text(shown).font(.system(size: 30))
-                .frame(width: 42, height: 42)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(entry.name)
-        .contextMenu {
-            // UX spec §4 — long-press shows the tone variants; the chosen one
-            // becomes this emoji's default for this account.
-            if let tones = entry.tones {
-                ForEach([entry.emoji] + tones, id: \.self) { variant in
-                    Button(variant) {
-                        self.tones = EmojiIndex.withTonePref(self.tones, entry: entry, variant: variant)
-                        EmojiIndex.saveTonePrefs(self.tones, accountIdB64: writableAccount)
-                        pick(variant)
-                    }
+        let variants = entry.tones.map { [entry.emoji] + $0 } ?? []
+        let open = toneRowFor == entry.emoji
+        return Text(shown).font(.system(size: 30))
+            .frame(width: 42, height: 42)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if toneRowFor != nil { toneRowFor = nil } else { pick(shown) }
+            }
+            // UX spec §4 — a long press shows the tone variants in a row
+            // above the emoji; the chosen one becomes this emoji's default
+            // for this account.
+            .onLongPressGesture(minimumDuration: MessageLongPress.thresholdSeconds) {
+                if !variants.isEmpty { toneRowFor = entry.emoji }
+            }
+            .overlay(alignment: .bottom) {
+                if open { toneRow(entry, variants: variants).offset(y: -48).fixedSize() }
+            }
+            .zIndex(open ? 1 : 0)
+            .accessibilityElement()
+            .accessibilityLabel(entry.name)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { pick(shown) }
+            .accessibilityActions {
+                ForEach(variants, id: \.self) { variant in
+                    Button(variant) { chooseTone(entry, variant) }
                 }
             }
+    }
+
+    private func toneRow(_ entry: EmojiEntry, variants: [String]) -> some View {
+        HStack(spacing: 2) {
+            ForEach(variants, id: \.self) { variant in
+                Button { chooseTone(entry, variant) } label: {
+                    Text(variant).font(.system(size: 30)).frame(width: 42, height: 42)
+                }
+                .buttonStyle(.plain)
+            }
         }
+        .padding(4)
+        .background(
+            RoundedRectangle(cornerRadius: LakkoRadius.control).fill(Color.lakkoSurface)
+                .shadow(color: .black.opacity(0.2), radius: 6, y: 2))
+    }
+
+    private func chooseTone(_ entry: EmojiEntry, _ variant: String) {
+        toneRowFor = nil
+        tones = EmojiIndex.withTonePref(tones, entry: entry, variant: variant)
+        EmojiIndex.saveTonePrefs(tones, accountIdB64: writableAccount)
+        pick(variant)
     }
 
     private func recentCell(_ emoji: String) -> some View {

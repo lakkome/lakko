@@ -80,7 +80,7 @@ import { withGroupMlsLock } from "../mls/group-lock";
 
 import { readKnockCursor, takeKnockReadSlot, writeKnockCursor } from "./knock-cursor";
 import { boundContactsAccount } from "../contacts/local-store";
-import { PUSH_GID_LEN, type DsWake } from "../ds/wake";
+import { DS_WAKE_HEADER_LEN, type DsWake } from "../ds/wake";
 import { loadWasm } from "../wasm";
 import {
   Role,
@@ -673,15 +673,15 @@ export interface ChatClientOptions {
    *  was written and throw otherwise (`chat/persist-hooks.ts`): a send
    *  publishes only after it resolved (`persistDurableOrThrow`). */
   onPersist?: () => Promise<void>;
-  /** ADR-0042 / ADR-0054 — resolve the opaque `push_gid` for a group's DS
-   *  `group_id`, so the `x-lakko-wake` header of a publish names the routing
-   *  id instead of the leaky DS journal key. Returns `null` when this device
-   *  does not (yet) hold the group's `push_routing_secret` — the publish then
+  /** ADR-0054 / ADR-0078 — build the sealed `x-lakko-wake` header value for
+   *  a publish to a group's DS `group_id` (`push/group-routing.ts`
+   *  `sealedWakeForGroup`): a wake sealed to push-gw, derived from the group's
+   *  `push_routing_secret`. Returns `null` when this device does not (yet)
+   *  hold the secret or push-gw's key is unavailable — the publish then
    *  carries NO wake header (never the `group_id`, invariant #5). When UNSET
-   *  the client wakes nobody at all: there is no fallback to the `group_id`.
-   *  Every production client that sends a waking frame (a chat message, a
-   *  call offer or end) MUST wire this. */
-  pushGidResolver?: (groupId: Uint8Array) => Promise<Uint8Array | null>;
+   *  the client wakes nobody at all. Every production client that sends a
+   *  waking frame (a chat message, a call offer or end) MUST wire this. */
+  wakeSealer?: (groupId: Uint8Array, kind: "message" | "call") => Promise<string | null>;
 }
 
 /**
@@ -722,8 +722,8 @@ export class ChatClient {
   private readonly cursorGate = new DurableCursorGate();
   private readonly identityProvider: (() => WasmIdentity | null) | undefined;
   private readonly onPersist: (() => Promise<void>) | undefined;
-  private readonly pushGidResolver:
-    | ((groupId: Uint8Array) => Promise<Uint8Array | null>)
+  private readonly wakeSealer:
+    | ((groupId: Uint8Array, kind: "message" | "call") => Promise<string | null>)
     | undefined;
 
   constructor(
@@ -732,7 +732,7 @@ export class ChatClient {
   ) {
     this.identityProvider = options.identityProvider;
     this.onPersist = options.onPersist;
-    this.pushGidResolver = options.pushGidResolver;
+    this.wakeSealer = options.wakeSealer;
   }
 
   /**
@@ -982,24 +982,24 @@ export class ChatClient {
     groupId: Uint8Array,
     wake: Exclude<OutboundWake, null>,
   ): Promise<DsWake | null> {
-    if (this.pushGidResolver === undefined) return null;
-    let pushGid: Uint8Array | null;
+    if (this.wakeSealer === undefined) return null;
+    let headerValue: string | null;
     try {
-      pushGid = await this.pushGidResolver(groupId);
+      headerValue = await this.wakeSealer(groupId, wake);
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.warn("push_gid resolution failed; publishing without a wake", err);
+      console.warn("wake sealing failed; publishing without a wake", err);
       return null;
     }
-    if (pushGid === null) return null;
-    if (pushGid.length !== PUSH_GID_LEN) {
+    if (headerValue === null) return null;
+    if (headerValue.length !== DS_WAKE_HEADER_LEN) {
       // A header the DS would answer with 400 would fail the publish itself,
       // after the ratchet has already advanced; drop the wake instead.
       // eslint-disable-next-line no-console
-      console.warn(`push_gid has ${pushGid.length} bytes; publishing without a wake`);
+      console.warn(`sealed wake has ${headerValue.length} characters; publishing without a wake`);
       return null;
     }
-    return { pushGid, kind: wake };
+    return { headerValue };
   }
 
   /**

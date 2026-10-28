@@ -20,6 +20,39 @@ import LakkoCore
 /// DeviceIdentity provider's storage only.
 public enum DeviceGroupLifecycle {
 
+    /// Refused: this device holds no account seed yet, so it cannot name its
+    /// DeviceGroup (ADR-0078 section 6: the id is a function of the seed).
+    public struct NoAccountSeed: Error {}
+
+    /// ADR-0078 section 6 — the 64-byte seed the account's DeviceGroup id is
+    /// derived from: the seed the conversation leaves are bound to, i.e. the
+    /// OLDEST own predecessor after a proven rotation (a rotation keeps the
+    /// DeviceGroup, so its id must not move), else `currentSeed` when given,
+    /// else the device's stored account seed. `nil` when none is held.
+    public static func lineageSeed(
+        accountIdB64: String,
+        currentSeed: Data? = nil,
+        predecessors: OwnPredecessorStoring = KeychainOwnPredecessorStore()
+    ) -> Data? {
+        let held = predecessors.load(accountIdB64: accountIdB64)
+        if let oldest = held.first { return oldest }
+        if let currentSeed { return currentSeed }
+        return try? AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: accountIdB64)
+    }
+
+    /// The account's DeviceGroup journal id ([`lineageSeed`]); `nil` when
+    /// this device cannot derive it yet.
+    public static func groupId(
+        accountIdB64: String,
+        currentSeed: Data? = nil,
+        predecessors: OwnPredecessorStoring = KeychainOwnPredecessorStore()
+    ) -> Data? {
+        guard let seed = lineageSeed(
+            accountIdB64: accountIdB64, currentSeed: currentSeed, predecessors: predecessors),
+              let account = try? Identity.fromSeed(seed: seed) else { return nil }
+        return deviceGroupIdFor(accountIdentity: account)
+    }
+
     /// Result of [`ensureDeviceGroup`].
     public struct Ensured {
         /// The Identity built from the DeviceIdentity seed,
@@ -32,6 +65,22 @@ public enum DeviceGroupLifecycle {
         /// `true` when this call bootstrapped a fresh
         /// DeviceGroup (this device is now the founder).
         public let bootstrapped: Bool
+        /// ADR-0081 decision 3 — the snapshot generation this handle was
+        /// read at (or written at, for a founding). A later write of this
+        /// handle names it and is refused once another handle wrote.
+        public let generation: Int
+    }
+
+    /// ADR-0081 decision 4 — this device holds no usable DeviceGroup state
+    /// and the call was not allowed to found one.
+    public struct NotJoined: Error, Equatable {
+        public enum Reason: Equatable {
+            /// The caller passes no founding decision (a one-shot path:
+            /// pairing, removal, the policy, the device list): nothing is
+            /// founded there.
+            case noState
+        }
+        public let reason: Reason
     }
 
     /// The account session each DeviceGroup identity handle was made in.
@@ -70,102 +119,130 @@ public enum DeviceGroupLifecycle {
             ?? AccountStoreGate.session(accountIdB64)
     }
 
-    /// Resolve the local DeviceGroup state: either restore
-    /// the cached snapshot or bootstrap a fresh founder leaf.
+    /// Resolve the local DeviceGroup state: restore the cached snapshot, or —
+    /// only when `found` is `true` — found a fresh DeviceGroup with this
+    /// device as its first leaf.
     ///
-    /// Idempotent on the snapshot side — calling twice with
-    /// the same `(accountIdB64, deviceIdentitySeed)` returns
-    /// the same group (the bootstrap branch fires only when
-    /// the snapshot is absent).
+    /// ADR-0081 decision 4: founding is reserved for a key reset and for an
+    /// account whose directory lists no other own device; the caller decides
+    /// that (``DeviceGroupSyncRepository`` asks the directory) and passes
+    /// `found`. Every other caller passes nothing and gets ``NotJoined`` when
+    /// this device holds no usable state: before ADR-0081 such a call
+    /// founded a new DeviceGroup, and the next claim reset the journal,
+    /// cutting off every live sibling. A snapshot that does not decrypt or
+    /// does not restore is DELETED first (it can never become usable), so
+    /// the decision is taken on "no state".
+    ///
+    /// The DeviceGroup id is derived from the account seed ([`lineageSeed`],
+    /// ADR-0078 section 6); `accountSeed` is the current one when the caller
+    /// holds it (a key reset passes the NEW seed). Throws ``NoAccountSeed``
+    /// when the device holds none.
+    ///
+    /// The founding's snapshot write FAILS CLOSED (decision 3).
     public static func ensureDeviceGroup(
         accountIdBytes: Data,
         accountIdB64: String,
         deviceIdentitySeed: Data,
+        accountSeed: Data? = nil,
+        found: Bool = false,
         snapshotStore: DeviceGroupSnapshotStore = DeviceGroupSnapshotStore()
     ) throws -> Ensured {
+        guard let seed = lineageSeed(accountIdB64: accountIdB64, currentSeed: accountSeed) else {
+            throw NoAccountSeed()
+        }
+        let lineage = try Identity.fromSeed(seed: seed)
         // Build the per-device Identity from the cached seed.
         // This is the DeviceIdentity (ADR-0007), NOT the
         // AccountIdentity ChatRepository holds.
         let identity = try Identity.fromSeed(seed: deviceIdentitySeed)
         noteHandle(identity, accountIdB64: accountIdB64)
 
-        // Try to restore prior MLS state.
+        // Try to restore prior MLS state. The generation is read BEFORE the
+        // snapshot, so a write that lands in between is caught by the next
+        // conditional write of this handle rather than overwritten by it.
+        let generation = snapshotStore.generation(accountIdB64: accountIdB64)
         if let snapshot = snapshotStore.getSnapshot(accountIdB64: accountIdB64) {
+            var loaded: DeviceGroup?
             do {
                 try identity.restoreStorage(snapshot: snapshot)
-                if let group = try loadDeviceGroup(
+                loaded = try loadDeviceGroup(
                     identity: identity,
-                    accountId: accountIdBytes
-                ) {
-                    return Ensured(
-                        identity: identity,
-                        group: group,
-                        bootstrapped: false
-                    )
-                }
-                // Snapshot existed but didn't carry the
-                // DeviceGroup row — fall through to
-                // bootstrap. Defensive: shouldn't happen in
-                // normal flows because every snapshot we
-                // write was captured immediately after a
-                // DeviceGroup mutation.
+                    accountId: accountIdBytes,
+                    accountIdentity: lineage
+                )
             } catch {
-                NSLog("DeviceGroup snapshot restore failed: \(error); bootstrapping")
-                // Fall through.
+                NSLog("DeviceGroup snapshot restore failed: %@", String(describing: error))
             }
+            if let loaded {
+                return Ensured(
+                    identity: identity, group: loaded, bootstrapped: false, generation: generation)
+            }
+            // A snapshot that does not restore, or carries no DeviceGroup,
+            // can never become usable: dropped before the decision.
+            NSLog("DeviceGroup snapshot unusable; deleted")
+            snapshotStore.dropUnusableSnapshot(accountIdB64: accountIdB64)
+        } else {
+            // No snapshot, or one that does not decrypt (`getSnapshot` reads
+            // both as nil): an undecryptable file is dropped, the pending
+            // rows (a rejoin's knock) stay.
+            snapshotStore.dropUnusableSnapshot(accountIdB64: accountIdB64)
         }
+        guard found else {
+            throw NotJoined(reason: .noState)
+        }
+        return try foundDeviceGroup(
+            identity: identity, lineage: lineage, accountIdBytes: accountIdBytes,
+            accountIdB64: accountIdB64, snapshotStore: snapshotStore)
+    }
 
-        // Bootstrap. Local device becomes the founding leaf.
+    /// Found a fresh DeviceGroup with `identity` as its first leaf: the
+    /// pending rows of a previous DeviceGroup are dropped (nothing of it can
+    /// be finished), the snapshot is written FAIL-CLOSED, and the founding is
+    /// marked so the next claim may reset (ADR-0057 obligation 7).
+    private static func foundDeviceGroup(
+        identity: Identity,
+        lineage: Identity,
+        accountIdBytes: Data,
+        accountIdB64: String,
+        snapshotStore: DeviceGroupSnapshotStore
+    ) throws -> Ensured {
         let group = try DeviceGroup.createFounder(
             identity: identity,
-            accountId: accountIdBytes
+            accountId: accountIdBytes,
+            accountIdentity: lineage
         )
+        for kind in DeviceGroupSnapshotStore.PendingKind.allCases {
+            snapshotStore.deletePending(accountIdB64: accountIdB64, kind: kind)
+        }
         let fresh = try identity.snapshotStorage()
-        snapshotStore.putSnapshot(
+        let written = try snapshotStore.putSnapshotDurable(
             accountIdB64: accountIdB64, blob: fresh,
             session: session(of: identity, accountIdB64: accountIdB64))
-        // ADR-0057 obligation 7 — founded HERE: the next claim may reset the
-        // journal if the same root claimed this deterministic id before (a
-        // DeviceGroup lost with the local state and founded again).
         if let groupId = try? group.groupId() {
             JournalFoundingMarks.shared.mark(
                 journalIdHex: DsClient.pseudonymHex(groupId), accountIdB64: accountIdB64)
         }
-        return Ensured(identity: identity, group: group, bootstrapped: true)
+        return Ensured(identity: identity, group: group, bootstrapped: true, generation: written)
     }
 
-    /// Re-capture the MLS provider snapshot after a
-    /// DeviceGroup mutation (add-device, remove-device,
-    /// application-message send). Best-effort — a snapshot
-    /// persist failure logs and continues.
-    public static func persistSnapshot(
-        identity: Identity,
-        accountIdB64: String,
-        snapshotStore: DeviceGroupSnapshotStore = DeviceGroupSnapshotStore()
-    ) {
-        do {
-            let snapshot = try identity.snapshotStorage()
-            snapshotStore.putSnapshot(
-                accountIdB64: accountIdB64, blob: snapshot,
-                session: session(of: identity, accountIdB64: accountIdB64))
-        } catch {
-            NSLog("DeviceGroup snapshot persist failed: \(error)")
-        }
-    }
-
-    /// Persist the MLS provider snapshot BEFORE a DeviceGroup message built
-    /// from it is published, and throw when it did not land: a disk or
-    /// Keychain failure, the account's session ended
-    /// (``AccountStoreGate/Sealed``), or `identity` is a handle of an earlier
-    /// session. The caller publishes nothing then.
+    /// Persist the MLS provider snapshot of `identity` and THROW when it did
+    /// not land (ADR-0081 decision 3: every DeviceGroup snapshot write fails
+    /// closed): a disk or Keychain failure, the account's session ended
+    /// (``AccountStoreGate/Sealed``), `identity` is a handle of an earlier
+    /// session, or — with `expectedGeneration` — another handle wrote since
+    /// (``DeviceGroupSnapshotStore/SnapshotChanged``). Returns the generation
+    /// the write made.
+    @discardableResult
     public static func persistSnapshotOrThrow(
         identity: Identity,
         accountIdB64: String,
+        expectedGeneration: Int? = nil,
         snapshotStore: DeviceGroupSnapshotStore = DeviceGroupSnapshotStore()
-    ) throws {
+    ) throws -> Int {
         let snapshot = try identity.snapshotStorage()
-        try snapshotStore.putSnapshotDurable(
+        return try snapshotStore.putSnapshotDurable(
             accountIdB64: accountIdB64, blob: snapshot,
-            session: session(of: identity, accountIdB64: accountIdB64))
+            session: session(of: identity, accountIdB64: accountIdB64),
+            expectedGeneration: expectedGeneration)
     }
 }

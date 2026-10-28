@@ -6,24 +6,17 @@ import { describe, expect, it } from "vitest";
 import {
   SFU_CALL_STATE_PROBE_MS,
   parseSfuCallState,
-  sfuCallStateInit,
-  sfuCallStateUrl,
+  sfuRoomStateUrl,
 } from "./sfu-call-state";
 
-describe("sfuCallStateUrl", () => {
-  it("asks the HTTP origin behind the WebSocket base, with no token in the URL", () => {
-    expect(sfuCallStateUrl("wss://test.lakko.me/sfu", "ab".repeat(16))).toBe(
-      `https://test.lakko.me/sfu/v1/calls/${"ab".repeat(16)}`,
+describe("sfuRoomStateUrl", () => {
+  it("asks the HTTP origin behind the WebSocket base for the room, no token anywhere", () => {
+    expect(sfuRoomStateUrl("wss://test.lakko.me/sfu", "ab".repeat(32))).toBe(
+      `https://test.lakko.me/sfu/v1/rooms/${"ab".repeat(32)}`,
     );
-    expect(sfuCallStateUrl("ws://127.0.0.1:9640/", "cd".repeat(16))).toBe(
-      `http://127.0.0.1:9640/v1/calls/${"cd".repeat(16)}`,
+    expect(sfuRoomStateUrl("ws://127.0.0.1:9640/", "cd".repeat(32))).toBe(
+      `http://127.0.0.1:9640/v1/rooms/${"cd".repeat(32)}`,
     );
-  });
-});
-
-describe("sfuCallStateInit", () => {
-  it("carries the token as a bearer header", () => {
-    expect(sfuCallStateInit("a.b.c")).toEqual({ headers: { Authorization: "Bearer a.b.c" } });
   });
 });
 

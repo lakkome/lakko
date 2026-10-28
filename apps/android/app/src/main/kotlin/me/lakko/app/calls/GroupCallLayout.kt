@@ -190,14 +190,53 @@ public fun stagePerson(
         StageCandidate(
             isLocal = p.isLocal,
             cameraOn = p.camOn,
-            speaking = speech.activeSpeakerId == p.id,
-            lastSpokeAtMs = (speech.lastSpokeAtMs[p.id] ?: 0L).coerceAtLeast(0L).toULong(),
+            // A share's tile never speaks; its sharer's camera tile does.
+            speaking = !p.isScreen && speech.activeSpeakerId == p.id,
+            lastSpokeAtMs = if (p.isScreen) 0UL else (speech.lastSpokeAtMs[p.id] ?: 0L).coerceAtLeast(0L).toULong(),
+            // ADR-0083: the shared rule ranks a share ahead of the speaker,
+            // and a pin ahead of the share.
+            isScreen = p.isScreen,
         )
     }
     val pinnedIndex = pinnedId?.let { id -> people.indexOfFirst { it.id == id } }?.takeIf { it >= 0 }
     val index = rules.callStage(candidates, pinnedIndex?.toUInt()) ?: return null
     return people.getOrNull(index.toInt())
 }
+
+/**
+ * The tiles of a group call with the current share's own tile (ADR-0083,
+ * `docs/ux/group-call-grid.md` section 6.3): a separate tile beside its
+ * sharer's, first among the others so it is found at once. The sharer's
+ * camera tile stays where it was. No tile while the sharer is not in the
+ * roster (its state can arrive before it does), and none for this device's
+ * own share, which this client never sends.
+ *
+ * Laid out with everyone else, but never counted as a person: what a tile's
+ * picture is asked for counts the people alone.
+ */
+public fun withShareTile(
+    people: List<CallUiState.Participant>,
+    share: ScreenShareView?,
+): List<CallUiState.Participant> {
+    if (share == null || share.isOwn) return people
+    val sharer = people.firstOrNull { !it.isLocal && it.id == remoteParticipantId(share.peerId) } ?: return people
+    val tile = CallUiState.Participant(
+        id = screenShareTileId(share.peerId),
+        displayName = sharer.displayName,
+        isLocal = false,
+        micOn = true,
+        camOn = true,
+        quality = CallUiState.QualityTier.Good,
+        speaking = false,
+        isScreen = true,
+    )
+    val firstRemote = people.indexOfFirst { !it.isLocal }.let { if (it < 0) people.size else it }
+    return people.take(firstRemote) + tile + people.drop(firstRemote)
+}
+
+/** The sharer's roster id behind a share tile id ([screenShareTileId]). */
+public fun sharerParticipantId(shareTileId: String): String =
+    remoteParticipantId(shareTileId.removePrefix("screen-"))
 
 /** The strip in Focus: everyone but the stage, in tile order. */
 public fun stripPeople(

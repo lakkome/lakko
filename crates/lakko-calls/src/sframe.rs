@@ -68,8 +68,8 @@ use lakko_mls::Group;
 use crate::error::{Error, Result};
 use crate::header::SframeHeader;
 use crate::media_frame::{
-    clear_prefix_len, media_frame_aad, media_frame_trailer, MediaCodec, MediaFrameError,
-    MediaFrameParts, MAX_CLEAR_PREFIX_LEN, MAX_MEDIA_FRAME_OVERHEAD,
+    clear_prefix_len, media_frame_aad, media_frame_trailer, MediaCodec, MediaContent,
+    MediaFrameError, MediaFrameParts, MAX_CLEAR_PREFIX_LEN, MAX_MEDIA_FRAME_OVERHEAD,
 };
 
 /// MLS exporter label for SFrame call keying. Pinned ASCII;
@@ -512,6 +512,21 @@ impl ParticipantKey {
     ///   last value. Nothing is sealed.
     /// - [`Error::Crypto`] on AEAD failure (practically unreachable).
     pub fn seal_media_frame(&mut self, frame: &[u8], clear_prefix_len: usize) -> Result<Vec<u8>> {
+        self.seal_media_frame_holding(frame, clear_prefix_len, MediaContent::Codec)
+    }
+
+    /// [`Self::seal_media_frame`] for a frame that holds `content`, which the
+    /// trailer states (and the AEAD binds).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::seal_media_frame`].
+    pub fn seal_media_frame_holding(
+        &mut self,
+        frame: &[u8],
+        clear_prefix_len: usize,
+        content: MediaContent,
+    ) -> Result<Vec<u8>> {
         if clear_prefix_len > MAX_CLEAR_PREFIX_LEN {
             return Err(media_frame_refusal(&MediaFrameError::ClearPrefixTooLong {
                 len: clear_prefix_len,
@@ -527,8 +542,8 @@ impl ParticipantKey {
             ctr: self.counter + 1,
         }
         .encode();
-        let trailer =
-            media_frame_trailer(clear.len(), header.len()).map_err(|e| media_frame_refusal(&e))?;
+        let trailer = media_frame_trailer(clear.len(), header.len(), content)
+            .map_err(|e| media_frame_refusal(&e))?;
         let aad = media_frame_aad(&header, clear, &trailer);
         let (_, ciphertext) = self.seal(&aad, body)?;
         let mut wire = Vec::with_capacity(frame.len() + MAX_MEDIA_FRAME_OVERHEAD);
@@ -541,8 +556,9 @@ impl ParticipantKey {
 
     /// [`Self::seal_media_frame`] with the clear prefix the sender's rule
     /// gives `codec` for this frame ([`clear_prefix_len`]): 10 bytes of a VP8
-    /// key frame, 3 of any other VP8 frame, none for Opus or an unknown
-    /// codec.
+    /// key frame, 3 of any other VP8 frame, none for Opus, RED or an unknown
+    /// codec; a RED container is marked as one in the trailer
+    /// ([`MediaCodec::content`]).
     ///
     /// # Errors
     ///
@@ -553,7 +569,7 @@ impl ParticipantKey {
         frame: &[u8],
         codec: MediaCodec,
     ) -> Result<Vec<u8>> {
-        self.seal_media_frame(frame, clear_prefix_len(codec, frame))
+        self.seal_media_frame_holding(frame, clear_prefix_len(codec, frame), codec.content())
     }
 
     /// Open a frame sealed by [`Self::seal_media_frame`] and return the

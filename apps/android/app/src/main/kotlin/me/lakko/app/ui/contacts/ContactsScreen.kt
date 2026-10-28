@@ -25,13 +25,16 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.QrCode
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
@@ -45,7 +48,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -57,14 +59,13 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.contacts.GeneratedInvite
@@ -72,11 +73,14 @@ import me.lakko.app.l10n.joinFacts
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.contacts.IncomingContactRequest
+import me.lakko.app.contacts.PendingContacts
 import me.lakko.app.contacts.SentContactRequest
+import me.lakko.app.auth.base64Encode
 import me.lakko.app.discovery.ActiveInvite
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.profile.ResolvedName
 import me.lakko.app.profile.requestSenderLabel
+import me.lakko.app.ui.chat.PeopleSearchSection
 import me.lakko.app.ui.components.LakkoAvatar
 import java.text.DateFormat
 import java.util.Date
@@ -85,15 +89,19 @@ import java.util.Date
  * The Contacts tab — docs/ux/client-redesign.md section 5.3.
  *
  * Top bar with the title, a search field and one add action whose menu holds
- * Add by username and Share invite link (the QR entries of the spec are
- * omitted: this client has no contact-QR payload, only the device-pairing one).
+ * Share invite link and Scan QR code (a scanned `/i/`, `/g/` or `/c/` link
+ * takes the route an opened app link takes; an invite link's own QR is shown
+ * from its row in the Invite links sheet). The search field is
+ * the one people search of `docs/ux/who-can-find-me.md` section 6.1: it
+ * filters the contacts and, from 3 characters, asks the network for people
+ * on its own, listed under **People** with **Add contact** on each row.
  * Below: a Requests section (incoming rows with Accept and Decline; sent
  * requests collapsed under "Sent"), then the alphabetical contact list with
  * sticky letter headers. Pull-to-refresh runs the same inbox poll the screen
  * already runs continuously.
  *
- * Add by username lives in a bottom sheet; invite links are managed in an
- * "Invite links" sheet (copy, share, revoke, create).
+ * Invite links are managed in an "Invite links" sheet (create with the
+ * defaults, copy, QR code, edit while unshared, delete).
  *
  * Call links are not here at all. They were, briefly, and the create-a-link
  * form that held them is gone from every screen: a link now belongs to a call
@@ -110,14 +118,16 @@ public fun ContactsScreen(
     /** Open the 1x1 chat for an accepted contact (fallback when
      *  [onOpenContact] is not wired). */
     onOpenChat: ((groupIdHex: String) -> Unit)? = null,
-    /** docs/ux/navigation.md section 4.3 — a username the conversation list's
-     *  one lookup row resolved. The add sheet opens with it already filled in,
-     *  because the person has typed it once and the request flow is the only
-     *  thing here they have not done yet. */
-    prefillUsername: String? = null,
-    /** Called once [prefillUsername] has been taken, so the slot can be
-     *  emptied and a later visit does not re-open the sheet. */
-    onPrefillConsumed: (() -> Unit)? = null,
+    /** ADR-0079 — open the chat with a person added through their invite
+     *  link whose app has not answered yet (by account id hex). */
+    onOpenPendingChat: ((accountIdHex: String) -> Unit)? = null,
+    /** `docs/ux/who-can-find-me.md` section 6.1 — people under the search
+     *  field, local and network; `null` filters the contacts only (tests). */
+    peopleSearch: me.lakko.app.search.PeopleSearchService? = null,
+    /** A Lakko `/i/`, `/g/` or `/c/` link read off a scanned QR code, handed
+     *  to the same intake an opened app link uses; `null` hides Scan QR code
+     *  (tests). */
+    onScannedLink: ((me.lakko.app.contacts.LakkoLink) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -141,55 +151,36 @@ public fun ContactsScreen(
 
     var query by remember { mutableStateOf("") }
     var menuOpen by remember { mutableStateOf(false) }
-    var addSheetOpen by remember { mutableStateOf(false) }
     var inviteSheetOpen by remember { mutableStateOf(false) }
+    var scanSheetOpen by remember { mutableStateOf(false) }
     var sentExpanded by remember { mutableStateOf(false) }
 
-    // docs/ux/navigation.md section 4.3 — a name found by the conversation
-    // list's lookup row opens the add sheet already filled in. Consumed as soon
-    // as it is taken, so returning to this tab later does not re-open it.
-    LaunchedEffect(prefillUsername) {
-        val username = prefillUsername ?: return@LaunchedEffect
-        viewModel.onUsernameChange(username)
-        addSheetOpen = true
-        onPrefillConsumed?.invoke()
-    }
-
-    if (addSheetOpen) {
-        AddByUsernameSheet(
-            state = state,
-            onUsernameChange = viewModel::onUsernameChange,
-            onIntroChange = viewModel::onIntroChange,
-            onSend = viewModel::onSendClicked,
-            onSent = {
-                viewModel.consumeSendSuccess()
-                addSheetOpen = false
-                sentExpanded = true
-            },
-            onDismiss = {
-                viewModel.onDismissAddSheet()
-                addSheetOpen = false
-            },
-        )
-    }
+    // docs/ux/who-can-find-me.md section 6.1 — the field asks the network on
+    // its own (3 characters, 500 ms after the last keystroke).
+    val scope = rememberCoroutineScope()
+    val peopleSession = remember(peopleSearch, scope) { peopleSearch?.session(scope) }
+    LaunchedEffect(query, peopleSession) { peopleSession?.onQuery(query) }
 
     if (inviteSheetOpen) {
+        val linkRecords by remember(viewModel) { viewModel.inviteLinkRecords() }.collectAsStateWithLifecycle()
         InviteLinksSheet(
             state = state,
+            linkSync = remember(linkRecords) { inviteLinkSyncBySlug(linkRecords) },
             onLoad = viewModel::onRefreshActiveInvitesClicked,
-            onCreate = viewModel::onGenerateInviteClicked,
-            onCopy = { url -> copyToClipboard(context, url) },
-            onRevoke = { row ->
-                val session = state.outstandingInvites.firstOrNull { it.blobIdSlug == row.slug }
-                if (session != null) {
-                    // An inline link (upload failed in transport) has no ledger
-                    // row, so there is nothing to revoke.
-                    session.blobId?.let(viewModel::onRevokeInviteClicked)
-                } else {
-                    viewModel.onRevokeActiveInviteClicked(row.slug)
-                }
-            },
+            onCreate = { viewModel.onGenerateInviteClicked() },
+            onSaveEdit = viewModel::onEditInviteSaved,
+            onCopy = { row, url -> viewModel.onCopyInviteClicked(row.slug, url) { copyToClipboard(context, it) } },
+            onDelete = { row -> viewModel.onDeleteInviteClicked(row.slug) },
             onDismiss = { inviteSheetOpen = false },
+        )
+    }
+    if (scanSheetOpen && onScannedLink != null) {
+        ScanLinkSheet(
+            onLink = { link ->
+                scanSheetOpen = false
+                onScannedLink(link)
+            },
+            onDismiss = { scanSheetOpen = false },
         )
     }
 
@@ -197,7 +188,14 @@ public fun ContactsScreen(
     // Defensive: rows persisted before the accept path deduplicated by key
     // may still hold one person twice, and LazyColumn keys must be unique.
     val accepted = state.accepted.distinctBy { contactRouteKey(it.request.fromPubkey) }
-    val sections = remember(accepted, nameVersion, query) {
+    // ADR-0079 section 4 — a person added through their invite link is listed
+    // at once, under the name the link states, mixed in alphabetically.
+    val invitedAll by viewModel.invited.collectAsStateWithLifecycle()
+    val invited = remember(invitedAll, accepted) {
+        PendingContacts.shown(invitedAll, accepted.mapTo(HashSet()) { base64Encode(it.request.fromPubkey) })
+    }
+    val unnamed = t("invite.contact.page.unnamed")
+    val sections = remember(accepted, invited, nameVersion, query, unnamed) {
         val rows = accepted.map { c ->
             val resolved = directory.resolve(c.request.fromPubkey)
             ContactRowModel(
@@ -206,10 +204,35 @@ public fun ContactsScreen(
                 username = resolved.verifiedUsername,
                 placeholder = resolved.isPlaceholder,
             )
+        } + invited.map { p ->
+            val stated = PendingContacts.name(p)
+            ContactRowModel(
+                key = INVITED_ROW_PREFIX + p.accountIdHex,
+                name = stated ?: unnamed,
+                username = p.username.ifEmpty { null },
+                placeholder = stated == null,
+                personKey = p.signaturePubkeyB64,
+            )
         }
         contactSections(filterContacts(rows, query))
     }
     val byKey = remember(accepted) { accepted.associateBy { contactRouteKey(it.request.fromPubkey) } }
+    // UX who-can-find-me 6.1 — **Open** on a people row opens the conversation
+    // (the contact's page when there is none yet).
+    val openPerson: (String) -> Unit = { keyB64 ->
+        val key = runCatching { java.util.Base64.getDecoder().decode(keyB64) }.getOrNull()
+        val contact = key?.let { k -> accepted.firstOrNull { it.request.fromPubkey.contentEquals(k) } }
+        when {
+            contact?.groupIdHex != null && onOpenChat != null -> onOpenChat(contact.groupIdHex)
+            key != null && onOpenContact != null -> onOpenContact(contactRouteKey(key))
+        }
+    }
+    // The contacts the filter lists above the People part, which leaves them out.
+    val listedKeys = remember(sections, byKey) {
+        sections.flatMap { it.rows }.mapNotNullTo(HashSet()) { row ->
+            byKey[row.key]?.let { base64Encode(it.request.fromPubkey) }
+        }
+    }
     val pending = remember(state.pending) { sortRequestsNewestFirst(state.pending) { it.messageId } }
 
     Scaffold(
@@ -220,19 +243,21 @@ public fun ContactsScreen(
                 actions = {
                     Box {
                         IconButton(onClick = { menuOpen = true }) {
-                            Icon(Icons.Filled.PersonAdd, contentDescription = t("contacts.list.empty.action"))
+                            Icon(Icons.Filled.PersonAdd, contentDescription = t("contacts.list.add"))
                         }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                            DropdownMenuItem(
-                                text = { Text(t("contacts.add.by_username")) },
-                                leadingIcon = { Icon(Icons.Filled.PersonAdd, contentDescription = null) },
-                                onClick = { menuOpen = false; addSheetOpen = true },
-                            )
                             DropdownMenuItem(
                                 text = { Text(t("contacts.add.share_invite")) },
                                 leadingIcon = { Icon(Icons.Filled.Link, contentDescription = null) },
                                 onClick = { menuOpen = false; inviteSheetOpen = true },
                             )
+                            if (onScannedLink != null) {
+                                DropdownMenuItem(
+                                    text = { Text(t("contacts.scan_qr")) },
+                                    leadingIcon = { Icon(Icons.Filled.QrCodeScanner, contentDescription = null) },
+                                    onClick = { menuOpen = false; scanSheetOpen = true },
+                                )
+                            }
                         }
                     }
                 },
@@ -250,7 +275,7 @@ public fun ContactsScreen(
                 ReauthPanel()
                 return@PullToRefreshBox
             }
-            val nothingAtAll = accepted.isEmpty() && pending.isEmpty() && state.sent.isEmpty()
+            val nothingAtAll = accepted.isEmpty() && invited.isEmpty() && pending.isEmpty() && state.sent.isEmpty()
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 item(key = "search") {
                     SearchField(
@@ -299,16 +324,29 @@ public fun ContactsScreen(
 
                 if (nothingAtAll && query.isBlank()) {
                     item(key = "empty") {
-                        EmptyState(onAdd = { addSheetOpen = true })
+                        EmptyState(onAdd = { inviteSheetOpen = true })
                     }
                 } else if (sections.isEmpty() && query.isNotBlank()) {
                     item(key = "no-match") {
-                        Text(
-                            t("contacts.list.no_match"),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(16.dp),
-                        )
+                        if (peopleSearch != null && peopleSession != null) {
+                            PeopleSearchSection(
+                                query = query,
+                                service = peopleSearch,
+                                session = peopleSession,
+                                conversationMatches = 0,
+                                onOpenChannel = { _, _ -> },
+                                onOpenContact = openPerson,
+                                noLocalMatchKey = "contacts.list.no_match",
+                                excludeKeysB64 = listedKeys,
+                            )
+                        } else {
+                            Text(
+                                t("contacts.list.no_match"),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(16.dp),
+                            )
+                        }
                     }
                 } else {
                     if (pending.isNotEmpty() || state.sent.isNotEmpty()) {
@@ -322,11 +360,27 @@ public fun ContactsScreen(
                                 row = row,
                                 onClick = {
                                     when {
+                                        row.key.startsWith(INVITED_ROW_PREFIX) ->
+                                            onOpenPendingChat?.invoke(row.key.removePrefix(INVITED_ROW_PREFIX))
                                         onOpenContact != null -> onOpenContact(row.key)
                                         contact?.groupIdHex != null && onOpenChat != null ->
                                             onOpenChat(contact.groupIdHex)
                                     }
                                 },
+                            )
+                        }
+                    }
+                    if (query.isNotBlank() && peopleSearch != null && peopleSession != null) {
+                        item(key = "people") {
+                            PeopleSearchSection(
+                                query = query,
+                                service = peopleSearch,
+                                session = peopleSession,
+                                conversationMatches = sections.sumOf { it.rows.size },
+                                onOpenChannel = { _, _ -> },
+                                onOpenContact = openPerson,
+                                noLocalMatchKey = null,
+                                excludeKeysB64 = listedKeys,
                             )
                         }
                     }
@@ -340,6 +394,10 @@ public fun ContactsScreen(
 // =============================================================================
 // List pieces
 // =============================================================================
+
+/** The row key prefix of a pending contact (ADR-0079); a contact's key is a
+ *  base64url signature key, which never contains `:`. */
+private const val INVITED_ROW_PREFIX = "invited:"
 
 @Composable
 private fun SearchField(query: String, onQueryChange: (String) -> Unit, modifier: Modifier = Modifier) {
@@ -424,7 +482,12 @@ private fun ContactRow(row: ContactRowModel, onClick: () -> Unit) {
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
-        LakkoAvatar(name = row.name, seed = row.key, size = 40.dp)
+        LakkoAvatar(
+            name = row.name,
+            seed = row.key,
+            size = 40.dp,
+            personKey = me.lakko.app.ui.components.personKeyBytes(row.personKey ?: row.key),
+        )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(row.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
@@ -458,6 +521,7 @@ private fun RequestRow(
                 name = if (name.isPlaceholder) "?" else name.primary,
                 seed = contactRouteKey(req.fromPubkey),
                 size = 40.dp,
+                personKey = req.fromPubkey,
             )
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -519,7 +583,12 @@ private fun SentRow(s: SentContactRequest) {
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 6.dp),
     ) {
-        LakkoAvatar(name = s.recipientUsername, seed = s.recipientAccountIdB64, size = 40.dp)
+        LakkoAvatar(
+            name = s.recipientUsername,
+            seed = s.recipientAccountIdB64,
+            size = 40.dp,
+            personKey = me.lakko.app.ui.components.personKeyBytes(s.recipientKeyB64),
+        )
         Spacer(Modifier.width(12.dp))
         Text(
             "@${s.recipientUsername}",
@@ -551,7 +620,7 @@ private fun EmptyState(onAdd: () -> Unit) {
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
         )
         Spacer(Modifier.height(12.dp))
-        Button(onClick = onAdd) { Text(t("contacts.list.empty.action")) }
+        Button(onClick = onAdd) { Text(t("contacts.add.share_invite")) }
     }
 }
 
@@ -578,87 +647,6 @@ private fun ReauthPanel() {
 }
 
 // =============================================================================
-// Add by username — bottom sheet
-// =============================================================================
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun AddByUsernameSheet(
-    state: ContactsUiState,
-    onUsernameChange: (String) -> Unit,
-    onIntroChange: (String) -> Unit,
-    onSend: () -> Unit,
-    onSent: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    LaunchedEffect(state.sendSucceeded) {
-        if (state.sendSucceeded) onSent()
-    }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .imePadding()
-                .navigationBarsPadding()
-                .padding(horizontal = 24.dp)
-                .padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text(t("contacts.add.title"), style = MaterialTheme.typography.titleLarge)
-            OutlinedTextField(
-                value = state.usernameInput,
-                onValueChange = onUsernameChange,
-                label = { Text(t("contacts.add.username_label")) },
-                prefix = { Text("@") },
-                singleLine = true,
-                enabled = !state.sending,
-                isError = state.usernameError != null,
-                supportingText = state.usernameError?.let { reason -> { Text(reason.text()) } },
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.None,
-                    autoCorrectEnabled = false,
-                    keyboardType = KeyboardType.Text,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = state.introInput,
-                onValueChange = onIntroChange,
-                label = { Text(t("contacts.add.intro_label")) },
-                enabled = !state.sending,
-                minLines = 2,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            state.sendError?.let { error ->
-                Text(
-                    text = error.text(),
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            Button(
-                onClick = onSend,
-                enabled = !state.sending && state.usernameInput.isNotBlank(),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                if (state.sending) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(t("common.sending"))
-                } else {
-                    Text(t("contacts.add.send"))
-                }
-            }
-        }
-    }
-}
-
-// =============================================================================
 // Invite links — bottom sheet
 // =============================================================================
 
@@ -668,7 +656,7 @@ private fun GeneratedInvite.toRow(): InviteLinkRow = InviteLinkRow(
     label = label,
     createdAtMs = createdAtMs,
     expiryMs = expiryMs,
-    usesLeft = invitesUsesLeft(maxUses, 0L),
+    maxUses = maxUses,
     fromSession = true,
 )
 
@@ -679,9 +667,9 @@ private fun ActiveInvite.toRow(heldUrls: Map<String, String>): InviteLinkRow = I
     // another device is not.
     url = heldUrls[blobIdSlug],
     label = label,
-    createdAtMs = null,
+    createdAtMs = createdAtMs,
     expiryMs = expiryMs,
-    usesLeft = invitesUsesLeft(maxUses, usedCount),
+    maxUses = maxUses,
     fromSession = false,
 )
 
@@ -689,10 +677,14 @@ private fun ActiveInvite.toRow(heldUrls: Map<String, String>): InviteLinkRow = I
 @Composable
 private fun InviteLinksSheet(
     state: ContactsUiState,
+    /** The synced record of each row by slug (UX section 9): the pencil and
+     *  the confirmation before Delete. */
+    linkSync: Map<String, InviteLinkSync>,
     onLoad: () -> Unit,
     onCreate: () -> Unit,
-    onCopy: (String) -> Unit,
-    onRevoke: (InviteLinkRow) -> Unit,
+    onSaveEdit: (slug: String, InviteCreateParams, onSaved: () -> Unit) -> Unit,
+    onCopy: (InviteLinkRow, String) -> Unit,
+    onDelete: (InviteLinkRow) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -706,14 +698,37 @@ private fun InviteLinksSheet(
     }
     val now = remember(rows) { System.currentTimeMillis() }
     val language = me.lakko.app.l10n.LocalStrings.current.language
+    // The created fact carries the time too, in the interface language.
     val dateFormat = remember(language) {
-        DateFormat.getDateInstance(DateFormat.MEDIUM, java.util.Locale.forLanguageTag(language))
+        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, java.util.Locale.forLanguageTag(language))
+    }
+    // The link whose terms are open (UX section 9), and the form's state.
+    var editingSlug by remember { mutableStateOf<String?>(null) }
+    var form by remember { mutableStateOf(InviteCreateForm()) }
+    var qrUrl by remember { mutableStateOf<String?>(null) }
+    var confirmDelete by remember { mutableStateOf<InviteLinkRow?>(null) }
+    qrUrl?.let { url -> InviteQrSheet(url = url, onDismiss = { qrUrl = null }) }
+    confirmDelete?.let { row ->
+        // A Lakko dialog, never a system alert (UX section 9).
+        me.lakko.app.ui.components.LakkoDialog(
+            onDismissRequest = { confirmDelete = null },
+            title = t("invite.links.delete_confirm_title"),
+            body = t("invite.links.delete_confirm_body"),
+            confirm = me.lakko.app.ui.components.LakkoDialogAction(
+                t("common.delete"),
+                me.lakko.app.ui.components.LakkoDialogTone.Danger,
+            ) {
+                confirmDelete = null
+                onDelete(row)
+            },
+        )
     }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
+                .imePadding()
                 .padding(horizontal = 24.dp)
                 .padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -724,10 +739,39 @@ private fun InviteLinksSheet(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            (state.inviteError ?: state.activeInvitesError)?.let { error ->
+            val error = state.inviteError ?: state.activeInvitesError
+            if (error != null) {
                 Text(error.text(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            } else {
+                state.inviteNotice?.let { notice ->
+                    Text(notice.text(), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
+                }
             }
-            if (state.loadingActiveInvites && rows.isEmpty()) {
+            val editing = editingSlug
+            // While the form is open it takes the list's place, so the whole
+            // form stays on screen above the keyboard.
+            if (editing != null) {
+                InviteCreateFormView(
+                    form = form,
+                    onChange = { form = it },
+                    busy = state.generatingInvite,
+                    onCreate = { params ->
+                        onSaveEdit(editing, params) {
+                            editingSlug = null
+                            form = InviteCreateForm()
+                        }
+                    },
+                    onCancel = {
+                        editingSlug = null
+                        form = InviteCreateForm()
+                    },
+                    modifier = Modifier.weight(1f, fill = false),
+                    title = t("invite.links.edit_title"),
+                    note = t("invite.links.edit_note"),
+                    submitLabel = t("common.save"),
+                    busyLabel = t("common.saving"),
+                )
+            } else if (state.loadingActiveInvites && rows.isEmpty()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.width(8.dp))
@@ -740,7 +784,7 @@ private fun InviteLinksSheet(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            LazyColumn(
+            if (editing == null) LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f, fill = false),
@@ -752,47 +796,78 @@ private fun InviteLinksSheet(
                                 add(t("invite.links.created", mapOf("date" to dateFormat.format(Date(it)))))
                             }
                             add(describeInviteExpiry(row.expiryMs, now).text())
-                            describeUsesLeft(row.usesLeft)?.let { add(it.text()) }
+                            add(describeInviteLimit(row.maxUses).text())
                         },
                     )
                     val share = inviteRowShare(row)
                     val shareUrl = (share as? InviteRowShare.Shareable)?.url
+                    val sync = linkSync[row.slug]
+                    val idle = state.revokingActiveInviteSlug == null && !state.generatingInvite
                     LinkRow(
-                        title = row.label.ifBlank { t("chat.invite_link.label") },
+                        title = inviteRowTitle(row),
                         meta = meta,
                         note = if (share is InviteRowShare.CreatedElsewhere) INVITE_CREATED_ELSEWHERE_COPY.text() else null,
-                        onCopy = shareUrl?.let { url -> { onCopy(url) } },
+                        onCopy = shareUrl?.let { url -> { onCopy(row, url) } },
+                        onShowQr = shareUrl?.let { url -> { qrUrl = url } },
                         trailing = {
-                            val revoking = state.revokingActiveInviteSlug == row.slug
-                            TextButton(
-                                onClick = { onRevoke(row) },
-                                enabled = state.revokingActiveInviteSlug == null,
-                            ) {
-                                Text(
-                                    if (revoking) t("invite.links.revoking") else t("chat.invite_link.revoke"),
-                                    color = MaterialTheme.colorScheme.error,
-                                )
+                            // The pencil only while nobody can hold the link.
+                            if (inviteRowEditable(sync)) {
+                                IconButton(
+                                    onClick = {
+                                        form = inviteFormFromTerms(
+                                            label = row.label,
+                                            expiryMs = row.expiryMs,
+                                            mintedAtMs = row.createdAtMs,
+                                            maxUses = row.maxUses,
+                                        )
+                                        editingSlug = row.slug
+                                    },
+                                    enabled = idle,
+                                ) {
+                                    Icon(Icons.Filled.Edit, contentDescription = t("invite.links.edit"))
+                                }
+                            }
+                            if (state.revokingActiveInviteSlug == row.slug) {
+                                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                }
+                            } else {
+                                IconButton(
+                                    onClick = {
+                                        if (inviteDeleteNeedsConfirmation(sync)) confirmDelete = row else onDelete(row)
+                                    },
+                                    enabled = idle,
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Delete,
+                                        contentDescription = t("invite.links.delete"),
+                                        tint = if (idle) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                             }
                         },
                     )
                     HorizontalDivider()
                 }
             }
-            Button(
-                onClick = onCreate,
-                enabled = !state.generatingInvite,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                if (state.generatingInvite) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(t("common.creating"))
-                } else {
-                    Text(t("invite.links.create"))
+            if (editing == null) {
+                // Create link mints at once with the defaults (UX section 9).
+                Button(
+                    onClick = onCreate,
+                    enabled = !state.generatingInvite,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    if (state.generatingInvite) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(t("common.creating"))
+                    } else {
+                        Text(t("invite.links.create"))
+                    }
                 }
             }
         }
@@ -805,9 +880,12 @@ private fun InviteLinksSheet(
  *  operating-system surface inside a Lakko screen). */
 @Composable
 private fun LinkRow(
-    title: String,
+    /** The label, or `null` for a link without one: the meta line leads. */
+    title: String?,
     meta: String,
     onCopy: (() -> Unit)?,
+    /** Opens the link's QR sheet; `null` when the row has no shareable URL. */
+    onShowQr: (() -> Unit)? = null,
     /** One line shown under the meta line in place of Copy (UX 5.3: a link
      *  created on another device). */
     note: String? = null,
@@ -820,12 +898,15 @@ private fun LinkRow(
             .padding(vertical = 6.dp),
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+            if (title != null) {
+                Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+            }
             if (meta.isNotEmpty()) {
                 Text(
                     meta,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    // With no title the meta line leads the row.
+                    style = if (title == null) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodySmall,
+                    color = if (title == null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             if (note != null) {
@@ -834,6 +915,11 @@ private fun LinkRow(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        }
+        if (onShowQr != null) {
+            IconButton(onClick = onShowQr) {
+                Icon(Icons.Filled.QrCode, contentDescription = t("invite.links.show_qr"))
             }
         }
         if (onCopy != null) {

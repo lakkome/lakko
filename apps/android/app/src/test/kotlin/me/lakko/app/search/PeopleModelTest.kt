@@ -100,5 +100,8 @@ class PeopleModelTest {
         assertEquals(SEARCH_FAILED, searchStateMessage(PeopleSearchState.FAILED))
         assertEquals(SEARCH_NOT_FOUND, searchStateMessage(PeopleSearchState.NOT_FOUND))
         assertNull(searchStateMessage(PeopleSearchState.SEARCHING))
+        // Out of tokens is its own line: never "not found", never the network failure.
+        assertEquals(SEARCH_OUT_OF_SEARCHES, searchStateMessage(PeopleSearchState.ALLOWANCE_USED))
+        assertEquals("search.people.out_of_searches", SEARCH_OUT_OF_SEARCHES.key)
     }
 }

@@ -107,6 +107,8 @@ internal fun avReceiverOf(streamId: String?, audio: Boolean): AvReceiverRef? {
         RemoteStreamRole.MAIN -> AvRole.MAIN
         RemoteStreamRole.MIDDLE -> AvRole.MIDDLE
         RemoteStreamRole.LIGHT -> AvRole.LIGHT
+        // A shared screen is not kept in step with its sharer's voice.
+        RemoteStreamRole.SCREEN -> return null
     }
     return AvReceiverRef(id.peerId, role)
 }

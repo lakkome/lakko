@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -20,10 +21,10 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
@@ -65,6 +66,9 @@ import me.lakko.app.ui.components.LakkoAvatar
 import uniffi.lakko_ffi_uniffi.InfoSection
 import uniffi.lakko_ffi_uniffi.PersonInfoCapabilities
 import uniffi.lakko_ffi_uniffi.personInfoSections
+import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoDialogAction
+import me.lakko.app.ui.components.LakkoDialogTone
 
 /**
  * Contact detail — docs/ux/client-redesign.md section 5.3, and the person a
@@ -113,12 +117,30 @@ public fun ContactDetailScreen(
      *  link opened a dead chat (2026-09-26); the host passes
      *  `ChatRepository.chatGroupIdHexFor`. */
     resolveChat: (linkedGroupIdHex: String?, peerKey: ByteArray) -> String? = { linked, _ -> linked },
+    /** The one-to-one this device holds with the person holding [peerKey],
+     *  for a person with no contact row: one the viewer removed, whose
+     *  conversation remains (docs/ux/conversation-info.md section 2.1,
+     *  amended 2026-10-24). `null` when there is none; the default finds
+     *  none. */
+    removedPeerChat: (peerKey: ByteArray) -> String? = { null },
     modifier: Modifier = Modifier,
 ) {
     val contactsState by contactsRepository.state.collectAsStateWithLifecycle()
-    val contact: AcceptedContact? = remember(contactsState.accepted, contactKey) {
+    val listed: AcceptedContact? = remember(contactsState.accepted, contactKey) {
         contactsRepository.contactByRouteKey(contactKey)
     }
+    // A person the viewer removed keeps the conversation; their card is this
+    // same page, built from that conversation, and offers `Add to contacts`
+    // in place of Rename and Remove. Never listed.
+    val removedPeer: AcceptedContact? = remember(listed, contactKey) {
+        if (listed != null) {
+            null
+        } else {
+            removedPeerContact(contactKey, removedPeerChat)
+        }
+    }
+    val contact: AcceptedContact? = listed ?: removedPeer
+    val isContact = listed != null
     // Removed (here or on another screen) while open: nothing to show.
     LaunchedEffect(contact) { if (contact == null) onBack() }
 
@@ -148,9 +170,9 @@ public fun ContactDetailScreen(
     // renders whichever blocks it is handed.
     // Remembered because asking now crosses the FFI: the rule is a native
     // call, and its answer changes only when one of its inputs does.
-    val sections = remember(membershipEnded) {
+    val sections = remember(membershipEnded, isContact) {
         personInfoSections(
-            PersonInfoCapabilities(membershipEnded = membershipEnded),
+            PersonInfoCapabilities(membershipEnded = membershipEnded, isContact = isContact),
         )
     }
     // Read through `nameVersion` so a profile or a username arriving later
@@ -173,6 +195,10 @@ public fun ContactDetailScreen(
                     renaming = true
                 },
                 onRemove = { confirmingRemove = true },
+                onAddContact = {
+                    val chat = c.groupIdHex
+                    if (chat != null) viewModel.onAddContactBack(c.request.fromPubkey, chat)
+                },
                 onDeleteChat = { confirmingDelete = true },
                 modifier = bodyModifier,
             )
@@ -249,6 +275,7 @@ private fun ContactDetailBody(
     onVerifySafetyNumber: (contactKey: String) -> Unit,
     onRename: () -> Unit,
     onRemove: () -> Unit,
+    onAddContact: () -> Unit,
     onDeleteChat: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -261,6 +288,9 @@ private fun ContactDetailBody(
                 name = if (name.isPlaceholder) "?" else name.primary,
                 seed = contactKey,
                 size = 72.dp,
+                personKey = me.lakko.app.ui.components.personKeyBytes(contactKey),
+                // UX §7: a profile video plays in the large views.
+                large = true,
             )
             Spacer(Modifier.height(12.dp))
             Text(name.primary, style = MaterialTheme.typography.headlineSmall, textAlign = TextAlign.Center)
@@ -353,6 +383,29 @@ private fun ContactDetailBody(
                     onClick = onRename,
                 )
             }
+            // Section 2.1 (amended 2026-10-24) — a person the viewer removed:
+            // back on the list with the conversation they have. Local; sends
+            // nothing.
+            if (InfoSection.ADD_CONTACT in sections) {
+                ListItem(
+                    headlineContent = { Text(t("contacts.add_back.control")) },
+                    supportingContent = {
+                        Text(t("contacts.add_back.sub", mapOf("name" to name.primary)))
+                    },
+                    leadingContent = {
+                        Icon(
+                            Icons.Filled.PersonAdd,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    },
+                    trailingContent = {
+                        TextButton(onClick = onAddContact) { Text(t("contacts.add_back.action")) }
+                    },
+                    colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
+                    modifier = Modifier.clickable(onClick = onAddContact),
+                )
+            }
             if (InfoSection.REMOVE_CONTACT in sections) {
                 HorizontalDivider()
                 DetailRow(
@@ -392,28 +445,21 @@ private fun RenameContactDialog(
     onSave: () -> Unit,
 ) {
     if (!open) return
-    AlertDialog(
+    LakkoDialog(
         onDismissRequest = onDismiss,
-        title = { Text(t("contacts.rename.action")) },
-        text = {
-            Column {
-                Text(
-                    t("contacts.rename.placeholder"),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = draft,
-                    onValueChange = onDraftChange,
-                    singleLine = true,
-                    label = { Text(t("contacts.rename.field")) },
-                )
-            }
-        },
-        confirmButton = { TextButton(onClick = onSave) { Text(t("common.save")) } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(t("common.cancel")) } },
-    )
+        title = t("contacts.rename.action"),
+        body = t("contacts.rename.placeholder"),
+        confirm = LakkoDialogAction(t("common.save"), onClick = onSave),
+        cancel = LakkoDialogAction(t("common.cancel"), LakkoDialogTone.Ghost, onClick = onDismiss),
+    ) {
+        OutlinedTextField(
+            value = draft,
+            onValueChange = onDraftChange,
+            singleLine = true,
+            label = { Text(t("contacts.rename.field")) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
 }
 
 /** Removing a contact, which deliberately leaves any existing chat behind. */
@@ -425,26 +471,17 @@ private fun RemoveContactDialog(
     onRemove: () -> Unit,
 ) {
     if (!open) return
-    AlertDialog(
+    LakkoDialog(
         onDismissRequest = onDismiss,
-        title = { Text(t("contacts.remove.title")) },
-        text = {
-            Text(
-                t(
-                    "common.sentence_pair",
-                    mapOf(
-                        "first" to t("contacts.remove.sub", mapOf("name" to name)),
-                        "second" to t("contacts.remove.body"),
-                    ),
-                ),
-            )
-        },
-        confirmButton = {
-            TextButton(onClick = onRemove) {
-                Text(t("common.remove"), color = MaterialTheme.colorScheme.error)
-            }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(t("common.cancel")) } },
+        title = t("contacts.remove.title"),
+        body = t(
+            "common.sentence_pair",
+            mapOf(
+                "first" to t("contacts.remove.sub", mapOf("name" to name)),
+                "second" to t("contacts.remove.body"),
+            ),
+        ),
+        confirm = LakkoDialogAction(t("common.remove"), LakkoDialogTone.Danger, onClick = onRemove),
     )
 }
 
@@ -521,17 +558,21 @@ public fun SafetyNumberScreen(
     val contact = remember(contactsState.accepted, contactKey) {
         contactsRepository.contactByRouteKey(contactKey)
     }
+    // A person the viewer removed has no row but keeps the safety number: it
+    // is computed over the key the route names (section 2.1, amended
+    // 2026-10-24).
+    val peerKey: ByteArray? = contact?.request?.fromPubkey ?: routeKeyBytes(contactKey)
     val appContext = LocalContext.current.applicationContext
     val directory = remember(appContext) { ProfileDirectory.get(appContext) }
     val nameVersion by directory.version.collectAsStateWithLifecycle()
-    val name = contact?.let { nameVersion.let { _ -> directory.resolve(it.request.fromPubkey).primary } }
+    val name = peerKey?.let { nameVersion.let { _ -> directory.resolve(it).primary } }
 
     var ui: SafetyNumberUi by remember { mutableStateOf(SafetyNumberUi.Loading) }
     LaunchedEffect(contactKey, contact) {
-        val c = contact ?: return@LaunchedEffect
+        val key = peerKey ?: return@LaunchedEffect
         ui = try {
             // Derives the own identity from the seed; keep it off the main thread.
-            val raw = withContext(Dispatchers.Default) { contactsRepository.safetyNumber(c.request.fromPubkey) }
+            val raw = withContext(Dispatchers.Default) { contactsRepository.safetyNumber(key) }
             SafetyNumberUi.Ready(safetyNumberGroups(raw))
         } catch (cause: Throwable) {
             me.lakko.app.rethrowIfCancelled(cause)

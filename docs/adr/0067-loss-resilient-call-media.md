@@ -109,7 +109,12 @@ a live call before the next.
    forwards a RED payload verbatim and can neither strip RED nor rewrite the
    inner Opus payload type, so Opus is payload type 111 for every
    participant (libwebrtc's and `str0m`'s default), and a subscriber that
-   did not negotiate red is not sent the packet. Chrome sends RED only when
+   did not negotiate red is not sent the packet. **Amended 2026-10-26
+   ([ADR-0071](0071-codec-header-in-the-clear.md) amendment):** that left a
+   Firefox participant (no `audio/red`) hearing nobody in Chrome or Safari;
+   the sender now marks a RED container in the sealed frame's trailer, the
+   SFU sends it to a subscriber whose track negotiated no `red` under its
+   Opus payload type, and that subscriber decodes the primary frame. Chrome sends RED only when
    the answer lists `red/48000/2` (fmtp `111/111`) before Opus. `str0m` has
    no red codec; the vendored fork gains one (third fork change). Chrome
    carries one redundant frame (20 ms) and the count cannot be raised from a

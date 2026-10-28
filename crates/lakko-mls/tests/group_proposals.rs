@@ -1480,7 +1480,11 @@ fn a_group_with_no_role_table_still_direct_commits() {
     let add_bob = alice_g
         .add_member_from_wire(&alice, &kp_wire(&bob))
         .expect("alice adds bob");
-    let mut bob_g = Group::join_from_welcome(&wire(add_bob.welcome), &bob).expect("bob joins");
+    // ADR-0081 second amendment: a table-less Welcome joins through a
+    // table-less entry point (the by-name DeviceGroup join returns a `Group`).
+    let mut bob_g =
+        lakko_mls::DeviceGroup::join_welcome_before_account(&wire(add_bob.welcome), &bob)
+            .expect("bob joins");
 
     // Such a group has no proposal path to fill the set with: `propose_*`
     // refuses without a table...

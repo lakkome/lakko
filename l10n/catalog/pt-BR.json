@@ -1806,10 +1806,6 @@
       "text": "Não foi possível baixar o anexo. Tente novamente.",
       "status": "machine"
     },
-    "chat.attachment.error.gone": {
-      "text": "O anexo não está mais disponível no servidor.",
-      "status": "machine"
-    },
     "chat.attachment.error.open_photo": {
       "text": "Não foi possível abrir esta foto. Tente novamente.",
       "status": "machine"
@@ -2312,10 +2308,6 @@
     },
     "chat.info.group": {
       "text": "Informações do grupo",
-      "status": "machine"
-    },
-    "chat.invite_link.cleared": {
-      "text": "Link removido (um link direto não tem nada a revogar).",
       "status": "machine"
     },
     "chat.invite_link.copy": {
@@ -3442,14 +3434,6 @@
       "text": "Nenhuma conversa ainda",
       "status": "machine"
     },
-    "chats.lookup.action": {
-      "text": "Procurar {name}",
-      "status": "machine"
-    },
-    "chats.lookup.nothing": {
-      "text": "Nada encontrado para {name}.",
-      "status": "machine"
-    },
     "chats.lookup.unreachable": {
       "text": "Não foi possível fazer a busca. Verifique sua conexão e tente novamente.",
       "status": "machine"
@@ -3854,40 +3838,8 @@
       "text": "Este pedido veio de uma versão antiga do Lakko. Peça à pessoa para atualizar e enviar de novo.",
       "status": "machine"
     },
-    "contacts.add.by_username": {
-      "text": "Adicionar pelo nome de usuário",
-      "status": "machine"
-    },
-    "contacts.add.intro_label": {
-      "text": "Mensagem (opcional)",
-      "status": "machine"
-    },
-    "contacts.add.intro_placeholder": {
-      "text": "Oi, aqui é a Alice, da conferência.",
-      "status": "machine"
-    },
-    "contacts.add.send": {
-      "text": "Enviar",
-      "status": "machine"
-    },
     "contacts.add.share_invite": {
       "text": "Compartilhar link de convite",
-      "status": "machine"
-    },
-    "contacts.add.subtitle": {
-      "text": "Os pedidos têm criptografia de ponta a ponta. Os servidores do Lakko não conseguem lê-los.",
-      "status": "machine"
-    },
-    "contacts.add.title": {
-      "text": "Adicionar contato",
-      "status": "machine"
-    },
-    "contacts.add.username_label": {
-      "text": "Nome de usuário",
-      "status": "machine"
-    },
-    "contacts.add.username_placeholder": {
-      "text": "@alice",
       "status": "machine"
     },
     "contacts.detail.actions": {
@@ -3958,12 +3910,8 @@
       "text": "Adicionar",
       "status": "machine"
     },
-    "contacts.list.empty.action": {
-      "text": "Adicionar contato",
-      "status": "machine"
-    },
     "contacts.list.empty.body": {
-      "text": "Adicione alguém pelo nome de usuário ou compartilhe seu link de convite.",
+      "text": "Encontre alguém pelo nome ou nome de usuário no campo de busca acima, ou compartilhe seu link de convite.",
       "status": "machine"
     },
     "contacts.list.empty.title": {
@@ -4108,18 +4056,6 @@
     },
     "contacts.safety.title": {
       "text": "Verificar número de segurança",
-      "status": "machine"
-    },
-    "contacts.send.done": {
-      "text": "Pedido enviado para {name}. Ele fica em Enviados até ser aceito.",
-      "status": "machine"
-    },
-    "desktop.quit_call.confirm": {
-      "text": "Encerrar chamada e sair",
-      "status": "machine"
-    },
-    "desktop.quit_call.title": {
-      "text": "Encerrar a chamada e sair?",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4550,12 +4486,12 @@
       "text": "Seus outros dispositivos mantêm as conversas e recebem as novas chaves sozinhos.",
       "status": "machine"
     },
-    "devices.rotate.effect_links": {
-      "text": "Os links de convite e de chamada que você criou antes deixam de funcionar. Crie novos.",
-      "status": "machine"
-    },
     "devices.rotate.effect_passkeys": {
       "text": "Suas chaves de acesso continuam permitindo entrar. \"Restaurar chaves com esta chave de acesso\" fica desativado até você ativar de novo.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_links": {
+      "text": "Os links de convite e de chamada que você criou antes deixam de funcionar. Crie novos.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -6146,14 +6082,6 @@
       "text": "Nunca",
       "status": "machine"
     },
-    "invite.links.for_new_user": {
-      "text": "Para alguém novo no Lakko",
-      "status": "machine"
-    },
-    "invite.links.inline_note": {
-      "text": "O Lakko não conseguiu encurtar este link, por isso ele é longo. Ele funciona do mesmo jeito e não pode ser revogado.",
-      "status": "machine"
-    },
     "invite.links.label_field": {
       "text": "Rótulo (opcional)",
       "status": "machine"
@@ -6180,10 +6108,6 @@
     },
     "invite.links.new_badge": {
       "text": "Novo",
-      "status": "machine"
-    },
-    "invite.links.referral_option": {
-      "text": "Para alguém que ainda não tem conta no Lakko",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -7342,10 +7266,6 @@
       "text": "Adicionar contato",
       "status": "machine"
     },
-    "search.people.add_contact_title": {
-      "text": "Adicionar {name}",
-      "status": "machine"
-    },
     "search.people.channel_result": {
       "text": "Canal {handle}",
       "status": "machine"
@@ -7366,16 +7286,8 @@
       "text": "Não foi possível enviar o pedido. Talvez a pessoa tenha mudado quem pode encontrá-la.",
       "status": "machine"
     },
-    "search.people.search": {
-      "text": "Pesquisar pessoas",
-      "status": "machine"
-    },
     "search.people.searching_a11y": {
       "text": "Pesquisando",
-      "status": "machine"
-    },
-    "search.people.send_request": {
-      "text": "Enviar pedido",
       "status": "machine"
     },
     "settings.about.lede_web": {
@@ -7396,54 +7308,6 @@
     },
     "settings.about.protection.title": {
       "text": "Como o Lakko protege você",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.close_window": {
-      "text": "Fechar a janela",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.destinations": {
-      "text": "Conversas, Feed, Contatos, Chamadas, Configurações",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.edit_last": {
-      "text": "Editar minha última mensagem (com o campo vazio)",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.escape": {
-      "text": "Fechar um menu, diálogo ou painel; sair de uma busca",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.folders": {
-      "text": "Trocar de pasta de chats",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.new_chat": {
-      "text": "Novo chat",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.previous_next": {
-      "text": "Conversa anterior ou seguinte",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.quit": {
-      "text": "Sair do Lakko",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.search": {
-      "text": "Buscar conversas e pessoas",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.send": {
-      "text": "Enviar ou começar uma nova linha",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.settings": {
-      "text": "Configurações",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.title": {
-      "text": "Atalhos de teclado",
       "status": "machine"
     },
     "settings.about.translations_updated": {
@@ -7634,30 +7498,6 @@
       "text": "Seus dados",
       "status": "machine"
     },
-    "settings.desktop.keep_running.sub": {
-      "text": "Você receberá mensagens e chamadas com a janela fechada.",
-      "status": "machine"
-    },
-    "settings.desktop.keep_running.title": {
-      "text": "Continuar em execução ao fechar a janela",
-      "status": "machine"
-    },
-    "settings.desktop.lede": {
-      "text": "Como o Lakko funciona neste computador.",
-      "status": "machine"
-    },
-    "settings.desktop.open_at_login.title": {
-      "text": "Abrir o Lakko quando eu entrar neste computador",
-      "status": "machine"
-    },
-    "settings.desktop.read_failed": {
-      "text": "Não foi possível ler estas configurações. Abra as Configurações de novo.",
-      "status": "machine"
-    },
-    "settings.desktop.save_failed": {
-      "text": "Não foi possível alterar esta configuração. Tente de novo.",
-      "status": "machine"
-    },
     "settings.devices.add.lede": {
       "text": "Primeiro entre no Lakko no novo dispositivo. Depois escolha qual dos dois está mostrando um código.",
       "status": "machine"
@@ -7702,14 +7542,6 @@
       "text": "Novo",
       "status": "machine"
     },
-    "settings.devices.remove.body": {
-      "text": "Ele já foi desconectado. Na próxima vez que se conectar, tudo o que esta conta guardava nele será apagado: conversas, contatos, chaves e a frase de recuperação.",
-      "status": "machine"
-    },
-    "settings.devices.remove.confirm": {
-      "text": "Remover dispositivo",
-      "status": "machine"
-    },
     "settings.devices.remove.confirm_named": {
       "text": "Remover {device}",
       "status": "machine"
@@ -7720,10 +7552,6 @@
     },
     "settings.devices.remove.reason_unused": {
       "text": "Não uso mais",
-      "status": "machine"
-    },
-    "settings.devices.remove.title": {
-      "text": "Remover {device}?",
       "status": "machine"
     },
     "settings.devices.remove.working": {
@@ -8022,36 +7850,8 @@
       "text": "Senha",
       "status": "machine"
     },
-    "settings.profile.error.generic": {
-      "text": "Não foi possível salvar seu nome. Tente novamente.",
-      "status": "machine"
-    },
-    "settings.profile.lede": {
-      "text": "Como seus contatos veem você.",
-      "status": "machine"
-    },
-    "settings.profile.name.hint": {
-      "text": "Aparece para as pessoas com quem você conversa. Não precisa ser único, no máximo {count, plural, one {# caractere} other {# caracteres}}.",
-      "status": "machine"
-    },
     "settings.profile.name.label": {
       "text": "Seu nome",
-      "status": "machine"
-    },
-    "settings.profile.preview.label": {
-      "text": "Como os outros veem você",
-      "status": "machine"
-    },
-    "settings.profile.preview.no_name": {
-      "text": "Os outros veem a impressão digital da sua chave até você definir um nome.",
-      "status": "machine"
-    },
-    "settings.profile.saved": {
-      "text": "Seu nome vai ser atualizado para seus contatos.",
-      "status": "machine"
-    },
-    "settings.profile.username.none": {
-      "text": "Nenhum",
       "status": "machine"
     },
     "settings.recovery.devices.title": {
@@ -8302,28 +8102,8 @@
       "text": "Nome de usuário: {message}",
       "status": "machine"
     },
-    "username.change.body": {
-      "text": "As pessoas não vão mais encontrar você por {old}. Ninguém mais pode ficar com ele por 30 dias.",
-      "status": "machine"
-    },
-    "username.change.next_change": {
-      "text": "Depois disso, você poderá alterá-lo de novo em 30 dias.",
-      "status": "machine"
-    },
-    "username.change.other_devices": {
-      "text": "Seus outros dispositivos recebem o novo nome de usuário na próxima vez que estiverem online.",
-      "status": "machine"
-    },
-    "username.change.save": {
-      "text": "Alterar",
-      "status": "machine"
-    },
     "username.change.title": {
       "text": "Alterar nome de usuário",
-      "status": "machine"
-    },
-    "username.change.too_soon": {
-      "text": "Você poderá alterar seu nome de usuário de novo em {date}.",
       "status": "machine"
     },
     "username.claim.body": {
@@ -8496,6 +8276,262 @@
     },
     "who_can_find_me.title": {
       "text": "Quem pode me encontrar",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "Adicionar {name} aos seus contatos?",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "Adicionar",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "Agora não",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} já está nos seus contatos",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "Abrir conversa",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "Este é o seu próprio link de convite",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "Compartilhe com a pessoa que você quer adicionar.",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "Concluído",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "Não foi possível adicionar {name}. Verifique sua conexão e tente de novo.",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "esta pessoa",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} vai receber suas mensagens quando o app estiver on-line de novo.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} ainda não respondeu. Você pode pedir um novo link.",
+      "status": "machine"
+    },
+    "chat.pending.call_disabled": {
+      "text": "Disponível quando {name} se conectar.",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "Adicionar aos contatos",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "Coloca {name} de volta na sua lista de contatos desta conta.",
+      "status": "machine"
+    },
+    "contacts.add_back.action": {
+      "text": "Adicionar",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "Não foi possível falar com {name}. Verifique sua conexão e tente de novo.",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "Mostrar QR code",
+      "status": "machine"
+    },
+    "invite.links.qr_hint": {
+      "text": "Quem escanear este código poderá enviar a você um pedido de contato.",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "Escanear QR code",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "Este código não é um link do Lakko. Tente outro código.",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "Encerrar chamada e sair",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "Encerrar a chamada e sair?",
+      "status": "machine"
+    },
+    "invite.links.expires_option_custom": {
+      "text": "Personalizado",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "Personalizado",
+      "status": "machine"
+    },
+    "invite.links.custom_expiry_amount": {
+      "text": "Período",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "Horas",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "Dias",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "Número de pessoas",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "Informe um período de 1 hora a 365 dias.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "Informe um número de pessoas de 1 a {max}.",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} convida você para o Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.about": {
+      "text": "O Lakko é um mensageiro em que cada conversa e chamada tem criptografia de ponta a ponta.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Criar uma conta",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "Já tenho uma conta",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Este link de convite não funciona mais",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Peça um novo a quem o enviou.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "Editar link",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "Condições do link",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "Ao salvar, um novo link é criado. O antigo deixa de funcionar.",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "Excluir link",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "Excluir este link?",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Quem já tiver o link não poderá mais usá-lo.",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "Link excluído.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "Não foi possível excluir o link. Verifique sua conexão e tente novamente.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "Não foi possível salvar o link. Verifique sua conexão e tente novamente.",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.close_window": {
+      "text": "Fechar a janela",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "Conversas, Feed, Contatos, Chamadas, Configurações",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "Editar minha última mensagem (com o campo vazio)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "Fechar um menu, diálogo ou painel; sair de uma busca",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "Trocar de pasta de chats",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "Novo chat",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "Conversa anterior ou seguinte",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Sair do Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "Buscar conversas e pessoas",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "Enviar ou começar uma nova linha",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "Configurações",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "Atalhos de teclado",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "Você receberá mensagens e chamadas com a janela fechada.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "Continuar em execução ao fechar a janela",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "Como o Lakko funciona neste computador.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "Abrir o Lakko quando eu entrar neste computador",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "Não foi possível ler estas configurações. Abra as Configurações de novo.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "Não foi possível alterar esta configuração. Tente de novo.",
       "status": "machine"
     }
   }

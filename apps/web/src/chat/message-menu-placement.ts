@@ -31,6 +31,13 @@
  * because nothing here remembers a previous menu.
  */
 
+
+/** Between the reaction row and the action card. Section 2 asks for "a visible
+ *  gap"; the 6px the two cards used to sit apart did not read as one. Here,
+ *  in a module with no imports, so the real-browser spec can read it without
+ *  loading the component and the string catalog behind it. */
+export const SURFACE_GAP_PX = 8;
+
 export interface MenuSize {
   readonly width: number;
   readonly height: number;

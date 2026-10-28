@@ -110,7 +110,7 @@ package me.lakko.app.chat
  * Everything here is expressed over injected ports so the whole orchestration is
  * host-testable on the plain JVM — no `Context`, no UniFFI `.so`, no network.
  * [ChatRepository] supplies the thin adapters. Same rationale (and same shape)
- * as [runCrashSafeCommit] and [runSplitPoll].
+ * as [prepareCrashSafeCommit] and [runSplitPoll].
  */
 
 /**
@@ -124,8 +124,10 @@ package me.lakko.app.chat
  * UX spec forbids.
  */
 public sealed class MembershipOutcome {
-    /** A direct commit landed. Only reachable in a group with NO role table,
-     *  where ADR-0045's proposal path does not apply. */
+    /** A direct commit landed. No membership call returns this since the
+     *  ADR-0081 amendment of 2026-10-19 deleted the direct-commit paths (a
+     *  group with no role table is refused); kept so the outcome consumers
+     *  keep one shape. */
     data class Committed(
         val commitMessageId: Long,
         val welcomeMessageId: Long?,
@@ -268,8 +270,17 @@ internal interface SweepJournalPort {
     /** Rows strictly after [after], in ascending id order. */
     suspend fun fetch(after: Long): List<SweepJournalRow>
 
-    /** Publish to this group's journal; returns the DS-assigned id. */
-    suspend fun publishGroup(bytes: ByteArray): Long
+    /**
+     * ADR-0081 decision 1 — send the staged commit [bytes] with the
+     * registration of the epoch it moves to (`dsStagedAccessSigner`) in ONE
+     * request, `POST .../commit`, proven under the epoch the group still sits
+     * at; returns the commit row's DS id. The identical re-send of a commit
+     * that landed answers its original id, so the owed verdict re-sends.
+     * [staged] is the staged sweep on a first run (its removed leaves name
+     * the registrar keys the owner revokes), `null` on the restart path.
+     * A throw is classified by [SweepPorts.classifyCommitFailure].
+     */
+    suspend fun commitStaged(bytes: ByteArray, staged: StagedSweepArtifacts?): Long
 
     /** Seal the raw Welcome [bytes] to the account named by [pseudonym] (an
      *  account key from [SweepPorts.welcomeTargets]) and publish it into its
@@ -432,15 +443,14 @@ internal class SweepPorts(
     val encodeB64: (ByteArray) -> String,
     val decodeB64: (String) -> ByteArray,
     /**
-     * ADR-0057 obligation 5 — register the access key of the epoch the STAGED
-     * sweep moves to (`dsStagedAccessSigner`) with this account's root or
-     * registrar signer (revoking the evicted accounts' registrar keys when the
-     * owner commits), BEFORE the sweep is durably recorded or published.
-     * THROWS when the Delivery Service does not take it; the sweep is then
-     * abandoned exactly as a failed outbox write abandons it, so no peer ever
-     * applies a commit whose epoch the server does not know.
+     * ADR-0081 — what a failed [SweepJournalPort.commitStaged] means:
+     * [SweepCommitFailure.LOST] (`409`: another commit owns the staged epoch,
+     * nothing of this one is on the DS — abandon like a lost verdict),
+     * [SweepCommitFailure.REFUSED] (a definitive refusal: abandon, drop the
+     * entry, throw) or [SweepCommitFailure.UNKNOWN] (the DS not reached: the
+     * sweep stays staged with its entry; the owed verdict re-sends it).
      */
-    val registerStagedEpoch: suspend (staged: StagedSweepArtifacts) -> Unit = {},
+    val classifyCommitFailure: (Throwable) -> SweepCommitFailure = { SweepCommitFailure.UNKNOWN },
     /**
      * Whether a NEW sweep may be staged now: `false` while the group is held
      * after a refused epoch registration ([SweepRegistrationBackoff]).
@@ -449,6 +459,9 @@ internal class SweepPorts(
      */
     val mayStage: () -> Boolean = { true },
 )
+
+/** What a failed commit of a staged sweep means ([SweepPorts.classifyCommitFailure]). */
+internal enum class SweepCommitFailure { LOST, REFUSED, UNKNOWN }
 
 /** What one sweep attempt did. */
 public sealed class SweepOutcome {
@@ -491,8 +504,10 @@ public sealed class SweepOutcome {
     ) : SweepOutcome()
 
     /** Lost the journal order: abandoned, no Welcome published, the proposals
-     *  survive for the winner's next sweep. */
-    data class Lost(val commitMessageId: Long) : SweepOutcome()
+     *  survive for the winner's next sweep. [commitMessageId] is `null` when
+     *  the commit route refused the commit outright (ADR-0081: another commit
+     *  owns the epoch, so nothing of this one is on the DS). */
+    data class Lost(val commitMessageId: Long?) : SweepOutcome()
 
     /** A previous run merged a winning sweep but could not get its Welcome onto
      *  the wire. The fan-out has now been retried and acked. */
@@ -816,18 +831,10 @@ private suspend fun publishAndAdjudicate(
 
     val entry: SweepDurableEntry
     if (owed == null) {
-        // ADR-0053 client contract point 3 — the Delivery Service learns the
-        // key of the epoch this sweep moves to BEFORE anything about the sweep
-        // is durable or on the wire. A refusal abandons the staged sweep (the
-        // per-group rollback) and nothing is published: a commit whose epoch
-        // the server does not know would leave every peer that applies it
-        // refused on its next request.
-        try {
-            ports.registerStagedEpoch(staged)
-        } catch (cause: Throwable) {
-            group.exclusiveProvider { group.abandonStagedSweep() }
-            throw cause
-        }
+        // Obligation 4 — the entry first; the staged epoch's key and the
+        // commit row then reach the DS together, in the commit call below
+        // (ADR-0081).
+        //
         // Obligation 4 — durably record BOTH artifacts before ANY publish. The
         // raw Welcome is recorded HERE, so the bytes the restart sweep would
         // publish are the very bytes computed now; nothing can drift. Each
@@ -856,10 +863,28 @@ private suspend fun publishAndAdjudicate(
             throw cause
         }
     } else {
+        // ADR-0081 — the restart half: the commit call below re-sends the
+        // same row with a freshly signed registration. The DS answers the
+        // original id when the first send landed, `409` when another commit
+        // took the epoch; it never replaces the winner's epoch.
         entry = owed
     }
 
-    val commitMessageId = ports.journal.publishGroup(ports.decodeB64(entry.commitB64))
+    val commitMessageId = try {
+        ports.journal.commitStaged(ports.decodeB64(entry.commitB64), if (owed == null) staged else null)
+    } catch (cause: kotlinx.coroutines.CancellationException) {
+        throw cause
+    } catch (cause: Throwable) {
+        val meaning = ports.classifyCommitFailure(cause)
+        if (meaning == SweepCommitFailure.UNKNOWN) throw cause
+        // Nothing of this commit is on the DS: abandon like a lost verdict.
+        // The proposals stay pending for the next sweep.
+        group.exclusiveProvider { group.abandonStagedSweep() }
+        ports.persist()
+        ports.outbox.discard(entry.id)
+        if (meaning == SweepCommitFailure.REFUSED) throw cause
+        return SweepOutcome.Lost(null)
+    }
     ports.markOwnPublished(commitMessageId)
 
     val won = adjudicate(ports, cursorBefore, commitMessageId)

@@ -110,7 +110,6 @@ pub(crate) async fn put_backup(
     persist_tempfile(temp, target.clone()).await?;
 
     tracing::info!(
-        account_id_hex = %hex_encode(&authed.0),
         bytes = bytes_written,
         first_upload = !already_existed,
         "backup blob written",
@@ -187,10 +186,7 @@ pub(crate) async fn delete_backup(
 
     match tokio::fs::remove_file(&path).await {
         Ok(()) => {
-            tracing::info!(
-                account_id_hex = %hex_encode(&authed.0),
-                "backup blob deleted",
-            );
+            tracing::info!("backup blob deleted",);
             Ok(StatusCode::NO_CONTENT)
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -347,7 +343,7 @@ async fn persist_tempfile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{build_app, AppState};
+    use crate::build_app;
     use axum::body::Body as AxumBody;
     use axum::http::Request;
     use http_body_util::BodyExt as _;
@@ -364,13 +360,10 @@ mod tests {
         tempfile::TempDir,
         lakko_auth_token::TokenSecret,
     ) {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let (mut state, tmp) = crate::test_support::state();
         let secret = lakko_auth_token::TokenSecret::new(vec![0xCDu8; 32])
             .expect("32 bytes is over MIN_SECRET_LEN");
-        let state = AppState {
-            blob_root: Arc::new(tmp.path().to_path_buf()),
-            session_token_secret: Arc::new(secret.clone()),
-        };
+        state.session_token_secret = Arc::new(secret.clone());
         (build_app(state), tmp, secret)
     }
 

@@ -15,11 +15,11 @@
  *   * edit surfaces new text; delete/reaction/typing/read-receipt do not,
  *   * the app's persisted cursor is used as the READ-ONLY fetch start,
  *   * an ADR-0042 `push_gid` wake reverse-maps via the injected
- *     `lookupRoute` to the REAL group (miss → legacy raw-group_id path;
- *     lookup error / malformed row → legacy path, never a throw),
- *   * the ADR-0042 (2026-09-30) wake gate: no binding or a `d` that is not
- *     the bound pseudonym decrypts nothing, and the route map + the legacy
- *     scan are asked about the BOUND account only,
+ *     `lookupRoute` to the REAL group; a miss, a lookup error or a malformed
+ *     row decrypts nothing (no legacy raw-group_id path, ADR-0078),
+ *   * the ADR-0042 / ADR-0078 wake gate: no binding, no well-formed `s`, or
+ *     a route row whose subscription id is not the wake's `s` decrypts
+ *     nothing, and the route map is asked about the BOUND account only,
  *   * and NO persist / cursor-advance hook is EVER called.
  *
  * The module under test is a `public/*.js` ESM (the one shape reachable
@@ -240,13 +240,13 @@ function baseDeps(overrides: Record<string, unknown> = {}) {
     messages: [msg(42, { kind: "chat", text: "hello world", attachmentCount: 0 })],
   }));
   const deps = {
-    readWakeBinding: vi.fn(async () => ({
-      devicePseudonymHex: "dd".repeat(32),
+    readWakeBinding: vi.fn(async () => ({ accountId: ACCOUNT_ID })),
+    // ADR-0078: the bound account's route row for the wake's push_gid, with
+    // this device's subscription id (the wake's `s`).
+    lookupRoute: vi.fn(async (_account: string, _gid: string) => ({
       accountId: ACCOUNT_ID,
-    })),
-    resolveAccount: vi.fn(async (_account: string, _hex: string) => ({
-      accountId: ACCOUNT_ID,
-      groupIdBytes: GROUP_BYTES,
+      groupIdB64: GROUP_B64,
+      subIdHex: "dd".repeat(16),
     })),
     getDeviceKey: vi.fn(async (_a: string) => ({}) as unknown),
     getIdentitySeed: vi.fn(async (_a: string, _k: unknown) => new Uint8Array(64)),
@@ -267,7 +267,7 @@ function baseDeps(overrides: Record<string, unknown> = {}) {
 }
 
 const wake = (over: Record<string, unknown> = {}) => ({
-  deviceHex: "dd".repeat(32),
+  subHex: "dd".repeat(16),
   groupHex: GROUP_HEX,
   pointer: 42,
   ...over,
@@ -437,7 +437,7 @@ describe("decryptPushPreview — fail-closed / null fallbacks", () => {
   });
 
   it("returns null when no local account owns the group", async () => {
-    const { deps } = baseDeps({ resolveAccount: vi.fn(async () => null) });
+    const { deps } = baseDeps({ lookupRoute: vi.fn(async () => null) });
     expect(await decryptPushPreview(wake(), deps)).toBeNull();
     // Short-circuits before touching the device key.
     expect(deps.getDeviceKey).not.toHaveBeenCalled();
@@ -805,87 +805,54 @@ describe("decryptPushPreview — the ADR-0045 committer beacon is never previewe
   });
 });
 
-describe("decryptPushPreview — ADR-0042 push_gid reverse-map (Sprint 4)", () => {
+describe("decryptPushPreview — ADR-0042 push_gid reverse-map", () => {
   it("resolves an opaque push_gid wake via lookupRoute to the REAL group and decrypts", async () => {
-    const lookupRoute = vi.fn(async (_account: string, _gid: string) => ({
-      accountId: ACCOUNT_ID,
-      groupIdB64: GROUP_B64,
-    }));
-    const { deps, dsFetchGroup, saveSnapshot, saveMessageLog, advanceCursor } =
-      baseDeps({ lookupRoute });
+    const { deps, dsFetchGroup, saveSnapshot, saveMessageLog, advanceCursor } = baseDeps();
     const out = await decryptPushPreview(wake({ groupHex: PUSH_GID_HEX }), deps);
     // Downstream everything (DS fetch, cursor, tag) uses the REAL group.
     expect(out).toEqual({ title: "Lakko", body: "hello world", tag: GROUP_HEX });
-    expect(lookupRoute).toHaveBeenCalledWith(ACCOUNT_ID, PUSH_GID_HEX);
+    expect(deps.lookupRoute).toHaveBeenCalledWith(ACCOUNT_ID, PUSH_GID_HEX);
     expect(dsFetchGroup).toHaveBeenCalledWith(GROUP_BYTES, 41, expect.any(Function));
     expect(deps.startCursor).toHaveBeenCalledWith(ACCOUNT_ID, GROUP_HEX);
-    // The legacy path never ran.
-    expect(deps.resolveAccount).not.toHaveBeenCalled();
     // The route lookup is a READ — still nothing persisted, ever.
     expect(saveSnapshot).not.toHaveBeenCalled();
     expect(saveMessageLog).not.toHaveBeenCalled();
     expect(advanceCursor).not.toHaveBeenCalled();
   });
 
-  it("falls back to the legacy raw-group_id path on a route miss", async () => {
-    const lookupRoute = vi.fn(async (_account: string, _gid: string) => null);
-    const { deps } = baseDeps({ lookupRoute });
-    // The wake's `g` IS a real group id this device knows (legacy wake /
-    // not-yet-provisioned group) — unchanged pre-Sprint-4 behavior.
-    const out = await decryptPushPreview(wake(), deps);
-    expect(out).toEqual({ title: "Lakko", body: "hello world", tag: GROUP_HEX });
-    expect(lookupRoute).toHaveBeenCalledWith(ACCOUNT_ID, GROUP_HEX);
-    expect(deps.resolveAccount).toHaveBeenCalledWith(ACCOUNT_ID, GROUP_HEX);
+  it("a route miss decrypts nothing (no legacy raw-group_id read)", async () => {
+    const { deps, dsFetchGroup } = baseDeps({ lookupRoute: vi.fn(async () => null) });
+    expect(await decryptPushPreview(wake(), deps)).toBeNull();
+    expect(dsFetchGroup).not.toHaveBeenCalled();
+    expect(deps.getDeviceKey).not.toHaveBeenCalled();
   });
 
-  it("treats a lookupRoute error as a miss (legacy path still works)", async () => {
-    const lookupRoute = vi.fn(async () => {
-      throw new Error("idb open blocked");
-    });
-    const { deps } = baseDeps({ lookupRoute });
-    const out = await decryptPushPreview(wake(), deps);
-    expect(out?.body).toBe("hello world");
-    expect(deps.resolveAccount).toHaveBeenCalledWith(ACCOUNT_ID, GROUP_HEX);
-  });
-
-  it("degrades to null (generic) when the lookup errors AND the legacy path misses", async () => {
-    const lookupRoute = vi.fn(async () => {
-      throw new Error("idb open blocked");
-    });
+  it("a lookupRoute error is a miss, never a throw", async () => {
     const { deps, dsFetchGroup } = baseDeps({
-      lookupRoute,
-      resolveAccount: vi.fn(async () => null),
+      lookupRoute: vi.fn(async () => {
+        throw new Error("idb open blocked");
+      }),
     });
-    // An unknown push_gid + no legacy match → null, never a throw.
-    expect(
-      await decryptPushPreview(wake({ groupHex: PUSH_GID_HEX }), deps),
-    ).toBeNull();
+    expect(await decryptPushPreview(wake({ groupHex: PUSH_GID_HEX }), deps)).toBeNull();
     expect(dsFetchGroup).not.toHaveBeenCalled();
   });
 
-  it("falls back to the legacy path on a malformed route row", async () => {
+  it("a malformed route row is a miss", async () => {
     for (const badRoute of [
-      { accountId: ACCOUNT_ID, groupIdB64: "!!!not-base64!!!" }, // undecodable
-      { accountId: ACCOUNT_ID, groupIdB64: btoa("short") }, // not 32 bytes
-      { accountId: ACCOUNT_ID }, // missing groupIdB64
-      { groupIdB64: GROUP_B64 }, // missing accountId
+      { accountId: ACCOUNT_ID, groupIdB64: "!!!not-base64!!!", subIdHex: "dd".repeat(16) },
+      { accountId: ACCOUNT_ID, groupIdB64: btoa("short"), subIdHex: "dd".repeat(16) },
+      { accountId: ACCOUNT_ID, subIdHex: "dd".repeat(16) },
+      { groupIdB64: GROUP_B64, subIdHex: "dd".repeat(16) },
+      { accountId: ACCOUNT_ID, groupIdB64: GROUP_B64 },
+      { accountId: ACCOUNT_ID, groupIdB64: GROUP_B64, subIdHex: "dd" },
     ]) {
-      const { deps } = baseDeps({
-        lookupRoute: vi.fn(async () => badRoute),
-      });
-      const out = await decryptPushPreview(wake(), deps);
-      // The legacy path (g = a known group id) still produced the preview.
-      expect(out?.body).toBe("hello world");
-      expect(deps.resolveAccount).toHaveBeenCalledWith(ACCOUNT_ID, GROUP_HEX);
+      const { deps } = baseDeps({ lookupRoute: vi.fn(async () => badRoute) });
+      expect(await decryptPushPreview(wake(), deps)).toBeNull();
     }
   });
 
   it("never persists on the route-resolved path even when decrypt fails", async () => {
     const { deps, saveSnapshot, saveMessageLog, advanceCursor } = baseDeps({
-      lookupRoute: vi.fn(async () => ({
-        accountId: ACCOUNT_ID,
-        groupIdB64: GROUP_B64,
-      })),
       dsFetchGroup: vi.fn(async () => ({
         messages: [msg(42, {}, { throwOnProcess: true })],
       })),
@@ -899,38 +866,33 @@ describe("decryptPushPreview — ADR-0042 push_gid reverse-map (Sprint 4)", () =
   });
 });
 
-describe("ADR-0042 (amended 2026-09-30) — a wake is handled only for the bound account", () => {
-  const BOUND = "dd".repeat(32);
+describe("ADR-0042 / ADR-0078 — a wake is handled only for a subscription the bound account holds", () => {
+  const SUB = "dd".repeat(16);
   const OTHER_ACCOUNT = "other-acct-b64";
 
   describe("wakeBoundAccount — the gate", () => {
-    const binding = { devicePseudonymHex: BOUND, accountId: ACCOUNT_ID };
+    const binding = { accountId: ACCOUNT_ID };
 
     it("no binding: nothing passes", () => {
       expect(wakeBoundAccount(wake(), null)).toBeNull();
       expect(wakeBoundAccount(wake(), undefined)).toBeNull();
     });
 
-    it("a `d` that is not the bound pseudonym does not pass", () => {
-      expect(wakeBoundAccount(wake({ deviceHex: "ee".repeat(32) }), binding)).toBeNull();
-      expect(wakeBoundAccount(wake({ deviceHex: null }), binding)).toBeNull();
-      expect(wakeBoundAccount(wake({ deviceHex: "dd" }), binding)).toBeNull();
-      expect(wakeBoundAccount(wake({ deviceHex: "zz".repeat(32) }), binding)).toBeNull();
+    it("a wake with no well-formed subscription id does not pass", () => {
+      expect(wakeBoundAccount(wake({ subHex: null }), binding)).toBeNull();
+      expect(wakeBoundAccount(wake({ subHex: "dd" }), binding)).toBeNull();
+      expect(wakeBoundAccount(wake({ subHex: "zz".repeat(16) }), binding)).toBeNull();
+      // The retired 32-byte device pseudonym shape is not a subscription id.
+      expect(wakeBoundAccount(wake({ subHex: "dd".repeat(32) }), binding)).toBeNull();
     });
 
-    it("the bound `d` passes as the bound account, case-insensitively", () => {
+    it("a well-formed id passes as the bound account", () => {
       expect(wakeBoundAccount(wake(), binding)).toBe(ACCOUNT_ID);
-      expect(wakeBoundAccount(wake({ deviceHex: BOUND.toUpperCase() }), binding)).toBe(
-        ACCOUNT_ID,
-      );
-      expect(
-        wakeBoundAccount(wake(), { devicePseudonymHex: BOUND.toUpperCase(), accountId: ACCOUNT_ID }),
-      ).toBe(ACCOUNT_ID);
+      expect(wakeBoundAccount(wake({ subHex: SUB.toUpperCase() }), binding)).toBe(ACCOUNT_ID);
     });
 
     it("a malformed binding does not pass", () => {
-      expect(wakeBoundAccount(wake(), { devicePseudonymHex: "dd", accountId: ACCOUNT_ID })).toBeNull();
-      expect(wakeBoundAccount(wake(), { devicePseudonymHex: BOUND, accountId: "" })).toBeNull();
+      expect(wakeBoundAccount(wake(), { accountId: "" })).toBeNull();
     });
   });
 
@@ -938,14 +900,14 @@ describe("ADR-0042 (amended 2026-09-30) — a wake is handled only for the bound
     it("no binding dep at all: null, and nothing is read", async () => {
       const { deps } = baseDeps({ readWakeBinding: undefined });
       expect(await decryptPushPreview(wake(), deps)).toBeNull();
-      expect(deps.resolveAccount).not.toHaveBeenCalled();
+      expect(deps.lookupRoute).not.toHaveBeenCalled();
       expect(deps.getDeviceKey).not.toHaveBeenCalled();
     });
 
     it("no binding (signed out): null, and nothing is read", async () => {
       const { deps, dsFetchGroup } = baseDeps({ readWakeBinding: vi.fn(async () => null) });
       expect(await decryptPushPreview(wake(), deps)).toBeNull();
-      expect(deps.resolveAccount).not.toHaveBeenCalled();
+      expect(deps.lookupRoute).not.toHaveBeenCalled();
       expect(deps.getDeviceKey).not.toHaveBeenCalled();
       expect(dsFetchGroup).not.toHaveBeenCalled();
     });
@@ -960,18 +922,17 @@ describe("ADR-0042 (amended 2026-09-30) — a wake is handled only for the bound
       expect(deps.getDeviceKey).not.toHaveBeenCalled();
     });
 
-    it("wrong `d`: null, and nothing is read", async () => {
+    it("a subscription id the bound account's row does not hold: null, no key read", async () => {
       const { deps } = baseDeps();
-      expect(await decryptPushPreview(wake({ deviceHex: "ee".repeat(32) }), deps)).toBeNull();
-      expect(deps.resolveAccount).not.toHaveBeenCalled();
+      expect(await decryptPushPreview(wake({ subHex: "ee".repeat(16) }), deps)).toBeNull();
       expect(deps.getDeviceKey).not.toHaveBeenCalled();
     });
 
-    it("right `d`: decrypts, and every per-account read names the bound account", async () => {
+    it("the right id: decrypts, and every per-account read names the bound account", async () => {
       const { deps } = baseDeps();
       const out = await decryptPushPreview(wake(), deps);
       expect(out?.body).toBe("hello world");
-      expect(deps.resolveAccount).toHaveBeenCalledWith(ACCOUNT_ID, GROUP_HEX);
+      expect(deps.lookupRoute).toHaveBeenCalledWith(ACCOUNT_ID, GROUP_HEX);
       expect(deps.getDeviceKey).toHaveBeenCalledWith(ACCOUNT_ID);
       expect(deps.getIdentitySeed).toHaveBeenCalledWith(ACCOUNT_ID, expect.anything());
       expect(deps.loadSnapshot).toHaveBeenCalledWith(ACCOUNT_ID, expect.anything());
@@ -981,10 +942,14 @@ describe("ADR-0042 (amended 2026-09-30) — a wake is handled only for the bound
 
   describe("account-scoped route lookup (two accounts in one group)", () => {
     // Both accounts are in the group, so both hold a row for the same
-    // push_gid. Only the bound account's row may be used.
-    const rows = new Map<string, { accountId: string; groupIdB64: string }>([
-      [`${OTHER_ACCOUNT}|${PUSH_GID_HEX}`, { accountId: OTHER_ACCOUNT, groupIdB64: GROUP_B64 }],
-      [`${ACCOUNT_ID}|${PUSH_GID_HEX}`, { accountId: ACCOUNT_ID, groupIdB64: GROUP_B64 }],
+    // push_gid, each with its own subscription id. Only the bound account's
+    // row may be used.
+    const rows = new Map<string, { accountId: string; groupIdB64: string; subIdHex: string }>([
+      [
+        `${OTHER_ACCOUNT}|${PUSH_GID_HEX}`,
+        { accountId: OTHER_ACCOUNT, groupIdB64: GROUP_B64, subIdHex: "ee".repeat(16) },
+      ],
+      [`${ACCOUNT_ID}|${PUSH_GID_HEX}`, { accountId: ACCOUNT_ID, groupIdB64: GROUP_B64, subIdHex: SUB }],
     ]);
     const lookupRoute = async (accountId: string, gid: string) =>
       rows.get(`${accountId}|${gid}`) ?? null;
@@ -999,53 +964,35 @@ describe("ADR-0042 (amended 2026-09-30) — a wake is handled only for the bound
       expect(deps.getDeviceKey).not.toHaveBeenCalledWith(OTHER_ACCOUNT);
     });
 
+    it("a wake for the OTHER account's subscription is dropped while this account is bound", async () => {
+      const { deps } = baseDeps({ lookupRoute: vi.fn(lookupRoute) });
+      expect(
+        await decryptPushPreview(wake({ groupHex: PUSH_GID_HEX, subHex: "ee".repeat(16) }), deps),
+      ).toBeNull();
+      expect(deps.getDeviceKey).not.toHaveBeenCalled();
+    });
+
     it("the other account bound: its own row, its own keys", async () => {
       const spy = vi.fn(lookupRoute);
       const { deps } = baseDeps({
         lookupRoute: spy,
-        readWakeBinding: vi.fn(async () => ({ devicePseudonymHex: BOUND, accountId: OTHER_ACCOUNT })),
+        readWakeBinding: vi.fn(async () => ({ accountId: OTHER_ACCOUNT })),
       });
-      await decryptPushPreview(wake({ groupHex: PUSH_GID_HEX }), deps);
+      await decryptPushPreview(wake({ groupHex: PUSH_GID_HEX, subHex: "ee".repeat(16) }), deps);
       expect(spy).toHaveBeenCalledWith(OTHER_ACCOUNT, PUSH_GID_HEX);
       expect(deps.getDeviceKey).toHaveBeenCalledWith(OTHER_ACCOUNT);
       expect(deps.getDeviceKey).not.toHaveBeenCalledWith(ACCOUNT_ID);
     });
 
     it("a row naming another account is a miss, even if returned for the bound one", async () => {
-      const target = await resolveWakeTarget(PUSH_GID_HEX, ACCOUNT_ID, {
-        lookupRoute: async () => ({ accountId: OTHER_ACCOUNT, groupIdB64: GROUP_B64 }),
-        resolveAccount: async () => null,
+      const target = await resolveWakeTarget(PUSH_GID_HEX, SUB, ACCOUNT_ID, {
+        lookupRoute: async () => ({ accountId: OTHER_ACCOUNT, groupIdB64: GROUP_B64, subIdHex: SUB }),
       });
       expect(target).toBeNull();
     });
-  });
 
-  describe("the legacy fallback is limited to the bound account", () => {
-    it("asks only about the bound account's groups", async () => {
-      const resolveAccount = vi.fn(async (_a: string, _h: string) => null);
-      const target = await resolveWakeTarget(GROUP_HEX, ACCOUNT_ID, {
-        lookupRoute: async () => null,
-        resolveAccount,
-      });
-      expect(target).toBeNull();
-      expect(resolveAccount).toHaveBeenCalledTimes(1);
-      expect(resolveAccount).toHaveBeenCalledWith(ACCOUNT_ID, GROUP_HEX);
-    });
-
-    it("an answer naming another account is refused", async () => {
-      const { deps, dsFetchGroup } = baseDeps({
-        resolveAccount: vi.fn(async () => ({ accountId: OTHER_ACCOUNT, groupIdBytes: GROUP_BYTES })),
-      });
-      expect(await decryptPushPreview(wake(), deps)).toBeNull();
-      expect(deps.getDeviceKey).not.toHaveBeenCalled();
-      expect(dsFetchGroup).not.toHaveBeenCalled();
-    });
-
-    it("the bound account's own group resolves", async () => {
-      const target = await resolveWakeTarget(GROUP_HEX, ACCOUNT_ID, {
-        lookupRoute: async () => null,
-        resolveAccount: async (a: string) => ({ accountId: a, groupIdBytes: GROUP_BYTES }),
-      });
+    it("the bound account's own row with the wake's id resolves", async () => {
+      const target = await resolveWakeTarget(PUSH_GID_HEX, SUB, ACCOUNT_ID, { lookupRoute });
       expect(target).toEqual({ groupIdBytes: GROUP_BYTES, groupHex: GROUP_HEX });
     });
   });

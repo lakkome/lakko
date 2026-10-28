@@ -156,6 +156,9 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
         muted: f?.muted === true,
         archived: f?.archived === true,
         live: readIsActive(g.group),
+        ...(kind === "chat"
+          ? { personKey: personKeysOf(g.group).find((k) => k !== ownPersonKeyB64(chats.identity())) }
+          : {}),
       };
     });
   });
@@ -225,7 +228,7 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
                     disabled={busyId() !== null}
                     onClick={() => void pick(row)}
                   >
-                    <Avatar label={row.title} id={row.id} />
+                    <Avatar label={row.title} id={row.id} personKey={row.personKey} />
                     <div class="lk-row-body">
                       <div class="lk-row-line">
                         <span class="lk-row-title">

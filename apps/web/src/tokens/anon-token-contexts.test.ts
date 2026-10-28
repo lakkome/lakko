@@ -17,14 +17,7 @@ import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import initWasm, * as wasm from "../../wasm/lakko_ffi_wasm";
-import {
-  ANON_TOKEN_CONTEXTS,
-  LOW_WATER,
-  MAX_POOL,
-  REFILL_BATCH,
-  lowWater,
-  refillBatch,
-} from "./anon-token-pool";
+import { ANON_TOKEN_CONTEXTS, MAX_POOL, POOL_TARGET, poolTarget } from "./anon-token-pool";
 
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -51,53 +44,52 @@ describe("the token contexts against the core", () => {
       "blob-upload",
       "blob-read",
       "mailbox-write",
+      "call-join",
     ]);
   });
 
   it("has a pool policy for every context, and for nothing else", () => {
     const names = [...wasm.anonTokenContexts()].sort();
-    expect(Object.keys(REFILL_BATCH).sort()).toEqual(names);
-    expect(Object.keys(LOW_WATER).sort()).toEqual(names);
+    expect(Object.keys(POOL_TARGET).sort()).toEqual(names);
   });
 
-  it("asks for a batch the core can blind and the pool can hold", () => {
+  it("keeps a target the core can blind in one batch and the pool can hold", () => {
+    // ADR-0078 section 8: a scheduled refill tops a bucket up to its target
+    // in ONE issuance, so the target never exceeds what one batch can carry.
     const maxBatch = wasm.anonTokenMaxBatch();
     for (const context of ANON_TOKEN_CONTEXTS) {
-      const batch = refillBatch(context);
-      const low = lowWater(context);
-      expect(batch, context).toBeGreaterThanOrEqual(1);
-      expect(batch, context).toBeLessThanOrEqual(Math.min(maxBatch, MAX_POOL));
-      // A refill must lift the bucket to at least its low-water mark, or
-      // every take would start another refill.
-      expect(low, context).toBeGreaterThanOrEqual(1);
-      expect(low, context).toBeLessThanOrEqual(batch);
+      const target = poolTarget(context);
+      expect(target, context).toBeGreaterThanOrEqual(2);
+      expect(target, context).toBeLessThanOrEqual(Math.min(maxBatch, MAX_POOL));
     }
   });
 
   it("the core blinds a batch for every context under its name", () => {
     for (const context of ANON_TOKEN_CONTEXTS) {
-      const request = new wasm.AnonTokenRequest(context, 19_675n, refillBatch(context));
+      const request = new wasm.AnonTokenRequest(context, 19_675n, poolTarget(context));
       try {
         const body = JSON.parse(request.issueBodyJson()) as {
           context: string;
           blinded_elements: string[];
         };
         expect(body.context).toBe(context);
-        expect(body.blinded_elements).toHaveLength(refillBatch(context));
+        expect(body.blinded_elements).toHaveLength(poolTarget(context));
       } finally {
         request.free();
       }
     }
   });
 
-  it("the storage contexts: batch 4 / 2 / 2, refilled once empty", () => {
-    // Chosen, not measured (no flow spends them yet).
-    expect([refillBatch("vault-claim"), lowWater("vault-claim")]).toEqual([4, 1]);
-    expect([refillBatch("blob-upload"), lowWater("blob-upload")]).toEqual([2, 1]);
-    expect([refillBatch("blob-read"), lowWater("blob-read")]).toEqual([2, 1]);
+  it("the storage contexts and mailbox-write keep 8 / 4 / 4 / 4 on hand", () => {
+    // Chosen, not measured.
+    expect(poolTarget("vault-claim")).toBe(8);
+    expect(poolTarget("blob-upload")).toBe(4);
+    expect(poolTarget("blob-read")).toBe(4);
+    expect(poolTarget("mailbox-write")).toBe(4);
   });
 
-  it("the ADR-0078 mailbox-write context: batch 2, refilled once empty", () => {
-    expect([refillBatch("mailbox-write"), lowWater("mailbox-write")]).toEqual([2, 1]);
+  it("the ADR-0078 call-join context keeps 4 on hand", () => {
+    // Chosen, not measured: one token per call admission.
+    expect(poolTarget("call-join")).toBe(4);
   });
 });

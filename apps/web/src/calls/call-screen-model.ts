@@ -154,6 +154,9 @@ export interface CallPeerLabelInput {
   /** The sole remote's display name, for the 1x1 case where the host has not
    *  resolved one. */
   readonly soleRemoteName: string | null | undefined;
+  /** The group's shared name (ADR-0051) on a group call placed in a
+   *  conversation; `null` or absent on a link call or a group with no name. */
+  readonly groupName?: string | null | undefined;
 }
 
 /**
@@ -166,15 +169,18 @@ export interface CallPeerLabelInput {
  * exactly how they come to disagree. `vitest` here has no Solid transform, so
  * the copy that lived in the view was a rule nothing could assert.
  *
- * A group call has no single name, so the label names the call and counts it
- * instead of inventing a person. `Participant` for a 1x1 call the host could
+ * A group call is named by its group, as on iOS and Android, and by
+ * `Group call` when the group has no name or the call came from a link; it
+ * never invents a person. Until 2026-10-23 the web said `Group call · 3` while
+ * the phones in the same call said the group's name. `Participant` for a 1x1 call the host could
  * not name is practically unreachable — it resolves a name for every one — but
  * it must not invent a person if it is, and `encryption-chip.ts` treats that
  * exact word as "no name" so the sheet's sentence stays consistent with it.
  */
 export function callPeerLabel(input: CallPeerLabelInput): string {
   if (input.surface === "group") {
-    return t("call.status.group_count", { count: input.participantCount });
+    const group = input.groupName?.trim() ?? "";
+    return group !== "" ? group : t("call.label.group");
   }
   const given = input.peerName?.trim() ?? "";
   if (given !== "") return given;

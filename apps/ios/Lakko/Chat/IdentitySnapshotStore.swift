@@ -80,8 +80,15 @@ public final class IdentitySnapshotStore {
     /// never deleted by the migration.
     private let oldEnvelopeDir: URL?
 
-    public init() {
+    /// A suffix of the record name, so one account can keep more than one
+    /// provider snapshot: the chat provider has none, the channel publisher
+    /// provider (``ChannelPublisherIdentity``) has `.channels`. The account
+    /// store gate is entered under the account id alone.
+    private let scope: String
+
+    public init(scope: String = "") {
         self.oldEnvelopeDir = Self.oldEnvelopeDir()
+        self.scope = scope
     }
 
     // MARK: - Public API
@@ -231,7 +238,7 @@ public final class IdentitySnapshotStore {
     private func fileName(_ accountIdB64: String) -> String {
         // Replace any `/` in the base64 account id with `_` so the
         // segment is filesystem-safe — same posture as Android.
-        "\(accountIdB64.replacingOccurrences(of: "/", with: "_")).bin"
+        "\(accountIdB64.replacingOccurrences(of: "/", with: "_"))\(scope).bin"
     }
 
     /// New authoritative location: the App Group container. `nil` when the

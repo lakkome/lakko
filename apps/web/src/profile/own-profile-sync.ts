@@ -23,6 +23,7 @@
 import { loadWasm } from "../wasm";
 import { markServiceEnvelopeDirty, setServiceEnvelopeComposer } from "../reach/service-envelope-outbox";
 import { adoptOwnProfile, loadOwnProfile, type OwnProfile, type OwnProfileStorage } from "./own-profile";
+import { avatarToWasm, type AvatarData, type AvatarWasm } from "./avatar-model";
 
 /** The one wasm export the composer needs, structurally. */
 export interface OwnProfileComposer {
@@ -31,6 +32,9 @@ export interface OwnProfileComposer {
     username: string | null | undefined,
     updatedAtMs: bigint,
     accountId?: Uint8Array | null,
+    usernameCertificate?: Uint8Array | null,
+    grants?: never[] | null,
+    avatar?: never | null,
   ): Uint8Array;
 }
 
@@ -39,16 +43,25 @@ export interface OwnProfileComposer {
  * name was ever saved. Pure over the core.
  */
 export function composeOwnProfileForDevices(
-  wasm: OwnProfileComposer,
+  wasm: OwnProfileComposer & Partial<AvatarWasm>,
   own: OwnProfile,
   accountIdBytes: Uint8Array | null,
 ): Uint8Array | null {
   if (own.updatedAtMs <= 0) return null;
+  // ADR-0084 — the photo travels with the name to the account's other
+  // devices, the same envelope a group gets.
+  const avatar =
+    own.avatar === null || wasm.AvatarRef === undefined || wasm.ProfileAvatar === undefined
+      ? undefined
+      : avatarToWasm<never>(wasm as AvatarWasm, own.avatar);
   return wasm.composeProfileEnvelope(
     own.displayName,
     undefined,
     BigInt(own.updatedAtMs),
     accountIdBytes ?? undefined,
+    undefined,
+    undefined,
+    avatar,
   );
 }
 
@@ -107,10 +120,14 @@ export function isOwnProfileBound(): boolean {
  * Adopt a display name another device of this account sent, when its stamp
  * is strictly newer than the stored one. Returns whether it was adopted.
  */
-export function receiveOwnProfile(displayName: string | null, updatedAtMs: bigint): boolean {
+export function receiveOwnProfile(
+  displayName: string | null,
+  updatedAtMs: bigint,
+  avatar: AvatarData | null = null,
+): boolean {
   const b = bound;
   if (b === null) return false;
-  const adopted = adoptOwnProfile(b.accountId, displayName, updatedAtMs, b.storage);
+  const adopted = adoptOwnProfile(b.accountId, displayName, updatedAtMs, b.storage, avatar);
   if (adopted === null) return false;
   for (const listener of listeners) {
     try {

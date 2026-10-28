@@ -1027,6 +1027,73 @@ one is covered in the SFU's own books by unit tests only. With
 looked at. The estimate being put back was exercised by a unit test (a
 forced cut), not by a cut on a real path.
 
+## The screen share (the `~screen` contract, ADR-0083)
+
+[ADR-0083](../../docs/adr/0083-screen-share.md) section 3. A publisher that
+shares its screen sends it as one more ordinary video sender (SFrame stream
+index 2) and, when it shares sound, one more ordinary audio sender (stream
+index 5), and names both lines in the offer that adds them:
+
+```json
+{"kind":"sdp-offer","sdp":"...","light_mids":["2"],"middle_mids":["3"],"screen_mids":["4","5"]}
+```
+
+`screen_mids` (`lakko_sfu_proto::ClientFrame::SdpOffer`) has the bounds of
+`light_mids` and is absent when empty. What the SFU does with it
+(`MediaPeer::declare_screen_tracks`, role `TrackRole::Screen`):
+
+- **A mid is taken for a line of either kind** (video or audio) that the
+  peer sends on, that has not been announced as an ordinary track and that
+  is not its light or middle line (`declared-as-the-other-copy`; the light
+  and middle declarations refuse a screen line the same way). The light and
+  middle lists are declared first. Other reasons are those of `light_mids`:
+  `unknown-mid`, `not-sent-by-peer`, `already-a-main-track`; logged as
+  `media: screen-track declaration ignored`.
+- **One new video line and one new audio line per offer**; a second of a
+  kind in the same offer is refused (`another-track-of-this-kind-declared`).
+  A taken mid stays a screen line for good, and naming it again is a no-op.
+  A share that starts again on new lines declares them in its own offer, up
+  to `MAX_SCREEN_MIDS` (8) lines over the peer's life
+  (`too-many-screen-lines` beyond).
+- **Each screen line reaches every subscriber as a screen track**, MSID
+  stream id = the source peer id followed by the literal `~screen`
+  (`media::SCREEN_STREAM_SUFFIX`; the same string as
+  `lakko_calls::screen_share::SCREEN_STREAM_SUFFIX`), never as a main
+  track. Its packets go to that track and nothing else, verbatim (C-39), on
+  its own RTP stream.
+- **Forwarded always.** `video-wants` never pauses a screen track, it has
+  no light or middle variant, no layer is selected, and `video-needed` does
+  not concern it: a screen line is never a camera sender the SFU tells to
+  stop.
+- **Key frames** for a screen track go through the same per-`(mid, rid)`
+  gate on the publisher as a camera's; a subscriber's PLI on its screen
+  track goes to the publisher's screen line.
+- **Downlink control**: a screen share, picture and sound, is taken off a
+  subscriber's budget before any camera and never given up (below).
+- **Publish budget**: while the publisher sends a screen picture (a
+  declared screen video line it still sends on), its room is reserved
+  before the camera ceilings and told as `screen_kbps` (below).
+
+A client that does not know the contract sees a further track under a stream
+id that matches no participant.
+
+Tests: `media.rs` (the declaration, accepted for a video and an audio line,
+refused for a light line, a second video line, a receive-only line and an
+unknown mid, and beyond the bound; the screen track's stream id; never paused
+by `video-wants`; a packet offered to the screen track alone; a subscriber's
+key frame request resolved to the publisher's screen line and held to its
+gate; the screen rates apart from the cameras'; the budget frame);
+`downlink_allocation.rs` (the screen taken off the budget first);
+`publish_budget.rs` (the reserve, its bounds, the absent ceiling, a share
+starting and stopping told at once); `tests/synthetic_client_e2e.rs`,
+`a_declared_screen_line_reaches_a_subscriber_as_a_screen_track_verbatim`
+(over the live media task: the `~screen` stream id in the SFU's offer, and
+the publisher's frame at the subscriber byte for byte while the subscriber
+shows only the light picture of that publisher).
+
+Not verified: nothing here was seen on a call or run against a browser or a
+native client.
+
 ## The publish budget (`publish-budget`, 2026-10-11)
 
 `publish_budget.rs` holds the rule, `media::drive_publish_budget` and
@@ -1052,6 +1119,7 @@ sender.
 
 ```json
 {"kind":"publish-budget","main_kbps":1922,"middle_kbps":500}
+{"kind":"publish-budget","main_kbps":422,"middle_kbps":500,"screen_kbps":1500}
 ```
 
 `lakko_sfu_proto::ServerFrame::PublishBudget`. Both fields are required
@@ -1060,7 +1128,9 @@ unsigned integers, kilobits per second, each from 1 to 20000
 encoder refuses to compose it. The ceiling of the publisher's **main** and
 **middle** camera sender. The light sender keeps its fixed ceiling and audio
 is never limited. A client sets each figure as that sender's maximum
-bitrate; one that ignores the frame behaves as before.
+bitrate; one that ignores the frame behaves as before. `screen_kbps`
+(ADR-0083) is present only while the publisher sends a screen picture, the
+ceiling of its screen-share sender, with the same bounds.
 
 ### The rule
 
@@ -1071,7 +1141,8 @@ All of it is the SFU's; a client has no allocation rule.
 | headroom, audio | the rate arriving on the publisher's audio tracks where it is metered (downlink control on), kept within 32 to 128 kbit/s; otherwise a constant | `AUDIO_RESERVE_BPS` 64 kbit/s |
 | headroom, light | a constant, when the publisher declared a light sender | `LIGHT_RESERVE_BPS` 150 kbit/s |
 | retransmissions and FEC | what is left is divided by 1.15 | `PROTECTION_PERCENT` 15 |
-| middle | its plan rate when needed; gives way only to the main floor | `MIDDLE_PLAN_BPS` 500 kbit/s |
+| screen (ADR-0083) | while a screen picture is sent: what the floors of the camera senders that are needed leave, before any camera ceiling | `SCREEN_FLOOR_BPS` 300 to `SCREEN_PLAN_BPS` 1500 kbit/s |
+| middle | its plan rate when needed, out of what the screen leaves; gives way only to the main floor | `MIDDLE_PLAN_BPS` 500 kbit/s |
 | main | the rest when needed | up to `MAIN_PLAN_BPS` 2500 kbit/s |
 | floors | never below | `MAIN_FLOOR_BPS` 200, `MIDDLE_FLOOR_BPS` 100 kbit/s |
 
@@ -1083,7 +1154,8 @@ senders is taken to send them all. Every constant is chosen, not measured.
 Examples (a light sender declared, audio not metered): an estimate of
 3000 kbit/s gives `main 1922, middle 500`; 1000 kbit/s gives
 `main 200, middle 483` with both needed and `main 683` with the middle
-sender off.
+sender off. Sharing a screen at 3000 kbit/s: `main 422, middle 500,
+screen 1500`; at 1000 kbit/s: `main 200, middle 100, screen 383`.
 
 ### When a publisher is told
 
@@ -1092,7 +1164,7 @@ sender off.
 - **Lower**: at once, when a ceiling is under 97% of what was told
   (`DROP_PERCENT`).
 - **Senders**: at once, when which senders are needed changed and a
-  ceiling with it. A `video-needed` frame makes the budget run in the same
+  ceiling with it; a screen share starting or stopping is such a change. A `video-needed` frame makes the budget run in the same
   pass.
 - **Higher**: no sooner than 2 s after the last frame (`RAISE_INTERVAL`),
   and only when a ceiling differs by 10% of what was told
@@ -1115,7 +1187,7 @@ media: a publisher was told how much its camera senders may send publisher=<peer
 
 ### Tests
 
-- `publish_budget.rs` (14): the headroom, the shares, the bounds over a
+- `publish_budget.rs` (18, four of them the screen reserve of ADR-0083): the headroom, the shares, the bounds over a
   sweep of estimates and needs, monotonicity, and each of the four reasons
   a frame is sent, with the interval and the share.
 - `media.rs` (4): told only once connected and sending video, a cut at
@@ -1853,7 +1925,10 @@ and `a_repaired_uplink_burst_costs_no_key_frame`. Vendored:
 ## Downlink control (`LAKKO_SFU_DOWNLINK_CONTROL`, ADR-0070 step 6)
 
 The SFU estimates what each subscriber's downlink carries and, when it is
-short, gives up the larger video tracks first. Without it the SFU sends a
+short, gives up the larger video tracks first. Audio, a screen share
+(ADR-0083, picture and sound) and the light tracks are taken off the budget
+first and never given up, so a subscriber's link goes to a screen before any
+camera. Without it the SFU sends a
 subscriber everything it asks for, whatever its path carries.
 
 **Off unless `LAKKO_SFU_DOWNLINK_CONTROL=1`, and only under

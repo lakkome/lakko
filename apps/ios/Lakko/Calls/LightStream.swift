@@ -27,12 +27,20 @@ enum LightStream {
     static let lightSuffix = "~light"
     /// What the SFU appends to a peer id to name that peer's middle track.
     static let middleSuffix = "~mid"
+    /// What a sender appends to its peer id (group call) or stream id
+    /// (one-to-one) to name its shared screen (ADR-0083 sections 3 and 4):
+    /// the share's picture and its sound. The same string as the core's
+    /// `screenStreamSuffix()`, pinned by a test.
+    static let screenSuffix = "~screen"
 
     /// Which of a peer's streams a remote stream id names.
     enum Role: String, Equatable {
         case main
         case middle
         case light
+        /// The person's shared screen (ADR-0083): its own tile, never a
+        /// picture of their camera.
+        case screen
     }
 
     /// A remote MSID stream id, read.
@@ -47,6 +55,7 @@ enum LightStream {
     private static let suffixes: [(String, Role)] = [
         (lightSuffix, .light),
         (middleSuffix, .middle),
+        (screenSuffix, .screen),
     ]
 
     /// Split a remote stream id into the peer it belongs to and which of that
@@ -81,6 +90,8 @@ enum RemoteVideoRoute: Equatable {
     case middle(peerId: String)
     /// The light companion of `peerId`.
     case light(peerId: String)
+    /// The shared screen of `peerId` (ADR-0083).
+    case screen(peerId: String)
 
     /// The route of a track that arrived under `streamId`.
     static func of(streamId: String?) -> RemoteVideoRoute {
@@ -90,6 +101,7 @@ enum RemoteVideoRoute: Equatable {
         case .main: return .main(streamId: streamId)
         case .middle: return .middle(peerId: id.peerId)
         case .light: return .light(peerId: id.peerId)
+        case .screen: return .screen(peerId: id.peerId)
         }
     }
 }

@@ -102,6 +102,32 @@ export class SyncStatePersister {
     return this.chain;
   }
 
+  /**
+   * Write `capture` now, after every write started so far, and reject when
+   * it cannot be written: the capture throws or returns `null`, or the save
+   * fails. For a change that must be on disk before anything depends on it
+   * (an invite link's record, before the link is handed out). A change
+   * waiting for its debounce is replaced: the capture reads the newest state.
+   */
+  async writeNow(account: string, capture: SyncStateCapture): Promise<void> {
+    this.stopTimer();
+    this.queued = null;
+    const captured = capture();
+    if (captured === null) throw new Error("sync state not written: the account is not bound");
+    let failure: { readonly err: unknown } | null = null;
+    const run = this.chain.then(async () => {
+      try {
+        await this.deps.save(account, captured);
+      } catch (err) {
+        failure = { err };
+        this.deps.onError?.(err);
+      }
+    });
+    this.chain = run;
+    await run;
+    if (failure !== null) throw (failure as { readonly err: unknown }).err;
+  }
+
   /** Drop a queued change without writing it (a removed device). */
   cancel(): void {
     this.stopTimer();

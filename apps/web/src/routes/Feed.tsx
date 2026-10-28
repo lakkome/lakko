@@ -102,6 +102,8 @@ import {
 } from "../feed/feed-store";
 import { recordFeedSeen } from "../feed/feed-seen-writer";
 import { memberNameOf } from "../profile/member-label";
+import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
+import { Avatar } from "../ui/Avatar";
 import { useProfiles } from "../profile/ProfileContext";
 import { Icon } from "../ui/icons";
 import { composeForwardEnvelope, reencryptAttachmentRef, type AttachmentRefBytes } from "../chat/attachments";
@@ -112,7 +114,7 @@ import { ForwardPicker } from "../chat/ForwardPicker";
 import type { ForwardPickerRow } from "../chat/forward-picker";
 import { MESSAGE_LOG_VERSION, updateMessageLog, type PersistedMessage } from "../chat/message-log-store";
 import { dsClockSkewNotice } from "../ds/access";
-import { pushGidForGroup } from "../push/group-routing";
+import { sealedWakeForGroup } from "../push/group-routing";
 import { feedForwardPayload } from "../feed/feed-forward";
 import { feedIconName, PRESET_ICONS } from "../feed/feed-icons";
 import {
@@ -608,6 +610,15 @@ export default function Feed(): JSX.Element {
     return key === null || key === undefined ? null : memberNameOf(profiles.resolve(key));
   };
 
+  /** ADR-0084 - whose photo sits beside the author's name: the author key of
+   *  an incoming group message, the own account for an outgoing one,
+   *  nothing for a channel post (the channel speaks as itself). */
+  const authorKeyOf = (ref: FeedCandidateRef): string | undefined => {
+    if (ref.source.kind === "channel") return undefined;
+    if (ref.message.direction === "outgoing") return OWN_AVATAR_KEY;
+    return ref.message.authorKeyB64 ?? undefined;
+  };
+
   const authorOf = (ref: FeedCandidateRef): string => {
     if (ref.source.kind === "channel") return ref.source.title;
     if (ref.message.direction === "outgoing") return t("chat.author.you");
@@ -871,10 +882,10 @@ export default function Feed(): JSX.Element {
     identityProvider: () => chats.identity(),
     onPersist: durableSnapshotHook(chats, accountId),
     // ADR-0042 — the wake goes under the opaque routing id, as from the chat.
-    pushGidResolver: async (groupId) => {
+    wakeSealer: async (groupId, kind) => {
       const account = accountId();
       if (account === null) return null;
-      return pushGidForGroup(account, base64Encode(groupId));
+      return sealedWakeForGroup(account, base64Encode(groupId), kind);
     },
   });
   const [forwarding, setForwarding] = createSignal<FeedCandidateRef | null>(null);
@@ -1323,7 +1334,15 @@ export default function Feed(): JSX.Element {
                         </div>
                         {/* A channel speaks as itself: its name is already the source. */}
                         <Show when={item.ref.source.kind === "group"}>
-                          <div class="lk-feed-author">{authorOf(item.ref)}</div>
+                          <div class="lk-feed-author lk-person-line">
+                            <Avatar
+                              label={authorOf(item.ref)}
+                              id={authorKeyOf(item.ref) ?? ""}
+                              size="sm"
+                              personKey={authorKeyOf(item.ref)}
+                            />
+                            <span>{authorOf(item.ref)}</span>
+                          </div>
                         </Show>
                         <Show when={item.ref.message.forward?.author}>
                           {(name) => <div class="lk-feed-forwarded">{t("chat.forward.from", { name: name() })}</div>}
@@ -1376,7 +1395,15 @@ export default function Feed(): JSX.Element {
                                     class="lk-feed-reply"
                                     onClick={() => open(reply)}
                                   >
-                                    <span class="lk-feed-author">{authorOf(reply)}</span>
+                                    <span class="lk-feed-author lk-person-line">
+                                      <Avatar
+                                        label={authorOf(reply)}
+                                        id={authorKeyOf(reply) ?? ""}
+                                        size="sm"
+                                        personKey={authorKeyOf(reply)}
+                                      />
+                                      <span>{authorOf(reply)}</span>
+                                    </span>
                                     <span class="lk-feed-text">{bodyOf(reply)}</span>
                                   </button>
                                 </li>

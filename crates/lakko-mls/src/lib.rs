@@ -31,10 +31,11 @@ pub mod key_package;
 pub mod pairing;
 pub mod publisher_group;
 pub mod refusal;
+pub mod self_removal;
 pub mod welcome_rendezvous;
 
 pub use device_binding::{account_key_of_credential, DeviceBinding, DEVICE_BINDING_LEN};
-pub use device_group::{AccountId, DeviceGroup, MAX_SERVICE_ENVELOPE_LEN};
+pub use device_group::{AccountId, AccountSeed, DeviceGroup, MAX_SERVICE_ENVELOPE_LEN};
 pub use error::{Error, Result};
 pub use group::{
     epoch_after_message, epoch_of_message, is_external_join_proposal_for, Group, Incoming,
@@ -45,9 +46,10 @@ pub use group_proposals::{ProposalKind, ProposalRecord};
 pub use group_roles::{account_committer_rank, committer_rank, OutgoingOwner, Role, RoleTable};
 pub use identity::Identity;
 pub use publisher_group::{
-    channel_id_from_group_id, ChannelId, PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN,
+    publisher_group_id_for, ChannelId, PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN,
 };
 pub use refusal::{RefusalDisposition, RefusalReason};
+pub use self_removal::{sign_self_removal, SelfRemovalProof, SELF_REMOVAL_PROOF_LEN};
 pub use welcome_rendezvous::WelcomeRendezvous;
 
 /// Re-exported MLS leaf-node index. Surfaced so callers do not need to
@@ -71,6 +73,35 @@ pub mod fuzz_api {
     pub fn parse_mls_message(bytes: &[u8]) -> bool {
         let mut slice = bytes;
         MlsMessageIn::tls_deserialize(&mut slice).is_ok()
+    }
+
+    /// Decode a DeviceGroup self-removal proof (ADR-0081 amendment) and, when
+    /// it decodes, check that it re-encodes to the identical bytes and that
+    /// [`crate::SelfRemovalProof::covers`] answers without panicking on the
+    /// attacker-chosen fields. Returns `true` when it decoded. The bytes
+    /// travel in the removal-authorisation slot of the DeviceGroup journal
+    /// envelope, which a malicious device of the account or the DS chooses.
+    ///
+    /// # Panics
+    ///
+    /// When a decoded proof does not re-encode to its input (a codec bug).
+    #[must_use]
+    pub fn decode_self_removal_proof(bytes: &[u8]) -> bool {
+        let Ok(proof) = crate::SelfRemovalProof::decode(bytes) else {
+            return false;
+        };
+        assert_eq!(
+            proof.encode(),
+            bytes,
+            "a decoded proof re-encodes to its input"
+        );
+        let _ = proof.covers(
+            &[1u8; 32],
+            proof.epoch,
+            &proof.removed_signature_pubkey,
+            &[proof.key_package_ref.to_vec()],
+        );
+        true
     }
 
     /// Try to parse and validate a wire-format `KeyPackage`. Returns `true`
