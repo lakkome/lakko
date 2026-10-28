@@ -358,6 +358,11 @@ targets:
           # signing team's id; the test deploy writes it from
           # LAKKO_APPLE_TEAM_ID when that is set.
           - applinks:test.lakko.me
+          # On a device in developer mode, running a development-signed
+          # build, this makes iOS fetch the association straight from the
+          # test host instead of Apple's CDN, which caches a missing or
+          # earlier file. Ignored by any other build.
+          - applinks:test.lakko.me?mode=developer
         # 1.20c — Push Notifications entitlement. `development`
         # routes APNs requests through the sandbox endpoint
         # (`api.sandbox.push.apple.com`); production builds
