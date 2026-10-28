@@ -154,8 +154,27 @@ const fn kind_of(kind: PushWakeKind) -> WakeKind {
 
 fn refused(status: StatusCode, why: &'static str) -> HandlerError {
     // The cause alone: never a key, a push_gid or a nonce.
-    tracing::debug!(why, "wake refused");
+    tracing::info!(why, "wake refused");
     (status, why.to_string())
+}
+
+/// The outcomes of one wake's deliveries as `provider:status=count` pairs in
+/// a fixed order (`apns:ok=1,webpush:ok=1`), or `none`. Provider names and
+/// the three status words only: no token, no detail.
+fn delivery_summary(deliveries: &[DeliveryOutcome]) -> String {
+    let mut counts: std::collections::BTreeMap<(&'static str, &'static str), usize> =
+        std::collections::BTreeMap::new();
+    for d in deliveries {
+        *counts.entry((d.provider.as_str(), d.status)).or_insert(0) += 1;
+    }
+    if counts.is_empty() {
+        return "none".to_string();
+    }
+    counts
+        .iter()
+        .map(|((provider, status), n)| format!("{provider}:{status}={n}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn unix_ms_now() -> u64 {
@@ -248,6 +267,19 @@ pub(crate) async fn notify_group(
             .await;
         }
     }
+
+    // One line per accepted wake: how many rows it reached and what each
+    // provider answered, counts only. A failure's detail can carry the
+    // provider URL, and APNs puts the device token in its path, so it stays
+    // out of the log.
+    let ring = kind.is_call();
+    tracing::info!(
+        ring,
+        woken,
+        unopened,
+        deliveries = %delivery_summary(&deliveries),
+        "wake fanned out"
+    );
 
     Ok(Json(NotifyGroupResponse {
         subscriptions_woken: woken,
@@ -377,7 +409,35 @@ async fn dispatch_one(
 
 #[cfg(test)]
 mod tests {
-    use super::{delivers_to, NotifyGroupRequest, ProviderKind, PushWakeKind, WakeKind};
+    use super::{
+        delivers_to, delivery_summary, DeliveryOutcome, NotifyGroupRequest, ProviderKind,
+        PushWakeKind, WakeKind,
+    };
+
+    fn outcome(provider: ProviderKind, status: &'static str) -> DeliveryOutcome {
+        DeliveryOutcome {
+            provider,
+            status,
+            detail: Some("https://api.sandbox.push.apple.com/3/device/abc".to_string()),
+        }
+    }
+
+    #[test]
+    fn the_delivery_summary_counts_provider_and_status_and_never_the_detail() {
+        let summary = delivery_summary(&[
+            outcome(ProviderKind::WebPush, "ok"),
+            outcome(ProviderKind::Apns, "ok"),
+            outcome(ProviderKind::Apns, "token_invalid"),
+            outcome(ProviderKind::Apns, "ok"),
+        ]);
+        assert_eq!(summary, "apns:ok=2,apns:token_invalid=1,webpush:ok=1");
+        assert!(!summary.contains("device"));
+    }
+
+    #[test]
+    fn a_wake_that_reached_nothing_says_none() {
+        assert_eq!(delivery_summary(&[]), "none");
+    }
 
     /// Every kind that is delivered to for `wake`, given a device
     /// registered under `registered`. Reads like the fan-out loop so a
