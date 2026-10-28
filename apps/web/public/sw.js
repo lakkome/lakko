@@ -402,7 +402,7 @@ async function handlePush(wake) {
       renotify: false,
       data,
       icon: "/icon-192.png",
-      badge: "/icon-96.png",
+      badge: "/badge-96.png",
     });
   } catch {
     // Some browsers + private modes don't allow showing notifications

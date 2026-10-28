@@ -28,7 +28,11 @@ demo. The security is the product's foundation, not its interface.
   for compositing). The glyph is a raster cut from the original icon;
   before a store submission trace it to a vector. Use the tile as the app
   icon, favicon, PWA icon, and once on the auth screens. Do not repeat it
-  in every header.
+  in every header. Every app and notification icon (iOS light / dark /
+  tinted, Android adaptive + monochrome + status bar, web favicon / PWA /
+  maskable / apple-touch / push badge) is rendered from the glyph by
+  `swift tools/brand/render-app-icons.swift`; change the composition
+  there, never by hand in one client.
 - **Gradient**: `linear-gradient(135deg, #312e81 0%, #818cf8 100%)`, dark
   indigo to light indigo. It appears on the logo tile and on the left
   brand panel of the auth screens, in both themes. **Never** a page, card,

@@ -28,8 +28,9 @@ import me.lakko.app.BuildConfig
  *      fields from `BuildConfig.FCM_*` and feed them into
  *      [`FirebaseOptions.Builder`], then
  *      `FirebaseApp.initializeApp(context, options)` on first
- *      use. Idempotent — subsequent calls find the named app
- *      already created and skip the init.
+ *      use, as the DEFAULT app: `FirebaseMessaging.getInstance()`
+ *      and the SDK's own message delivery read only the default
+ *      app. Idempotent — a later call finds it and skips the init.
  *   2. **`FirebaseMessaging.getInstance().token.await()`** — the
  *      coroutine-friendly accessor for the per-device FCM
  *      registration token. The Firebase SDK caches the token;
@@ -94,22 +95,13 @@ public class PushSubscriber(
         accountIdB64: String,
         stillSignedIn: () -> Boolean = { true },
     ): SubscribeResult? {
-        val options = buildFirebaseOptionsOrNull() ?: run {
-            Log.i(TAG, "FCM disabled (missing BuildConfig.FCM_* fields)")
-            return null
-        }
-        try {
-            ensureFirebaseInitialised(options)
-        } catch (cause: Throwable) {
-            Log.w(TAG, "Firebase init failed", cause)
-            return null
-        }
+        if (!ensureFirebase(context)) return null
 
         val token = try {
             // `FirebaseMessaging.getInstance(firebaseApp)` was made
             // package-private in Firebase BoM 33+; the public path is the
-            // no-arg overload, which resolves to the default app — the only
-            // one Lakko ever initialises.
+            // no-arg overload, which resolves to the default app, the one
+            // [ensureFirebase] initialises.
             FirebaseMessaging.getInstance().token.await()
         } catch (cause: Throwable) {
             Log.w(TAG, "FCM token fetch failed", cause)
@@ -193,47 +185,54 @@ public class PushSubscriber(
     // Internal
     // -----------------------------------------------------------------
 
-    private fun buildFirebaseOptionsOrNull(): FirebaseOptions? {
-        val projectId = BuildConfig.FCM_PROJECT_ID
-        val appId = BuildConfig.FCM_APPLICATION_ID
-        val apiKey = BuildConfig.FCM_API_KEY
-        val senderId = BuildConfig.FCM_SENDER_ID
-        if (projectId.isEmpty() || appId.isEmpty() ||
-            apiKey.isEmpty() || senderId.isEmpty()
-        ) {
-            return null
-        }
-        return FirebaseOptions.Builder()
-            .setProjectId(projectId)
-            .setApplicationId(appId)
-            .setApiKey(apiKey)
-            .setGcmSenderId(senderId)
-            .build()
-    }
-
-    private fun ensureFirebaseInitialised(
-        options: FirebaseOptions,
-    ): FirebaseApp {
-        // Look for an already-initialised app with our name; if
-        // present, reuse it (subsequent calls within the same
-        // process). Otherwise init now.
-        return try {
-            FirebaseApp.getInstance(APP_NAME)
-        } catch (_: IllegalStateException) {
-            FirebaseApp.initializeApp(context.applicationContext, options, APP_NAME)
-        }
-    }
-
     public companion object {
         /** Logcat tag for the push module. */
         public const val TAG: String = "lakko-push"
 
-        /** Name we hand to `FirebaseApp.initializeApp` so we
-         *  don't collide with the default Firebase app (which
-         *  some host SDK might attempt to create). Using a
-         *  named app also lets us cleanly query its existence
-         *  via `FirebaseApp.getInstance(APP_NAME)`. */
-        public const val APP_NAME: String = "lakko"
+        /**
+         * Initialise the default Firebase app from `BuildConfig.FCM_*`
+         * unless it exists. Returns false when FCM is not configured for
+         * this build or the init fails; push then stays off.
+         *
+         * It must be the DEFAULT app: `FirebaseMessaging.getInstance()` and
+         * the SDK's delivery to [LakkoMessagingService] read only that one.
+         * Initialising a named app instead left the token fetch failing
+         * with "Default FirebaseApp is not initialized".
+         */
+        public fun ensureFirebase(context: Context): Boolean {
+            val options = firebaseOptionsOrNull() ?: run {
+                Log.i(TAG, "FCM disabled (missing BuildConfig.FCM_* fields)")
+                return false
+            }
+            return try {
+                val apps = FirebaseApp.getApps(context.applicationContext)
+                if (apps.none { it.name == FirebaseApp.DEFAULT_APP_NAME }) {
+                    FirebaseApp.initializeApp(context.applicationContext, options)
+                }
+                true
+            } catch (cause: Throwable) {
+                Log.w(TAG, "Firebase init failed", cause)
+                false
+            }
+        }
+
+        private fun firebaseOptionsOrNull(): FirebaseOptions? {
+            val projectId = BuildConfig.FCM_PROJECT_ID
+            val appId = BuildConfig.FCM_APPLICATION_ID
+            val apiKey = BuildConfig.FCM_API_KEY
+            val senderId = BuildConfig.FCM_SENDER_ID
+            if (projectId.isEmpty() || appId.isEmpty() ||
+                apiKey.isEmpty() || senderId.isEmpty()
+            ) {
+                return null
+            }
+            return FirebaseOptions.Builder()
+                .setProjectId(projectId)
+                .setApplicationId(appId)
+                .setApiKey(apiKey)
+                .setGcmSenderId(senderId)
+                .build()
+        }
     }
 }
 

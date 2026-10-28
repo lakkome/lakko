@@ -287,7 +287,7 @@ public object NewDeviceNotices {
             )
             // It names no device and no place (UX 17.5).
             val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.sym_def_app_icon)
+                .setSmallIcon(me.lakko.app.R.drawable.ic_stat_lakko)
                 .setContentTitle(strings["devices.added_notice.title"])
                 .setContentText(strings["devices.added_notice.notification_body"])
                 .setAutoCancel(true)

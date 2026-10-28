@@ -106,9 +106,9 @@ targets:
     # Asset catalog: `Lakko/Assets.xcassets` (picked up by the `Lakko`
     # source path above) carries `AccentColor` plus the light + dark colour
     # sets of the UX-spec token table (docs/ux/client-redesign.md section 4),
-    # read through `Lakko/UI/Theme/LakkoTheme.swift`. No app icon set yet:
-    # the default launcher icon still shows for `me.lakko.dev` debug
-    # installs until the brand tile is added.
+    # read through `Lakko/UI/Theme/LakkoTheme.swift`, and the `AppIcon` set
+    # (light, dark and tinted 1024 images rendered by
+    # `tools/brand/render-app-icons.swift`).
     info:
       path: Lakko/Info.plist
       properties:

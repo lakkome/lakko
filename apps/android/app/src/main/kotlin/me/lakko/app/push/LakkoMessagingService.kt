@@ -87,6 +87,13 @@ public class LakkoMessagingService : FirebaseMessagingService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    override fun onCreate() {
+        // A push can start this service in a process where no sign-in ran,
+        // so the default Firebase app the SDK delivers through may not exist.
+        PushSubscriber.ensureFirebase(applicationContext)
+        super.onCreate()
+    }
+
     override fun onNewToken(token: String) {
         scope.launch {
             try {
@@ -327,7 +334,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             // matches the AndroidManifest `android:icon` fallback
             // from 1.15c. When the app ships a real icon pack
             // (post-MVP), swap this to `R.mipmap.ic_launcher`.
-            .setSmallIcon(android.R.drawable.sym_def_app_icon)
+            .setSmallIcon(me.lakko.app.R.drawable.ic_stat_lakko)
             // Real decrypted preview when the background decrypt
             // yielded one; the generic fallback otherwise.
             .setContentTitle(preview?.title ?: "Lakko")
