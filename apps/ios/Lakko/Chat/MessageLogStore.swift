@@ -395,6 +395,9 @@ public struct PersistedMessage: Codable, Equatable {
     /// could not read (`text` is empty). Absent on every other row and on a
     /// row written before the field existed; both read back as `nil`.
     public let unsupportedVersion: UInt64?
+    /// ADR-0082 section 5 — the DS id of the newest edit or delete op folded
+    /// into the message; absent when never edited.
+    public var lastOpId: Int64?
 
     public init(
         messageId: Int64,
@@ -408,8 +411,10 @@ public struct PersistedMessage: Codable, Equatable {
         reactions: [PersistedReaction] = [],
         reply: PersistedReply? = nil,
         forward: PersistedForward? = nil,
-        unsupportedVersion: UInt64? = nil
+        unsupportedVersion: UInt64? = nil,
+        lastOpId: Int64? = nil
     ) {
+        self.lastOpId = lastOpId
         self.messageId = messageId
         self.direction = direction
         self.text = text
@@ -430,7 +435,7 @@ public struct PersistedMessage: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case messageId, direction, text, attachments, createdAt
         case authorKeyB64, edited, deleted, reactions, reply, forward
-        case unsupportedVersion
+        case unsupportedVersion, lastOpId
     }
 
     public init(from decoder: Decoder) throws {
@@ -453,6 +458,7 @@ public struct PersistedMessage: Codable, Equatable {
         self.reply = try c.decodeIfPresent(PersistedReply.self, forKey: .reply)
         self.forward = try c.decodeIfPresent(PersistedForward.self, forKey: .forward)
         self.unsupportedVersion = try c.decodeIfPresent(UInt64.self, forKey: .unsupportedVersion)
+        self.lastOpId = try c.decodeIfPresent(Int64.self, forKey: .lastOpId)
     }
 }
 

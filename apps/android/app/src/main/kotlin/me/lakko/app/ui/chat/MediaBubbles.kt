@@ -330,6 +330,10 @@ internal fun VoiceBubble(
                     onLongPress = onLongPress,
                 )
             }
+            // ADR-0082 / translation UX 4.1 — the transcript button at the
+            // trailing end, in a slot that is part of the row in every state
+            // (§2: the row never changes geometry).
+            me.lakko.app.ui.translation.TranscriptSlot(ref, hub, contentColor, onLongPress)
         }
         // UX 4.1 / 4.2 — a gone file says so (also from the prefetch, before
         // any press) and offers no Retry; a limit offers Try again.
@@ -351,6 +355,8 @@ internal fun VoiceBubble(
                 },
             )
         }
+        // UX 4.2 — the transcript opens BELOW the row, inside the same bubble.
+        me.lakko.app.ui.translation.TranscriptUnder(ref, hub, contentColor)
     }
 }
 
@@ -612,6 +618,7 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress:
     }
 
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Box {
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
@@ -695,11 +702,25 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress:
                 )
             }
         }
+            // ADR-0082 / translation UX 4.1 — on the bubble's trailing bottom
+            // edge, outside the circle, so the circle never moves.
+            Box(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)),
+            ) {
+                me.lakko.app.ui.translation.TranscriptSlot(ref, hub, MaterialTheme.colorScheme.onSurface, onLongPress)
+            }
+        }
         Text(formatTotalClock(duration), style = MaterialTheme.typography.labelSmall)
         val failures by hub.failures.collectAsStateWithLifecycle()
         val failure = failures[key]
         if (failed || failure == me.lakko.app.media.MediaFailure.GONE) {
             MediaFailureLabel(failure, t(COULD_NOT_PLAY), onMedia = false)
+        }
+        Box(Modifier.widthIn(max = 240.dp)) {
+            me.lakko.app.ui.translation.TranscriptUnder(ref, hub, MaterialTheme.colorScheme.onSurface)
         }
     }
 }
@@ -902,6 +923,9 @@ internal fun PendingMediaBubble(
                                 meta = null,
                             )
                         }
+                        // ADR-0082 — the transcript button's slot, empty here,
+                        // so the row is as wide as the delivered one.
+                        Spacer(Modifier.width(me.lakko.app.ui.translation.TRANSCRIPT_BUTTON_SLOT))
                     }
                     KIND_VIDEO_NOTE -> {
                         row.posterBytes?.let { bytes ->

@@ -37,6 +37,7 @@ import { refreshProtection } from "../auth/protect/protection-state";
 import Profile from "./Profile";
 import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { ChatFoldersSection } from "../chat/folders/ChatFoldersSection";
+import { TranslationSettingsSection } from "../translation/TranslationSettings";
 import { paths } from "./paths";
 
 type Section =
@@ -49,7 +50,7 @@ type Section =
   | "media"
   | "about"
   | "account";
-type Page = Section | "recovery" | "privacy-groups";
+type Page = Section | "recovery" | "privacy-groups" | "translation";
 
 // Language sits after Appearance (`docs/ux/localization.md` section 1).
 const SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconName }> = [
@@ -74,6 +75,8 @@ function currentLanguageOwnName(): string {
 function pageOf(s: string | undefined): Page | null {
   if (s === "recovery") return "recovery";
   if (s === "privacy-groups") return "privacy-groups";
+  // ADR-0082 / UX section 6 - a sub-screen of Language.
+  if (s === "translation") return "translation";
   // The former Data section: its export card now sits under Account.
   if (s === "data") return "account";
   return SECTIONS.some((x) => x.id === s) ? (s as Section) : null;
@@ -100,6 +103,7 @@ export default function Settings(): JSX.Element {
   const highlighted = (): Section => {
     const p = shown();
     if (p === "recovery") return "security";
+    if (p === "translation") return "language";
     return p === "privacy-groups" ? "privacy" : p;
   };
 
@@ -176,6 +180,9 @@ export default function Settings(): JSX.Element {
           </Show>
           <Show when={shown() === "language"}>
             <LanguageSection />
+          </Show>
+          <Show when={shown() === "translation"}>
+            <TranslationSettingsSection />
           </Show>
           <Show when={shown() === "media"}>
             <MediaSection />
@@ -343,6 +350,19 @@ function LanguageSection(): JSX.Element {
       </div>
       <section class="lk-card">
         <LanguagePicker />
+      </section>
+      <section class="lk-card">
+        <div class="lk-card-row">
+          <span class="lk-card-row-icon">
+            <Icon name="globe" size={18} />
+          </span>
+          <div class="lk-card-row-body">
+            <span class="lk-card-row-title">{t("settings.translation.title")}</span>
+          </div>
+          <A href={paths.settingsSection("translation")} class="lk-card-row-action">
+            {t("common.manage")}
+          </A>
+        </div>
       </section>
     </>
   );

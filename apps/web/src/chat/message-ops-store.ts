@@ -64,12 +64,14 @@ export function persistedWithOps(
 ): PersistedMessage {
   if (state === undefined) return m;
   const reactions = reactionsToPersisted(state.reactions);
+  const opId = state.lastOpId === undefined ? {} : { lastOpId: String(state.lastOpId) };
   if (state.deleted === true) {
     return {
       ...m,
       text: "",
       attachments: [],
       deleted: true,
+      ...opId,
       ...(reactions.length === 0 ? {} : { reactions }),
     };
   }
@@ -78,6 +80,7 @@ export function persistedWithOps(
   return {
     ...m,
     ...(edited ? { text: state.editedText as string, edited: true } : {}),
+    ...opId,
     ...(reactions.length === 0 ? {} : { reactions }),
   };
 }
@@ -106,9 +109,11 @@ export function opsFromPersisted(
     const deleted = m.deleted === true;
     const edited = m.edited === true;
     if (!deleted && !edited && reactions.size === 0) continue;
+    const opId = m.lastOpId === undefined ? Number.NaN : Number(m.lastOpId);
     out.set(id, {
       ...(edited ? { editedText: m.text } : {}),
       ...(deleted ? { deleted: true } : {}),
+      ...(Number.isFinite(opId) ? { lastOpId: opId } : {}),
       reactions,
     });
   }
@@ -129,6 +134,8 @@ export interface IncomingOp {
    * receipt. `undefined` — unattributable — is dropped.
    */
   readonly senderKey: MemberIdentity | undefined;
+  /** The op's own DS `messageId`, when the receive path knows it. */
+  readonly messageId?: number;
 }
 
 /**
@@ -197,8 +204,8 @@ function foldOne(
   }
   const next: OverlayOp =
     op.op === "edit"
-      ? { op: "edit", target: op.target, text: op.text }
-      : { op: "delete", target: op.target };
+      ? { op: "edit", target: op.target, text: op.text, opId: op.messageId }
+      : { op: "delete", target: op.target, opId: op.messageId };
   return applyOp(overlay, next);
 }
 

@@ -2694,6 +2694,14 @@
       "text": "भेजा गया",
       "status": "machine"
     },
+    "chat.message.show_original": {
+      "text": "मूल दिखाएँ",
+      "status": "machine"
+    },
+    "chat.message.translate": {
+      "text": "अनुवाद करें",
+      "status": "machine"
+    },
     "chat.message.unpin": {
       "text": "अनपिन करें",
       "status": "machine"
@@ -6174,6 +6182,10 @@
       "text": "Lakko फ़ोटो और वीडियो आपकी लाइब्रेरी में तभी सेव करता है जब आप सेव चुनते हैं।",
       "status": "machine"
     },
+    "ios.permission.speech_recognition": {
+      "text": "जब आप कहते हैं, Lakko वॉइस मैसेज और वीडियो मैसेज को टेक्स्ट में बदलता है। यह आपके डिवाइस पर होता है; रिकॉर्डिंग ट्रांसक्राइब करने के लिए कहीं नहीं भेजी जाती।",
+      "status": "machine"
+    },
     "language.name.ar": {
       "text": "अरबी",
       "status": "machine"
@@ -8058,6 +8070,110 @@
       "text": "सुरक्षा नंबर",
       "status": "machine"
     },
+    "settings.translation.delete_all": {
+      "text": "सभी अनुवाद और ट्रांसक्रिप्ट मिटाएँ",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.body": {
+      "text": "{count, plural, one {इस डिवाइस पर # अनुवाद या ट्रांसक्रिप्ट मिटा दिया जाएगा। मैसेज पर कोई असर नहीं पड़ेगा।} other {इस डिवाइस पर # अनुवाद और ट्रांसक्रिप्ट मिटा दिए जाएँगे। मैसेज पर कोई असर नहीं पड़ेगा।}}",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.confirm": {
+      "text": "मिटाएँ",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.title": {
+      "text": "सभी अनुवाद और ट्रांसक्रिप्ट मिटाएँ?",
+      "status": "machine"
+    },
+    "settings.translation.footer": {
+      "text": "अनुवाद और ट्रांसक्रिप्शन इसी डिवाइस पर होते हैं। मैसेज और वॉइस रिकॉर्डिंग अनुवाद या ट्रांसक्रिप्शन के लिए कभी कहीं नहीं भेजी जातीं।",
+      "status": "machine"
+    },
+    "settings.translation.mobile_data": {
+      "text": "मोबाइल डेटा पर पैक डाउनलोड करें",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_both": {
+      "text": "अनुवाद और ट्रांसक्रिप्शन",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_transcription": {
+      "text": "ट्रांसक्रिप्शन",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_translation": {
+      "text": "अनुवाद",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.android": {
+      "text": "Android इसे मैनेज करता है",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.ios": {
+      "text": "iOS इसे मैनेज करता है",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.web": {
+      "text": "आपका ब्राउज़र इसे मैनेज करता है",
+      "status": "machine"
+    },
+    "settings.translation.pack.remove": {
+      "text": "हटाएँ",
+      "status": "machine"
+    },
+    "settings.translation.packs": {
+      "text": "इस डिवाइस पर भाषा पैक",
+      "status": "machine"
+    },
+    "settings.translation.packs.empty": {
+      "text": "इस डिवाइस पर कोई भाषा पैक नहीं है",
+      "status": "machine"
+    },
+    "settings.translation.reading": {
+      "text": "मैं जो भाषाएँ पढ़ता हूँ",
+      "status": "machine"
+    },
+    "settings.translation.reading.add": {
+      "text": "भाषा जोड़ें",
+      "status": "machine"
+    },
+    "settings.translation.reading.remove": {
+      "text": "{language} हटाएँ",
+      "status": "machine"
+    },
+    "settings.translation.show_transcript": {
+      "text": "ट्रांसक्रिप्ट बटन दिखाएँ",
+      "status": "machine"
+    },
+    "settings.translation.show_translate": {
+      "text": "अनुवाद बटन दिखाएँ",
+      "status": "machine"
+    },
+    "settings.translation.target": {
+      "text": "इस भाषा में अनुवाद करें",
+      "status": "machine"
+    },
+    "settings.translation.title": {
+      "text": "अनुवाद और ट्रांसक्रिप्शन",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.transcription": {
+      "text": "इस डिवाइस पर ट्रांसक्रिप्शन उपलब्ध नहीं है",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.transcription_web": {
+      "text": "इस ब्राउज़र में ट्रांसक्रिप्शन उपलब्ध नहीं है",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.translation": {
+      "text": "इस डिवाइस पर अनुवाद उपलब्ध नहीं है",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.translation_web": {
+      "text": "इस ब्राउज़र में अनुवाद उपलब्ध नहीं है",
+      "status": "machine"
+    },
     "tokens.action_allowance_used": {
       "text": "आप इसके लिए आज की सीमा इस्तेमाल कर चुके हैं। कल फिर से कोशिश करें।",
       "status": "machine"
@@ -8072,6 +8188,182 @@
     },
     "tokens.subscribe_allowance_used": {
       "text": "आज आपने बहुत सारे चैनल सब्सक्राइब किए हैं। कल फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "transcript.button.hide": {
+      "text": "ट्रांसक्रिप्ट छिपाएँ",
+      "status": "machine"
+    },
+    "transcript.button.show": {
+      "text": "ट्रांसक्रिप्ट दिखाएँ",
+      "status": "machine"
+    },
+    "transcript.failed": {
+      "text": "यह मैसेज ट्रांसक्राइब नहीं हो सका",
+      "status": "machine"
+    },
+    "transcript.hide": {
+      "text": "छिपाएँ",
+      "status": "machine"
+    },
+    "transcript.line": {
+      "text": "ट्रांसक्रिप्ट",
+      "status": "machine"
+    },
+    "transcript.line.translated": {
+      "text": "ट्रांसक्रिप्ट · {language} से अनुवादित",
+      "status": "machine"
+    },
+    "transcript.no_speech": {
+      "text": "इस मैसेज में कोई बोली नहीं है",
+      "status": "machine"
+    },
+    "transcript.permission_denied": {
+      "text": "ट्रांसक्रिप्ट देखने के लिए Settings में Lakko को स्पीच रिकग्निशन की अनुमति दें।",
+      "status": "machine"
+    },
+    "transcript.show_more": {
+      "text": "और दिखाएँ",
+      "status": "machine"
+    },
+    "transcript.transcribing": {
+      "text": "ट्रांसक्राइब हो रहा है…",
+      "status": "machine"
+    },
+    "transcript.unavailable_source": {
+      "text": "Lakko इस डिवाइस पर {language} ट्रांसक्राइब नहीं कर सकता",
+      "status": "machine"
+    },
+    "translate.auto": {
+      "text": "अपने आप अनुवाद करें",
+      "status": "machine"
+    },
+    "translate.bar.body": {
+      "text": "यहाँ मैसेज {language} में हैं।",
+      "status": "machine"
+    },
+    "translate.bar.close": {
+      "text": "बंद करें",
+      "status": "machine"
+    },
+    "translate.bar.not_now": {
+      "text": "अभी नहीं",
+      "status": "machine"
+    },
+    "translate.bar.translate": {
+      "text": "अनुवाद करें",
+      "status": "machine"
+    },
+    "translate.line.failed": {
+      "text": "यह मैसेज अनुवाद नहीं हो सका",
+      "status": "machine"
+    },
+    "translate.line.not_language": {
+      "text": "{language} नहीं है?",
+      "status": "machine"
+    },
+    "translate.line.same_language": {
+      "text": "यह मैसेज पहले से {language} में है",
+      "status": "machine"
+    },
+    "translate.line.show_original": {
+      "text": "मूल दिखाएँ",
+      "status": "machine"
+    },
+    "translate.line.translate": {
+      "text": "अनुवाद करें",
+      "status": "machine"
+    },
+    "translate.line.translated": {
+      "text": "{language} से अनुवादित",
+      "status": "machine"
+    },
+    "translate.line.translating": {
+      "text": "अनुवाद हो रहा है…",
+      "status": "machine"
+    },
+    "translate.line.try_again": {
+      "text": "फिर से कोशिश करें",
+      "status": "machine"
+    },
+    "translate.pack.blocked_anti_censorship": {
+      "text": "सेंसरशिप से बचाव चालू होने पर भाषा पैक डाउनलोड नहीं किए जा सकते।",
+      "status": "machine"
+    },
+    "translate.pack.body.transcription": {
+      "text": "ट्रांसक्रिप्शन इसी डिवाइस पर होता है। इसके लिए Lakko को {language} पैक चाहिए। वॉइस मैसेज ट्रांसक्रिप्शन के लिए कभी कहीं नहीं भेजे जाते।",
+      "status": "machine"
+    },
+    "translate.pack.body.transcription_sized": {
+      "text": "ट्रांसक्रिप्शन इसी डिवाइस पर होता है। इसके लिए Lakko को {language} पैक चाहिए ({size})। वॉइस मैसेज ट्रांसक्रिप्शन के लिए कभी कहीं नहीं भेजे जाते।",
+      "status": "machine"
+    },
+    "translate.pack.body.translation": {
+      "text": "अनुवाद इसी डिवाइस पर होता है। इसके लिए Lakko को {language} पैक चाहिए। मैसेज अनुवाद के लिए कभी कहीं नहीं भेजे जाते।",
+      "status": "machine"
+    },
+    "translate.pack.body.translation_sized": {
+      "text": "अनुवाद इसी डिवाइस पर होता है। इसके लिए Lakko को {language} पैक चाहिए ({size})। मैसेज अनुवाद के लिए कभी कहीं नहीं भेजे जाते।",
+      "status": "machine"
+    },
+    "translate.pack.cancel": {
+      "text": "रद्द करें",
+      "status": "machine"
+    },
+    "translate.pack.download": {
+      "text": "डाउनलोड करें",
+      "status": "machine"
+    },
+    "translate.pack.download_wifi": {
+      "text": "Wi-Fi पर डाउनलोड करें",
+      "status": "machine"
+    },
+    "translate.pack.downloading": {
+      "text": "{language} डाउनलोड हो रहा है… {percent}%",
+      "status": "machine"
+    },
+    "translate.pack.downloading_unsized": {
+      "text": "{language} डाउनलोड हो रहा है…",
+      "status": "machine"
+    },
+    "translate.pack.failed": {
+      "text": "{language} पैक डाउनलोड नहीं हो सका",
+      "status": "machine"
+    },
+    "translate.pack.not_now": {
+      "text": "अभी नहीं",
+      "status": "machine"
+    },
+    "translate.pack.source.android": {
+      "text": "यह पैक Google से आता है।",
+      "status": "machine"
+    },
+    "translate.pack.source.ios": {
+      "text": "यह पैक Apple से आता है।",
+      "status": "machine"
+    },
+    "translate.pack.source.web": {
+      "text": "यह पैक आपके ब्राउज़र बनाने वाली कंपनी से आता है।",
+      "status": "machine"
+    },
+    "translate.pack.title.transcription": {
+      "text": "ट्रांसक्रिप्शन के लिए {language} डाउनलोड करें?",
+      "status": "machine"
+    },
+    "translate.pack.title.translation": {
+      "text": "अनुवाद के लिए {language} डाउनलोड करें?",
+      "status": "machine"
+    },
+    "translate.pack.waiting_wifi": {
+      "text": "{language} डाउनलोड करने के लिए Wi-Fi का इंतज़ार है",
+      "status": "machine"
+    },
+    "translate.picker.title": {
+      "text": "इस मैसेज की भाषा",
+      "status": "machine"
+    },
+    "translate.unsupported_source": {
+      "text": "Lakko इस डिवाइस पर {language} से अनुवाद नहीं कर सकता",
       "status": "machine"
     },
     "update.available.message": {

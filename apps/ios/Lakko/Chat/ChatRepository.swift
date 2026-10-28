@@ -164,7 +164,12 @@ public final class ChatRepository: ObservableObject {
 
     /// Account id (base64) of the session that bootstrapped this
     /// repository.
-    var currentAccountIdB64: String?
+    var currentAccountIdB64: String? {
+        // ADR-0082 section 5 — a delete for everyone removes the message's
+        // translations and transcripts; the fold that sees it does not know
+        // the account, so the bound one is kept where the purge reads it.
+        didSet { MessageTranslationPurge.boundAccountIdB64 = currentAccountIdB64 }
+    }
 
     /// Raw account id + bearer token of the live session, for the
     /// KeyPackage upload. Refreshed on EVERY ``bootstrap(secrets:)`` call,
@@ -3742,8 +3747,8 @@ public final class ChatRepository: ObservableObject {
         try await publishMessageOpLocked(
             groupIdHex: groupIdHex,
             envelopeBytes: envelopeBytes
-        ) { record in
-            record.applyLocalEdit(target: target, newText: newText)
+        ) { record, opMessageId in
+            record.applyLocalEdit(target: target, newText: newText, opMessageId: opMessageId)
         }
     }
 
@@ -3763,8 +3768,8 @@ public final class ChatRepository: ObservableObject {
         try await publishMessageOpLocked(
             groupIdHex: groupIdHex,
             envelopeBytes: envelopeBytes
-        ) { record in
-            record.applyLocalDelete(target: target)
+        ) { record, opMessageId in
+            record.applyLocalDelete(target: target, opMessageId: opMessageId)
         }
     }
 
@@ -3790,7 +3795,7 @@ public final class ChatRepository: ObservableObject {
         try await publishMessageOpLocked(
             groupIdHex: groupIdHex,
             envelopeBytes: envelopeBytes
-        ) { record in
+        ) { record, _ in
             // Read off the RE-READ record, for the same reason the record is
             // re-read at all — a predecessor's persist-abort replaces it.
             //
@@ -3838,7 +3843,7 @@ public final class ChatRepository: ObservableObject {
     private func publishMessageOpLocked(
         groupIdHex: String,
         envelopeBytes: Data,
-        applyLocally: @escaping @MainActor (GroupRecord) -> Void
+        applyLocally: @escaping @MainActor (GroupRecord, _ opMessageId: Int64?) -> Void
     ) async throws {
         // ADR-0073 R.7 case 1 — an op on a message of a dead one-to-one is
         // applied on this device alone: its target exists only in the old
@@ -3847,14 +3852,17 @@ public final class ChatRepository: ObservableObject {
             kind: isOneToOne(groupIdHex: groupIdHex) ? .chat : .group,
             unrepairableKeyB64: unrepairableKeyB64(groupIdHex: groupIdHex)) == .localOnly
         try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+            // ADR-0082 section 5 — the op's own DS id becomes the target's
+            // last op id; `nil` for an op applied on this device alone.
+            var opMessageId: Int64?
             if !localOnly {
-                _ = try await sealAndPublishLocked(
+                opMessageId = try await sealAndPublishLocked(
                     groupIdHex: groupIdHex,
                     plaintextBytes: envelopeBytes
-                )
+                ).messageId
             }
             guard let record = groups[groupIdHex] else { return }
-            applyLocally(record)
+            applyLocally(record, opMessageId)
         }
         if localOnly { persistMessageLogBestEffort() }
         persistSnapshotBestEffort()
@@ -9016,6 +9024,18 @@ public struct ChatMessage: Equatable, Identifiable {
     /// display time, so nothing English is stored and the line follows a
     /// language switch. `nil` for every message this build could read.
     public let unsupportedVersion: UInt64?
+    /// ADR-0082 section 5 / ADR-0023 — the DS message id of the newest edit or
+    /// delete op folded into this message; `nil` when it was never edited. A
+    /// reaction does not move it. A stored translation or transcript made
+    /// before it changed is stale (`storedResultIsCurrent`, with 0 for `nil`).
+    public internal(set) var lastOpId: Int64?
+
+    /// Raise ``lastOpId`` to an op's id; never lowers it (a re-fetch of an
+    /// older op changes nothing).
+    mutating func noteOp(_ opMessageId: Int64?) {
+        guard let opMessageId else { return }
+        if lastOpId.map({ opMessageId > $0 }) ?? true { lastOpId = opMessageId }
+    }
 
     /// Whether an outgoing row reached the server.
     public enum Ack: Equatable {
@@ -9042,8 +9062,10 @@ public struct ChatMessage: Equatable, Identifiable {
         localId: Int64 = 0,
         reply: ReplyRef? = nil,
         forward: ForwardRef? = nil,
-        unsupportedVersion: UInt64? = nil
+        unsupportedVersion: UInt64? = nil,
+        lastOpId: Int64? = nil
     ) {
+        self.lastOpId = lastOpId
         self.messageId = messageId
         self.direction = direction
         self.text = text
@@ -9097,7 +9119,8 @@ public struct ChatMessage: Equatable, Identifiable {
                     author: $0.author, excerpt: $0.excerpt)
             },
             forward: forward,
-            unsupportedVersion: unsupportedVersion)
+            unsupportedVersion: unsupportedVersion,
+            lastOpId: lastOpId)
     }
 
     /// ADR-0023 — aggregate the reaction list into `(emoji,
@@ -9393,7 +9416,8 @@ final class GroupRecord {
             ack: .sent,
             localId: localId,
             reply: old.reply,
-            forward: old.forward
+            forward: old.forward,
+            lastOpId: old.lastOpId
         )
     }
 
@@ -9446,18 +9470,21 @@ final class GroupRecord {
     /// ADR-0023 — apply an edit op locally to our own outgoing
     /// message (the sender never receives its own app message
     /// back, so the send path mutates the timeline directly).
-    func applyLocalEdit(target: Int64, newText: String) {
+    func applyLocalEdit(target: Int64, newText: String, opMessageId: Int64? = nil) {
         guard let idx = messages.firstIndex(where: { $0.messageId == target }) else { return }
         guard !messages[idx].deleted else { return }
         messages[idx].text = newText
         messages[idx].edited = true
+        messages[idx].noteOp(opMessageId)
     }
 
     /// ADR-0023 — apply a delete op locally to our own outgoing
     /// message.
-    func applyLocalDelete(target: Int64) {
+    func applyLocalDelete(target: Int64, opMessageId: Int64? = nil) {
         guard let idx = messages.firstIndex(where: { $0.messageId == target }) else { return }
         messages[idx].deleted = true
+        messages[idx].noteOp(opMessageId)
+        MessageTranslationPurge.messageDeleted(groupId: groupId, messageId: target)
     }
 
     /// ADR-0023 — toggle our own reaction locally on `target`.
@@ -9543,7 +9570,7 @@ final class GroupRecord {
                         unsupportedVersion: version
                     )
                 )
-            case .op(_, let op, let target, let text, let emoji, let senderKey, let createdAt):
+            case .op(let opMessageId, let op, let target, let text, let emoji, let senderKey, let createdAt):
                 // ADR-0024 — typing / read-receipt ops render NO bubble
                 // and never touch the timeline. They surface to the view
                 // model via `chatStatusSink` (ephemeral typing state +
@@ -9580,7 +9607,8 @@ final class GroupRecord {
                         target: target,
                         text: text,
                         emoji: emoji,
-                        senderKey: senderKey
+                        senderKey: senderKey,
+                        opMessageId: opMessageId
                     )
                 }
             case .system(let messageId, let systemKind, let createdAt):
@@ -9732,7 +9760,8 @@ final class GroupRecord {
         target: Int64,
         text: String,
         emoji: String?,
-        senderKey: MemberIdentity?
+        senderKey: MemberIdentity?,
+        opMessageId: Int64? = nil
     ) {
         guard let senderKey = senderKey else { return }
         guard let idx = messages.firstIndex(where: { $0.messageId == target }) else { return }
@@ -9743,10 +9772,13 @@ final class GroupRecord {
             guard !messages[idx].deleted else { return }
             messages[idx].text = text
             messages[idx].edited = true
+            messages[idx].noteOp(opMessageId)
         case .delete:
             guard AuthorIdentity.editDeleteAuthorized(
                 author: messages[idx].authorKeyB64, opSender: senderKey) else { return }
             messages[idx].deleted = true
+            messages[idx].noteOp(opMessageId)
+            MessageTranslationPurge.messageDeleted(groupId: groupId, messageId: target)
         case .reaction:
             guard let emoji = emoji, !emoji.isEmpty else { return }
             toggleReaction(target: target, reactor: senderKey, emoji: emoji)

@@ -13,3 +13,5 @@
 "NSPhotoLibraryAddUsageDescription" = "يحفظ Lakko الصور ومقاطع الفيديو في مكتبتك فقط عندما تختار «حفظ».";
 
 "NSFaceIDUsageDescription" = "يستخدم Lakko Face ID للتأكد من أنك أنت قبل عرض عبارة الاسترداد.";
+
+"NSSpeechRecognitionUsageDescription" = "يحوّل Lakko الرسائل الصوتية ورسائل الفيديو إلى نص عندما تطلب ذلك. يتم ذلك على جهازك، ولا تُرسل التسجيلات إلى أي مكان لتحويلها إلى نص.";

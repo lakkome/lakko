@@ -2694,6 +2694,14 @@
       "text": "ارسال شد",
       "status": "machine"
     },
+    "chat.message.show_original": {
+      "text": "نمایش متن اصلی",
+      "status": "machine"
+    },
+    "chat.message.translate": {
+      "text": "ترجمه",
+      "status": "machine"
+    },
     "chat.message.unpin": {
       "text": "برداشتن سنجاق",
       "status": "machine"
@@ -6174,6 +6182,10 @@
       "text": "Lakko عکس‌ها و ویدیوها را فقط وقتی «ذخیره» را انتخاب کنید در کتابخانه‌تان ذخیره می‌کند.",
       "status": "machine"
     },
+    "ios.permission.speech_recognition": {
+      "text": "Lakko پیام‌های صوتی و پیام‌های ویدیویی را وقتی بخواهید به متن تبدیل می‌کند. این کار روی دستگاه شما انجام می‌شود و ضبط‌ها هرگز برای تبدیل به متن به جایی فرستاده نمی‌شوند.",
+      "status": "machine"
+    },
     "language.name.ar": {
       "text": "عربی",
       "status": "machine"
@@ -8058,6 +8070,110 @@
       "text": "شماره‌های امنیتی",
       "status": "machine"
     },
+    "settings.translation.delete_all": {
+      "text": "حذف همه ترجمه‌ها و رونویسی‌ها",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.body": {
+      "text": "{count, plural, one {# ترجمه یا رونویسی در این دستگاه حذف می‌شود. پیام‌ها تغییری نمی‌کنند.} other {# ترجمه و رونویسی در این دستگاه حذف می‌شود. پیام‌ها تغییری نمی‌کنند.}}",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.confirm": {
+      "text": "حذف",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.title": {
+      "text": "همه ترجمه‌ها و رونویسی‌ها حذف شوند؟",
+      "status": "machine"
+    },
+    "settings.translation.footer": {
+      "text": "ترجمه و رونویسی در همین دستگاه انجام می‌شود. پیام‌ها و صداهای ضبط‌شده هرگز برای ترجمه یا رونویسی به جایی فرستاده نمی‌شوند.",
+      "status": "machine"
+    },
+    "settings.translation.mobile_data": {
+      "text": "بارگیری بسته‌ها با داده تلفن همراه",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_both": {
+      "text": "ترجمه و رونویسی",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_transcription": {
+      "text": "رونویسی",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_translation": {
+      "text": "ترجمه",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.android": {
+      "text": "مدیریت‌شده توسط Android",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.ios": {
+      "text": "مدیریت‌شده توسط iOS",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.web": {
+      "text": "مدیریت‌شده توسط مرورگر شما",
+      "status": "machine"
+    },
+    "settings.translation.pack.remove": {
+      "text": "حذف",
+      "status": "machine"
+    },
+    "settings.translation.packs": {
+      "text": "بسته‌های زبان در این دستگاه",
+      "status": "machine"
+    },
+    "settings.translation.packs.empty": {
+      "text": "هیچ بسته زبانی در این دستگاه نیست",
+      "status": "machine"
+    },
+    "settings.translation.reading": {
+      "text": "زبان‌هایی که می‌خوانم",
+      "status": "machine"
+    },
+    "settings.translation.reading.add": {
+      "text": "افزودن زبان",
+      "status": "machine"
+    },
+    "settings.translation.reading.remove": {
+      "text": "حذف {language}",
+      "status": "machine"
+    },
+    "settings.translation.show_transcript": {
+      "text": "نمایش دکمه رونویسی",
+      "status": "machine"
+    },
+    "settings.translation.show_translate": {
+      "text": "نمایش دکمه ترجمه",
+      "status": "machine"
+    },
+    "settings.translation.target": {
+      "text": "ترجمه به",
+      "status": "machine"
+    },
+    "settings.translation.title": {
+      "text": "ترجمه و رونویسی",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.transcription": {
+      "text": "رونویسی در این دستگاه در دسترس نیست",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.transcription_web": {
+      "text": "رونویسی در این مرورگر در دسترس نیست",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.translation": {
+      "text": "ترجمه در این دستگاه در دسترس نیست",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.translation_web": {
+      "text": "ترجمه در این مرورگر در دسترس نیست",
+      "status": "machine"
+    },
     "tokens.action_allowance_used": {
       "text": "سهمیه امروز شما برای این کار تمام شده است. فردا دوباره تلاش کنید.",
       "status": "machine"
@@ -8072,6 +8188,182 @@
     },
     "tokens.subscribe_allowance_used": {
       "text": "امروز مشترک کانال‌های زیادی شده‌اید. فردا دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "transcript.button.hide": {
+      "text": "پنهان کردن رونویسی",
+      "status": "machine"
+    },
+    "transcript.button.show": {
+      "text": "نمایش رونویسی",
+      "status": "machine"
+    },
+    "transcript.failed": {
+      "text": "رونویسی این پیام ممکن نشد",
+      "status": "machine"
+    },
+    "transcript.hide": {
+      "text": "پنهان کردن",
+      "status": "machine"
+    },
+    "transcript.line": {
+      "text": "رونویسی",
+      "status": "machine"
+    },
+    "transcript.line.translated": {
+      "text": "رونویسی · ترجمه‌شده از {language}",
+      "status": "machine"
+    },
+    "transcript.no_speech": {
+      "text": "در این پیام گفتاری نیست",
+      "status": "machine"
+    },
+    "transcript.permission_denied": {
+      "text": "برای دیدن متن پیام‌ها، در تنظیمات به Lakko اجازهٔ تشخیص گفتار بدهید.",
+      "status": "machine"
+    },
+    "transcript.show_more": {
+      "text": "نمایش بیشتر",
+      "status": "machine"
+    },
+    "transcript.transcribing": {
+      "text": "در حال رونویسی…",
+      "status": "machine"
+    },
+    "transcript.unavailable_source": {
+      "text": "Lakko نمی‌تواند {language} را در این دستگاه رونویسی کند",
+      "status": "machine"
+    },
+    "translate.auto": {
+      "text": "ترجمه خودکار",
+      "status": "machine"
+    },
+    "translate.bar.body": {
+      "text": "پیام‌های اینجا به {language} هستند.",
+      "status": "machine"
+    },
+    "translate.bar.close": {
+      "text": "بستن",
+      "status": "machine"
+    },
+    "translate.bar.not_now": {
+      "text": "الان نه",
+      "status": "machine"
+    },
+    "translate.bar.translate": {
+      "text": "ترجمه",
+      "status": "machine"
+    },
+    "translate.line.failed": {
+      "text": "ترجمه این پیام ممکن نشد",
+      "status": "machine"
+    },
+    "translate.line.not_language": {
+      "text": "{language} نیست؟",
+      "status": "machine"
+    },
+    "translate.line.same_language": {
+      "text": "این پیام از قبل به {language} است",
+      "status": "machine"
+    },
+    "translate.line.show_original": {
+      "text": "نمایش متن اصلی",
+      "status": "machine"
+    },
+    "translate.line.translate": {
+      "text": "ترجمه",
+      "status": "machine"
+    },
+    "translate.line.translated": {
+      "text": "ترجمه‌شده از {language}",
+      "status": "machine"
+    },
+    "translate.line.translating": {
+      "text": "در حال ترجمه…",
+      "status": "machine"
+    },
+    "translate.line.try_again": {
+      "text": "تلاش دوباره",
+      "status": "machine"
+    },
+    "translate.pack.blocked_anti_censorship": {
+      "text": "وقتی ضدسانسور روشن است، بسته‌های زبان بارگیری نمی‌شوند.",
+      "status": "machine"
+    },
+    "translate.pack.body.transcription": {
+      "text": "رونویسی در همین دستگاه انجام می‌شود. Lakko برای این کار به بسته {language} نیاز دارد. پیام‌های صوتی هرگز برای رونویسی به جایی فرستاده نمی‌شوند.",
+      "status": "machine"
+    },
+    "translate.pack.body.transcription_sized": {
+      "text": "رونویسی در همین دستگاه انجام می‌شود. Lakko برای این کار به بسته {language} نیاز دارد ({size}). پیام‌های صوتی هرگز برای رونویسی به جایی فرستاده نمی‌شوند.",
+      "status": "machine"
+    },
+    "translate.pack.body.translation": {
+      "text": "ترجمه در همین دستگاه انجام می‌شود. Lakko برای این کار به بسته {language} نیاز دارد. پیام‌ها هرگز برای ترجمه به جایی فرستاده نمی‌شوند.",
+      "status": "machine"
+    },
+    "translate.pack.body.translation_sized": {
+      "text": "ترجمه در همین دستگاه انجام می‌شود. Lakko برای این کار به بسته {language} نیاز دارد ({size}). پیام‌ها هرگز برای ترجمه به جایی فرستاده نمی‌شوند.",
+      "status": "machine"
+    },
+    "translate.pack.cancel": {
+      "text": "لغو",
+      "status": "machine"
+    },
+    "translate.pack.download": {
+      "text": "بارگیری",
+      "status": "machine"
+    },
+    "translate.pack.download_wifi": {
+      "text": "بارگیری با Wi-Fi",
+      "status": "machine"
+    },
+    "translate.pack.downloading": {
+      "text": "در حال بارگیری {language}… {percent}٪",
+      "status": "machine"
+    },
+    "translate.pack.downloading_unsized": {
+      "text": "در حال دانلود {language}…",
+      "status": "machine"
+    },
+    "translate.pack.failed": {
+      "text": "بارگیری بسته {language} ممکن نشد",
+      "status": "machine"
+    },
+    "translate.pack.not_now": {
+      "text": "الان نه",
+      "status": "machine"
+    },
+    "translate.pack.source.android": {
+      "text": "این بسته از Google می‌آید.",
+      "status": "machine"
+    },
+    "translate.pack.source.ios": {
+      "text": "این بسته از Apple می‌آید.",
+      "status": "machine"
+    },
+    "translate.pack.source.web": {
+      "text": "این بسته از سازنده مرورگر شما می‌آید.",
+      "status": "machine"
+    },
+    "translate.pack.title.transcription": {
+      "text": "{language} برای رونویسی بارگیری شود؟",
+      "status": "machine"
+    },
+    "translate.pack.title.translation": {
+      "text": "{language} برای ترجمه بارگیری شود؟",
+      "status": "machine"
+    },
+    "translate.pack.waiting_wifi": {
+      "text": "در انتظار Wi-Fi برای بارگیری {language}",
+      "status": "machine"
+    },
+    "translate.picker.title": {
+      "text": "زبان این پیام",
+      "status": "machine"
+    },
+    "translate.unsupported_source": {
+      "text": "Lakko نمی‌تواند در این دستگاه از {language} ترجمه کند",
       "status": "machine"
     },
     "update.available.message": {

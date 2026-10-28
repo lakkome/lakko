@@ -1074,6 +1074,11 @@ public class ChatRepository(
             // a corrupt / missing log doesn't block the rest of
             // the bootstrap.
             val log = MessageLogStore.getLog(applicationContext, newAccountIdB64)
+            // ADR-0082 — this account's translations and transcripts.
+            me.lakko.app.translation.TranslationCenter.install(applicationContext) {
+                me.lakko.app.l10n.Localization.state.value.resolved
+            }
+            me.lakko.app.translation.TranslationCenter.bind(applicationContext, newAccountIdB64)
             if (log != null) {
                 for ((groupIdHex, persisted) in log.groups) {
                     val record = groups[groupIdHex] ?: continue
@@ -4464,13 +4469,14 @@ public class ChatRepository(
                 val ownKey = ownIdentity(record.group)
                 prepared to ownKey
             }
-            chatClient.publishPreparedSend(prepared)
+            val sent = chatClient.publishPreparedSend(prepared)
             record.applyOwnOp(
                 op = MessageOp.Edit,
                 target = targetMessageId,
                 text = newText,
                 emoji = null,
                 ownKey = ownKey,
+                opId = sent.messageId,
             )
             persistMessageLogBestEffort()
             publishThreadList()
@@ -9253,6 +9259,7 @@ public class ChatRepository(
         // is taken here; it waits for disk writes in flight, never for the
         // network, so it is safe on the main thread this is called from.
         currentAccountIdB64.get()?.let { me.lakko.app.account.AccountStoreGate.seal(it) }
+        me.lakko.app.translation.TranslationCenter.unbind()
         introductionTicker?.cancel()
         introductionTicker = null
         me.lakko.app.reach.ReachManager.peek()?.clear()
@@ -13066,9 +13073,20 @@ public data class ChatMessage(
      */
     val historyOf: String? = null,
     val historyMessageId: Long = 0,
+    /**
+     * ADR-0082 section 5 — the DS id of the last edit or delete applied to this
+     * message, `0` when none. A stored translation or transcript carries the
+     * value it was made for; a higher one makes it stale. An own edit whose
+     * publish returned no id still moves it ([nextLastOpId]).
+     */
+    val lastOpId: Long = 0,
 ) {
     /** Whether this is a read-only row of an older segment. */
     val isHistory: Boolean get() = historyOf != null
+
+    /** ADR-0082 — the highest op that touched this message (ADR-0023): its
+     *  own id until an edit or delete lands. */
+    val effectiveOpId: Long get() = maxOf(messageId, lastOpId)
 
     /**
      * The stable identity of this row.
@@ -13398,6 +13416,8 @@ private class GroupRecord(
         text: String,
         emoji: String?,
         ownKey: MemberIdentity?,
+        /** The op's own DS id, when the publish returned one (0 = unknown). */
+        opId: Long = 0L,
     ) {
         applyOpInternal(
             op = op,
@@ -13405,6 +13425,7 @@ private class GroupRecord(
             text = text,
             emoji = emoji,
             sender = if (op == MessageOp.Reaction) ownKey ?: OWN_REACTION_SENTINEL else ownKey,
+            opId = opId,
         )
     }
 
@@ -13496,6 +13517,7 @@ private class GroupRecord(
                     text = event.text,
                     emoji = event.emoji,
                     sender = event.senderKey,
+                    opId = event.messageId,
                 )
                 is IncomingChatEvent.Typing -> applyTyping(
                     sender = event.senderKey,
@@ -13689,6 +13711,9 @@ private class GroupRecord(
         text: String,
         emoji: String?,
         sender: MemberIdentity?,
+        /** ADR-0082 — the op's own DS id, so a stored translation or
+         *  transcript of the edited message is known to be stale. */
+        opId: Long = 0L,
     ) {
         synchronized(messages) {
             val idx = messages.indexOfFirst { it.messageId == target }
@@ -13698,7 +13723,11 @@ private class GroupRecord(
                 MessageOp.Edit -> {
                     if (!editDeleteAuthorized(current.authorKey, sender)) return
                     if (current.deleted) return // a deleted message stays deleted
-                    messages[idx] = current.copy(text = text, edited = true)
+                    messages[idx] = current.copy(
+                        text = text,
+                        edited = true,
+                        lastOpId = nextLastOpId(current, opId),
+                    )
                 }
                 MessageOp.Delete -> {
                     if (!editDeleteAuthorized(current.authorKey, sender)) return
@@ -13706,6 +13735,12 @@ private class GroupRecord(
                         text = "",
                         attachments = emptyList(),
                         deleted = true,
+                        lastOpId = nextLastOpId(current, opId),
+                    )
+                    // ADR-0082 section 5 — its translation and transcript go too.
+                    me.lakko.app.translation.TranslationCenter.messageDeleted(
+                        AttachmentBridge.hex(groupId),
+                        target,
                     )
                 }
                 MessageOp.Reaction -> {
@@ -13923,3 +13958,12 @@ private class GroupRecord(
         }
     }
 }
+
+/**
+ * ADR-0082 — the [ChatMessage.lastOpId] after an op with DS id [opId] (0 when
+ * the caller has none). A real id is used as it is (idempotent when the same
+ * op is applied twice); without one the value still rises, so the edit makes
+ * a stored result stale.
+ */
+internal fun nextLastOpId(current: ChatMessage, opId: Long): Long =
+    if (opId > 0L) maxOf(opId, current.lastOpId) else current.effectiveOpId + 1

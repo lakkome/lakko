@@ -35,6 +35,7 @@ import { originHistory } from "./routes/origin-history";
 import { AuthProvider } from "./auth/AuthContext";
 import { ChatProvider } from "./chat/ChatContext";
 import { BackgroundReceiveProvider } from "./chat/BackgroundReceiveContext";
+import { TranslationProvider } from "./translation/TranslationContext";
 import { CallActionListener } from "./calls/CallActionListener";
 import { CallHostProvider, CallHostView } from "./calls/CallHostContext";
 import { ChannelsHydration } from "./channels/ChannelsHydration";
@@ -187,6 +188,10 @@ const App: Component = () => (
         <MailboxProvider>
         <CallHostProvider>
         <BackgroundReceiveProvider>
+        {/* ADR-0082 — on-device translation and transcription: one
+            controller per session, plus the pack dialog and the language
+            picker it can raise from any conversation. */}
+        <TranslationProvider>
           {/*
            * The address bar shows the origin only: the router's paths live in
            * `history.state` (`routes/origin-history.ts`), never in the URL.
@@ -272,6 +277,7 @@ const App: Component = () => (
            */}
           <FolderEditorHost />
           <ConfirmDialog />
+        </TranslationProvider>
         </BackgroundReceiveProvider>
         </CallHostProvider>
         </MailboxProvider>

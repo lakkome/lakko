@@ -83,4 +83,5 @@ detail, and `Implemented` is used where the decision is fully landed.
 | [0065](0065-attachment-lifetime-and-access.md) | Accepted | Attachment files have a lifetime, an owner who can delete them, and a gate |
 | [0077](0077-account-binding-and-store-gate.md) | Accepted | Work started for one account never acts for another; a wiped account's stores take no late write; a refused persist publishes nothing |
 | [0078](0078-servers-cannot-link-accounts.md) | Proposed | Lakko's servers cannot link accounts: sealed senders, anonymous admission, unlinkable ids |
+| [0082](0082-on-device-translation-and-transcription.md) | Accepted | Translation and transcription happen on the device that shows the message, or not at all |
 | [0083](0083-screen-share.md) | Accepted | Screen sharing: one share per call, ordered the same on every device |

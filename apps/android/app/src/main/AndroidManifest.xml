@@ -38,6 +38,12 @@
       app using OkHttp / Ktor / Firebase.
     -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+      ADR-0082 — a language pack downloads on Wi-Fi only unless the person
+      allows mobile data; telling the two apart reads whether the active
+      network is metered. A normal permission, granted at install.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!--
       Phase 2a3b4 — runtime camera permission for the add-device

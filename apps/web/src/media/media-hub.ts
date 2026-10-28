@@ -48,6 +48,9 @@ export interface MediaHub {
   loadThumb(thumb: ThumbRefBytes): Promise<string | null>;
   /** File local bytes (a take not yet uploaded) under `key`. */
   fileLocal(key: string, blob: Blob, mime: string | undefined): string | null;
+  /** The decrypted bytes filed under `key`, or `null`. For an on-device
+   *  transcript (ADR-0082): the same authenticated bytes playback uses. */
+  blobFor(key: string): Blob | null;
   /**
    * Re-key everything about `from` to `to`: an outgoing take's own bytes, once
    * the upload comes back and the message is known by its blob id.
@@ -100,6 +103,9 @@ export function createMediaHub(opts: {
   onPlayedChange?: () => void;
 }): MediaHub {
   const registry = new ObjectUrlRegistry();
+  /** The blobs behind the registry's URLs, so a transcript reads the bytes
+   *  directly instead of fetching an object URL. */
+  const blobs = new Map<string, Blob>();
   const [version, setVersion] = createSignal(0);
   const [played, setPlayed] = createSignal<ReadonlySet<string>>(new Set());
   const [requestedPlay, setRequestedPlay] = createSignal<string | null>(null);
@@ -113,6 +119,7 @@ export function createMediaHub(opts: {
     const type = blobTypeFor(mime, allowlist);
     const blob = bytes instanceof Blob ? new Blob([bytes], { type }) : new Blob([bytes.slice()], { type });
     const url = registry.set(key, blob);
+    if (url !== null) blobs.set(key, blob);
     setVersion((v) => v + 1);
     return url;
   }
@@ -154,9 +161,15 @@ export function createMediaHub(opts: {
       return fetchAndFile(`thumb:${mediaKey(thumb.blobId)}`, thumb, thumb.mime);
     },
     fileLocal: (key, blob, mime) => file(key, blob, mime),
+    blobFor: (key) => (registry.has(key) ? (blobs.get(key) ?? null) : null),
     adopt(from, to) {
       if (from === to) return registry.has(from);
       const moved = registry.rename(from, to);
+      const movedBlob = blobs.get(from);
+      if (moved && movedBlob !== undefined) {
+        blobs.delete(from);
+        blobs.set(to, movedBlob);
+      }
       if (played().has(from)) {
         const next = new Set(played());
         next.delete(from);
@@ -173,6 +186,7 @@ export function createMediaHub(opts: {
     },
     revoke(key) {
       registry.revoke(key);
+      blobs.delete(key);
       setVersion((v) => v + 1);
     },
     isPlayed: (key) => played().has(key),
@@ -225,6 +239,7 @@ export function createMediaHub(opts: {
       current = null;
       setActiveKey(null);
       registry.dispose();
+      blobs.clear();
       setVersion((v) => v + 1);
     },
   };

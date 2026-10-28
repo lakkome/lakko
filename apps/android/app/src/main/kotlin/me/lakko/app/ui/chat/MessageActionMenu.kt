@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -163,9 +164,14 @@ internal data class MessageActions(
     val canSave: Boolean = false,
     /** `Remove from saved` instead of `Save`. */
     val saved: Boolean = false,
+    /** ADR-0082 / translation UX 3.1 — `Translate` after Copy, decided by the
+     *  shared `translationOffered` rule; reads `Show original` on a message
+     *  already showing its translation. */
+    val canTranslate: Boolean = false,
+    val translateLabel: String = Localization.strings.value["chat.message.translate"],
 ) {
     /** Whether the card has anything to draw. */
-    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward || canPin || canSelect || canSave
+    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward || canPin || canSelect || canSave || canTranslate
 }
 
 /**
@@ -277,6 +283,8 @@ internal fun MessageActionMenuOverlay(
     onSelect: () -> Unit = {},
     /** Saved section 2 — Save / Remove from saved was chosen. */
     onSave: () -> Unit = {},
+    /** ADR-0082 — Translate / Show original was chosen. */
+    onTranslate: () -> Unit = {},
 ) {
     // The chat window's own height, read OUTSIDE the popup. Inside it,
     // `constraints.maxHeight` is the popup window's height, which the system
@@ -377,6 +385,7 @@ internal fun MessageActionMenuOverlay(
                             onSave = onSave,
                             onEdit = onEdit,
                             onDelete = onDelete,
+                            onTranslate = onTranslate,
                         )
                     }
                 },
@@ -478,6 +487,7 @@ internal fun MessageActionCard(
     onPin: () -> Unit = {},
     onSelect: () -> Unit = {},
     onSave: () -> Unit = {},
+    onTranslate: () -> Unit = {},
 ) {
     Surface(
         modifier = modifier.testTag(ACTION_CARD_TAG),
@@ -527,6 +537,15 @@ internal fun MessageActionCard(
                     onClick = onCopy,
                 )
             }
+            if (actions.canTranslate) {
+                // Translation UX 3.1 — with the actions that only read,
+                // after Copy. Nothing leaves the device.
+                ActionRow(
+                    label = actions.translateLabel,
+                    icon = Icons.Filled.Translate,
+                    onClick = onTranslate,
+                )
+            }
             if (actions.canSelect) {
                 // Section 8 — after Copy, with the actions that only read:
                 // entering the mode changes nothing until an action fires.
@@ -573,7 +592,7 @@ internal fun MessageActionCard(
                         // row gap above it.
                         .padding(top = DESTRUCTIVE_GAP),
                 ) {
-                    if (actions.canReply || actions.canForward || actions.canCopy || actions.canSelect || actions.canPin || actions.canSave || actions.canEdit) {
+                    if (actions.canReply || actions.canForward || actions.canCopy || actions.canTranslate || actions.canSelect || actions.canPin || actions.canSave || actions.canEdit) {
                         HorizontalDivider(
                             thickness = CARD_BORDER_WIDTH,
                             color = MaterialTheme.colorScheme.outlineVariant,

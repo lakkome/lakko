@@ -188,6 +188,12 @@ struct ContactDetailScreen: View {
                 }
             }
 
+            // ADR-0082 / `translation-and-transcription.md` 3.7 — this
+            // device's switch for the one-to-one.
+            if let chat {
+                Section { AutoTranslateToggle(conversation: chat) }
+            }
+
             // `Add to contacts` (section 2.1, amended 2026-10-24): local and
             // instant, it sends nothing, so it asks nothing first.
             if sections.contains(.addContact) {

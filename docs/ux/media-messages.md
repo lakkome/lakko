@@ -373,7 +373,7 @@ to GIPHY's hosts with a size cap; session-token auth; a per-account rate limit; 
 ## 9. Out of scope (v1)
 
 Stickers (the previous app had packs; not requested), trimming a recording, transcribing
-voice messages, raise-to-listen on native, sending a GIF with a caption, a GIF favourites
+voice messages (now specified in [`translation-and-transcription.md`](translation-and-transcription.md)), raise-to-listen on native, sending a GIF with a caption, a GIF favourites
 list, and video notes longer than 60 s.
 
 ## 10. Photos and videos in the timeline

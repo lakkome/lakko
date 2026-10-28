@@ -21,7 +21,7 @@
  * button, so pressing play paused it. They are now `MessageMenu.tsx`, opened
  * on a deliberate gesture and rendered outside the bubble.
  */
-import { createSignal, For, Index, onCleanup, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, For, Index, onCleanup, Show, type JSX } from "solid-js";
 import { A } from "@solidjs/router";
 
 import { callInviteOf } from "../calls/call-invite-link";
@@ -63,9 +63,16 @@ import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { currentLanguage, joinList, t } from "../l10n";
+import type { MessageRef, TextSlot } from "../translation/controller";
+import { useTranslation } from "../translation/context";
+import { TranslationLine } from "../translation/TranslationLine";
+import type { TranscriptHost } from "../translation/Transcript";
 
 /** The callbacks and reactive reads a bubble needs from the chat view. */
 export interface BubbleHost {
+  /** ADR-0082 — the conversation a translation or transcript is filed
+   *  under (the group id, standard base64). Absent: no translation. */
+  conversationId?: string | undefined;
   /** ADR-0065 section 2 — whether this account saved the message (the mark
    *  beside the time and the menu's `Remove from saved`). Reactive. */
   isSavedOf?: (messageId: number) => boolean;
@@ -405,6 +412,100 @@ function ChatBubbleBody(
     typeof location === "undefined" ? null : callInviteOf(displayText(), location.origin);
   const isEditing = (): boolean =>
     props.messageId !== undefined && props.editingId === props.messageId;
+
+  // ----- ADR-0082: translation and transcription, on this device ----------
+  //
+  // Everything below reads text this device already decrypted and hands it
+  // to an on-device engine through the controller; nothing leaves the
+  // device. The ORIGINAL stays the message: Reply, Forward, Save and Select
+  // read `displayText()` and the message id as before, and only Copy and the
+  // bubble's own text show the translation (UX 3.2).
+  const translation = useTranslation();
+  const messageRef = (): MessageRef | null =>
+    props.messageId === undefined || props.conversationId === undefined
+      ? null
+      : {
+          conversation: props.conversationId,
+          messageId: props.messageId,
+          // ADR-0082 section 5 — the DS id of the latest edit op, 0 when
+          // the message was never edited.
+          lastOpId: state()?.lastOpId ?? 0,
+        };
+  const textView = () => {
+    const ref = messageRef();
+    return translation === undefined || ref === null || isEditing()
+      ? ({ phase: "none" } as const)
+      : translation.textView("text", ref);
+  };
+  /** The text the bubble shows: the translation while it is shown. */
+  const shownText = (): string => {
+    const v = textView();
+    return v.phase === "translated" ? v.text : displayText();
+  };
+  /** The transcript open under a voice / video message without a caption,
+   *  which the menu then treats as the message's text (UX 4.2). */
+  const openTranscript = (): string | null => {
+    const ref = messageRef();
+    if (translation === undefined || ref === null || displayText().length > 0) return null;
+    const v = translation.transcriptView(ref);
+    return v.phase === "shown" ? v.text : null;
+  };
+  /** What Translate acts on, and in which slot. */
+  const translateTarget = (): { slot: TextSlot; text: string } | null => {
+    if (displayText().length > 0) return { slot: "text", text: displayText() };
+    const tr = openTranscript();
+    return tr === null ? null : { slot: "transcript-translation", text: tr };
+  };
+  const translateLabel = (): "translate" | "show-original" | null => {
+    const ref = messageRef();
+    const target = translateTarget();
+    if (translation === undefined || ref === null || target === null) return null;
+    if (translation.textView(target.slot, ref).phase === "translated") return "show-original";
+    return translation.offer(ref, target.text, props.tone === "outgoing") === "none" ? null : "translate";
+  };
+  /** Copy is "the text I see" (UX 3.2): the translation while it is shown. */
+  const copyableText = (): string | null => {
+    const ref = messageRef();
+    if (displayText().length > 0) return shownText();
+    const tr = openTranscript();
+    if (tr === null || translation === undefined || ref === null) return null;
+    const v = translation.textView("transcript-translation", ref);
+    return v.phase === "translated" ? v.text : tr;
+  };
+  // The language of a shown message is known before its menu opens, so the
+  // row and its source are decided without a wait (UX 3.1). Detection runs on
+  // the device and only where its model is already present.
+  createEffect(() => {
+    const ref = messageRef();
+    if (translation === undefined || ref === null || isDeleted() || props.tone === "outgoing") return;
+    const text = displayText();
+    if (text.length > 0) translation.offer(ref, text, false);
+  });
+  // UX 3.7 — automatic translation as the message is shown.
+  createEffect(() => {
+    const ref = messageRef();
+    if (translation === undefined || ref === null || isDeleted() || isEditing()) return;
+    const text = displayText();
+    if (text.length === 0) return;
+    translation.autoTranslate(ref, text, props.tone === "outgoing");
+  });
+  /** The transcript host of one media attachment, or `undefined`. */
+  const transcriptHost = (ref: AttachmentRefBytes): TranscriptHost | undefined => {
+    const m = messageRef();
+    if (translation === undefined || m === null || props.ack !== "sent") return undefined;
+    const kind = props.hub.decision(ref).bubble;
+    if (kind !== "voice" && kind !== "video_note") return undefined;
+    return {
+      controller: translation,
+      messageRef: m,
+      loadAudio: async () => {
+        const key = keyFor(ref);
+        // The same fetch and AEAD open playing uses; never partial bytes.
+        if (props.hub.blobFor(key) === null && ref.blobId.length > 0) await props.hub.load(ref);
+        return props.hub.blobFor(key);
+      },
+    };
+  };
 
   // ----- the action menu (see `MessageMenu.tsx`) ---------------------------
   //
@@ -814,12 +915,25 @@ function ChatBubbleBody(
                   )}
                 </Show>
                 <Show when={displayText().length > 0 && callInvite() === null}>
-                  <div class="lk-bubble-text">
-                    {displayText()}
+                  <div class="lk-bubble-text" dir="auto">
+                    {shownText()}
                     <Show when={isEdited()}>
                       <span class="lk-bubble-edited">{t("chat.message.edited")}</span>
                     </Show>
                   </div>
+                  {/* UX 3.2 — machine output is always marked, and the
+                      original is one tap away on this line. */}
+                  <Show when={translation !== undefined && messageRef()}>
+                    {(ref) => (
+                      <TranslationLine
+                        controller={translation!}
+                        slot="text"
+                        messageRef={ref()}
+                        text={displayText()}
+                        view={textView()}
+                      />
+                    )}
+                  </Show>
                 </Show>
                 <Show when={mediaRefs().length > 0}>
                   <div
@@ -850,6 +964,7 @@ function ChatBubbleBody(
                           // reads it, and the branch above is what keeps the
                           // row from being drawn twice.
                           meta={metaSlot() === "voice-line" ? metaLine : undefined}
+                          transcript={transcriptHost(ref())}
                         />
                       )}
                     </Index>
@@ -979,7 +1094,14 @@ function ChatBubbleBody(
                  is offered on somebody else's message too, and withheld from
                  our own lone photo. The text is the one on screen, so an
                  edited message copies what the person is reading. */
-              copyText={displayText().length > 0 ? displayText() : null}
+              copyText={copyableText()}
+              translateLabel={translateLabel()}
+              onTranslate={() => {
+                const ref = messageRef();
+                const target = translateTarget();
+                if (translation === undefined || ref === null || target === null) return;
+                translation.toggle(target.slot, ref, target.text);
+              }}
               onReact={(emoji) => {
                 if (props.messageId !== undefined) void props.onReact(props.messageId, emoji);
               }}

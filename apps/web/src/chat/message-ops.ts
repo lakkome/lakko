@@ -54,6 +54,11 @@ export interface MessageOpState {
   /** Set once a delete op has been applied — renders the
    *  "message deleted" tombstone. */
   deleted?: boolean;
+  /** The DS `messageId` of the latest edit or delete op applied, when
+   *  known: the version a cached translation or transcript of this
+   *  message is keyed on (ADR-0082 section 5). `undefined` = no such op
+   *  seen, or one applied without an id (a local-only op). */
+  lastOpId?: number;
   /** emoji → set of reactor IDENTITIES (base64 signature keys),
    *  never leaf indices: a departing member's leaf is handed to
    *  the next member added, so a leaf-keyed set lets a newcomer
@@ -70,8 +75,14 @@ export interface MessageOpState {
  *  already run the structural decode + (for edit/delete) the
  *  author gate. */
 export type OverlayOp =
-  | { op: "edit"; target: number; text: string }
-  | { op: "delete"; target: number }
+  | {
+      op: "edit";
+      target: number;
+      text: string;
+      /** The edit op's own DS `messageId`, when known. */
+      opId?: number | undefined;
+    }
+  | { op: "delete"; target: number; opId?: number | undefined }
   | {
       op: "reaction";
       target: number;
@@ -112,14 +123,17 @@ export function applyOp(
   const state: MessageOpState = {
     ...(cur?.editedText !== undefined ? { editedText: cur.editedText } : {}),
     ...(cur?.deleted !== undefined ? { deleted: cur.deleted } : {}),
+    ...(cur?.lastOpId !== undefined ? { lastOpId: cur.lastOpId } : {}),
     reactions: cur
       ? new Map([...cur.reactions].map(([k, v]) => [k, new Set(v)]))
       : new Map(),
   };
   if (op.op === "edit") {
     state.editedText = op.text;
+    if (op.opId !== undefined) state.lastOpId = op.opId;
   } else if (op.op === "delete") {
     state.deleted = true;
+    if (op.opId !== undefined) state.lastOpId = op.opId;
   } else {
     const reactors =
       state.reactions.get(op.emoji) ?? new Set<MemberIdentity>();

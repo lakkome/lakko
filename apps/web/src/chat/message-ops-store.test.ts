@@ -291,3 +291,37 @@ describe("foldOpsIntoStored", () => {
     expect(viaStore).toEqual(viaOverlay);
   });
 });
+
+// ADR-0082 section 5 — a message's version is the DS id of its latest edit or
+// delete op, carried through all three doors, so a cached translation is keyed
+// on the op and not on the text.
+describe("the last op id", () => {
+  it("is the id of the latest edit, even an edit back to the same words", () => {
+    let m = applyOp(new Map(), { op: "edit", target: 7, text: "b", opId: 20 });
+    expect(m.get(7)?.lastOpId).toBe(20);
+    m = applyOp(m, { op: "edit", target: 7, text: "the original", opId: 31 });
+    expect(m.get(7)?.lastOpId).toBe(31);
+    // A reaction does not move it.
+    m = applyOp(m, { op: "reaction", target: 7, emoji: "👍", reactor: BOB });
+    expect(m.get(7)?.lastOpId).toBe(31);
+    // A local-only edit with no id keeps the last one known.
+    m = applyOp(m, { op: "edit", target: 7, text: "c" });
+    expect(m.get(7)?.lastOpId).toBe(31);
+  });
+
+  it("survives a persist and a reload", () => {
+    const written = persistedWithOps(row(), state({ editedText: "b", lastOpId: 44 }));
+    expect(written.lastOpId).toBe("44");
+    expect(opsFromPersisted([written]).get(7)?.lastOpId).toBe(44);
+    const deleted = persistedWithOps(row(), state({ deleted: true, lastOpId: 45 }));
+    expect(opsFromPersisted([deleted]).get(7)?.lastOpId).toBe(45);
+  });
+
+  it("is taken from the op's own id on the background door", () => {
+    const [out] = foldOpsIntoStored(
+      [row()],
+      [{ op: "edit", target: 7, text: "new", emoji: undefined, senderKey: ALICE, messageId: 99 }],
+    );
+    expect(out?.lastOpId).toBe("99");
+  });
+});

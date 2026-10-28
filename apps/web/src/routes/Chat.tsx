@@ -490,6 +490,8 @@ import {
 } from "../chat/timeline-row";
 import { TimelineBubble } from "../chat/TimelineBubble";
 import { CallTimelineRow } from "../chat/CallTimelineRow";
+import { useTranslation } from "../translation/context";
+import { AutoTranslateSwitch, TranslateBar, type BarCandidate } from "../translation/ConversationControls";
 import {
   layoutTimeline,
   type TimelineItem,
@@ -639,6 +641,8 @@ function ChatView(props: {
   const profiles = useProfiles();
   const groupNames = useGroupNames();
   const pins = usePins();
+  // ADR-0082 — on-device translation and transcription.
+  const translation = useTranslation();
   const sharedChannels = useSharedChannels();
   // ADR-0024 — the durable read watermarks both receive paths feed.
   const readWatermarkStore = useReadWatermarks();
@@ -762,6 +766,32 @@ function ChatView(props: {
   const timelineEntries = createMemo(() =>
     mergeConversationEntries(uniqueRows, callRows(), rowCreatedAt, rowIdentity),
   );
+  /** ADR-0082 / UX 3.6 — the incoming messages the conversation bar's rule
+   *  reads, newest first. Not the person's own, from any of their devices. */
+  const translateBarCandidates = (): BarCandidate[] => {
+    const own = ownPersonKeyB64(chats.identity());
+    const list = uniqueRows();
+    const out: BarCandidate[] = [];
+    for (let i = list.length - 1; i >= 0 && out.length < 64; i--) {
+      const row = list[i];
+      if (row === undefined || row.kind !== "incoming" || row.event.kind !== "application") continue;
+      const ev = row.event;
+      if (own !== null && own !== undefined && ev.senderKey === own) continue;
+      const op = msgOps().get(ev.messageId) ?? historyOps().get(ev.messageId);
+      if (op?.deleted === true) continue;
+      const text = op?.editedText ?? ev.text;
+      if (text.length === 0) continue;
+      out.push({
+        messageRef: {
+          conversation: props.entry.groupIdB64,
+          messageId: ev.messageId,
+          lastOpId: op?.lastOpId ?? 0,
+        },
+        text,
+      });
+    }
+    return out;
+  };
   // docs/ux section 5.2 — date separators + sender runs, one layout record
   // per entry (`chat/timeline-layout.ts`). An outgoing row and an incoming row
   // from this person's other device (ADR-0050) are both "self", so they run
@@ -2967,7 +2997,12 @@ function ChatView(props: {
         headGroupIdB64: props.entry.groupIdB64,
         chats,
         // ADR-0052 decision 3 — the pins are wiped with the conversation.
-        afterSegment: (segment) => pins.forgetConversation(segment.groupIdB64),
+        afterSegment: async (segment) => {
+          await pins.forgetConversation(segment.groupIdB64);
+          // ADR-0082 section 5 — a deleted conversation leaves no
+          // translated text or transcript behind on this device.
+          await translation?.forgetConversation(segment.groupIdB64);
+        },
       });
       // Nothing held for a conversation that is gone is ever sent.
       if (heldSends.take(conversationHex()).length > 0) void persistHeldSends(s.account.accountId);
@@ -3703,13 +3738,15 @@ function ChatView(props: {
     const author = authorIdentityForMessageId(e.target, extra);
     if (!editDeleteAuthorized(author, e.senderKey)) return prev;
     if (e.op === "edit") {
-      return applyOp(prev, { op: "edit", target: e.target, text: e.text });
+      return applyOp(prev, { op: "edit", target: e.target, text: e.text, opId: e.messageId });
     }
     // Section 4.1 — an author-gated delete takes the message's pin records
     // with it (shared and personal), and (ADR-0065) it leaves Saved.
     void pins.messageDeleted(props.entry.groupIdB64, e.target);
     savedMessageDeleted(e.target);
-    return applyOp(prev, { op: "delete", target: e.target });
+    // ADR-0082 section 5 — and every translation and transcript made of it.
+    translation?.forgetMessage(props.entry.groupIdB64, e.target);
+    return applyOp(prev, { op: "delete", target: e.target, opId: e.messageId });
   }
 
   /**
@@ -4567,13 +4604,16 @@ function ChatView(props: {
     try {
       // ADR-0073 R.7 case 1 — in a superseded one-to-one an op is applied
       // here and never sent: its target exists only in the old session.
+      // ADR-0082 section 5 — the edit's own DS id is the message's new
+      // version; a local-only edit (no publish) carries none.
+      let opId: number | undefined;
       if (opRouteNow() === "send") {
         const envelopeBytes = await composeEditEnvelope(messageId, newText);
-        await publishQuiet(envelopeBytes);
+        opId = (await publishQuiet(envelopeBytes)).messageId;
       }
       // Apply locally (no echo). Author == us, so the gate the
       // receive loop runs would accept it; we mirror that here.
-      setMsgOps(applyOp(msgOps(), { op: "edit", target: messageId, text: newText }));
+      setMsgOps(applyOp(msgOps(), { op: "edit", target: messageId, text: newText, opId }));
     } catch (err) {
       setError(errorText(err, "chat.error.edit"));
     }
@@ -4589,15 +4629,18 @@ function ChatView(props: {
     const blobIds =
       row?.kind === "outgoing" ? blobIdsOfRefs(row.attachments) : row?.kind === "incoming" && row.event.kind === "application" ? blobIdsOfRefs(row.event.attachments) : [];
     const published = opRouteNow() === "send";
+    let opId: number | undefined;
     if (published) {
       const envelopeBytes = await composeDeleteEnvelope(messageId);
-      await publishQuiet(envelopeBytes);
+      opId = (await publishQuiet(envelopeBytes)).messageId;
     }
-    setMsgOps(applyOp(msgOps(), { op: "delete", target: messageId }));
+    setMsgOps(applyOp(msgOps(), { op: "delete", target: messageId, opId }));
     // Section 4.1 — a deleted message leaves the bar and its pin records
     // go with it.
     void pins.messageDeleted(props.entry.groupIdB64, messageId);
     savedMessageDeleted(messageId);
+    // ADR-0082 section 5 — and every translation and transcript made of it.
+    translation?.forgetMessage(props.entry.groupIdB64, messageId);
     const account = blobAccount();
     if (published && account !== null) void deleteBlobs(account, blobIds);
   }
@@ -4788,8 +4831,8 @@ function ChatView(props: {
    * before this, every keystroke's typing signal woke the other person with
    * "New message". The same rule as the iOS and Android clients.
    */
-  async function publishQuiet(envelopeBytes: Uint8Array): Promise<void> {
-    await chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes);
+  async function publishQuiet(envelopeBytes: Uint8Array): Promise<{ messageId: number }> {
+    return chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes);
   }
 
   async function publishEphemeral(envelopeBytes: Uint8Array): Promise<void> {
@@ -7387,6 +7430,8 @@ function ChatView(props: {
           <Show when={!membershipEnded()}>
             <ShareChannelsSwitch entry={props.entry} />
           </Show>
+          {/* ADR-0082 / UX 3.7 — a setting of this device only. */}
+          <AutoTranslateSwitch conversation={props.entry.groupIdB64} />
           {/* 1.18g — the add-member form, reached from `Add member` in the
               header's overflow menu, which opens this info with the form
               ready. Submit drives
@@ -8499,6 +8544,8 @@ function ChatView(props: {
         {notice() !== null && <div class="form-notice">{notice()}</div>}
       </Show>
 
+      {/* ADR-0082 / UX 3.6 — "Messages here are in Spanish." */}
+      <TranslateBar conversation={props.entry.groupIdB64} candidates={translateBarCandidates} />
       <Show
         when={timelineEntries().length > 0}
         fallback={
@@ -8544,6 +8591,7 @@ function ChatView(props: {
               <Show when={entry.kind === "message" ? entry.row : undefined}>
                 {(row) => (
               <TimelineBubble
+                conversationId={props.entry.groupIdB64}
                 row={row()}
                 isGroup={isGroupChat()}
                 startsRun={place().startsRun}

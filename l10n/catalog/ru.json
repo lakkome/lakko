@@ -2802,6 +2802,14 @@
       "text": "Отправлено",
       "status": "machine"
     },
+    "chat.message.show_original": {
+      "text": "Показать оригинал",
+      "status": "machine"
+    },
+    "chat.message.translate": {
+      "text": "Перевести",
+      "status": "machine"
+    },
     "chat.message.unpin": {
       "text": "Открепить",
       "status": "machine"
@@ -6466,6 +6474,10 @@
       "text": "Lakko сохраняет фото и видео в вашу медиатеку, только когда вы нажимаете «Сохранить».",
       "status": "machine"
     },
+    "ios.permission.speech_recognition": {
+      "text": "Lakko превращает голосовые и видеосообщения в текст, когда вы об этом просите. Это происходит на вашем устройстве; записи никуда не отправляются для расшифровки.",
+      "status": "machine"
+    },
     "language.name.ar": {
       "text": "Арабский",
       "status": "machine"
@@ -8502,6 +8514,110 @@
       "text": "Коды безопасности",
       "status": "machine"
     },
+    "settings.translation.delete_all": {
+      "text": "Удалить все переводы и расшифровки",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.body": {
+      "text": "{count, plural, one {Будет удалён # перевод или расшифровка на этом устройстве. Сообщения не изменятся.} few {Будут удалены # перевода и расшифровки на этом устройстве. Сообщения не изменятся.} many {Будут удалены # переводов и расшифровок на этом устройстве. Сообщения не изменятся.} other {Будут удалены # перевода и расшифровки на этом устройстве. Сообщения не изменятся.}}",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.confirm": {
+      "text": "Удалить",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.title": {
+      "text": "Удалить все переводы и расшифровки?",
+      "status": "machine"
+    },
+    "settings.translation.footer": {
+      "text": "Перевод и расшифровка выполняются на этом устройстве. Сообщения и голосовые записи никуда не отправляются для перевода или расшифровки.",
+      "status": "machine"
+    },
+    "settings.translation.mobile_data": {
+      "text": "Скачивать пакеты через мобильную сеть",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_both": {
+      "text": "Перевод и расшифровка",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_transcription": {
+      "text": "Расшифровка",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_translation": {
+      "text": "Перевод",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.android": {
+      "text": "Управляется Android",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.ios": {
+      "text": "Управляется iOS",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.web": {
+      "text": "Управляется браузером",
+      "status": "machine"
+    },
+    "settings.translation.pack.remove": {
+      "text": "Удалить",
+      "status": "machine"
+    },
+    "settings.translation.packs": {
+      "text": "Языковые пакеты на этом устройстве",
+      "status": "machine"
+    },
+    "settings.translation.packs.empty": {
+      "text": "На этом устройстве нет языковых пакетов",
+      "status": "machine"
+    },
+    "settings.translation.reading": {
+      "text": "Языки, которые я читаю",
+      "status": "machine"
+    },
+    "settings.translation.reading.add": {
+      "text": "Добавить язык",
+      "status": "machine"
+    },
+    "settings.translation.reading.remove": {
+      "text": "Удалить язык «{language}»",
+      "status": "machine"
+    },
+    "settings.translation.show_transcript": {
+      "text": "Кнопка расшифровки",
+      "status": "machine"
+    },
+    "settings.translation.show_translate": {
+      "text": "Кнопка «Перевести»",
+      "status": "machine"
+    },
+    "settings.translation.target": {
+      "text": "Переводить на",
+      "status": "machine"
+    },
+    "settings.translation.title": {
+      "text": "Перевод и расшифровка",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.transcription": {
+      "text": "Расшифровка недоступна на этом устройстве",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.transcription_web": {
+      "text": "Расшифровка недоступна в этом браузере",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.translation": {
+      "text": "Перевод недоступен на этом устройстве",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.translation_web": {
+      "text": "Перевод недоступен в этом браузере",
+      "status": "machine"
+    },
     "tokens.action_allowance_used": {
       "text": "Вы исчерпали дневной лимит на это действие. Попробуйте завтра.",
       "status": "machine"
@@ -8516,6 +8632,182 @@
     },
     "tokens.subscribe_allowance_used": {
       "text": "Сегодня вы подписались на много каналов. Попробуйте завтра.",
+      "status": "machine"
+    },
+    "transcript.button.hide": {
+      "text": "Скрыть расшифровку",
+      "status": "machine"
+    },
+    "transcript.button.show": {
+      "text": "Показать расшифровку",
+      "status": "machine"
+    },
+    "transcript.failed": {
+      "text": "Не удалось расшифровать сообщение",
+      "status": "machine"
+    },
+    "transcript.hide": {
+      "text": "Скрыть",
+      "status": "machine"
+    },
+    "transcript.line": {
+      "text": "Расшифровка",
+      "status": "machine"
+    },
+    "transcript.line.translated": {
+      "text": "Расшифровка · Переведено, язык оригинала: {language}",
+      "status": "machine"
+    },
+    "transcript.no_speech": {
+      "text": "В этом сообщении нет речи",
+      "status": "machine"
+    },
+    "transcript.permission_denied": {
+      "text": "Разрешите Lakko распознавание речи в Настройках, чтобы видеть расшифровки.",
+      "status": "machine"
+    },
+    "transcript.show_more": {
+      "text": "Показать больше",
+      "status": "machine"
+    },
+    "transcript.transcribing": {
+      "text": "Расшифровка…",
+      "status": "machine"
+    },
+    "transcript.unavailable_source": {
+      "text": "Lakko не может расшифровывать язык «{language}» на этом устройстве",
+      "status": "machine"
+    },
+    "translate.auto": {
+      "text": "Переводить автоматически",
+      "status": "machine"
+    },
+    "translate.bar.body": {
+      "text": "Сообщения здесь на языке «{language}».",
+      "status": "machine"
+    },
+    "translate.bar.close": {
+      "text": "Закрыть",
+      "status": "machine"
+    },
+    "translate.bar.not_now": {
+      "text": "Не сейчас",
+      "status": "machine"
+    },
+    "translate.bar.translate": {
+      "text": "Перевести",
+      "status": "machine"
+    },
+    "translate.line.failed": {
+      "text": "Не удалось перевести сообщение",
+      "status": "machine"
+    },
+    "translate.line.not_language": {
+      "text": "Не {language}?",
+      "status": "machine"
+    },
+    "translate.line.same_language": {
+      "text": "Это сообщение уже на языке «{language}»",
+      "status": "machine"
+    },
+    "translate.line.show_original": {
+      "text": "Показать оригинал",
+      "status": "machine"
+    },
+    "translate.line.translate": {
+      "text": "Перевести",
+      "status": "machine"
+    },
+    "translate.line.translated": {
+      "text": "Переведено, язык оригинала: {language}",
+      "status": "machine"
+    },
+    "translate.line.translating": {
+      "text": "Перевод…",
+      "status": "machine"
+    },
+    "translate.line.try_again": {
+      "text": "Повторить",
+      "status": "machine"
+    },
+    "translate.pack.blocked_anti_censorship": {
+      "text": "Языковые пакеты нельзя скачать, пока включён обход блокировок.",
+      "status": "machine"
+    },
+    "translate.pack.body.transcription": {
+      "text": "Расшифровка выполняется на этом устройстве. Для неё Lakko нужен пакет «{language}». Голосовые сообщения никуда не отправляются для расшифровки.",
+      "status": "machine"
+    },
+    "translate.pack.body.transcription_sized": {
+      "text": "Расшифровка выполняется на этом устройстве. Для неё Lakko нужен пакет «{language}» ({size}). Голосовые сообщения никуда не отправляются для расшифровки.",
+      "status": "machine"
+    },
+    "translate.pack.body.translation": {
+      "text": "Перевод выполняется на этом устройстве. Для него Lakko нужен пакет «{language}». Сообщения никуда не отправляются для перевода.",
+      "status": "machine"
+    },
+    "translate.pack.body.translation_sized": {
+      "text": "Перевод выполняется на этом устройстве. Для него Lakko нужен пакет «{language}» ({size}). Сообщения никуда не отправляются для перевода.",
+      "status": "machine"
+    },
+    "translate.pack.cancel": {
+      "text": "Отмена",
+      "status": "machine"
+    },
+    "translate.pack.download": {
+      "text": "Скачать",
+      "status": "machine"
+    },
+    "translate.pack.download_wifi": {
+      "text": "Скачать по Wi-Fi",
+      "status": "machine"
+    },
+    "translate.pack.downloading": {
+      "text": "Скачивание «{language}»… {percent}%",
+      "status": "machine"
+    },
+    "translate.pack.downloading_unsized": {
+      "text": "Загрузка: {language}…",
+      "status": "machine"
+    },
+    "translate.pack.failed": {
+      "text": "Не удалось скачать пакет «{language}»",
+      "status": "machine"
+    },
+    "translate.pack.not_now": {
+      "text": "Не сейчас",
+      "status": "machine"
+    },
+    "translate.pack.source.android": {
+      "text": "Пакет предоставляет Google.",
+      "status": "machine"
+    },
+    "translate.pack.source.ios": {
+      "text": "Пакет предоставляет Apple.",
+      "status": "machine"
+    },
+    "translate.pack.source.web": {
+      "text": "Пакет предоставляет разработчик вашего браузера.",
+      "status": "machine"
+    },
+    "translate.pack.title.transcription": {
+      "text": "Скачать «{language}» для расшифровки?",
+      "status": "machine"
+    },
+    "translate.pack.title.translation": {
+      "text": "Скачать «{language}» для перевода?",
+      "status": "machine"
+    },
+    "translate.pack.waiting_wifi": {
+      "text": "Ожидание Wi-Fi для скачивания «{language}»",
+      "status": "machine"
+    },
+    "translate.picker.title": {
+      "text": "Язык этого сообщения",
+      "status": "machine"
+    },
+    "translate.unsupported_source": {
+      "text": "Lakko не может переводить с языка «{language}» на этом устройстве",
       "status": "machine"
     },
     "update.available.message": {

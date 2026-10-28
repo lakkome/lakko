@@ -62,7 +62,7 @@
  *
  * Order within the action card is section 2's: the actions that produce a NEW
  * message first (Reply, then Forward - ADR-0052 decisions 1 and 2), then the
- * ones that only read (Copy, then Select - section 8), then the ones that
+ * ones that only read (Copy, Translate - ADR-0082 - then Select - section 8), then the ones that
  * change this message (Pin, then Edit), then the destructive one, separated
  * and in the platform's destructive colour. Reply is offered on any message
  * with an id, which is every message this menu opens on; Forward on any such
@@ -149,6 +149,12 @@ export interface MessageMenuProps {
   saveLabel?: "save" | "unsave" | null;
   onSave?: () => void;
   onCopy: (text: string) => void;
+  /** ADR-0082 / translation UX 3.1 — the row after Copy, in the group of
+   *  actions that only read: `Translate`, `Show original` on a message
+   *  already showing a translation, or `null` when this device cannot
+   *  translate it (the shared rule `translationOffered` decided). */
+  translateLabel?: "translate" | "show-original" | null;
+  onTranslate?: () => void;
   /** Section 8 — whether the `Select` row is offered: the same gate as
    *  Forward (an id, a complete send; the menu never opens on a deleted
    *  message). */
@@ -342,6 +348,18 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 >
                   <Icon name="copy" size={16} />
                   <span>{t("common.copy")}</span>
+                </button>
+              )}
+            </Show>
+            <Show when={props.pinOnly === true ? null : (props.translateLabel ?? null)}>
+              {(label) => (
+                <button type="button" role="menuitem" onClick={() => run(() => props.onTranslate?.())}>
+                  <Icon name="globe" size={16} />
+                  <span>
+                    {label() === "show-original"
+                      ? t("chat.message.show_original")
+                      : t("chat.message.translate")}
+                  </span>
                 </button>
               )}
             </Show>

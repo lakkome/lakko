@@ -284,6 +284,16 @@ enum AccountLocalDataWipe {
             removeKeys(in: standard, withPrefix: knockCursorPrefix + accountIdB64 + ".")
         }
         step("message-log") { MessageLogStore().deleteLog(accountIdB64: accountIdB64) }
+        // ADR-0082 section 5 — the translations, transcripts and
+        // per-conversation translation choices, and the audio extracted for a
+        // transcription still under way.
+        step("message-translations") {
+            try MessageTranslationStore.shared.clear(accountIdB64: accountIdB64)
+            if MessageTranslationPurge.boundAccountIdB64 == accountIdB64 {
+                MessageTranslationCenter.shared.forgetAccount()
+            }
+            try removeIfPresent(AudioExtract.directory)
+        }
 
         // 5. Contacts and profiles.
         step("verified-bindings") { VerifiedBindingStore.clear(ownerAccountIdB64: accountIdB64) }

@@ -179,6 +179,9 @@ public struct ChatScreen: View {
         // bubble reads the controller out of the environment.
         MessageMenuHost { chatBody }
             .overlay { VideoNoteOverlay(media: media) }
+            // ADR-0082 — the conversation id the rows translate under, the
+            // translation session host, the pack dialog and the picker.
+            .modifier(TranslationOverlays(conversation: viewModel.groupIdHex, messages: viewModel.messages))
             .environmentObject(media)
             .environmentObject(media.live)
             .onAppear {
@@ -214,6 +217,9 @@ public struct ChatScreen: View {
     @ViewBuilder
     private var chatBody: some View {
         VStack(spacing: 0) {
+            // ADR-0082 / UX 3.6 — "Messages here are in Spanish." at the top
+            // of the conversation, a child of this VStack like the pinned bar.
+            TranslationBar(conversation: viewModel.groupIdHex, messages: viewModel.messages)
             // ADR-0052 decision 3 / `docs/ux/message-actions.md` section 4 —
             // the pinned bar, under the header: one pin at a time, newest
             // first, shared before personal. A child of this VStack, so the
@@ -1866,6 +1872,9 @@ struct MessageRow: View {
     /// `docs/ux/message-actions.md` — where the menu goes when it opens, `nil`
     /// outside a ``MessageMenuHost``.
     @Environment(\.messageMenuPresenter) private var menuPresenter
+    /// ADR-0082 — the conversation this row belongs to, for translation and
+    /// transcripts; `nil` outside a conversation screen.
+    @Environment(\.translationConversation) private var translationConversation
 
     /// Where this row's bubble is on screen.
     ///
@@ -2130,10 +2139,28 @@ struct MessageRow: View {
         actionsAvailable
             && message.direction != .system
             && !message.deleted
-            && !message.text.isEmpty
+            && (!message.text.isEmpty || copyText != nil)
             // ADR-0073 R.5 — a row of an older group of the conversation is
             // read-only: its menu offers nothing but Unpin (below).
             && !isHistoryRow
+    }
+
+    /// ADR-0082 / UX 3.2 — Copy is "the text I see": a translation while it
+    /// is shown, a transcript on a voice message with one.
+    private var copyText: String? {
+        guard let conversation = translationConversation else {
+            return message.text.isEmpty ? nil : message.text
+        }
+        return MessageTranslationCenter.shared.copyText(conversation: conversation, message: message)
+    }
+
+    /// ADR-0082 / UX 3.1 — the `Translate` row, from the shared rule.
+    private var translateState: MessageTranslationCenter.MenuState {
+        guard let conversation = translationConversation, actionsAvailable,
+              message.direction != .system, !message.deleted, message.messageId > 0,
+              message.unsupportedVersion == nil, !isHistoryRow
+        else { return .unavailable }
+        return MessageTranslationCenter.shared.menuState(conversation: conversation, message: message)
     }
 
     /// ADR-0073 R.5 — whether this row belongs to an older segment of the
@@ -2153,7 +2180,8 @@ struct MessageRow: View {
             canSelect: canSelect,
             // UX section 2 — on any message that is not deleted.
             // An older segment's row may be saved too (round-6 rule).
-            save: saveState)
+            save: saveState,
+            translate: translateState)
     }
 
     /// Make a bubble the thing the menu opens on.
@@ -2228,8 +2256,18 @@ struct MessageRow: View {
                         onToggleSave()
                     case .copy:
                         // Decided here because this is what knows which text the
-                        // person can see.
-                        MessageClipboard.copy(message.text)
+                        // person can see (a translation while it is shown).
+                        MessageClipboard.copy(copyText ?? message.text)
+                    case .translate:
+                        if let conversation = translationConversation {
+                            MessageTranslationCenter.shared.translate(
+                                conversation: conversation, message: message,
+                                askLanguage: translateState == .translateAskLanguage)
+                        }
+                    case .showOriginal:
+                        if let conversation = translationConversation {
+                            MessageTranslationCenter.shared.showOriginal(conversation: conversation, message: message)
+                        }
                     case .select:
                         onSelect()
                     case .edit:
@@ -2302,8 +2340,9 @@ struct MessageRow: View {
                         // loupe under a menu. `docs/ux/message-actions.md` §3
                         // replaces what selection was being used for with Copy,
                         // which takes the whole message in one tap.
-                        Text(message.text)
-                            .font(.body)
+                        // ADR-0082 — the text or its translation, with the
+                        // quiet line under it (UX 3.2).
+                        TranslatableMessageText(message: message, outgoing: isOutgoing)
                     }
                     if !message.attachments.isEmpty {
                         attachmentChips
@@ -2394,11 +2433,19 @@ struct MessageRow: View {
                         ref: ref,
                         bubble: decision.bubble,
                         mediaKey: ChatMediaController.key(for: ref),
-                        incoming: message.direction == .incoming
+                        incoming: message.direction == .incoming,
+                        transcript: transcriptTarget
                     )
                 }
             }
         }
+    }
+
+    /// ADR-0082 section 4 — a stored message can be transcribed; a row still
+    /// sending has no id to keep a transcript under.
+    private var transcriptTarget: TranscriptTarget? {
+        message.messageId > 0 && !isHistoryRow
+            ? TranscriptTarget(messageId: message.messageId, lastOpId: message.lastOpId ?? 0) : nil
     }
 
     @ViewBuilder
@@ -2408,7 +2455,8 @@ struct MessageRow: View {
                 ref: ref,
                 bubble: .videoNote,
                 mediaKey: ChatMediaController.key(for: ref),
-                incoming: message.direction == .incoming
+                incoming: message.direction == .incoming,
+                transcript: transcriptTarget
             )
         }
     }
@@ -2960,6 +3008,8 @@ struct MembersSheet: View {
                 // `docs/ux/who-can-find-me.md` section 5 — present only while
                 // the setting includes groups at all.
                 MembersCanFindMeSection(groupIdHex: viewModel.groupIdHex)
+                // ADR-0082 / UX 3.7 — a setting of this device only.
+                Section { AutoTranslateToggle(conversation: viewModel.groupIdHex) }
                 // ADR-0022 — only owner/admin (or an open/legacy group) sees
                 // the add affordance; a plain member's add would be refused.
                 if sections.contains(.addMember) {

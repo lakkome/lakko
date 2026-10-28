@@ -13,3 +13,5 @@
 "NSPhotoLibraryAddUsageDescription" = "Lakko fotoğraf ve videoları yalnızca Kaydet'i seçtiğinde arşivine kaydeder.";
 
 "NSFaceIDUsageDescription" = "Lakko, kurtarma ifadenizi göstermeden önce siz olduğunuzu doğrulamak için Face ID kullanır.";
+
+"NSSpeechRecognitionUsageDescription" = "Lakko, istediğinizde sesli mesajları ve video mesajları metne dönüştürür. Bu işlem cihazınızda yapılır; kayıtlar metne dönüştürülmek için hiçbir yere gönderilmez.";

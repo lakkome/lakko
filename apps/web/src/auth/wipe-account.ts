@@ -88,6 +88,7 @@ import { clearKnockCursorsForAccount } from "../chat/knock-cursor";
 import { deleteGroupClosedRow } from "../chat/group-closed-idb";
 import { deleteGroupNameRow } from "../chat/group-name-idb";
 import { deletePinRow } from "../chat/pin-idb";
+import { deleteTranslationRows } from "../translation/result-idb";
 import { deleteReadWatermarkRow } from "../chat/read-watermark-idb";
 import { clearSelectedTab } from "../chat/folders/selected-tab";
 import { deleteCallLogRow } from "../calls/call-log-idb";
@@ -220,6 +221,9 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "registrar-seeds", run: () => deleteRegistrarSeedRow(accountIdB64) },
     { name: "pending-root-seeds", run: () => deletePendingRootSeedRow(accountIdB64) },
     { name: "pins", run: () => deletePinRow(accountIdB64) },
+    // ADR-0082 section 5: translations, transcripts and the per-conversation
+    // translation choices this device made.
+    { name: "translations", run: () => deleteTranslationRows(accountIdB64) },
     { name: "reach", run: () => deleteReachRows(accountIdB64) },
     // The person's own feeds on this device (ADR-0063 section 6).
     { name: "feeds", run: () => deleteFeedState(accountIdB64) },

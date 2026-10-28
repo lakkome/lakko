@@ -66,6 +66,13 @@ import me.lakko.app.l10n.visibleLanguages
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 public fun LanguageScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
+    // ADR-0082 UX section 6 — the Translation and transcription sub-screen.
+    var translationOpen by rememberSaveable { mutableStateOf(false) }
+    if (translationOpen) {
+        androidx.activity.compose.BackHandler { translationOpen = false }
+        me.lakko.app.ui.translation.TranslationSettingsScreen(onBack = { translationOpen = false }, modifier = modifier)
+        return
+    }
     Scaffold(
         modifier = modifier,
         topBar = {
@@ -79,7 +86,11 @@ public fun LanguageScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
             )
         },
     ) { padding ->
-        LanguageList(modifier = Modifier.padding(padding).fillMaxSize())
+        Column(Modifier.padding(padding).fillMaxSize()) {
+            me.lakko.app.ui.translation.TranslationSettingsRow(onClick = { translationOpen = true })
+            androidx.compose.material3.HorizontalDivider()
+            LanguageList(modifier = Modifier.weight(1f))
+        }
     }
 }
 

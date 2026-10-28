@@ -145,6 +145,12 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     byId("lakko-registrar-seeds", "rows"),
     byId("lakko-pending-root-seeds", "rows"),
     byId("lakko-pins", "rows"),
+    // ADR-0082: one row per result, filed under a digest.
+    {
+      db: "lakko-translations",
+      store: "rows",
+      row: { id: `t-${acct}`, accountId: acct, cls: "result", ciphertext: ct },
+    },
     { db: "lakko-reach", store: "rows", row: { key: `${acct}|book`, ciphertext: ct } },
     { db: "lakko-reach", store: "rows", row: { key: `${acct}|grants`, ciphertext: ct } },
     byId("lakko-read-watermarks", "rows"),
@@ -564,6 +570,11 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko-registrar-seeds": "account",
   "lakko-pending-root-seeds": "account",
   "lakko-pins": "account",
+  "lakko-translations": "account",
+  // The domain of the digest a translation row is filed under, not a store.
+  "lakko/translation/row/v1": "not-storage",
+  // The domain of the keyed conversation tag on a translation row.
+  "lakko/translation/conversation-tag/v1": "not-storage",
   "lakko-reach": "account",
   "lakko-read-watermarks": "account",
   "lakko-call-log": "account",
@@ -670,6 +681,8 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.theme": "device",
   // ADR-0061: the interface language is chosen per device.
   "lakko.language": "device",
+  // ADR-0082 / UX section 6: the translation settings are per device.
+  "lakko.translation.settings.v1": "device",
   "lakko.transparency.last-seen-root.v1": "device",
   // The store gate's cross-tab marker: digests of the accounts wiped in the
   // last minute, never an account id; it prunes itself.

@@ -13,3 +13,5 @@
 "NSPhotoLibraryAddUsageDescription" = "只有在你选择“保存”时，Lakko 才会将照片和视频保存到你的图库。";
 
 "NSFaceIDUsageDescription" = "Lakko 使用面容 ID 确认是你本人，然后才显示你的恢复短语。";
+
+"NSSpeechRecognitionUsageDescription" = "在你要求时，Lakko 会把语音消息和视频消息转成文字。这在你的设备上完成，录音绝不会被发送到任何地方进行转写。";

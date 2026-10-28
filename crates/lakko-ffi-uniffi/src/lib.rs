@@ -72,6 +72,7 @@ pub mod scoped_discovery;
 pub mod sframe;
 pub mod sfu_signaling;
 pub mod synced_state;
+pub mod translation;
 pub mod transport;
 pub mod ui_rules;
 pub mod vault;

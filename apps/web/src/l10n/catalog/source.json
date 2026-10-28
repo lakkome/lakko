@@ -2858,6 +2858,14 @@
       "text": "Sent",
       "comment": "Tooltip of the single check under the reader's message: sent, not yet read by everyone."
     },
+    "chat.message.show_original": {
+      "text": "Show original",
+      "comment": "Message menu row on a message currently showing a translation: put the original text back."
+    },
+    "chat.message.translate": {
+      "text": "Translate",
+      "comment": "Message menu row: show a translation of this message, made on this device."
+    },
     "chat.message.unpin": {
       "text": "Unpin",
       "comment": "Message menu item: remove the pin from the message."
@@ -6575,6 +6583,10 @@
       "text": "Lakko saves photos and videos to your library only when you choose Save.",
       "comment": "iOS system permission prompt for photo library (add only) access (Info.plist usage description). iOS shows it in its own alert, in the language iOS uses for Lakko, the first time Lakko asks. It must say why Lakko needs the access. No placeholders."
     },
+    "ios.permission.speech_recognition": {
+      "text": "Lakko turns voice messages and video messages into text when you ask it to. This happens on your device; recordings are never sent anywhere to be transcribed.",
+      "comment": "iOS system permission prompt for speech recognition (Info.plist usage description). iOS shows it in its own alert, in the language iOS uses for Lakko, the first time Lakko asks. It must say why Lakko needs the access. No placeholders."
+    },
     "language.name.ar": {
       "text": "Arabic",
       "comment": "Name of the Arabic language, shown under its own name in the language list."
@@ -8833,6 +8845,111 @@
       "comment": "Row title in Settings > Security explaining safety numbers.",
       "security_critical": true
     },
+    "settings.translation.delete_all": {
+      "text": "Delete all translations and transcripts",
+      "comment": "Row that deletes every translation and transcript stored on this device."
+    },
+    "settings.translation.delete_all.body": {
+      "text": "{count, plural, one {# translation or transcript on this device will be deleted. Messages are not affected.} other {# translations and transcripts on this device will be deleted. Messages are not affected.}}",
+      "comment": "Confirmation dialog body; {count} is how many are stored."
+    },
+    "settings.translation.delete_all.confirm": {
+      "text": "Delete",
+      "comment": "Confirmation dialog destructive button."
+    },
+    "settings.translation.delete_all.title": {
+      "text": "Delete all translations and transcripts?",
+      "comment": "Confirmation dialog title."
+    },
+    "settings.translation.footer": {
+      "text": "Translation and transcription happen on this device. Messages and voice recordings are never sent anywhere to be translated or transcribed.",
+      "comment": "Paragraph at the bottom of the translation settings screen.",
+      "security_critical": true
+    },
+    "settings.translation.mobile_data": {
+      "text": "Download packs on mobile data",
+      "comment": "Switch: allow language-pack downloads on mobile data."
+    },
+    "settings.translation.pack.for_both": {
+      "text": "Translation and transcription",
+      "comment": "Subtitle of a pack used for both."
+    },
+    "settings.translation.pack.for_transcription": {
+      "text": "Transcription",
+      "comment": "Subtitle of a pack used for transcription."
+    },
+    "settings.translation.pack.for_translation": {
+      "text": "Translation",
+      "comment": "Subtitle of a pack used for translation."
+    },
+    "settings.translation.pack.managed.android": {
+      "text": "Managed by Android",
+      "comment": "Shown instead of Remove for a pack Android manages."
+    },
+    "settings.translation.pack.managed.ios": {
+      "text": "Managed by iOS",
+      "comment": "Shown instead of Remove for a pack iOS manages."
+    },
+    "settings.translation.pack.managed.web": {
+      "text": "Managed by your browser",
+      "comment": "Shown instead of Remove for a pack the browser manages."
+    },
+    "settings.translation.pack.remove": {
+      "text": "Remove",
+      "comment": "Button that deletes a pack Lakko downloaded."
+    },
+    "settings.translation.packs": {
+      "text": "Language packs on this device",
+      "comment": "Section title: the language packs stored on this device."
+    },
+    "settings.translation.packs.empty": {
+      "text": "No language packs on this device",
+      "comment": "Shown when no pack is stored."
+    },
+    "settings.translation.reading": {
+      "text": "Languages I read",
+      "comment": "Section title: languages never offered for translation."
+    },
+    "settings.translation.reading.add": {
+      "text": "Add language",
+      "comment": "Button that adds a language to the reading list."
+    },
+    "settings.translation.reading.remove": {
+      "text": "Remove {language}",
+      "comment": "Accessibility label of the control that removes a language from the reading list. {language} is a language name in the interface language, e.g. 'Spanish'."
+    },
+    "settings.translation.show_transcript": {
+      "text": "Show transcript button",
+      "comment": "Switch: offer the transcript button on voice and video messages."
+    },
+    "settings.translation.show_translate": {
+      "text": "Show Translate button",
+      "comment": "Switch: offer Translate in the message menu and the conversation banner."
+    },
+    "settings.translation.target": {
+      "text": "Translate into",
+      "comment": "Row: the language translations are made into."
+    },
+    "settings.translation.title": {
+      "text": "Translation and transcription",
+      "comment": "Row in Settings > Language and title of its screen."
+    },
+    "settings.translation.unavailable.transcription": {
+      "text": "Transcription isn't available on this device",
+      "comment": "Shown in settings instead of the transcription rows when this device has no local engine."
+    },
+    "settings.translation.unavailable.transcription_web": {
+      "text": "Transcription isn't available in this browser",
+      "comment": "Web variant of the line above."
+    },
+    "settings.translation.unavailable.translation": {
+      "text": "Translation isn't available on this device",
+      "comment": "Shown in settings instead of the translation rows when this device has no local engine."
+    },
+    "settings.translation.unavailable.translation_web": {
+      "text": "Translation isn't available in this browser",
+      "comment": "Web variant of the line above."
+    },
     "tokens.action_allowance_used": {
       "text": "You have used today's allowance for this. Try again tomorrow.",
       "comment": "An invite link, group link or channel name refused because the account's daily allowance for it is used up."
@@ -8848,6 +8965,190 @@
     "tokens.subscribe_allowance_used": {
       "text": "You've subscribed to a lot of channels today. Try again tomorrow.",
       "comment": "The account's daily allowance of channel subscriptions is used up."
+    },
+    "transcript.button.hide": {
+      "text": "Hide transcript",
+      "comment": "Accessibility label of the transcript button while the transcript is open."
+    },
+    "transcript.button.show": {
+      "text": "Show transcript",
+      "comment": "Accessibility label of the transcript button on a voice or video message."
+    },
+    "transcript.failed": {
+      "text": "Couldn't transcribe this message",
+      "comment": "Shown under a voice message when transcription failed."
+    },
+    "transcript.hide": {
+      "text": "Hide",
+      "comment": "Button next to the transcript label: close the transcript."
+    },
+    "transcript.line": {
+      "text": "Transcript",
+      "comment": "Quiet label under a transcript."
+    },
+    "transcript.line.translated": {
+      "text": "Transcript · Translated from {language}",
+      "comment": "Quiet label under a translated transcript. {language} is a language name in the interface language, e.g. 'Spanish'."
+    },
+    "transcript.no_speech": {
+      "text": "No speech in this message",
+      "comment": "Shown under a voice message in which no speech was found."
+    },
+    "transcript.permission_denied": {
+      "text": "Allow speech recognition for Lakko in Settings to see transcripts.",
+      "comment": "Shown under a voice or video message when the person has not allowed speech recognition for Lakko in the system settings."
+    },
+    "transcript.show_more": {
+      "text": "Show more",
+      "comment": "Expands a long transcript."
+    },
+    "transcript.transcribing": {
+      "text": "Transcribing…",
+      "comment": "Shown under a voice message while this device transcribes it."
+    },
+    "transcript.unavailable_source": {
+      "text": "Lakko can't transcribe {language} on this device",
+      "comment": "Shown when the chosen language cannot be transcribed here. {language} is a language name in the interface language, e.g. 'Spanish'."
+    },
+    "translate.auto": {
+      "text": "Translate automatically",
+      "comment": "Switch in a conversation's info screen: translate incoming messages in other languages as they are shown, on this device."
+    },
+    "translate.bar.body": {
+      "text": "Messages here are in {language}.",
+      "comment": "Banner at the top of a conversation whose recent messages are in another language. {language} is a language name in the interface language, e.g. 'Spanish'."
+    },
+    "translate.bar.close": {
+      "text": "Close",
+      "comment": "Accessibility label of the banner's close control."
+    },
+    "translate.bar.not_now": {
+      "text": "Not now",
+      "comment": "Banner button: hide this banner for this language in this conversation."
+    },
+    "translate.bar.translate": {
+      "text": "Translate",
+      "comment": "Banner button: turn on automatic translation for this conversation."
+    },
+    "translate.line.failed": {
+      "text": "Couldn't translate this message",
+      "comment": "Quiet line under a message when translation failed; the original stays."
+    },
+    "translate.line.not_language": {
+      "text": "Not {language}?",
+      "comment": "Button that opens a list to choose the message's language when detection was wrong. {language} is a language name in the interface language, e.g. 'Spanish'."
+    },
+    "translate.line.same_language": {
+      "text": "This message is already in {language}",
+      "comment": "Shown briefly when the message turns out to be in the target language. {language} is a language name in the interface language, e.g. 'Spanish'."
+    },
+    "translate.line.show_original": {
+      "text": "Show original",
+      "comment": "Button on the quiet line under a translated message."
+    },
+    "translate.line.translate": {
+      "text": "Translate",
+      "comment": "Button on the quiet line under a message whose original is shown again."
+    },
+    "translate.line.translated": {
+      "text": "Translated from {language}",
+      "comment": "Quiet line under a translated message. {language} is a language name in the interface language, e.g. 'Spanish'."
+    },
+    "translate.line.translating": {
+      "text": "Translating…",
+      "comment": "Quiet line under a message while this device translates it."
+    },
+    "translate.line.try_again": {
+      "text": "Try again",
+      "comment": "Button after a failed translation or transcription."
+    },
+    "translate.pack.blocked_anti_censorship": {
+      "text": "Language packs can't be downloaded while anti-censorship is on.",
+      "comment": "Shown instead of the pack dialog while anti-censorship is on; the download would leave the protected connection.",
+      "security_critical": true
+    },
+    "translate.pack.body.transcription": {
+      "text": "Transcription happens on this device. Lakko needs the {language} pack to do it. Voice messages are never sent anywhere to be transcribed.",
+      "comment": "Dialog body when the pack size is unknown. {language} is a language name in the interface language, e.g. 'Spanish'.",
+      "security_critical": true
+    },
+    "translate.pack.body.transcription_sized": {
+      "text": "Transcription happens on this device. Lakko needs the {language} pack to do it ({size}). Voice messages are never sent anywhere to be transcribed.",
+      "comment": "Dialog body with the pack size, e.g. '30 MB'. {language} is a language name in the interface language, e.g. 'Spanish'.",
+      "security_critical": true
+    },
+    "translate.pack.body.translation": {
+      "text": "Translation happens on this device. Lakko needs the {language} pack to do it. Messages are never sent anywhere to be translated.",
+      "comment": "Dialog body when the pack size is unknown. {language} is a language name in the interface language, e.g. 'Spanish'.",
+      "security_critical": true
+    },
+    "translate.pack.body.translation_sized": {
+      "text": "Translation happens on this device. Lakko needs the {language} pack to do it ({size}). Messages are never sent anywhere to be translated.",
+      "comment": "Dialog body with the pack size, e.g. '30 MB'. {language} is a language name in the interface language, e.g. 'Spanish'.",
+      "security_critical": true
+    },
+    "translate.pack.cancel": {
+      "text": "Cancel",
+      "comment": "Cancels a pack download in progress."
+    },
+    "translate.pack.download": {
+      "text": "Download",
+      "comment": "Pack dialog: start the download."
+    },
+    "translate.pack.download_wifi": {
+      "text": "Download on Wi-Fi",
+      "comment": "Pack dialog on mobile data when mobile-data downloads are off: queue until Wi-Fi."
+    },
+    "translate.pack.downloading": {
+      "text": "Downloading {language}… {percent}%",
+      "comment": "Quiet line while a pack downloads; {percent} is 0-100. {language} is a language name in the interface language, e.g. 'Spanish'."
+    },
+    "translate.pack.downloading_unsized": {
+      "text": "Downloading {language}…",
+      "comment": "Quiet line while a pack downloads and the platform reports no progress. {language} is a language name in the interface language."
+    },
+    "translate.pack.failed": {
+      "text": "Couldn't download the {language} pack",
+      "comment": "Shown when a pack download failed. {language} is a language name in the interface language, e.g. 'Spanish'."
+    },
+    "translate.pack.not_now": {
+      "text": "Not now",
+      "comment": "Pack dialog: close without downloading."
+    },
+    "translate.pack.source.android": {
+      "text": "The pack comes from Google.",
+      "comment": "Second paragraph of the pack dialog on Android: who serves the download.",
+      "security_critical": true
+    },
+    "translate.pack.source.ios": {
+      "text": "The pack comes from Apple.",
+      "comment": "Second paragraph of the pack dialog on iOS: who serves the download.",
+      "security_critical": true
+    },
+    "translate.pack.source.web": {
+      "text": "The pack comes from your browser's maker.",
+      "comment": "Second paragraph of the pack dialog on the web: who serves the download.",
+      "security_critical": true
+    },
+    "translate.pack.title.transcription": {
+      "text": "Download {language} for transcription?",
+      "comment": "Dialog title before downloading a language pack for transcription. {language} is a language name in the interface language, e.g. 'Spanish'."
+    },
+    "translate.pack.title.translation": {
+      "text": "Download {language} for translation?",
+      "comment": "Dialog title before downloading a language pack for translation. {language} is a language name in the interface language, e.g. 'Spanish'."
+    },
+    "translate.pack.waiting_wifi": {
+      "text": "Waiting for Wi-Fi to download {language}",
+      "comment": "Quiet line while a pack download waits for Wi-Fi. {language} is a language name in the interface language, e.g. 'Spanish'."
+    },
+    "translate.picker.title": {
+      "text": "Language of this message",
+      "comment": "Title of the list of languages this device can translate or transcribe from."
+    },
+    "translate.unsupported_source": {
+      "text": "Lakko can't translate from {language} on this device",
+      "comment": "Shown when the chosen source language cannot be translated here. {language} is a language name in the interface language, e.g. 'Spanish'."
     },
     "update.available.message": {
       "text": "A new version of Lakko is available.",

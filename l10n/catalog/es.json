@@ -2694,6 +2694,14 @@
       "text": "Enviado",
       "status": "machine"
     },
+    "chat.message.show_original": {
+      "text": "Ver original",
+      "status": "machine"
+    },
+    "chat.message.translate": {
+      "text": "Traducir",
+      "status": "machine"
+    },
     "chat.message.unpin": {
       "text": "Desfijar",
       "status": "machine"
@@ -6174,6 +6182,10 @@
       "text": "Lakko guarda fotos y videos en tu biblioteca solo cuando eliges Guardar.",
       "status": "machine"
     },
+    "ios.permission.speech_recognition": {
+      "text": "Lakko convierte los mensajes de voz y los videomensajes en texto cuando se lo pides. Esto ocurre en tu dispositivo; las grabaciones nunca se envían a ningún sitio para transcribirlas.",
+      "status": "machine"
+    },
     "language.name.ar": {
       "text": "Árabe",
       "status": "machine"
@@ -8058,6 +8070,110 @@
       "text": "Números de seguridad",
       "status": "machine"
     },
+    "settings.translation.delete_all": {
+      "text": "Eliminar todas las traducciones y transcripciones",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.body": {
+      "text": "{count, plural, one {Se eliminará # traducción o transcripción de este dispositivo. Los mensajes no cambian.} other {Se eliminarán # traducciones y transcripciones de este dispositivo. Los mensajes no cambian.}}",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.confirm": {
+      "text": "Eliminar",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.title": {
+      "text": "¿Eliminar todas las traducciones y transcripciones?",
+      "status": "machine"
+    },
+    "settings.translation.footer": {
+      "text": "La traducción y la transcripción se hacen en este dispositivo. Los mensajes y las grabaciones de voz nunca se envían a ningún sitio para traducirlos o transcribirlos.",
+      "status": "machine"
+    },
+    "settings.translation.mobile_data": {
+      "text": "Descargar paquetes con datos móviles",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_both": {
+      "text": "Traducción y transcripción",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_transcription": {
+      "text": "Transcripción",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_translation": {
+      "text": "Traducción",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.android": {
+      "text": "Lo gestiona Android",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.ios": {
+      "text": "Lo gestiona iOS",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.web": {
+      "text": "Lo gestiona tu navegador",
+      "status": "machine"
+    },
+    "settings.translation.pack.remove": {
+      "text": "Quitar",
+      "status": "machine"
+    },
+    "settings.translation.packs": {
+      "text": "Paquetes de idioma en este dispositivo",
+      "status": "machine"
+    },
+    "settings.translation.packs.empty": {
+      "text": "No hay paquetes de idioma en este dispositivo",
+      "status": "machine"
+    },
+    "settings.translation.reading": {
+      "text": "Idiomas que leo",
+      "status": "machine"
+    },
+    "settings.translation.reading.add": {
+      "text": "Añadir idioma",
+      "status": "machine"
+    },
+    "settings.translation.reading.remove": {
+      "text": "Quitar {language}",
+      "status": "machine"
+    },
+    "settings.translation.show_transcript": {
+      "text": "Mostrar el botón de transcripción",
+      "status": "machine"
+    },
+    "settings.translation.show_translate": {
+      "text": "Mostrar el botón Traducir",
+      "status": "machine"
+    },
+    "settings.translation.target": {
+      "text": "Traducir a",
+      "status": "machine"
+    },
+    "settings.translation.title": {
+      "text": "Traducción y transcripción",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.transcription": {
+      "text": "La transcripción no está disponible en este dispositivo",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.transcription_web": {
+      "text": "La transcripción no está disponible en este navegador",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.translation": {
+      "text": "La traducción no está disponible en este dispositivo",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.translation_web": {
+      "text": "La traducción no está disponible en este navegador",
+      "status": "machine"
+    },
     "tokens.action_allowance_used": {
       "text": "Ya usaste el límite diario para esto. Inténtalo de nuevo mañana.",
       "status": "machine"
@@ -8072,6 +8188,182 @@
     },
     "tokens.subscribe_allowance_used": {
       "text": "Hoy te has suscrito a muchos canales. Inténtalo de nuevo mañana.",
+      "status": "machine"
+    },
+    "transcript.button.hide": {
+      "text": "Ocultar transcripción",
+      "status": "machine"
+    },
+    "transcript.button.show": {
+      "text": "Ver transcripción",
+      "status": "machine"
+    },
+    "transcript.failed": {
+      "text": "No se pudo transcribir este mensaje",
+      "status": "machine"
+    },
+    "transcript.hide": {
+      "text": "Ocultar",
+      "status": "machine"
+    },
+    "transcript.line": {
+      "text": "Transcripción",
+      "status": "machine"
+    },
+    "transcript.line.translated": {
+      "text": "Transcripción · Traducido del {language}",
+      "status": "machine"
+    },
+    "transcript.no_speech": {
+      "text": "No hay voz en este mensaje",
+      "status": "machine"
+    },
+    "transcript.permission_denied": {
+      "text": "Permite el reconocimiento de voz para Lakko en Ajustes para ver las transcripciones.",
+      "status": "machine"
+    },
+    "transcript.show_more": {
+      "text": "Ver más",
+      "status": "machine"
+    },
+    "transcript.transcribing": {
+      "text": "Transcribiendo…",
+      "status": "machine"
+    },
+    "transcript.unavailable_source": {
+      "text": "Lakko no puede transcribir {language} en este dispositivo",
+      "status": "machine"
+    },
+    "translate.auto": {
+      "text": "Traducir automáticamente",
+      "status": "machine"
+    },
+    "translate.bar.body": {
+      "text": "Los mensajes de aquí están en {language}.",
+      "status": "machine"
+    },
+    "translate.bar.close": {
+      "text": "Cerrar",
+      "status": "machine"
+    },
+    "translate.bar.not_now": {
+      "text": "Ahora no",
+      "status": "machine"
+    },
+    "translate.bar.translate": {
+      "text": "Traducir",
+      "status": "machine"
+    },
+    "translate.line.failed": {
+      "text": "No se pudo traducir este mensaje",
+      "status": "machine"
+    },
+    "translate.line.not_language": {
+      "text": "¿No es {language}?",
+      "status": "machine"
+    },
+    "translate.line.same_language": {
+      "text": "Este mensaje ya está en {language}",
+      "status": "machine"
+    },
+    "translate.line.show_original": {
+      "text": "Ver original",
+      "status": "machine"
+    },
+    "translate.line.translate": {
+      "text": "Traducir",
+      "status": "machine"
+    },
+    "translate.line.translated": {
+      "text": "Traducido del {language}",
+      "status": "machine"
+    },
+    "translate.line.translating": {
+      "text": "Traduciendo…",
+      "status": "machine"
+    },
+    "translate.line.try_again": {
+      "text": "Reintentar",
+      "status": "machine"
+    },
+    "translate.pack.blocked_anti_censorship": {
+      "text": "No se pueden descargar paquetes de idioma mientras Anticensura está activado.",
+      "status": "machine"
+    },
+    "translate.pack.body.transcription": {
+      "text": "La transcripción se hace en este dispositivo. Lakko necesita el paquete de {language} para hacerla. Los mensajes de voz nunca se envían a ningún sitio para transcribirlos.",
+      "status": "machine"
+    },
+    "translate.pack.body.transcription_sized": {
+      "text": "La transcripción se hace en este dispositivo. Lakko necesita el paquete de {language} para hacerla ({size}). Los mensajes de voz nunca se envían a ningún sitio para transcribirlos.",
+      "status": "machine"
+    },
+    "translate.pack.body.translation": {
+      "text": "La traducción se hace en este dispositivo. Lakko necesita el paquete de {language} para hacerla. Los mensajes nunca se envían a ningún sitio para traducirlos.",
+      "status": "machine"
+    },
+    "translate.pack.body.translation_sized": {
+      "text": "La traducción se hace en este dispositivo. Lakko necesita el paquete de {language} para hacerla ({size}). Los mensajes nunca se envían a ningún sitio para traducirlos.",
+      "status": "machine"
+    },
+    "translate.pack.cancel": {
+      "text": "Cancelar",
+      "status": "machine"
+    },
+    "translate.pack.download": {
+      "text": "Descargar",
+      "status": "machine"
+    },
+    "translate.pack.download_wifi": {
+      "text": "Descargar con wifi",
+      "status": "machine"
+    },
+    "translate.pack.downloading": {
+      "text": "Descargando {language}… {percent} %",
+      "status": "machine"
+    },
+    "translate.pack.downloading_unsized": {
+      "text": "Descargando {language}…",
+      "status": "machine"
+    },
+    "translate.pack.failed": {
+      "text": "No se pudo descargar el paquete de {language}",
+      "status": "machine"
+    },
+    "translate.pack.not_now": {
+      "text": "Ahora no",
+      "status": "machine"
+    },
+    "translate.pack.source.android": {
+      "text": "El paquete lo proporciona Google.",
+      "status": "machine"
+    },
+    "translate.pack.source.ios": {
+      "text": "El paquete lo proporciona Apple.",
+      "status": "machine"
+    },
+    "translate.pack.source.web": {
+      "text": "El paquete lo proporciona el fabricante de tu navegador.",
+      "status": "machine"
+    },
+    "translate.pack.title.transcription": {
+      "text": "¿Descargar {language} para la transcripción?",
+      "status": "machine"
+    },
+    "translate.pack.title.translation": {
+      "text": "¿Descargar {language} para la traducción?",
+      "status": "machine"
+    },
+    "translate.pack.waiting_wifi": {
+      "text": "Esperando wifi para descargar {language}",
+      "status": "machine"
+    },
+    "translate.picker.title": {
+      "text": "Idioma de este mensaje",
+      "status": "machine"
+    },
+    "translate.unsupported_source": {
+      "text": "Lakko no puede traducir del {language} en este dispositivo",
       "status": "machine"
     },
     "update.available.message": {

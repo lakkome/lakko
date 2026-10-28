@@ -2088,7 +2088,7 @@ private struct SessionRoot: View, Equatable {
                         ? chatListVM.title(groupIdHex: groupIdHex) : nil
                 })
         case .language:
-            LanguageScreen()
+            LanguageScreen(showsTranslationSettings: true)
         case .chatFolders(let reorder):
             ChatFoldersSettingsScreen(
                 startInReorder: reorder, viewModel: chatListVM, channels: channelsState,

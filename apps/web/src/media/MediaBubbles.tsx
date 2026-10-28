@@ -26,6 +26,7 @@ import { errorName, mediaErrorIsReal, playRejectionOutcome, waitForMetadata } fr
 import { nextPlaybackRate, rateLabel } from "./playback-queue";
 import { formatClock, formatTotalClock, spokenDuration } from "./recording-machine";
 import { PhotoBubble, VideoBubble } from "./VisualBubbles";
+import { TranscriptBlock, TranscriptButton, type TranscriptHost } from "../translation/Transcript";
 import { voicePress } from "./voice-press";
 import { barIsPlayed, waveformBars } from "./waveform";
 
@@ -56,6 +57,12 @@ export interface MediaBubbleProps {
    * lone voice message — means the caller is drawing the line itself.
    */
   meta?: (() => JSX.Element) | undefined;
+  /**
+   * ADR-0082 — the on-device transcript of this message (UX section 4), or
+   * absent when there is nothing to offer: an un-sent take, a bubble rendered
+   * outside the session. Absent still reserves the `Aa` button's space.
+   */
+  transcript?: TranscriptHost | undefined;
 }
 
 const WAVE_BARS = 40;
@@ -457,6 +464,9 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
             >
               {rateLabel(rate())}
             </button>
+            {/* UX section 4.1 — beside the speed control's reserved space,
+                and reserved the same way when it is not offered. */}
+            <TranscriptButton host={props.transcript} />
             {/* UX spec §2 — "the message's own time sits on that same line",
                 after the speed control. Only when the caller handed it over,
                 which it does exactly for a voice message alone in its bubble
@@ -465,6 +475,9 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
           </div>
         </div>
       </div>
+      {/* UX section 4.2 — the transcript opens BELOW the row, inside the
+          bubble; the row keeps its height. */}
+      <TranscriptBlock host={props.transcript} />
       <Show when={status() === "error"}>
         <AttachmentFailureNote
           failure={failure()}
@@ -710,6 +723,7 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
 
   return (
     <div style={{ display: "flex", "flex-direction": "column", "align-items": "center", gap: "0.2rem" }}>
+      <div class="lakko-vn-frame">
       <button ref={root} type="button" class="lakko-vn-bubble" aria-label={label()} onClick={onTap}>
         <Show when={mounted() && videoUrl() !== null}>
           <video
@@ -795,6 +809,13 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
           <span class="lakko-vn-corner">{t("chat.video_note.sound_on")}</span>
         </Show>
       </button>
+      {/* UX section 4.1 — on the bubble's trailing bottom edge. A sibling of
+          the circle, not inside it: a button cannot hold a button. */}
+      <span class="lakko-vn-transcript">
+        <TranscriptButton host={props.transcript} />
+      </span>
+      </div>
+      <TranscriptBlock host={props.transcript} />
       <Show when={status() === "error"}>
         <AttachmentFailureNote
           failure={noteFailure()}

@@ -335,6 +335,14 @@ targets:
         NSFaceIDUsageDescription: >-
           Lakko uses Face ID to confirm it is you before it shows
           your recovery phrase.
+        # ADR-0082 — transcribing a voice or video message on this device
+        # needs the speech-recognition permission. Recognition is always on
+        # device (`SpeechRequestFactory`). Catalog key
+        # `ios.permission.speech_recognition`.
+        NSSpeechRecognitionUsageDescription: >-
+          Lakko turns voice messages and video messages into text
+          when you ask it to. This happens on your device;
+          recordings are never sent anywhere to be transcribed.
         # `UIRequiredDeviceCapabilities` left at default — every
         # device the deployment target accepts has the same
         # baseline (arm64, OpenGL ES 2.0).

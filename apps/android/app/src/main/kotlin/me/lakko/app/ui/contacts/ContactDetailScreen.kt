@@ -375,6 +375,11 @@ private fun ContactDetailBody(
                     onClick = { onVerifySafetyNumber(contactKey) },
                 )
             }
+            // ADR-0082 / translation UX 3.7 — `Translate automatically`, for
+            // this device only; absent with no chat or no engine.
+            if (InfoSection.MESSAGE in sections) {
+                me.lakko.app.ui.translation.AutoTranslateRow(groupIdHex)
+            }
             if (InfoSection.RENAME_CONTACT in sections) {
                 DetailRow(
                     title = t("contacts.rename.action"),

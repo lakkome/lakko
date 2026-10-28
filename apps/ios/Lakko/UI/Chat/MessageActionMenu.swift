@@ -91,6 +91,13 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     /// Puts the message text on the clipboard. Nothing leaves the device.
     case copy
 
+    /// ADR-0082 / `translation-and-transcription.md` 3.1 — translate the
+    /// text on this device. Offered by the shared rule `translationOffered`.
+    case translate
+
+    /// The same row on a message showing its translation.
+    case showOriginal
+
     /// Section 8 — enters selection mode with this message already selected,
     /// from which Delete and Forward act on the set. Offered on the rows that
     /// are selectable at all: landed, not a tombstone, send complete (the
@@ -114,6 +121,8 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .save: return Localization.text("chat.message.save")
         case .unsave: return Localization.text("chat.message.unsave")
         case .copy: return Localization.text("common.copy")
+        case .translate: return Localization.text("chat.message.translate")
+        case .showOriginal: return Localization.text("chat.message.show_original")
         case .select: return Localization.text("chat.message.select")
         case .edit: return Localization.text("chat.message.edit")
         case .delete: return Localization.text("common.delete")
@@ -129,6 +138,8 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .save: return "bookmark"
         case .unsave: return "bookmark.slash"
         case .copy: return "doc.on.doc"
+        case .translate: return "character.bubble"
+        case .showOriginal: return "text.bubble"
         case .select: return "checkmark.circle"
         case .edit: return "pencil"
         case .delete: return "trash"
@@ -156,7 +167,8 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         canReply: Bool, canForward: Bool, canEditOrDelete: Bool, hasText: Bool,
         pin: PinMenuState = .unavailable,
         canSelect: Bool = false,
-        save: SaveMenuState = .unavailable
+        save: SaveMenuState = .unavailable,
+        translate: MessageTranslateMenuState = .unavailable
     ) -> [MessageMenuAction] {
         var actions: [MessageMenuAction] = []
         // Section 3.1 — any message with an id; a tombstone and a row that
@@ -169,6 +181,12 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         // attachment has nothing to put on the clipboard, and a tombstone has
         // nothing left at all.
         if hasText { actions.append(.copy) }
+        // ADR-0082 / UX 3.1 — in the read-only group, after Copy.
+        switch translate {
+        case .translate, .translateAskLanguage: actions.append(.translate)
+        case .showOriginal: actions.append(.showOriginal)
+        case .unavailable: break
+        }
         // Section 8 — on every row that is selectable in the mode it opens.
         if canSelect { actions.append(.select) }
         // Section 4.1 — `Pin` on any message whose send is complete and that

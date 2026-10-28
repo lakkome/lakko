@@ -2694,6 +2694,14 @@
       "text": "Gönderildi",
       "status": "machine"
     },
+    "chat.message.show_original": {
+      "text": "Orijinali göster",
+      "status": "machine"
+    },
+    "chat.message.translate": {
+      "text": "Çevir",
+      "status": "machine"
+    },
     "chat.message.unpin": {
       "text": "Sabitlemeyi kaldır",
       "status": "machine"
@@ -6174,6 +6182,10 @@
       "text": "Lakko fotoğraf ve videoları yalnızca Kaydet'i seçtiğinde arşivine kaydeder.",
       "status": "machine"
     },
+    "ios.permission.speech_recognition": {
+      "text": "Lakko, istediğinizde sesli mesajları ve video mesajları metne dönüştürür. Bu işlem cihazınızda yapılır; kayıtlar metne dönüştürülmek için hiçbir yere gönderilmez.",
+      "status": "machine"
+    },
     "language.name.ar": {
       "text": "Arapça",
       "status": "machine"
@@ -8058,6 +8070,110 @@
       "text": "Güvenlik numaraları",
       "status": "machine"
     },
+    "settings.translation.delete_all": {
+      "text": "Tüm çevirileri ve dökümleri sil",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.body": {
+      "text": "{count, plural, one {Bu cihazdaki # çeviri veya döküm silinecek. Mesajlar etkilenmez.} other {Bu cihazdaki # çeviri ve döküm silinecek. Mesajlar etkilenmez.}}",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.confirm": {
+      "text": "Sil",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.title": {
+      "text": "Tüm çeviriler ve dökümler silinsin mi?",
+      "status": "machine"
+    },
+    "settings.translation.footer": {
+      "text": "Çeviri ve metne dökme bu cihazda yapılır. Mesajlar ve ses kayıtları çevrilmek veya metne dökülmek için hiçbir yere gönderilmez.",
+      "status": "machine"
+    },
+    "settings.translation.mobile_data": {
+      "text": "Paketleri mobil veriyle indir",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_both": {
+      "text": "Çeviri ve metne dökme",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_transcription": {
+      "text": "Metne dökme",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_translation": {
+      "text": "Çeviri",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.android": {
+      "text": "Android tarafından yönetilir",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.ios": {
+      "text": "iOS tarafından yönetilir",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.web": {
+      "text": "Tarayıcınız tarafından yönetilir",
+      "status": "machine"
+    },
+    "settings.translation.pack.remove": {
+      "text": "Kaldır",
+      "status": "machine"
+    },
+    "settings.translation.packs": {
+      "text": "Bu cihazdaki dil paketleri",
+      "status": "machine"
+    },
+    "settings.translation.packs.empty": {
+      "text": "Bu cihazda dil paketi yok",
+      "status": "machine"
+    },
+    "settings.translation.reading": {
+      "text": "Okuduğum diller",
+      "status": "machine"
+    },
+    "settings.translation.reading.add": {
+      "text": "Dil ekle",
+      "status": "machine"
+    },
+    "settings.translation.reading.remove": {
+      "text": "{language} dilini kaldır",
+      "status": "machine"
+    },
+    "settings.translation.show_transcript": {
+      "text": "Döküm düğmesini göster",
+      "status": "machine"
+    },
+    "settings.translation.show_translate": {
+      "text": "Çevir düğmesini göster",
+      "status": "machine"
+    },
+    "settings.translation.target": {
+      "text": "Çeviri dili",
+      "status": "machine"
+    },
+    "settings.translation.title": {
+      "text": "Çeviri ve metne dökme",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.transcription": {
+      "text": "Bu cihazda metne dökme kullanılamıyor",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.transcription_web": {
+      "text": "Bu tarayıcıda metne dökme kullanılamıyor",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.translation": {
+      "text": "Bu cihazda çeviri kullanılamıyor",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.translation_web": {
+      "text": "Bu tarayıcıda çeviri kullanılamıyor",
+      "status": "machine"
+    },
     "tokens.action_allowance_used": {
       "text": "Bunun için bugünkü hakkınızı kullandınız. Yarın tekrar deneyin.",
       "status": "machine"
@@ -8072,6 +8188,182 @@
     },
     "tokens.subscribe_allowance_used": {
       "text": "Bugün çok sayıda kanala abone oldunuz. Yarın tekrar deneyin.",
+      "status": "machine"
+    },
+    "transcript.button.hide": {
+      "text": "Dökümü gizle",
+      "status": "machine"
+    },
+    "transcript.button.show": {
+      "text": "Dökümü göster",
+      "status": "machine"
+    },
+    "transcript.failed": {
+      "text": "Bu mesaj metne dökülemedi",
+      "status": "machine"
+    },
+    "transcript.hide": {
+      "text": "Gizle",
+      "status": "machine"
+    },
+    "transcript.line": {
+      "text": "Döküm",
+      "status": "machine"
+    },
+    "transcript.line.translated": {
+      "text": "Döküm · {language} dilinden çevrildi",
+      "status": "machine"
+    },
+    "transcript.no_speech": {
+      "text": "Bu mesajda konuşma yok",
+      "status": "machine"
+    },
+    "transcript.permission_denied": {
+      "text": "Dökümleri görmek için Ayarlar'da Lakko'ya konuşma tanıma izni verin.",
+      "status": "machine"
+    },
+    "transcript.show_more": {
+      "text": "Daha fazla göster",
+      "status": "machine"
+    },
+    "transcript.transcribing": {
+      "text": "Metne dökülüyor…",
+      "status": "machine"
+    },
+    "transcript.unavailable_source": {
+      "text": "Lakko bu cihazda {language} dilini metne dökemiyor",
+      "status": "machine"
+    },
+    "translate.auto": {
+      "text": "Otomatik çevir",
+      "status": "machine"
+    },
+    "translate.bar.body": {
+      "text": "Buradaki mesajlar {language} dilinde.",
+      "status": "machine"
+    },
+    "translate.bar.close": {
+      "text": "Kapat",
+      "status": "machine"
+    },
+    "translate.bar.not_now": {
+      "text": "Şimdi değil",
+      "status": "machine"
+    },
+    "translate.bar.translate": {
+      "text": "Çevir",
+      "status": "machine"
+    },
+    "translate.line.failed": {
+      "text": "Bu mesaj çevrilemedi",
+      "status": "machine"
+    },
+    "translate.line.not_language": {
+      "text": "{language} değil mi?",
+      "status": "machine"
+    },
+    "translate.line.same_language": {
+      "text": "Bu mesaj zaten {language} dilinde",
+      "status": "machine"
+    },
+    "translate.line.show_original": {
+      "text": "Orijinali göster",
+      "status": "machine"
+    },
+    "translate.line.translate": {
+      "text": "Çevir",
+      "status": "machine"
+    },
+    "translate.line.translated": {
+      "text": "{language} dilinden çevrildi",
+      "status": "machine"
+    },
+    "translate.line.translating": {
+      "text": "Çevriliyor…",
+      "status": "machine"
+    },
+    "translate.line.try_again": {
+      "text": "Tekrar dene",
+      "status": "machine"
+    },
+    "translate.pack.blocked_anti_censorship": {
+      "text": "Sansürü aşma açıkken dil paketleri indirilemez.",
+      "status": "machine"
+    },
+    "translate.pack.body.transcription": {
+      "text": "Metne dökme bu cihazda yapılır. Lakko bunun için {language} paketine ihtiyaç duyar. Sesli mesajlar metne dökülmek için hiçbir yere gönderilmez.",
+      "status": "machine"
+    },
+    "translate.pack.body.transcription_sized": {
+      "text": "Metne dökme bu cihazda yapılır. Lakko bunun için {language} paketine ihtiyaç duyar ({size}). Sesli mesajlar metne dökülmek için hiçbir yere gönderilmez.",
+      "status": "machine"
+    },
+    "translate.pack.body.translation": {
+      "text": "Çeviri bu cihazda yapılır. Lakko bunun için {language} paketine ihtiyaç duyar. Mesajlar çevrilmek için hiçbir yere gönderilmez.",
+      "status": "machine"
+    },
+    "translate.pack.body.translation_sized": {
+      "text": "Çeviri bu cihazda yapılır. Lakko bunun için {language} paketine ihtiyaç duyar ({size}). Mesajlar çevrilmek için hiçbir yere gönderilmez.",
+      "status": "machine"
+    },
+    "translate.pack.cancel": {
+      "text": "İptal",
+      "status": "machine"
+    },
+    "translate.pack.download": {
+      "text": "İndir",
+      "status": "machine"
+    },
+    "translate.pack.download_wifi": {
+      "text": "Wi-Fi ile indir",
+      "status": "machine"
+    },
+    "translate.pack.downloading": {
+      "text": "{language} indiriliyor… %{percent}",
+      "status": "machine"
+    },
+    "translate.pack.downloading_unsized": {
+      "text": "{language} indiriliyor…",
+      "status": "machine"
+    },
+    "translate.pack.failed": {
+      "text": "{language} paketi indirilemedi",
+      "status": "machine"
+    },
+    "translate.pack.not_now": {
+      "text": "Şimdi değil",
+      "status": "machine"
+    },
+    "translate.pack.source.android": {
+      "text": "Paket Google tarafından sağlanır.",
+      "status": "machine"
+    },
+    "translate.pack.source.ios": {
+      "text": "Paket Apple tarafından sağlanır.",
+      "status": "machine"
+    },
+    "translate.pack.source.web": {
+      "text": "Paket, tarayıcınızın üreticisi tarafından sağlanır.",
+      "status": "machine"
+    },
+    "translate.pack.title.transcription": {
+      "text": "Metne dökme için {language} indirilsin mi?",
+      "status": "machine"
+    },
+    "translate.pack.title.translation": {
+      "text": "Çeviri için {language} indirilsin mi?",
+      "status": "machine"
+    },
+    "translate.pack.waiting_wifi": {
+      "text": "{language} indirmek için Wi-Fi bekleniyor",
+      "status": "machine"
+    },
+    "translate.picker.title": {
+      "text": "Bu mesajın dili",
+      "status": "machine"
+    },
+    "translate.unsupported_source": {
+      "text": "Lakko bu cihazda {language} dilinden çeviri yapamıyor",
       "status": "machine"
     },
     "update.available.message": {

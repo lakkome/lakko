@@ -74,6 +74,7 @@ row of things.
 | React | any message with an id | Toggles one emoji. Already built; what changes is that it is a visible row, not a submenu |
 | Reply | any message | Composes a new message that quotes this one |
 | Copy | any message with text | Puts the text on the clipboard. Nothing leaves the device |
+| Translate | someone else's message with text, when this device can translate it | Shows a translation in place, made on this device ([`translation-and-transcription.md`](translation-and-transcription.md) section 3) |
 | Forward | any message | Sends the same content to another conversation |
 | Pin | any message, with a choice - see §4 | Keeps the message reachable at the top of the conversation |
 | Edit | own, not deleted | Already built |

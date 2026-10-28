@@ -74,7 +74,8 @@ export const paths = {
       | "media"
       | "about"
       | "account"
-      | "recovery",
+      | "recovery"
+      | "translation",
   ): string {
     return `/settings/${section}`;
   },

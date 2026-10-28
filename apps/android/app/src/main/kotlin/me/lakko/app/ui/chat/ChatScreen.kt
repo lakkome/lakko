@@ -808,6 +808,19 @@ public fun ChatScreen(
                 )
             }
         }
+
+        // ADR-0082 / translation UX 3.6 — `Messages here are in Spanish.`
+        val recentIncomingKeys = remember(state.messages) {
+            state.messages
+                .asReversed()
+                .asSequence()
+                .filter { it.direction == me.lakko.app.chat.Direction.Incoming && it.text.isNotBlank() && !it.deleted }
+                .take(uniffi.lakko_ffi_uniffi.translationBarWindow().toInt())
+                .map { me.lakko.app.translation.TranslationStoreState.messageKey(viewModel.groupIdHex, it.messageId) }
+                .toList()
+        }
+        me.lakko.app.ui.translation.ConversationTranslateBar(viewModel.groupIdHex, recentIncomingKeys)
+        me.lakko.app.ui.translation.TranslationDialogs(mediaHub)
         if (pinListOpen) {
             PinListSheet(
                 entries = pinEntries,
@@ -921,6 +934,9 @@ public fun ChatScreen(
                             DateSeparatorPill(item.label)
                             return@items
                         }
+                        androidx.compose.runtime.CompositionLocalProvider(
+                            me.lakko.app.ui.translation.LocalTranslationConversation provides viewModel.groupIdHex,
+                        ) {
                         val row = item as TimelineItem.Row
                         val msg = row.message
                         val pinMenu = me.lakko.app.chat.pinMenuFor(
@@ -1078,6 +1094,7 @@ public fun ChatScreen(
                             // UX section 8 — enter selection mode on this row.
                             onSelect = { viewModel.onEnterSelection(msg) },
                         )
+                        }
                         }
                     }
                     // ADR-0047 — outgoing media still uploading or not sent.
@@ -1850,6 +1867,10 @@ internal fun Bubble(
     var bubbleBounds by remember { mutableStateOf<Rect?>(null) }
     val context = LocalContext.current
 
+    // ADR-0082 — translation of this message, and the transcript of its voice
+    // or video message, on this device. A row of an older segment takes none.
+    val tr = rememberBubbleTranslation(msg, isOwn)
+
     Column(
         horizontalAlignment = if (isOwn) Alignment.End else Alignment.Start,
         verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -2002,11 +2023,26 @@ internal fun Bubble(
                             )
                         } else if (msg.text.isNotEmpty()) {
                             Text(
-                                text = msg.text,
+                                // Translation UX 3.2 — the translation takes the
+                                // place of the text inside the same bubble.
+                                text = tr.shownText,
                                 style = MaterialTheme.typography.bodyMedium,
                             )
+                            tr.captionLine?.let { line ->
+                                me.lakko.app.ui.translation.TranslateQuietLine(
+                                    line = line,
+                                    contentColor = contentColor,
+                                    onShowOriginal = tr.onShowOriginal,
+                                    onTranslate = tr.onTranslate,
+                                    onNotLanguage = tr.onNotLanguage,
+                                    onCancel = tr.onCancel,
+                                )
+                            }
                         }
                         if (msg.attachments.isNotEmpty()) {
+                            androidx.compose.runtime.CompositionLocalProvider(
+                                me.lakko.app.ui.translation.LocalTranscriptTarget provides tr.transcriptTarget,
+                            ) {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 for (ref in msg.attachments) {
                                     AttachmentView(
@@ -2068,6 +2104,7 @@ internal fun Bubble(
                                     }
                                 }
                             }
+                            }
                         }
                     }
                     // UX 5.2 — the time in the lower corner, with the edited
@@ -2111,7 +2148,8 @@ internal fun Bubble(
                         messageActionsFor(
                             isOwn = isOwn,
                             deleted = msg.deleted,
-                            text = msg.text,
+                            // Translation UX 3.2 — Copy copies the text shown.
+                            text = tr.copyText,
                             menuAvailable = menuAvailable,
                             // UX 5.1 — no Forward on a row still sending or
                             // one that failed.
@@ -2119,6 +2157,9 @@ internal fun Bubble(
                             // UX 4.1 — `Pin` or `Unpin`, decided by the screen.
                             pinLabel = pinLabel,
                             saved = savedMessage,
+                        ).copy(
+                            canTranslate = menuAvailable && tr.menuOffered,
+                            translateLabel = tr.menuLabel,
                         )
                     },
                     reactions = if (msg.isHistory) emptyList() else REACTION_EMOJIS,
@@ -2154,7 +2195,11 @@ internal fun Bubble(
                     },
                     onCopy = {
                         menuOpen = false
-                        copyMessageText(context, msg.text)
+                        copyMessageText(context, tr.copyText)
+                    },
+                    onTranslate = {
+                        menuOpen = false
+                        tr.onMenuTranslate()
                     },
                     onEdit = {
                         menuOpen = false
@@ -3724,6 +3769,8 @@ private fun MembersSheet(
                         idHex = viewModel.groupIdHex,
                     )
                 }
+                // ADR-0082 / translation UX 3.7 — this device only.
+                me.lakko.app.ui.translation.AutoTranslateRow(viewModel.groupIdHex)
                 // ADR-0022 — only owner/admin (or an open/legacy group) sees the
                 // add affordance; a plain member's add would be refused by peers.
                 if (InfoSection.ADD_MEMBER in sections) {

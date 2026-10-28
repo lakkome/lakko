@@ -33,13 +33,20 @@ struct MediaAttachmentView: View {
     /// Pending sends only: whether the local bytes are on disk yet.
     var localReady = true
     var onRetry: () -> Void = {}
+    /// ADR-0082 section 4 — the stored message a transcript belongs to;
+    /// `nil` for a take still being sent (the button's space stays empty).
+    var transcript: TranscriptTarget? = nil
 
     var body: some View {
         switch bubble {
         case .voice:
-            VoiceBubble(ref: ref, mediaKey: mediaKey, incoming: incoming, upload: upload, onRetry: onRetry)
+            VoiceBubble(
+                ref: ref, mediaKey: mediaKey, incoming: incoming, upload: upload, onRetry: onRetry,
+                transcript: transcript)
         case .videoNote:
-            VideoNoteBubble(ref: ref, mediaKey: mediaKey, incoming: incoming, upload: upload, onRetry: onRetry)
+            VideoNoteBubble(
+                ref: ref, mediaKey: mediaKey, incoming: incoming, upload: upload, onRetry: onRetry,
+                transcript: transcript)
         case .gif:
             GifBubble(ref: ref, mediaKey: mediaKey, upload: upload, localReady: localReady, onRetry: onRetry)
         case .photo:
@@ -85,6 +92,12 @@ struct VoiceBubble: View {
     let incoming: Bool
     let upload: MediaUploadState?
     let onRetry: () -> Void
+    var transcript: TranscriptTarget? = nil
+
+    /// The width of the row: the play disc, the gap and the waveform column.
+    /// The transcript opens under the row at this width, so the bubble does
+    /// not widen when it does.
+    private static let rowWidth: CGFloat = 38 + 10 + 170
 
     @EnvironmentObject private var media: ChatMediaController
     @EnvironmentObject private var live: MediaLiveState
@@ -141,10 +154,15 @@ struct VoiceBubble: View {
                                 Localization.text(
                                     "chat.voice.speed", texts: ["rate": PlaybackQueue.rateLabel(media.rate)]))
                         }
+                        // ADR-0082 / UX 4.1 — the transcript button at the
+                        // trailing end. Its frame is the same in every
+                        // state, offered or not, so the row never moves.
+                        TranscriptButton(target: transcript, ref: ref, mediaKey: mediaKey, tint: tint)
                     }
                 }
                 .frame(width: 170)
             }
+            TranscriptBlock(target: transcript, ref: ref, outgoing: !incoming, width: Self.rowWidth)
             if upload == .failed {
                 NotSentButton(onRetry: onRetry)
             } else if media.failedKeys.contains(mediaKey) {
@@ -526,6 +544,7 @@ struct VideoNoteBubble: View {
     let incoming: Bool
     let upload: MediaUploadState?
     let onRetry: () -> Void
+    var transcript: TranscriptTarget? = nil
 
     @EnvironmentObject private var media: ChatMediaController
     @StateObject private var model = VideoNotePlayerModel()
@@ -597,7 +616,13 @@ struct VideoNoteBubble: View {
                 if incoming, !media.isPlayed(mediaKey) {
                     Circle().fill(Color.lakkoAccent).frame(width: 6, height: 6)
                 }
+                Spacer(minLength: 0)
+                // ADR-0082 / UX 4.1 — on the bubble's trailing bottom edge;
+                // its space is reserved in every state.
+                TranscriptButton(target: transcript, ref: ref, mediaKey: mediaKey, tint: Color.secondary)
             }
+            .frame(width: Self.diameter)
+            TranscriptBlock(target: transcript, ref: ref, outgoing: false, width: Self.diameter)
             if upload == .failed {
                 NotSentButton(onRetry: onRetry).foregroundStyle(.red)
             } else if model.failed {

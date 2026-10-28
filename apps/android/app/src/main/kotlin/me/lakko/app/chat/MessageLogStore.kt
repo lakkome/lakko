@@ -384,6 +384,8 @@ public data class PersistedMessage(
      * catalog sentence. Nullable with a default like [reply].
      */
     val unsupportedVersion: Long? = null,
+    /** ADR-0082 — [ChatMessage.lastOpId]; absent on older rows (= 0). */
+    val lastOpId: Long = 0,
 ) {
     /** Explicit companion so the conversion helpers below can
      *  attach as `PersistedMessage.Companion.from(msg)`. */
@@ -551,6 +553,7 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
             }
         },
         unsupportedVersion = if (msg.deleted) null else msg.unsupportedVersion,
+        lastOpId = msg.lastOpId,
     )
 
 /** Inverse — reconstruct a runtime [ChatMessage] from the JSON
@@ -593,6 +596,7 @@ public fun PersistedMessage.toChatMessage(): ChatMessage? {
             )
         },
         unsupportedVersion = unsupportedVersion,
+        lastOpId = lastOpId,
     )
 }
 

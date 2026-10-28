@@ -2694,6 +2694,14 @@
       "text": "נשלחה",
       "status": "machine"
     },
+    "chat.message.show_original": {
+      "text": "הצגת המקור",
+      "status": "machine"
+    },
+    "chat.message.translate": {
+      "text": "תרגום",
+      "status": "machine"
+    },
     "chat.message.unpin": {
       "text": "ביטול הצמדה",
       "status": "machine"
@@ -6174,6 +6182,10 @@
       "text": "Lakko שומרת תמונות וסרטונים בספרייה שלך רק כשבוחרים „שמירה”.",
       "status": "machine"
     },
+    "ios.permission.speech_recognition": {
+      "text": "Lakko הופכת הודעות קוליות והודעות וידאו לטקסט כשמבקשים ממנה. זה קורה במכשיר שלך; ההקלטות אף פעם לא נשלחות לשום מקום לתמלול.",
+      "status": "machine"
+    },
     "language.name.ar": {
       "text": "ערבית",
       "status": "machine"
@@ -8058,6 +8070,110 @@
       "text": "מספרי בטיחות",
       "status": "machine"
     },
+    "settings.translation.delete_all": {
+      "text": "מחיקת כל התרגומים והתמלילים",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.body": {
+      "text": "{count, plural, one {תרגום או תמליל אחד במכשיר הזה יימחק. ההודעות לא ישתנו.} two {שני תרגומים ותמלילים במכשיר הזה יימחקו. ההודעות לא ישתנו.} other {# תרגומים ותמלילים במכשיר הזה יימחקו. ההודעות לא ישתנו.}}",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.confirm": {
+      "text": "מחיקה",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.title": {
+      "text": "למחוק את כל התרגומים והתמלילים?",
+      "status": "machine"
+    },
+    "settings.translation.footer": {
+      "text": "התרגום והתמלול מתבצעים במכשיר הזה. הודעות והקלטות קוליות אף פעם לא נשלחות לשום מקום לתרגום או לתמלול.",
+      "status": "machine"
+    },
+    "settings.translation.mobile_data": {
+      "text": "הורדת חבילות בחבילת הגלישה",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_both": {
+      "text": "תרגום ותמלול",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_transcription": {
+      "text": "תמלול",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_translation": {
+      "text": "תרגום",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.android": {
+      "text": "מנוהל על ידי Android",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.ios": {
+      "text": "מנוהל על ידי iOS",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.web": {
+      "text": "מנוהל על ידי הדפדפן",
+      "status": "machine"
+    },
+    "settings.translation.pack.remove": {
+      "text": "הסרה",
+      "status": "machine"
+    },
+    "settings.translation.packs": {
+      "text": "חבילות שפה במכשיר הזה",
+      "status": "machine"
+    },
+    "settings.translation.packs.empty": {
+      "text": "אין חבילות שפה במכשיר הזה",
+      "status": "machine"
+    },
+    "settings.translation.reading": {
+      "text": "שפות שאני קורא",
+      "status": "machine"
+    },
+    "settings.translation.reading.add": {
+      "text": "הוספת שפה",
+      "status": "machine"
+    },
+    "settings.translation.reading.remove": {
+      "text": "הסרת {language}",
+      "status": "machine"
+    },
+    "settings.translation.show_transcript": {
+      "text": "הצגת כפתור התמליל",
+      "status": "machine"
+    },
+    "settings.translation.show_translate": {
+      "text": "הצגת כפתור התרגום",
+      "status": "machine"
+    },
+    "settings.translation.target": {
+      "text": "תרגום אל",
+      "status": "machine"
+    },
+    "settings.translation.title": {
+      "text": "תרגום ותמלול",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.transcription": {
+      "text": "תמלול לא זמין במכשיר הזה",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.transcription_web": {
+      "text": "תמלול לא זמין בדפדפן הזה",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.translation": {
+      "text": "תרגום לא זמין במכשיר הזה",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.translation_web": {
+      "text": "תרגום לא זמין בדפדפן הזה",
+      "status": "machine"
+    },
     "tokens.action_allowance_used": {
       "text": "ניצלתם את המכסה היומית לפעולה הזו. נסו שוב מחר.",
       "status": "machine"
@@ -8072,6 +8188,182 @@
     },
     "tokens.subscribe_allowance_used": {
       "text": "נרשמתם להרבה ערוצים היום. נסו שוב מחר.",
+      "status": "machine"
+    },
+    "transcript.button.hide": {
+      "text": "הסתרת התמליל",
+      "status": "machine"
+    },
+    "transcript.button.show": {
+      "text": "הצגת התמליל",
+      "status": "machine"
+    },
+    "transcript.failed": {
+      "text": "לא ניתן היה לתמלל את ההודעה הזו",
+      "status": "machine"
+    },
+    "transcript.hide": {
+      "text": "הסתרה",
+      "status": "machine"
+    },
+    "transcript.line": {
+      "text": "תמליל",
+      "status": "machine"
+    },
+    "transcript.line.translated": {
+      "text": "תמליל · תורגם מ־{language}",
+      "status": "machine"
+    },
+    "transcript.no_speech": {
+      "text": "אין דיבור בהודעה הזו",
+      "status": "machine"
+    },
+    "transcript.permission_denied": {
+      "text": "כדי לראות תמלולים, יש לאפשר זיהוי דיבור ל-Lakko בהגדרות.",
+      "status": "machine"
+    },
+    "transcript.show_more": {
+      "text": "הצגת עוד",
+      "status": "machine"
+    },
+    "transcript.transcribing": {
+      "text": "מתמלל…",
+      "status": "machine"
+    },
+    "transcript.unavailable_source": {
+      "text": "Lakko לא יכולה לתמלל {language} במכשיר הזה",
+      "status": "machine"
+    },
+    "translate.auto": {
+      "text": "תרגום אוטומטי",
+      "status": "machine"
+    },
+    "translate.bar.body": {
+      "text": "ההודעות כאן כתובות ב{language}.",
+      "status": "machine"
+    },
+    "translate.bar.close": {
+      "text": "סגירה",
+      "status": "machine"
+    },
+    "translate.bar.not_now": {
+      "text": "לא עכשיו",
+      "status": "machine"
+    },
+    "translate.bar.translate": {
+      "text": "תרגום",
+      "status": "machine"
+    },
+    "translate.line.failed": {
+      "text": "לא ניתן היה לתרגם את ההודעה הזו",
+      "status": "machine"
+    },
+    "translate.line.not_language": {
+      "text": "לא {language}?",
+      "status": "machine"
+    },
+    "translate.line.same_language": {
+      "text": "ההודעה הזו כבר כתובה ב{language}",
+      "status": "machine"
+    },
+    "translate.line.show_original": {
+      "text": "הצגת המקור",
+      "status": "machine"
+    },
+    "translate.line.translate": {
+      "text": "תרגום",
+      "status": "machine"
+    },
+    "translate.line.translated": {
+      "text": "תורגם מ־{language}",
+      "status": "machine"
+    },
+    "translate.line.translating": {
+      "text": "מתרגם…",
+      "status": "machine"
+    },
+    "translate.line.try_again": {
+      "text": "ניסיון חוזר",
+      "status": "machine"
+    },
+    "translate.pack.blocked_anti_censorship": {
+      "text": "אי אפשר להוריד חבילות שפה כשעקיפת צנזורה מופעלת.",
+      "status": "machine"
+    },
+    "translate.pack.body.transcription": {
+      "text": "התמלול מתבצע במכשיר הזה. כדי לעשות זאת, Lakko צריכה את חבילת {language}. הודעות קוליות אף פעם לא נשלחות לשום מקום לתמלול.",
+      "status": "machine"
+    },
+    "translate.pack.body.transcription_sized": {
+      "text": "התמלול מתבצע במכשיר הזה. כדי לעשות זאת, Lakko צריכה את חבילת {language} ({size}). הודעות קוליות אף פעם לא נשלחות לשום מקום לתמלול.",
+      "status": "machine"
+    },
+    "translate.pack.body.translation": {
+      "text": "התרגום מתבצע במכשיר הזה. כדי לעשות זאת, Lakko צריכה את חבילת {language}. הודעות אף פעם לא נשלחות לשום מקום לתרגום.",
+      "status": "machine"
+    },
+    "translate.pack.body.translation_sized": {
+      "text": "התרגום מתבצע במכשיר הזה. כדי לעשות זאת, Lakko צריכה את חבילת {language} ({size}). הודעות אף פעם לא נשלחות לשום מקום לתרגום.",
+      "status": "machine"
+    },
+    "translate.pack.cancel": {
+      "text": "ביטול",
+      "status": "machine"
+    },
+    "translate.pack.download": {
+      "text": "הורדה",
+      "status": "machine"
+    },
+    "translate.pack.download_wifi": {
+      "text": "הורדה ב־Wi-Fi",
+      "status": "machine"
+    },
+    "translate.pack.downloading": {
+      "text": "מוריד את {language}… {percent}%",
+      "status": "machine"
+    },
+    "translate.pack.downloading_unsized": {
+      "text": "מוריד את {language}…",
+      "status": "machine"
+    },
+    "translate.pack.failed": {
+      "text": "לא ניתן היה להוריד את חבילת {language}",
+      "status": "machine"
+    },
+    "translate.pack.not_now": {
+      "text": "לא עכשיו",
+      "status": "machine"
+    },
+    "translate.pack.source.android": {
+      "text": "החבילה מגיעה מ־Google.",
+      "status": "machine"
+    },
+    "translate.pack.source.ios": {
+      "text": "החבילה מגיעה מ־Apple.",
+      "status": "machine"
+    },
+    "translate.pack.source.web": {
+      "text": "החבילה מגיעה מיצרן הדפדפן שלך.",
+      "status": "machine"
+    },
+    "translate.pack.title.transcription": {
+      "text": "להוריד את {language} לתמלול?",
+      "status": "machine"
+    },
+    "translate.pack.title.translation": {
+      "text": "להוריד את {language} לתרגום?",
+      "status": "machine"
+    },
+    "translate.pack.waiting_wifi": {
+      "text": "ממתין ל־Wi-Fi כדי להוריד את {language}",
+      "status": "machine"
+    },
+    "translate.picker.title": {
+      "text": "השפה של ההודעה הזו",
+      "status": "machine"
+    },
+    "translate.unsupported_source": {
+      "text": "Lakko לא יכולה לתרגם מ־{language} במכשיר הזה",
       "status": "machine"
     },
     "update.available.message": {

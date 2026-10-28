@@ -200,6 +200,9 @@ public object AccountLocalWipe {
         // ---- chat -----------------------------------------------------------
         Step("mls-snapshot") { ctx, acct -> me.lakko.app.chat.IdentitySnapshotStore.deleteSnapshot(ctx, acct) },
         Step("message-log") { ctx, acct -> me.lakko.app.chat.MessageLogStore.deleteLog(ctx, acct) },
+        // ADR-0082 section 5 — translations, transcripts and the
+        // per-conversation translation choices.
+        Step("translations") { ctx, acct -> me.lakko.app.translation.SealedTranslationStore.deleteAccount(ctx, acct) },
         Step("known-groups") { ctx, acct -> me.lakko.app.chat.KnownGroupsStore(ctx).clear(acct) },
         Step("commit-outbox") { ctx, acct -> me.lakko.app.chat.CommitOutboxStore.deleteForAccount(ctx, acct) },
         Step("committer-beacons") { ctx, acct ->

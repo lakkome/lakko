@@ -109,6 +109,7 @@ pub mod storage;
 pub mod supersession;
 pub mod sync;
 pub mod synced_state;
+pub mod translation;
 pub mod transparency;
 pub mod ui_rules;
 pub mod vault;

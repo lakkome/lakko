@@ -244,6 +244,10 @@ const IOS_INFOPLIST_KEYS: &[(&str, &str)] = &[
         "ios.permission.photo_library_add",
     ),
     ("NSFaceIDUsageDescription", "ios.permission.face_id"),
+    (
+        "NSSpeechRecognitionUsageDescription",
+        "ios.permission.speech_recognition",
+    ),
 ];
 
 fn cmd_ios_infoplist(args: &[String]) -> Result<(), String> {

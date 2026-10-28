@@ -161,6 +161,13 @@ export interface PersistedMessage {
    */
   readonly edited?: boolean;
   /**
+   * ADR-0082 section 5 — the DS `messageId` of the latest edit or delete op
+   * applied to this message, stringified like `messageId`. What a cached
+   * translation or transcript is keyed on, so an edit (even back to the
+   * same words) invalidates it. Absent when no such op carried an id.
+   */
+  readonly lastOpId?: string;
+  /**
    * ADR-0023 — this message was deleted; the bubble is the tombstone.
    *
    * Such a row carries an EMPTY `text` and no `attachments`, which

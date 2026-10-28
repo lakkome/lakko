@@ -31,6 +31,7 @@
  * session, so a `null` here is transient; the fallback panel offers a real
  * way back to the sign-in form.
  */
+import { useTranslation } from "../translation/context";
 import {
   createEffect,
   createMemo,
@@ -146,6 +147,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   const chats = useChats();
   const lineageView = useLineage();
   const pins = usePins();
+  const translation = useTranslation();
   const profiles = useProfiles();
   const navigate = useNavigate();
   // The Show wrapper above guarantees identitySecrets() is non-null on every
@@ -463,7 +465,12 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
         })),
         headGroupIdB64: view?.head.groupIdB64 ?? g.groupIdB64,
         chats,
-        afterSegment: (segment) => pins.forgetConversation(segment.groupIdB64),
+        afterSegment: async (segment) => {
+          await pins.forgetConversation(segment.groupIdB64);
+          // ADR-0082 section 5 — no translated text or transcript outlives
+          // the conversation on this device.
+          await translation?.forgetConversation(segment.groupIdB64);
+        },
       });
       // Nothing held for a conversation that is gone is ever sent.
       const conversationHex = view?.conversationHex ?? syncGroupIdHex(g.group.groupId);
@@ -655,6 +662,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
               onDeleteChat={
                 chatMembershipEnded(c()) ? () => void onDeleteChat(c()) : null
               }
+              conversationId={chatMembershipEnded(c()) ? null : (groupWith(c())?.groupIdB64 ?? null)}
             />
           )}
         </Show>

@@ -38,6 +38,7 @@
  * the GROUP panel only, which a one-to-one had just stopped opening - so an
  * ended one-to-one had no way to be closed at all.
  */
+import { AutoTranslateSwitch } from "../translation/ConversationControls";
 import { createEffect, createMemo, createSignal, For, on, Show, type JSX } from "solid-js";
 
 import { base64Decode } from "../auth/account-id";
@@ -101,6 +102,10 @@ export interface ContactDetailViewProps {
    * is nothing to delete; the block is then absent whatever the rule says.
    */
   readonly onDeleteChat: (() => void) | null;
+  /** ADR-0082 / UX 3.7 — the one-to-one conversation with this person (its
+   *  group id, standard base64), for `Translate automatically`; `null` or
+   *  absent when there is none. */
+  readonly conversationId?: string | null;
 }
 
 export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
@@ -400,6 +405,12 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
               </div>
             </Show>
           </section>
+        </Show>
+
+        {/* UX 3.7 — a setting of this device only, for the one-to-one with
+            this person. */}
+        <Show when={props.conversationId}>
+          {(conversation) => <AutoTranslateSwitch conversation={conversation()} />}
         </Show>
 
         <Show when={sections().includes("add-contact")}>

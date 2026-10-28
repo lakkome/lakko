@@ -134,6 +134,11 @@ androidx-camera        = "1.4.2"
 # pipeline. Transformer pulls media3-common / -effect / -exoplayer.
 androidx-media3        = "1.4.1"
 mlkit-barcode-scanning = "17.3.0"
+# ADR-0082 (amended 2026-10-27): on-device translation where the system has
+# no TranslationManager service. Its data disclosure says it reports the
+# configured source and target languages to Google; accepted by the
+# maintainer for that fallback only. Never ML Kit language-id.
+mlkit-translate        = "17.0.3"
 zxing-core             = "3.5.3"
 
 # The first UI tests on Android (2026-09). Nine user-visible defects were found
@@ -287,6 +292,7 @@ androidx-camera-view      = { group = "androidx.camera", name = "camera-view",  
 # AAC in MP4). Same CameraX version as the modules above.
 androidx-camera-video     = { group = "androidx.camera", name = "camera-video",     version.ref = "androidx-camera" }
 mlkit-barcode-scanning    = { group = "com.google.mlkit", name = "barcode-scanning", version.ref = "mlkit-barcode-scanning" }
+mlkit-translate           = { group = "com.google.mlkit", name = "translate",        version.ref = "mlkit-translate" }
 zxing-core                = { group = "com.google.zxing", name = "core",            version.ref = "zxing-core" }
 
 # G3-2 — WebRTC pod artifact. The community webrtc-sdk org

@@ -105,6 +105,8 @@
 	<string>Lakko uses the microphone for end-to-end-encrypted calls and to record voice messages and video messages you choose to send. The mic is only on while you are in a call or recording a message, and everything it captures is encrypted on your device before it is sent.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Lakko saves photos and videos to your library only when you choose Save.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Lakko turns voice messages and video messages into text when you ask it to. This happens on your device; recordings are never sent anywhere to be transcribed.</string>
 	<key>NSUserActivityTypes</key>
 	<array>
 		<string>INStartCallIntent</string>

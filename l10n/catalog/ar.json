@@ -2694,6 +2694,14 @@
       "text": "مرسلة",
       "status": "machine"
     },
+    "chat.message.show_original": {
+      "text": "عرض النص الأصلي",
+      "status": "machine"
+    },
+    "chat.message.translate": {
+      "text": "ترجمة",
+      "status": "machine"
+    },
     "chat.message.unpin": {
       "text": "إلغاء التثبيت",
       "status": "machine"
@@ -6174,6 +6182,10 @@
       "text": "يحفظ Lakko الصور ومقاطع الفيديو في مكتبتك فقط عندما تختار «حفظ».",
       "status": "machine"
     },
+    "ios.permission.speech_recognition": {
+      "text": "يحوّل Lakko الرسائل الصوتية ورسائل الفيديو إلى نص عندما تطلب ذلك. يتم ذلك على جهازك، ولا تُرسل التسجيلات إلى أي مكان لتحويلها إلى نص.",
+      "status": "machine"
+    },
     "language.name.ar": {
       "text": "العربية",
       "status": "machine"
@@ -8058,6 +8070,110 @@
       "text": "أرقام الأمان",
       "status": "machine"
     },
+    "settings.translation.delete_all": {
+      "text": "حذف كل الترجمات والنصوص المكتوبة",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.body": {
+      "text": "{count, plural, zero {سيُحذف # ترجمة ونص مكتوب من هذا الجهاز. لن تتأثر الرسائل.} one {ستُحذف ترجمة أو نص مكتوب واحد من هذا الجهاز. لن تتأثر الرسائل.} two {ستُحذف ترجمتان أو نصان مكتوبان من هذا الجهاز. لن تتأثر الرسائل.} few {ستُحذف # ترجمات ونصوص مكتوبة من هذا الجهاز. لن تتأثر الرسائل.} many {سيُحذف # ترجمةً ونصًا مكتوبًا من هذا الجهاز. لن تتأثر الرسائل.} other {سيُحذف # ترجمة ونص مكتوب من هذا الجهاز. لن تتأثر الرسائل.}}",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.confirm": {
+      "text": "حذف",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.title": {
+      "text": "هل تريد حذف كل الترجمات والنصوص المكتوبة؟",
+      "status": "machine"
+    },
+    "settings.translation.footer": {
+      "text": "تتم الترجمة وتحويل الكلام إلى نص على هذا الجهاز. لا تُرسَل الرسائل والتسجيلات الصوتية إلى أي مكان لترجمتها أو تحويلها إلى نص.",
+      "status": "machine"
+    },
+    "settings.translation.mobile_data": {
+      "text": "تنزيل الحزم عبر بيانات الجوال",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_both": {
+      "text": "الترجمة وتحويل الكلام إلى نص",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_transcription": {
+      "text": "تحويل الكلام إلى نص",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_translation": {
+      "text": "الترجمة",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.android": {
+      "text": "يديرها Android",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.ios": {
+      "text": "يديرها iOS",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.web": {
+      "text": "يديرها متصفحك",
+      "status": "machine"
+    },
+    "settings.translation.pack.remove": {
+      "text": "إزالة",
+      "status": "machine"
+    },
+    "settings.translation.packs": {
+      "text": "حزم اللغات على هذا الجهاز",
+      "status": "machine"
+    },
+    "settings.translation.packs.empty": {
+      "text": "لا توجد حزم لغات على هذا الجهاز",
+      "status": "machine"
+    },
+    "settings.translation.reading": {
+      "text": "اللغات التي أقرؤها",
+      "status": "machine"
+    },
+    "settings.translation.reading.add": {
+      "text": "إضافة لغة",
+      "status": "machine"
+    },
+    "settings.translation.reading.remove": {
+      "text": "إزالة {language}",
+      "status": "machine"
+    },
+    "settings.translation.show_transcript": {
+      "text": "إظهار زر النص المكتوب",
+      "status": "machine"
+    },
+    "settings.translation.show_translate": {
+      "text": "إظهار زر الترجمة",
+      "status": "machine"
+    },
+    "settings.translation.target": {
+      "text": "الترجمة إلى",
+      "status": "machine"
+    },
+    "settings.translation.title": {
+      "text": "الترجمة وتحويل الكلام إلى نص",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.transcription": {
+      "text": "تحويل الكلام إلى نص غير متاح على هذا الجهاز",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.transcription_web": {
+      "text": "تحويل الكلام إلى نص غير متاح في هذا المتصفح",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.translation": {
+      "text": "الترجمة غير متاحة على هذا الجهاز",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.translation_web": {
+      "text": "الترجمة غير متاحة في هذا المتصفح",
+      "status": "machine"
+    },
     "tokens.action_allowance_used": {
       "text": "لقد استنفدت الحد اليومي المسموح لهذا الإجراء. حاول مجددًا غدًا.",
       "status": "machine"
@@ -8072,6 +8188,182 @@
     },
     "tokens.subscribe_allowance_used": {
       "text": "اشتركت في قنوات كثيرة اليوم. حاول مرة أخرى غدًا.",
+      "status": "machine"
+    },
+    "transcript.button.hide": {
+      "text": "إخفاء النص المكتوب",
+      "status": "machine"
+    },
+    "transcript.button.show": {
+      "text": "عرض النص المكتوب",
+      "status": "machine"
+    },
+    "transcript.failed": {
+      "text": "تعذّر تحويل هذه الرسالة إلى نص",
+      "status": "machine"
+    },
+    "transcript.hide": {
+      "text": "إخفاء",
+      "status": "machine"
+    },
+    "transcript.line": {
+      "text": "النص المكتوب",
+      "status": "machine"
+    },
+    "transcript.line.translated": {
+      "text": "النص المكتوب · مترجم من {language}",
+      "status": "machine"
+    },
+    "transcript.no_speech": {
+      "text": "لا يوجد كلام في هذه الرسالة",
+      "status": "machine"
+    },
+    "transcript.permission_denied": {
+      "text": "اسمح لـ Lakko بالتعرّف على الكلام في الإعدادات لرؤية النصوص.",
+      "status": "machine"
+    },
+    "transcript.show_more": {
+      "text": "عرض المزيد",
+      "status": "machine"
+    },
+    "transcript.transcribing": {
+      "text": "جارٍ التحويل إلى نص…",
+      "status": "machine"
+    },
+    "transcript.unavailable_source": {
+      "text": "لا يستطيع Lakko تحويل {language} إلى نص على هذا الجهاز",
+      "status": "machine"
+    },
+    "translate.auto": {
+      "text": "الترجمة تلقائيًا",
+      "status": "machine"
+    },
+    "translate.bar.body": {
+      "text": "الرسائل هنا باللغة {language}.",
+      "status": "machine"
+    },
+    "translate.bar.close": {
+      "text": "إغلاق",
+      "status": "machine"
+    },
+    "translate.bar.not_now": {
+      "text": "ليس الآن",
+      "status": "machine"
+    },
+    "translate.bar.translate": {
+      "text": "ترجمة",
+      "status": "machine"
+    },
+    "translate.line.failed": {
+      "text": "تعذّرت ترجمة هذه الرسالة",
+      "status": "machine"
+    },
+    "translate.line.not_language": {
+      "text": "ليست {language}؟",
+      "status": "machine"
+    },
+    "translate.line.same_language": {
+      "text": "هذه الرسالة باللغة {language} بالفعل",
+      "status": "machine"
+    },
+    "translate.line.show_original": {
+      "text": "عرض النص الأصلي",
+      "status": "machine"
+    },
+    "translate.line.translate": {
+      "text": "ترجمة",
+      "status": "machine"
+    },
+    "translate.line.translated": {
+      "text": "مترجمة من {language}",
+      "status": "machine"
+    },
+    "translate.line.translating": {
+      "text": "جارٍ الترجمة…",
+      "status": "machine"
+    },
+    "translate.line.try_again": {
+      "text": "حاول مجددًا",
+      "status": "machine"
+    },
+    "translate.pack.blocked_anti_censorship": {
+      "text": "لا يمكن تنزيل حزم اللغات أثناء تشغيل تجاوز الرقابة.",
+      "status": "machine"
+    },
+    "translate.pack.body.transcription": {
+      "text": "يتم تحويل الكلام إلى نص على هذا الجهاز. يحتاج Lakko إلى حزمة {language} لذلك. لا تُرسَل الرسائل الصوتية إلى أي مكان لتحويلها إلى نص.",
+      "status": "machine"
+    },
+    "translate.pack.body.transcription_sized": {
+      "text": "يتم تحويل الكلام إلى نص على هذا الجهاز. يحتاج Lakko إلى حزمة {language} لذلك ({size}). لا تُرسَل الرسائل الصوتية إلى أي مكان لتحويلها إلى نص.",
+      "status": "machine"
+    },
+    "translate.pack.body.translation": {
+      "text": "تتم الترجمة على هذا الجهاز. يحتاج Lakko إلى حزمة {language} لذلك. لا تُرسَل الرسائل إلى أي مكان لترجمتها.",
+      "status": "machine"
+    },
+    "translate.pack.body.translation_sized": {
+      "text": "تتم الترجمة على هذا الجهاز. يحتاج Lakko إلى حزمة {language} لذلك ({size}). لا تُرسَل الرسائل إلى أي مكان لترجمتها.",
+      "status": "machine"
+    },
+    "translate.pack.cancel": {
+      "text": "إلغاء",
+      "status": "machine"
+    },
+    "translate.pack.download": {
+      "text": "تنزيل",
+      "status": "machine"
+    },
+    "translate.pack.download_wifi": {
+      "text": "التنزيل عبر Wi-Fi",
+      "status": "machine"
+    },
+    "translate.pack.downloading": {
+      "text": "جارٍ تنزيل {language}… {percent}٪",
+      "status": "machine"
+    },
+    "translate.pack.downloading_unsized": {
+      "text": "جارٍ تنزيل {language}…",
+      "status": "machine"
+    },
+    "translate.pack.failed": {
+      "text": "تعذّر تنزيل حزمة {language}",
+      "status": "machine"
+    },
+    "translate.pack.not_now": {
+      "text": "ليس الآن",
+      "status": "machine"
+    },
+    "translate.pack.source.android": {
+      "text": "الحزمة مقدَّمة من Google.",
+      "status": "machine"
+    },
+    "translate.pack.source.ios": {
+      "text": "الحزمة مقدَّمة من Apple.",
+      "status": "machine"
+    },
+    "translate.pack.source.web": {
+      "text": "الحزمة مقدَّمة من الشركة المطوّرة لمتصفحك.",
+      "status": "machine"
+    },
+    "translate.pack.title.transcription": {
+      "text": "هل تريد تنزيل {language} لتحويل الكلام إلى نص؟",
+      "status": "machine"
+    },
+    "translate.pack.title.translation": {
+      "text": "هل تريد تنزيل {language} للترجمة؟",
+      "status": "machine"
+    },
+    "translate.pack.waiting_wifi": {
+      "text": "بانتظار Wi-Fi لتنزيل {language}",
+      "status": "machine"
+    },
+    "translate.picker.title": {
+      "text": "لغة هذه الرسالة",
+      "status": "machine"
+    },
+    "translate.unsupported_source": {
+      "text": "لا يستطيع Lakko الترجمة من {language} على هذا الجهاز",
       "status": "machine"
     },
     "update.available.message": {

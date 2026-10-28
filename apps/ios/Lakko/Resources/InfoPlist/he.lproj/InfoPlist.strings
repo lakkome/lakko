@@ -13,3 +13,5 @@
 "NSPhotoLibraryAddUsageDescription" = "Lakko שומרת תמונות וסרטונים בספרייה שלך רק כשבוחרים „שמירה”.";
 
 "NSFaceIDUsageDescription" = "Lakko משתמשת ב-Face ID כדי לוודא שזה אתם לפני הצגת ביטוי השחזור.";
+
+"NSSpeechRecognitionUsageDescription" = "Lakko הופכת הודעות קוליות והודעות וידאו לטקסט כשמבקשים ממנה. זה קורה במכשיר שלך; ההקלטות אף פעם לא נשלחות לשום מקום לתמלול.";

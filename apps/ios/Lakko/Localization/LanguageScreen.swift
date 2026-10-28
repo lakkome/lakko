@@ -13,6 +13,9 @@ import SwiftUI
 /// included (it re-sorts, its title changes, the layout flips); there is no
 /// confirmation and no Apply button.
 struct LanguageScreen: View {
+    /// ADR-0082 — Settings > Language carries the entry to Translation and
+    /// transcription; the sheet shown before sign-in does not.
+    var showsTranslationSettings = false
     @ObservedObject private var l10n = Localization.shared
     @State private var query = ""
 
@@ -38,6 +41,16 @@ struct LanguageScreen: View {
 
     var body: some View {
         List {
+            if showsTranslationSettings, query.isEmpty {
+                Section {
+                    NavigationLink {
+                        TranslationSettingsScreen()
+                    } label: {
+                        Label(l10n.t("settings.translation.title"), systemImage: "character.bubble")
+                            .foregroundStyle(Color.lakkoText)
+                    }
+                }
+            }
             if showsSystemRow {
                 let systemName = l10n.ownName(of: l10n.systemLanguage)
                 row(

@@ -2694,6 +2694,14 @@
       "text": "已发送",
       "status": "machine"
     },
+    "chat.message.show_original": {
+      "text": "显示原文",
+      "status": "machine"
+    },
+    "chat.message.translate": {
+      "text": "翻译",
+      "status": "machine"
+    },
     "chat.message.unpin": {
       "text": "取消置顶",
       "status": "machine"
@@ -6174,6 +6182,10 @@
       "text": "只有在你选择“保存”时，Lakko 才会将照片和视频保存到你的图库。",
       "status": "machine"
     },
+    "ios.permission.speech_recognition": {
+      "text": "在你要求时，Lakko 会把语音消息和视频消息转成文字。这在你的设备上完成，录音绝不会被发送到任何地方进行转写。",
+      "status": "machine"
+    },
     "language.name.ar": {
       "text": "阿拉伯语",
       "status": "machine"
@@ -8058,6 +8070,110 @@
       "text": "安全码",
       "status": "machine"
     },
+    "settings.translation.delete_all": {
+      "text": "删除所有翻译和转写",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.body": {
+      "text": "{count, plural, other {将删除此设备上的 # 条翻译和转写。消息不受影响。}}",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.confirm": {
+      "text": "删除",
+      "status": "machine"
+    },
+    "settings.translation.delete_all.title": {
+      "text": "删除所有翻译和转写？",
+      "status": "machine"
+    },
+    "settings.translation.footer": {
+      "text": "翻译和转写在此设备上完成。消息和语音录音绝不会被发送到任何地方进行翻译或转写。",
+      "status": "machine"
+    },
+    "settings.translation.mobile_data": {
+      "text": "使用移动数据下载语言包",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_both": {
+      "text": "翻译和转写",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_transcription": {
+      "text": "转写",
+      "status": "machine"
+    },
+    "settings.translation.pack.for_translation": {
+      "text": "翻译",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.android": {
+      "text": "由 Android 管理",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.ios": {
+      "text": "由 iOS 管理",
+      "status": "machine"
+    },
+    "settings.translation.pack.managed.web": {
+      "text": "由你的浏览器管理",
+      "status": "machine"
+    },
+    "settings.translation.pack.remove": {
+      "text": "移除",
+      "status": "machine"
+    },
+    "settings.translation.packs": {
+      "text": "此设备上的语言包",
+      "status": "machine"
+    },
+    "settings.translation.packs.empty": {
+      "text": "此设备上没有语言包",
+      "status": "machine"
+    },
+    "settings.translation.reading": {
+      "text": "我能读懂的语言",
+      "status": "machine"
+    },
+    "settings.translation.reading.add": {
+      "text": "添加语言",
+      "status": "machine"
+    },
+    "settings.translation.reading.remove": {
+      "text": "移除{language}",
+      "status": "machine"
+    },
+    "settings.translation.show_transcript": {
+      "text": "显示转写按钮",
+      "status": "machine"
+    },
+    "settings.translation.show_translate": {
+      "text": "显示“翻译”按钮",
+      "status": "machine"
+    },
+    "settings.translation.target": {
+      "text": "翻译成",
+      "status": "machine"
+    },
+    "settings.translation.title": {
+      "text": "翻译和转写",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.transcription": {
+      "text": "此设备不支持转写",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.transcription_web": {
+      "text": "此浏览器不支持转写",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.translation": {
+      "text": "此设备不支持翻译",
+      "status": "machine"
+    },
+    "settings.translation.unavailable.translation_web": {
+      "text": "此浏览器不支持翻译",
+      "status": "machine"
+    },
     "tokens.action_allowance_used": {
       "text": "你今天的此项使用额度已用完。请明天再试。",
       "status": "machine"
@@ -8072,6 +8188,182 @@
     },
     "tokens.subscribe_allowance_used": {
       "text": "你今天订阅了很多频道。请明天再试。",
+      "status": "machine"
+    },
+    "transcript.button.hide": {
+      "text": "隐藏转写",
+      "status": "machine"
+    },
+    "transcript.button.show": {
+      "text": "显示转写",
+      "status": "machine"
+    },
+    "transcript.failed": {
+      "text": "无法转写这条消息",
+      "status": "machine"
+    },
+    "transcript.hide": {
+      "text": "隐藏",
+      "status": "machine"
+    },
+    "transcript.line": {
+      "text": "转写",
+      "status": "machine"
+    },
+    "transcript.line.translated": {
+      "text": "转写 · 译自{language}",
+      "status": "machine"
+    },
+    "transcript.no_speech": {
+      "text": "这条消息中没有语音",
+      "status": "machine"
+    },
+    "transcript.permission_denied": {
+      "text": "请在“设置”中允许 Lakko 使用语音识别，以查看转写文字。",
+      "status": "machine"
+    },
+    "transcript.show_more": {
+      "text": "显示更多",
+      "status": "machine"
+    },
+    "transcript.transcribing": {
+      "text": "正在转写…",
+      "status": "machine"
+    },
+    "transcript.unavailable_source": {
+      "text": "Lakko 无法在此设备上转写{language}",
+      "status": "machine"
+    },
+    "translate.auto": {
+      "text": "自动翻译",
+      "status": "machine"
+    },
+    "translate.bar.body": {
+      "text": "这里的消息使用{language}。",
+      "status": "machine"
+    },
+    "translate.bar.close": {
+      "text": "关闭",
+      "status": "machine"
+    },
+    "translate.bar.not_now": {
+      "text": "暂不",
+      "status": "machine"
+    },
+    "translate.bar.translate": {
+      "text": "翻译",
+      "status": "machine"
+    },
+    "translate.line.failed": {
+      "text": "无法翻译这条消息",
+      "status": "machine"
+    },
+    "translate.line.not_language": {
+      "text": "不是{language}？",
+      "status": "machine"
+    },
+    "translate.line.same_language": {
+      "text": "这条消息已经是{language}",
+      "status": "machine"
+    },
+    "translate.line.show_original": {
+      "text": "显示原文",
+      "status": "machine"
+    },
+    "translate.line.translate": {
+      "text": "翻译",
+      "status": "machine"
+    },
+    "translate.line.translated": {
+      "text": "译自{language}",
+      "status": "machine"
+    },
+    "translate.line.translating": {
+      "text": "正在翻译…",
+      "status": "machine"
+    },
+    "translate.line.try_again": {
+      "text": "重试",
+      "status": "machine"
+    },
+    "translate.pack.blocked_anti_censorship": {
+      "text": "开启反审查时无法下载语言包。",
+      "status": "machine"
+    },
+    "translate.pack.body.transcription": {
+      "text": "转写在此设备上完成。Lakko 需要{language}语言包才能转写。语音消息绝不会被发送到任何地方进行转写。",
+      "status": "machine"
+    },
+    "translate.pack.body.transcription_sized": {
+      "text": "转写在此设备上完成。Lakko 需要{language}语言包才能转写（{size}）。语音消息绝不会被发送到任何地方进行转写。",
+      "status": "machine"
+    },
+    "translate.pack.body.translation": {
+      "text": "翻译在此设备上完成。Lakko 需要{language}语言包才能翻译。消息绝不会被发送到任何地方进行翻译。",
+      "status": "machine"
+    },
+    "translate.pack.body.translation_sized": {
+      "text": "翻译在此设备上完成。Lakko 需要{language}语言包才能翻译（{size}）。消息绝不会被发送到任何地方进行翻译。",
+      "status": "machine"
+    },
+    "translate.pack.cancel": {
+      "text": "取消",
+      "status": "machine"
+    },
+    "translate.pack.download": {
+      "text": "下载",
+      "status": "machine"
+    },
+    "translate.pack.download_wifi": {
+      "text": "使用 Wi-Fi 下载",
+      "status": "machine"
+    },
+    "translate.pack.downloading": {
+      "text": "正在下载{language}… {percent}%",
+      "status": "machine"
+    },
+    "translate.pack.downloading_unsized": {
+      "text": "正在下载{language}…",
+      "status": "machine"
+    },
+    "translate.pack.failed": {
+      "text": "无法下载{language}语言包",
+      "status": "machine"
+    },
+    "translate.pack.not_now": {
+      "text": "暂不",
+      "status": "machine"
+    },
+    "translate.pack.source.android": {
+      "text": "语言包由 Google 提供。",
+      "status": "machine"
+    },
+    "translate.pack.source.ios": {
+      "text": "语言包由 Apple 提供。",
+      "status": "machine"
+    },
+    "translate.pack.source.web": {
+      "text": "语言包由你的浏览器开发商提供。",
+      "status": "machine"
+    },
+    "translate.pack.title.transcription": {
+      "text": "下载{language}用于转写？",
+      "status": "machine"
+    },
+    "translate.pack.title.translation": {
+      "text": "下载{language}用于翻译？",
+      "status": "machine"
+    },
+    "translate.pack.waiting_wifi": {
+      "text": "正在等待 Wi-Fi 以下载{language}",
+      "status": "machine"
+    },
+    "translate.picker.title": {
+      "text": "这条消息的语言",
+      "status": "machine"
+    },
+    "translate.unsupported_source": {
+      "text": "Lakko 无法在此设备上翻译{language}",
       "status": "machine"
     },
     "update.available.message": {

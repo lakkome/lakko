@@ -89,6 +89,7 @@ extension PersistedMessage {
                     originMessageId: $0.originMessageId)
             }
         self.unsupportedVersion = msg.unsupportedVersion
+        self.lastOpId = msg.lastOpId
     }
 
     /// Inverse — reconstruct a runtime ``ChatMessage`` from
@@ -128,7 +129,8 @@ extension PersistedMessage {
                     originGroupIdHex: $0.originGroupIdHex,
                     originMessageId: $0.originMessageId)
             },
-            unsupportedVersion: unsupportedVersion
+            unsupportedVersion: unsupportedVersion,
+            lastOpId: lastOpId
         )
     }
 }

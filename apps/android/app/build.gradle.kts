@@ -612,6 +612,9 @@ dependencies {
     implementation(libs.androidx.media3.effect)
     implementation(libs.androidx.media3.common)
     implementation(libs.mlkit.barcode.scanning)
+    // ADR-0082: the translation fallback for devices whose system has no
+    // on-device translation service (MlKitTranslationEngine only).
+    implementation(libs.mlkit.translate)
     implementation(libs.zxing.core)
 
     // G3-2 — WebRTC pod. The artifact ships the Java/Kotlin
