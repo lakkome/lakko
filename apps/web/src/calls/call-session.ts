@@ -126,6 +126,7 @@ import {
 import { CallPathLog } from "./call-path";
 import { iceServersFor, iceServersLine } from "./ice-servers";
 import { loadWasm } from "../wasm";
+import type { CallSignalingWake } from "./call-signaling-wake";
 import type { ParsedCallSignaling } from "../../wasm/lakko_ffi_wasm";
 
 /** Lifecycle phases this session can be in. Mirror of
@@ -232,8 +233,15 @@ export interface CallSessionCallbacks {
   /** Outbound signaling bytes to PUT to the chat group's DS
    *  journal. The composer wraps in MLS application
    *  message; transport stays on the existing Phase 1
-   *  pipeline. */
-  onOutboundSignaling(plaintextBytes: Uint8Array): void;
+   *  pipeline.
+   *
+   *  `wake` is whether this frame rings someone or stops a ring: `"call"`
+   *  only for the dial offer and for the End of a call that never connected
+   *  on this device. A renegotiation offer and the End of a connected call
+   *  are `"none"`: their tags match the dial and the cancel, and a call wake
+   *  on them rang the peer's iPhone (a VoIP push is always reported to
+   *  CallKit as an incoming call). See `call-signaling-wake.ts`. */
+  onOutboundSignaling(plaintextBytes: Uint8Array, wake: CallSignalingWake): void;
   /** State transition tick. UI re-renders. */
   onStateChange(state: WebCallState, reason?: WebCallEndReason): void;
   /** G3-3-conn-quality — periodic connection-quality tick while
@@ -413,6 +421,10 @@ export class CallSession {
   private makingOffer = false;
   private isSettingRemoteAnswerPending = false;
   private negotiationReady = false;
+  /** Whether this call ever reached `connected` on this device. Decides the
+   *  wake of its End: an End for a call that connected reaches a peer that is
+   *  in the call and awake, so it is published silently. */
+  private everConnected = false;
   /** The per-call SFrame seed and this client's MLS leaf, armed by
    *  {@link setCallKey} before the peer connection opens. `null` means the
    *  call refuses rather than sending anything unsealed (invariant #4). */
@@ -798,7 +810,8 @@ export class CallSession {
       media.audio,
       media.video,
     );
-    this.callbacks.onOutboundSignaling(bytes);
+    // The dial: the one offer that rings the callee.
+    this.callbacks.onOutboundSignaling(bytes, "call");
   }
 
   /** Whether the dial that built `pc` is over: the call left `outgoing`, or
@@ -1008,7 +1021,7 @@ export class CallSession {
       // No Answer is published for a call that ended meanwhile.
       if (this.pc !== pc) return;
       const bytes = wasm.composeCallAnswerSignaling(this.callId, answer.sdp);
-      this.callbacks.onOutboundSignaling(bytes);
+      this.callbacks.onOutboundSignaling(bytes, "none");
     } catch (err) {
       // The call ended while the accept was in flight (a closed peer
       // connection may reject what was pending on it): nothing failed.
@@ -1388,7 +1401,7 @@ export class CallSession {
           c.sdpMid ?? "",
           c.sdpMLineIndex ?? 0,
         );
-        this.callbacks.onOutboundSignaling(bytes);
+        this.callbacks.onOutboundSignaling(bytes, "none");
       })();
     };
 
@@ -1542,7 +1555,9 @@ export class CallSession {
         true,
         true,
       );
-      this.callbacks.onOutboundSignaling(bytes);
+      // A renegotiation of a call already past its dial: the peer is in the
+      // call. A wake here showed the peer's iPhone an incoming call.
+      this.callbacks.onOutboundSignaling(bytes, "none");
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("renegotiation offer failed", err);
@@ -1589,7 +1604,7 @@ export class CallSession {
       if (answerSdp === undefined) return;
       const wasm = await loadWasm();
       const bytes = wasm.composeCallAnswerSignaling(this.callId, this.outgoingSdp(answerSdp));
-      this.callbacks.onOutboundSignaling(bytes);
+      this.callbacks.onOutboundSignaling(bytes, "none");
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("renegotiation offer apply failed", err);
@@ -1658,7 +1673,10 @@ export class CallSession {
     try {
       const wasm = await loadWasm();
       const bytes = wasm.composeCallEndSignaling(this.callId, reason);
-      this.callbacks.onOutboundSignaling(bytes);
+      // An End for a call that never connected here stops a ring on the other
+      // side's devices, including ones whose app is closed: it wakes. An End
+      // for a connected call reaches a peer that is in the call: silent.
+      this.callbacks.onOutboundSignaling(bytes, this.everConnected ? "none" : "call");
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("compose end signaling failed", err);
@@ -1788,6 +1806,7 @@ export class CallSession {
     // G3-3-conn-quality — arm the stats poll loop once, on the
     // first transition into `connected`.
     if (state === "connected") {
+      this.everConnected = true;
       this.startStatsPolling();
     }
     this.callbacks.onStateChange(state, reason);

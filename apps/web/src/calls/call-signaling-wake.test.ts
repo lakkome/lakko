@@ -72,31 +72,40 @@ describe("callSignalingBodyKind", () => {
 
 describe("shouldWakeForCallSignaling", () => {
   it("wakes for an offer — the ring itself", () => {
-    expect(shouldWakeForCallSignaling(offer())).toBe(true);
-    expect(shouldWakeForCallSignaling(offer(true))).toBe(true);
+    expect(shouldWakeForCallSignaling(offer(), "call")).toBe(true);
+    expect(shouldWakeForCallSignaling(offer(true), "call")).toBe(true);
   });
 
   it("wakes for an end — so a cancelled call stops ringing a closed tab", () => {
-    expect(shouldWakeForCallSignaling(end())).toBe(true);
+    expect(shouldWakeForCallSignaling(end(), "call")).toBe(true);
     for (const reason of ["declined", "busy", "timedOut", "error"]) {
-      expect(shouldWakeForCallSignaling(wasm.composeCallEndSignaling(CALL_ID, reason))).toBe(true);
+      expect(shouldWakeForCallSignaling(wasm.composeCallEndSignaling(CALL_ID, reason), "call")).toBe(true);
     }
   });
 
   it("stays silent for answer and candidate — the peer is already awake", () => {
-    expect(shouldWakeForCallSignaling(answer())).toBe(false);
-    expect(shouldWakeForCallSignaling(candidate())).toBe(false);
+    expect(shouldWakeForCallSignaling(answer(), "call")).toBe(false);
+    expect(shouldWakeForCallSignaling(candidate(), "call")).toBe(false);
   });
 
   it("stays silent for the group-control frames", () => {
-    expect(shouldWakeForCallSignaling(new Uint8Array([0x72, 0x00]))).toBe(false);
-    expect(shouldWakeForCallSignaling(new Uint8Array([0x7a, 0x00]))).toBe(false);
-    expect(shouldWakeForCallSignaling(new Uint8Array([0x82, 0x01, 0x00]))).toBe(false);
+    expect(shouldWakeForCallSignaling(new Uint8Array([0x72, 0x00]), "call")).toBe(false);
+    expect(shouldWakeForCallSignaling(new Uint8Array([0x7a, 0x00]), "call")).toBe(false);
+    expect(shouldWakeForCallSignaling(new Uint8Array([0x82, 0x01, 0x00]), "call")).toBe(false);
+  });
+
+  it("never wakes for a frame the session did not ask a wake for", () => {
+    // A renegotiation offer and the end of a connected call carry the same
+    // tags as the dial and the cancel; the session's intent is what separates
+    // them.
+    expect(shouldWakeForCallSignaling(offer(), "none")).toBe(false);
+    expect(shouldWakeForCallSignaling(offer(true), "none")).toBe(false);
+    expect(shouldWakeForCallSignaling(end(), "none")).toBe(false);
   });
 
   it("fails toward silence on bytes that are not call signaling at all", () => {
-    expect(shouldWakeForCallSignaling(new Uint8Array())).toBe(false);
-    expect(shouldWakeForCallSignaling(new TextEncoder().encode('{"v":1}'))).toBe(false);
-    expect(shouldWakeForCallSignaling(new TextEncoder().encode("lakko/group-name/v1"))).toBe(false);
+    expect(shouldWakeForCallSignaling(new Uint8Array(), "call")).toBe(false);
+    expect(shouldWakeForCallSignaling(new TextEncoder().encode('{"v":1}'), "call")).toBe(false);
+    expect(shouldWakeForCallSignaling(new TextEncoder().encode("lakko/group-name/v1"), "call")).toBe(false);
   });
 });

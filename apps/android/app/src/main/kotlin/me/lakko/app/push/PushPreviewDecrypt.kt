@@ -426,7 +426,33 @@ public data class PushWakeOutcome(
     /** UX 16.4 — the wake named a closed one-to-one: post NOTHING for it, not
      *  even the generic banner [EMPTY] falls back to. */
     val suppressed: Boolean = false,
+    /** The read ran to the end: the snapshot was restored and the rows were
+     *  fetched and processed. `false` for every early return, where nothing
+     *  is known about the wake and the generic banner stands. */
+    val readRan: Boolean = false,
+    /** Rows that did not decrypt and that the app's message log does not
+     *  hold, i.e. a message this device cannot read yet. A row that does not
+     *  decrypt but IS held is this device's own message coming back (a
+     *  sender cannot open its own message) and is not counted. */
+    val unreadableRows: Int = 0,
 ) {
+    /**
+     * Whether a wake that showed no preview and rang for nothing still posts
+     * the generic "New message" banner.
+     *
+     * A banner means a message from someone else. A wake that brought only
+     * this device's own message, a message from another device of the same
+     * account, or service traffic (receipts, typing, reactions, profiles, ...)
+     * posts nothing. The generic banner is kept for what cannot be told
+     * apart: a read that did not run, or a row that did not decrypt and is
+     * not ours, and only while the app is not on screen (on screen the app
+     * shows the conversation itself).
+     */
+    public fun genericBannerWanted(appOnScreen: Boolean): Boolean =
+        preview == null && ring == null &&
+            (!readRan || (!appOnScreen && unreadableRows > 0))
+
+
     internal companion object {
         val EMPTY = PushWakeOutcome(preview = null, ring = null, cancelledCallIds = emptyList())
         val SUPPRESSED =
@@ -582,10 +608,25 @@ public suspend fun decryptPushWake(
                 me.lakko.app.chat.NO_LINEAGE
             }
         }
+        // The account key of this device's person, read once and only when a
+        // decrypted message asks: a message from it (another device of the
+        // same account) is not a notification.
+        val ownPersonKeyB64 by lazy { runCatching { group.facts()?.ownPersonKeyB64 }.getOrNull() }
+        var unreadableRows = 0
         for (row in rows) {
             val processed = try {
                 group.process(row.payload)
-            } catch (_: Throwable) {
+            } catch (cause: Throwable) {
+                // A sender cannot open its own message. The app's log holds a
+                // row it sent (or one it already received), so a held id is
+                // quiet; anything else is a message this device cannot read.
+                if (isOwnMessageEcho(cause)) continue
+                val held = try {
+                    deps.heldRow(account.accountIdB64, realGroupHex, row.id) != null
+                } catch (_: Throwable) {
+                    false
+                }
+                if (!held) unreadableRows += 1
                 continue
             }
             if (processed != null) {
@@ -611,6 +652,10 @@ public suspend fun decryptPushWake(
                 }
             }
             processed?.callSignal?.let { callSignals += it }
+            val fromOwnAccount = processed?.senderAccountB64 != null &&
+                processed.callSignal == null &&
+                processed.senderAccountB64 == ownPersonKeyB64
+            if (fromOwnAccount) continue
             val body = previewBodyOf(processed) ?: continue
             // ADR-0048 UX §5 — the sender's resolved name when it is already
             // known on this device; the generic title otherwise.
@@ -646,6 +691,8 @@ public suspend fun decryptPushWake(
             // of a retired key, or a re-send this device holds the original
             // of): nothing is posted for it, not even the generic banner.
             suppressed = wakePostsNothing(latest != null, calls.ring != null, suppressedRows),
+            readRan = true,
+            unreadableRows = unreadableRows,
         )
     } finally {
         // Discard the throwaway MLS state. We NEVER snapshot it back —
@@ -772,3 +819,15 @@ public fun notificationGroupKey(
     val conversation = conversationHexForWake(resolved, lineage)
     return if (conversation == resolved) raw else conversation
 }
+
+/**
+ * Whether a row's decrypt failure is this device's own message coming back: a
+ * sender cannot open what it sent. The core names the refusal: openmls's
+ * `ValidationError::CannotDecryptOwnMessage` reaches the client inside the
+ * error text (`process_message: ValidationError(CannotDecryptOwnMessage)`).
+ * It covers every row this device published (its typing, receipts and
+ * commits, which the message log never holds). A text that does not match
+ * (another openmls wording) only falls back to the held-id check.
+ */
+internal fun isOwnMessageEcho(cause: Throwable): Boolean =
+    generateSequence(cause) { it.cause }.any { it.message?.contains("CannotDecryptOwnMessage") == true }

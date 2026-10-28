@@ -300,7 +300,6 @@ function seedDeviceSettings(): void {
   local.setItem("lakko.push.token.v1", "cHNldWRv");
   local.setItem("lakko.composer.recordMode", "voice");
   local.setItem("lakko.media.autoplayVideoNotes", "1");
-  local.setItem("lakko.gif.privacyNoteDismissed", "1");
   local.setItem("lakko.feed.device-banner-dismissed", "1");
 }
 
@@ -383,7 +382,6 @@ describe("wipeAccountLocalData", () => {
       "lakko.push.token.v1",
       "lakko.composer.recordMode",
       "lakko.media.autoplayVideoNotes",
-      "lakko.gif.privacyNoteDismissed",
     ]) {
       expect(local.getItem(k), k).not.toBeNull();
     }

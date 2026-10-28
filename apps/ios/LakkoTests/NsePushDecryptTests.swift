@@ -46,15 +46,12 @@ final class NsePushDecryptTests: XCTestCase {
             self.throwOn = throwOn
         }
 
-        func process(_ payload: Data) -> NseProcessedRow? {
+        func process(_ payload: Data) throws -> NseProcessedRow? {
             processCount += 1
             let tag = payload.isEmpty ? -1 : Int(payload[payload.startIndex])
-            if throwOn.contains(tag) {
-                // Mirror a per-row decrypt failure: the real impl returns nil;
-                // the fake models the "throws internally, dropped" shape by
-                // returning nil for the thrown tag (the core skips nils).
-                return nil
-            }
+            // A per-row decrypt failure, thrown as the real impl's core
+            // receive path throws it.
+            if throwOn.contains(tag) { throw FakeError.decrypt }
             return decode(payload)
         }
 
@@ -104,6 +101,11 @@ final class NsePushDecryptTests: XCTestCase {
         var lastCursorGroupHex: String?
         /// ADR-0053 — the group the fetch was handed to sign with.
         var lastFetchGroup: NseThrowawayGroup?
+        /// The DS message ids the app's message log holds for the group.
+        var held: Set<Int64> = []
+        /// This account's own person key, as the mirror reports it.
+        var ownKey: String?
+        var heldReads = 0
 
         init(
             account: NseResolvedAccount?,
@@ -198,9 +200,16 @@ final class NsePushDecryptTests: XCTestCase {
         }
 
         func isAntiCensorshipArmed() -> Bool { armed }
+
+        func heldMessageIds(accountIdB64: String, groupIdHex: String) -> Set<Int64> {
+            heldReads += 1
+            return held
+        }
+
+        func ownPersonKeyB64(accountIdB64: String) -> String? { ownKey }
     }
 
-    private enum FakeError: Error { case open, ds }
+    private enum FakeError: Error { case open, ds, decrypt }
 
     private func okAccount() -> NseResolvedAccount {
         NseResolvedAccount(accountIdB64: accountId, groupIdBytes: groupIdBytes)
@@ -722,5 +731,120 @@ final class NsePushDecryptTests: XCTestCase {
         XCTAssertEqual(deps.openCount, 0)
         XCTAssertEqual(deps.dsFetchCount, 0)
         XCTAssertFalse(deps.readAccounts.contains(otherAccount))
+    }
+
+    // MARK: - A wake for this device's own message
+
+    // The DS wakes every subscription of a group, the sender's own devices
+    // included. The sender's device cannot open its own message, so without
+    // these rules it posted the generic "New message" for what it just sent.
+
+    private func ownWakeDeps(
+        _ rows: [NseFetchedRow], decode: @escaping (Data) -> NseProcessedRow?, throwOn: Set<Int> = []
+    ) -> (FakeDeps, FakeThrowawayGroup) {
+        let group = FakeThrowawayGroup(decode: decode, throwOn: throwOn)
+        let deps = FakeDeps(account: okAccount(), group: group, rows: rows)
+        deps.ownKey = "own-person"
+        return (deps, group)
+    }
+
+    private func from(_ sender: String, _ text: String) -> NseProcessedRow {
+        NseProcessedRow(kind: .chat, text: text, attachmentCount: 0, senderKeyB64: sender)
+    }
+
+    func testOwnMessageTheLogHoldsPostsNothing() async {
+        // Row 10 is this device's own message: it does not decrypt here, and
+        // the app's log holds it.
+        let (deps, _) = ownWakeDeps([row(10, 1)], decode: { _ in nil }, throwOn: [1])
+        deps.held = [10]
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 10), deps)
+        XCTAssertEqual(outcome, .quiet(tag: groupHex))
+    }
+
+    func testMessageFromAnotherDeviceOfTheSamePersonPostsNothing() async {
+        let (deps, _) = ownWakeDeps([row(10, 1)], decode: { _ in self.from("own-person", "from my laptop") })
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 10), deps)
+        XCTAssertEqual(outcome, .quiet(tag: groupHex))
+    }
+
+    func testServiceTrafficAlonePostsNothing() async {
+        // A service envelope (nil), a read receipt and a reaction from
+        // someone else: nothing a notification would show.
+        let (deps, _) = ownWakeDeps([row(10, 1), row(11, 2), row(12, 3)], decode: { payload in
+            switch payload[payload.startIndex] {
+            case 2: return NseProcessedRow(kind: .readReceipt, text: "", attachmentCount: 0, senderKeyB64: "peer")
+            case 3: return NseProcessedRow(kind: .reaction, text: "", attachmentCount: 0, senderKeyB64: "peer")
+            default: return nil
+            }
+        })
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 12), deps)
+        XCTAssertEqual(outcome, .quiet(tag: groupHex))
+    }
+
+    func testPeerMessageIsPreviewedEvenWhenANewerOwnRowFollows() async {
+        // Row 10: a peer's message. Row 11: this device's own (held, does not
+        // decrypt). Row 12: from another device of this person. The peer's
+        // message is still the preview.
+        let (deps, _) = ownWakeDeps([row(10, 1), row(11, 2), row(12, 3)], decode: { payload in
+            switch payload[payload.startIndex] {
+            case 1: return self.from("peer", "hi there")
+            case 3: return self.from("own-person", "mine")
+            default: return nil
+            }
+        }, throwOn: [2])
+        deps.held = [11]
+        guard case .preview(let preview) = await decryptPushOutcome(
+            NsePushWake(groupHex: groupHex, pointer: 12), deps) else {
+            return XCTFail("a message from someone else is previewed")
+        }
+        XCTAssertEqual(preview.body, "hi there")
+    }
+
+    func testARowThatDoesNotDecryptAndIsNotHeldKeepsTheGenericLine() async {
+        // Row 10 is this device's own (held); row 11 does not decrypt and is
+        // not in the log: it may be a message from someone else.
+        let (deps, _) = ownWakeDeps([row(10, 1), row(11, 2)], decode: { _ in nil }, throwOn: [1, 2])
+        deps.held = [10]
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 11), deps)
+        XCTAssertEqual(outcome, .none)
+        XCTAssertEqual(deps.heldReads, 1, "the log is read once per wake")
+    }
+
+    func testAReadThatDidNotRunKeepsTheGenericLine() async {
+        let decode: (Data) -> NseProcessedRow? = { _ in self.from("own-person", "mine") }
+        let wake = NsePushWake(groupHex: groupHex, pointer: 10)
+        let noSeed = FakeDeps(account: okAccount(), seed: nil,
+                              group: FakeThrowawayGroup(decode: decode), rows: [row(10, 1)])
+        let noSnapshot = FakeDeps(account: okAccount(), snapshot: nil,
+                                  group: FakeThrowawayGroup(decode: decode), rows: [row(10, 1)])
+        let fetchFailed = FakeDeps(account: okAccount(),
+                                   group: FakeThrowawayGroup(decode: decode), rows: [row(10, 1)], dsThrows: true)
+        for deps in [noSeed, noSnapshot, fetchFailed] {
+            deps.ownKey = "own-person"
+            let outcome = await decryptPushOutcome(wake, deps)
+            XCTAssertEqual(outcome, .none)
+        }
+    }
+
+    func testOwnAccountCallSignalingStillDecides() async {
+        // Calls keep their own rules: an end from another device of this
+        // person (answered there) still takes the alert down.
+        let callIdHex = String(repeating: "c", count: 32)
+        let (deps, _) = ownWakeDeps([row(10, 1)], decode: { _ in
+            NseProcessedRow(kind: .callEnd, text: "", attachmentCount: 0,
+                            callIdHex: callIdHex, senderKeyB64: "own-person")
+        })
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 10), deps)
+        XCTAssertEqual(outcome, .callEnded(callIdHex: callIdHex))
+    }
+
+    /// The core's own-message refusal (`CannotDecryptOwnMessage`) is this
+    /// device's own row coming back; any other decrypt failure is not.
+    func testTheOwnMessageRefusalIsRecognised() {
+        struct Refusal: Error, CustomStringConvertible {
+            let description: String
+        }
+        XCTAssertTrue(nseIsOwnMessageEcho(Refusal(description: "Message(message: \"process_message: ValidationError(CannotDecryptOwnMessage)\")")))
+        XCTAssertFalse(nseIsOwnMessageEcho(Refusal(description: "Message(message: \"process_message: WrongEpoch\")")))
     }
 }

@@ -27,7 +27,7 @@
       "status": "machine"
     },
     "auth.brand.body": {
-      "text": "Conversas, grupos, canais e chamadas com criptografia de ponta a ponta por padrão. Os servidores do Lakko nunca veem suas mensagens.",
+      "text": "Conversas, grupos, canais e chamadas com criptografia de ponta a ponta por padrão.",
       "status": "machine"
     },
     "auth.brand.foot": {
@@ -1483,7 +1483,7 @@
       "status": "machine"
     },
     "channels.meta.desc": {
-      "text": "O nome e a descrição chegam a todos os inscritos com criptografia. O servidor nunca os lê.",
+      "text": "O nome e a descrição chegam a todos os inscritos.",
       "status": "machine"
     },
     "channels.meta.error.description_bad_character": {
@@ -1575,7 +1575,7 @@
       "status": "machine"
     },
     "channels.new.subtitle": {
-      "text": "Os inscritos veem o nome e a descrição. Eles viajam criptografados; só texto cifrado chega ao servidor.",
+      "text": "Os inscritos veem o nome e a descrição.",
       "status": "machine"
     },
     "channels.new.title": {
@@ -2210,16 +2210,8 @@
       "text": "Nenhum GIF encontrado",
       "status": "machine"
     },
-    "chat.gif.note_dismiss": {
-      "text": "Entendi",
-      "status": "machine"
-    },
     "chat.gif.open_full": {
       "text": "Abrir GIF em tela cheia",
-      "status": "machine"
-    },
-    "chat.gif.privacy_note": {
-      "text": "A pesquisa de GIFs passa pelo servidor do Lakko, que vê o que você pesquisa. GIFs enviados são criptografados como qualquer arquivo.",
       "status": "machine"
     },
     "chat.gif.rate_limited": {
@@ -4710,10 +4702,6 @@
       "text": "Misturar temas aleatórios",
       "status": "machine"
     },
-    "discover.mix.off_line": {
-      "text": "Usa menos dados. O servidor do Lakko vai ver exatamente quais temas você escolheu.",
-      "status": "machine"
-    },
     "discover.nothing_yet": {
       "text": "Ainda não há sugestões. Escolha temas ou peça às pessoas dos seus grupos que compartilhem os canais delas.",
       "status": "machine"
@@ -4723,7 +4711,7 @@
       "status": "machine"
     },
     "discover.pick.body": {
-      "text": "O Lakko baixa sugestões sobre eles, misturadas com alguns temas aleatórios para que o servidor do Lakko não saiba exatamente quais você escolheu. Ele nunca vê quais canais você abre.",
+      "text": "O Lakko baixa sugestões sobre eles, misturadas com alguns temas aleatórios.",
       "status": "machine"
     },
     "discover.pick.title": {
@@ -4758,10 +4746,6 @@
       "text": "Buscar",
       "status": "machine"
     },
-    "discover.search.helper": {
-      "text": "As buscas são enviadas ao servidor do Lakko.",
-      "status": "machine"
-    },
     "discover.search.no_results": {
       "text": "Nenhum canal encontrado.",
       "status": "machine"
@@ -4791,11 +4775,11 @@
       "status": "machine"
     },
     "discover.share.line": {
-      "text": "As pessoas deste grupo podem ver quais canais você segue. O servidor do Lakko não pode.",
+      "text": "As pessoas deste grupo podem ver quais canais você segue.",
       "status": "machine"
     },
     "discover.shared.desc": {
-      "text": "Grupos em que as pessoas podem ver quais canais você segue. O servidor do Lakko não pode.",
+      "text": "Grupos em que as pessoas podem ver quais canais você segue.",
       "status": "machine"
     },
     "discover.shared.empty": {
@@ -6259,7 +6243,7 @@
       "status": "machine"
     },
     "new_group.name_hint": {
-      "text": "Todos os membros veem o nome. Ele é enviado criptografado; o servidor nunca o lê.",
+      "text": "Todos os membros veem o nome.",
       "status": "machine"
     },
     "new_group.name_not_sent": {
@@ -6615,7 +6599,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "Digite seu nome de usuário e abra o Lakko em um dispositivo que ainda esteja conectado; depois digite aqui o código que ele mostrar. Nada que os servidores do Lakko possam ler é enviado. Não precisa de câmera; se preferir, há um QR code.",
+      "text": "Digite seu nome de usuário e abra o Lakko em um dispositivo que ainda esteja conectado; depois digite aqui o código que ele mostrar. Não precisa de câmera; se preferir, há um QR code.",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -7111,7 +7095,7 @@
       "status": "machine"
     },
     "restore_identity.device_intro": {
-      "text": "Um dispositivo que ainda esteja conectado mostra um código de seis dígitos; digite-o aqui. A transferência tem criptografia de ponta a ponta; os servidores do Lakko não conseguem lê-la. Não precisa de câmera; se preferir, há um QR code.",
+      "text": "Um dispositivo que ainda esteja conectado mostra um código de seis dígitos; digite-o aqui. Não precisa de câmera; se preferir, há um QR code.",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -7295,7 +7279,7 @@
       "status": "machine"
     },
     "settings.about.protection.body": {
-      "text": "Mensagens, chamadas e solicitações de contato têm criptografia de ponta a ponta: só as pessoas da conversa podem lê-las, nunca os servidores do Lakko. Sua senha nunca sai do seu dispositivo, e cada contato tem um número de segurança que você pode comparar pessoalmente.",
+      "text": "Mensagens, chamadas e solicitações de contato têm criptografia de ponta a ponta: só as pessoas da conversa podem lê-las. Sua senha nunca sai do seu dispositivo, e cada contato tem um número de segurança que você pode comparar pessoalmente.",
       "status": "machine"
     },
     "settings.about.protection.title": {
@@ -7519,7 +7503,7 @@
       "status": "machine"
     },
     "settings.devices.lede": {
-      "text": "Os celulares, tablets e computadores conectados à sua conta. Adicionar um tem criptografia de ponta a ponta; os servidores do Lakko não conseguem ler.",
+      "text": "Os celulares, tablets e computadores conectados à sua conta.",
       "status": "machine"
     },
     "settings.devices.list.lede": {

@@ -107,14 +107,26 @@ public class OneToOneCallKey(public val seed: ByteArray, public val localLeaf: I
 
 /** The platform effects the host drives: session construction, keying, publish. */
 public interface OneToOneCallPort<S : OneToOneCallSession> {
-    /** A new session for a call in [groupIdHex]; its outbound signaling goes to [outbound]. */
-    public fun createSession(groupIdHex: String, callId: ByteArray, outbound: (ByteArray) -> Unit): S
+    /**
+     * A new session for a call in [groupIdHex]; its outbound signaling goes to
+     * [outbound], each frame with the wake the session asked for it
+     * ([OneToOneCallWakes]).
+     */
+    public fun createSession(
+        groupIdHex: String,
+        callId: ByteArray,
+        outbound: (ByteArray, CallSignalingWake) -> Unit,
+    ): S
 
     /** The per-call SFrame key from the group's MLS exporter, or `null` (the call then refuses). */
     public suspend fun deriveCallKey(groupIdHex: String, callId: ByteArray): OneToOneCallKey?
 
-    /** Publish call-signaling bytes to [groupIdHex]'s journal. May throw. */
-    public suspend fun publish(groupIdHex: String, bytes: ByteArray)
+    /**
+     * Publish call-signaling bytes to [groupIdHex]'s journal. [wake] is the
+     * sender's intent; the publisher still wakes only for an offer or an end
+     * ([shouldWakeForCallSignaling]). May throw.
+     */
+    public suspend fun publish(groupIdHex: String, bytes: ByteArray, wake: CallSignalingWake)
 
     /** Compose an `End` body, or `null` when composing failed. */
     public fun composeEnd(callId: ByteArray, reason: FfiCallEndReason): ByteArray?
@@ -657,7 +669,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         class ScreenShare(val groupIdHex: String, val callIdHex: String, val share: VerifiedCallScreenShare) : Event
     }
 
-    private class Outbound(val groupIdHex: String, val bytes: ByteArray)
+    private class Outbound(val groupIdHex: String, val bytes: ByteArray, val wake: CallSignalingWake)
 
     private enum class TimerKind { RING, ESTABLISH }
 
@@ -755,7 +767,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
                 // included; the call has already ended locally.
                 if (item.groupIdHex.lowercase() in closedGroups) continue
                 try {
-                    p.publish(item.groupIdHex, item.bytes)
+                    p.publish(item.groupIdHex, item.bytes, item.wake)
                 } catch (cancel: CancellationException) {
                     throw cancel
                 } catch (error: Throwable) {
@@ -1010,8 +1022,8 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
             return
         }
         clearSlot()
-        val session = p.createSession(row.groupIdHex, offer.callId) { bytes ->
-            outbound.trySend(Outbound(row.groupIdHex, bytes))
+        val session = p.createSession(row.groupIdHex, offer.callId) { bytes, wake ->
+            outbound.trySend(Outbound(row.groupIdHex, bytes, wake))
         }
         val key = p.deriveCallKey(row.groupIdHex, offer.callId)
         if (key != null) {
@@ -1051,8 +1063,8 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         val p = port ?: return
         clearSlot()
         val callId = ByteArray(CALL_ID_BYTES).also { SecureRandom().nextBytes(it) }
-        val session = p.createSession(groupIdHex, callId) { bytes ->
-            outbound.trySend(Outbound(groupIdHex, bytes))
+        val session = p.createSession(groupIdHex, callId) { bytes, wake ->
+            outbound.trySend(Outbound(groupIdHex, bytes, wake))
         }
         val key = p.deriveCallKey(groupIdHex, callId)
         if (key != null) session.setCallKey(key.seed, key.localLeaf)
@@ -1341,9 +1353,14 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         s.timerGeneration += 1
     }
 
+    /**
+     * An End for a call this device has no session for (busy, a decline from
+     * the ring screen): the call never connected here, so it stops the ring the
+     * caller started on the other side's devices and keeps its wake.
+     */
     private fun publishEnd(groupIdHex: String, callId: ByteArray, reason: FfiCallEndReason) {
         val bytes = port?.composeEnd(callId, reason) ?: return
-        outbound.trySend(Outbound(groupIdHex, bytes))
+        outbound.trySend(Outbound(groupIdHex, bytes, CallSignalingWake.CALL))
     }
 
     private fun rememberEnded(callIdHex: String) {

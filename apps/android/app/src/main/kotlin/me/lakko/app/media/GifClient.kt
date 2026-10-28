@@ -400,7 +400,6 @@ public class SearchDebouncer(
 
 // ----- copy (UX spec §5): catalog keys (ADR-0061) ---------------------------
 
-public const val GIF_PRIVACY_NOTE: String = "chat.gif.privacy_note"
 public const val GIF_NO_RESULTS: String = "chat.gif.no_results"
 public const val GIF_UNAVAILABLE: String = "chat.gif.unavailable"
 public const val GIF_RATE_LIMITED: String = "chat.gif.rate_limited"

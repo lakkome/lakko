@@ -2654,7 +2654,13 @@ public class ChatRepository(
             return false
         }
         try {
-            publishApplicationMessage(groupIdHex = groupIdHex, plaintextBytes = bytes)
+            // No group-call frame wakes anyone, an End included: a group call
+            // never rings a closed device, so there is no ring to stop.
+            publishApplicationMessage(
+                groupIdHex = groupIdHex,
+                plaintextBytes = bytes,
+                wake = me.lakko.app.calls.GROUP_CALL_CONTROL_WAKE,
+            )
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
         } catch (cause: Throwable) {
@@ -4092,25 +4098,33 @@ public class ChatRepository(
      * Publish a raw application payload — a call-signaling frame, a service
      * envelope — with no chat bubble and no message log entry.
      *
-     * Fires a push wake for exactly the two call-signaling frames
-     * [me.lakko.app.calls.shouldWakeForCallSignaling] names (an offer and an
-     * end) and for nothing else, so a backgrounded or closed callee rings
-     * (`docs/ux/calls.md` §2.1 / §7). The decision is taken from the composed
-     * bytes here rather than passed in by the caller, so there is no second
-     * place a caller could get it wrong: the group-call control frames that
-     * reach this same method through [publishGroupCallSignal] stay silent
-     * because their tag is not an offer or an end, not because someone
-     * remembered to say so.
+     * Fires a push wake when the caller asked for one ([wake]) AND the frame
+     * is a call offer or end ([me.lakko.app.calls.shouldWakeForCallSignaling]),
+     * so a backgrounded or closed callee rings (`docs/ux/calls.md` §2.1 / §7).
+     * A 1x1 session asks only for its dial offer and for the End of a call
+     * that never connected: a renegotiation offer and the End of a connected
+     * call carry the same tags, and a wake on either rang the peer's iPhone.
+     * The group-call control frames that reach this method through
+     * [publishGroupCallSignal] ask for no wake, an End included
+     * ([me.lakko.app.calls.GROUP_CALL_CONTROL_WAKE]).
      */
     public suspend fun publishApplicationMessage(
         groupIdHex: String,
         plaintextBytes: ByteArray,
+        wake: me.lakko.app.calls.CallSignalingWake,
     ): Unit =
-        forSession { publishApplicationMessageOnMlsThread(groupIdHex = groupIdHex, plaintextBytes = plaintextBytes) }
+        forSession {
+            publishApplicationMessageOnMlsThread(
+                groupIdHex = groupIdHex,
+                plaintextBytes = plaintextBytes,
+                wake = wake,
+            )
+        }
 
     private suspend fun publishApplicationMessageOnMlsThread(
         groupIdHex: String,
         plaintextBytes: ByteArray,
+        wake: me.lakko.app.calls.CallSignalingWake,
     ): Unit {
         // ADR-0073 R.7 case 1 — nothing goes into a dead one-to-one but the claim.
         if (deadOneToOne(groupIdHex)) throw deadSessionError()
@@ -4144,17 +4158,18 @@ public class ChatRepository(
             }
             // docs/ux/calls.md §2.1 — a call must arrive when the app is closed.
             // ADR-0054 — the wake rides this signed publish as a header and the
-            // DS fans it out after appending the row; only an offer and an end
-            // ask for one, every other frame published here stays silent.
-            val wake = sealedWakeFor(
+            // DS fans it out after appending the row; only an offer or an end
+            // the caller asked a wake for gets one, every other frame published
+            // here stays silent.
+            val sealedWake = sealedWakeFor(
                 groupIdHex,
-                if (me.lakko.app.calls.shouldWakeForCallSignaling(plaintextBytes)) DsWakeKind.CALL else null,
+                if (me.lakko.app.calls.shouldWakeForCallSignaling(plaintextBytes, wake)) DsWakeKind.CALL else null,
             )
             // ADR-0045 — the publish is INSIDE the per-group lock (see
             // [runGroupSend]): a message sealed at one epoch and published on the
             // far side of a commit is permanently undecryptable for every
             // recipient, because `lakko-mls` retains no past-epoch secrets.
-            chatClient.publishPreparedSend(prepared, wake = wake)
+            chatClient.publishPreparedSend(prepared, wake = sealedWake)
         }
     }
 

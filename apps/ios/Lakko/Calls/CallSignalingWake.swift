@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// Which outbound call-signaling frames are worth a push wake.
 ///
@@ -21,13 +22,25 @@ import Foundation
 ///
 /// ## The rule, and why it is this narrow
 ///
-/// Exactly two of the seven signaling bodies wake anyone:
+/// At most two of the signaling bodies wake anyone, and each only once in a
+/// call's life:
 ///
-///   - **offer** — the ring itself. Nothing else can start one.
-///   - **end** — stops a ring the callee may already be showing, on every
-///     device of theirs, including the ones whose app is shut. Without it a
-///     cancelled call keeps ringing a closed app's notification until the user
-///     dismisses it by hand.
+///   - **the dial** — the FIRST offer of a call, the ring itself. A later
+///     offer for the same call id is a renegotiation (a camera turned on or
+///     off, the peer's screen share) between two people already in the call.
+///   - **an end of a call that never connected here** — the caller
+///     cancelling, the callee declining or missing it. It stops a ring the
+///     other side may still be showing, on every device of theirs, including
+///     the ones whose app is shut. Once the call has connected nobody is
+///     ringing.
+///
+/// A wake for anything else is not merely wasted: on iOS a call wake is a
+/// VoIP push, which must be reported to CallKit as an incoming call, so a
+/// renegotiation offer or the end of a connected call rang the other phone as
+/// a new audio call. Which offer is the dial and whether the call connected
+/// are not in the bytes, so the session decides
+/// (``sessionAsks(_:everConnected:)``) and the publisher combines that with
+/// the byte peek (``wakeKind(for:sessionAsks:)``).
 ///
 /// Everything else is deliberately silent:
 ///
@@ -41,7 +54,7 @@ import Foundation
 ///     never asks for a wake at all; this table refusing them is the second
 ///     layer, not the first.
 ///
-/// ## Why a byte peek rather than a parse
+/// ## Why a byte peek as well
 ///
 /// The publisher sees the frame as already-composed prost bytes, and the
 /// leading field tag of `CallSignalingPayload.body` names the variant with no
@@ -120,10 +133,126 @@ enum CallSignalingWake {
     /// `true` for an offer and an end, `false` for everything else —
     /// including anything that is not call signaling, so a caller that hands
     /// over the wrong bytes fails toward silence rather than toward a push.
+    ///
+    /// An upper bound only: the session narrows it to the dial and to the end
+    /// of a call that never connected (``wakeKind(for:sessionAsks:)``).
     static func shouldWake(_ bytes: Data) -> Bool {
         switch bodyKind(bytes) {
         case .offer, .end: return true
         default: return false
         }
+    }
+
+    /// The frames a 1x1 ``CallSession`` puts on the wire, as the session
+    /// knows them. "Dial" and "renegotiation" are the same body on the wire.
+    enum OutboundFrame: Equatable {
+        /// The first offer of a call this device places.
+        case dialOffer
+        /// Any later offer for the same call id.
+        case renegotiationOffer
+        case answer
+        case candidate
+        case end
+    }
+
+    /// Does the session ask for a call wake for this frame? The dial does,
+    /// and an end does while the call has never connected on this device.
+    static func sessionAsks(_ frame: OutboundFrame, everConnected: Bool) -> Bool {
+        switch frame {
+        case .dialOffer: return true
+        case .end: return !everConnected
+        case .renegotiationOffer, .answer, .candidate: return false
+        }
+    }
+
+    /// The wake a publish carries: ``DsWake/Kind/call`` when the session asks
+    /// for one AND the bytes are an offer or an end, else none. Either side
+    /// alone can only remove the wake, so wrong bytes or a wrong flag fail
+    /// toward silence.
+    static func wakeKind(for bytes: Data, sessionAsks: Bool) -> DsWake.Kind? {
+        sessionAsks && shouldWake(bytes) ? .call : nil
+    }
+}
+
+/// The receive half: a call wake for a conversation in which this device is
+/// already in a 1x1 call, or has just left one, rings nothing.
+///
+/// A VoIP push must be reported to CallKit as an incoming call
+/// (``VoipPushRegistrar``), so every call wake that reaches this device rings
+/// it unless the decision says otherwise. Three kinds of wake reach a device
+/// that is in the call the wake is about:
+///
+///   - this device's own publish, echoed back (the DS wakes every subscribed
+///     device of the group, the sender's included): the dial of a call it
+///     placed, the end of a call it cancelled;
+///   - a sender that still wakes for every offer and end (a renegotiation
+///     offer, the end of a connected call);
+///   - the other person's end for a ring this device is still showing.
+///
+/// None of them is a new call. ``VoipPushRegistrar/decide(_:binding:routes:defaults:callWakeSuppressed:)``
+/// treats them as it treats a muted conversation: reported, ended at once,
+/// and still fetched, so the row behind the wake is applied to the call it
+/// belongs to.
+///
+/// Main-actor state of ``CallHost``; read synchronously at report time.
+struct CallWakeSuppression {
+
+    /// How long after a call ended here a wake for its conversation still
+    /// rings nothing. Chosen, not measured: long enough for a push sent at the
+    /// hang-up to arrive after this device already applied the end (the push
+    /// and the journal poll race), short enough that a call placed again a
+    /// moment later rings normally. A call placed again inside the window
+    /// still arrives through the fetched row, without the VoIP placeholder.
+    static let recentEndWindowMs: Int64 = 10_000
+
+    /// Lowercase group hex -> when the last 1x1 call in it ended here.
+    private var endedAtMs: [String: Int64] = [:]
+
+    /// Record that the 1x1 call in `groupIdHex` reached `.done`.
+    mutating func noteEnded(groupIdHex: String, atMs: Int64) {
+        endedAtMs = endedAtMs.filter { atMs - $0.value < Self.recentEndWindowMs }
+        endedAtMs[groupIdHex.lowercased()] = atMs
+    }
+
+    mutating func reset() {
+        endedAtMs.removeAll()
+    }
+
+    /// The VoIP report's whole answer for one conversation: the one-to-one
+    /// host's, the group-call host's, and the conversation's kind. A call
+    /// wake for a conversation known to be a GROUP is never a one-to-one ring
+    /// (ADR-0062: a group of any size calls over the SFU, and a group call
+    /// rings no closed device). An unknown kind (the group not loaded yet, a
+    /// cold launch) decides nothing.
+    static func anySource(oneToOne: Bool, groupCall: Bool, kind: GroupKind?) -> Bool {
+        oneToOne || groupCall || kind == .group
+    }
+
+    /// Does a call wake for `groupIdHex` ring nothing?
+    ///
+    /// `true` when the call in the slot is in that conversation and is
+    /// ringing, dialling, connecting, connected or ending — a wake about it
+    /// is about a call already on this device — or when the conversation's
+    /// last call ended less than ``recentEndWindowMs`` ago. An `.idle`
+    /// session (the pre-join check, nothing sent yet) suppresses nothing.
+    func suppresses(
+        groupIdHex: String,
+        activeGroupIdHex: String?,
+        activeState: CallSession.WebCallState?,
+        nowMs: Int64
+    ) -> Bool {
+        let group = groupIdHex.lowercased()
+        if let activeState, let activeGroupIdHex, activeGroupIdHex.lowercased() == group {
+            switch activeState {
+            case .ringing, .outgoing, .connecting, .connected, .ending:
+                return true
+            case .idle, .done:
+                break
+            }
+        }
+        guard let ended = endedAtMs[group] else { return false }
+        // A clock that stepped back reads as "just ended": silence is the
+        // safe side for a call this device already took part in.
+        return nowMs - ended < Self.recentEndWindowMs
     }
 }

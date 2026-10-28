@@ -109,8 +109,24 @@ public final class PushAppDelegate: NSObject, UIApplicationDelegate,
             completionHandler([])
             return
         }
+        // A notification the extension delivered only because it could not
+        // post nothing (`NsePushOutcome.quiet`: this device's own message,
+        // another device of the same person, service traffic) is not shown
+        // over a running app either.
+        if (content.userInfo[LakkoQuietNotification.userInfoKey] as? Bool) == true {
+            completionHandler([])
+            return
+        }
+        // The generic line ("New message") is not shown over a running app:
+        // the app already shows the conversation, and a row the extension
+        // could not read is most often this device's own message coming back
+        // before the app recorded it.
+        if (content.userInfo[LakkoGenericNotification.userInfoKey] as? Bool) == true {
+            completionHandler([])
+            return
+        }
         // Everything else: the decrypted message preview the NSE wrote
-        // (ADR-0041), or the generic fallback when it could not.
+        // (ADR-0041).
         completionHandler([.banner, .sound, .badge])
     }
 

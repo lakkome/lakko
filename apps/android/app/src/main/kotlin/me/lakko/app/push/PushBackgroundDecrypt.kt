@@ -300,12 +300,10 @@ private class RealThrowawayGroup(
     override fun process(payload: ByteArray): ProcessedRow? {
         // ADR-0022 — the same role-verifying receive path the live poll
         // loop uses. A bad frame / wrong epoch / own echo / role-refused
-        // commit throws and is dropped by the pure core (fail-closed).
-        val processed = try {
-            group.processIncomingVerifyingRoles(identity, payload)
-        } catch (_: Throwable) {
-            return null
-        }
+        // commit throws, and the throw reaches the caller's loop, which
+        // drops the row (fail-closed) and tells this device's own message
+        // apart from one it cannot read.
+        val processed = group.processIncomingVerifyingRoles(identity, payload)
         // Only Application messages carry a user-visible preview. A
         // Commit / Proposal / ExternalJoinProposal advances state (in
         // the THROWAWAY provider only) but has no body to show.

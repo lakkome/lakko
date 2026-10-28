@@ -337,6 +337,15 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   ADR-0061 — the notification words the page stored in Cache Storage (raw,
  *   as read), so an attachment-only preview reads in the interface language.
  *   Absent or malformed means English.
+ * @property {(accountId: string, deviceKey: any, groupHex: string) => Promise<Iterable<number> | null>} [lookupHeldMessageIds]
+ *   READ-ONLY: the DS message ids the app's encrypted message log already
+ *   holds for this group (`src/chat/message-log-store.ts`), through
+ *   {@link heldMessageIdsFromLogRow}. Asked at most once per wake, and only
+ *   when a row does not decrypt: a sender cannot open its own message, so a
+ *   row that does not decrypt but is held is this device's own message
+ *   coming back (or one it already received) and is quiet. Optional; absent,
+ *   `null` and a throw all mean "nothing held", so such a row counts as
+ *   unreadable and the generic notification stands.
  * @property {() => number} [nowMs]
  *   Wall clock, for the stale-offer gate. Defaults to `Date.now()`; injected
  *   only so the tests can place a row on either side of the window without
@@ -383,18 +392,82 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  */
 
 /**
- * Produce a real decrypted notification preview for a GroupMessage
- * wake, or `null` when the background path cannot (safely) yield one —
- * in which case the SW shows its generic fallback.
+ * What the background read of one wake found.
  *
- * Never throws for a "cannot decrypt" reason; every such path returns
- * `null`. (A programming error in a mock could still throw in tests —
- * the SW wraps the whole call in try/catch regardless.)
+ * @typedef {object} PushWakeOutcome
+ * @property {PushPreview | null} preview  The preview or the call notice, as
+ *   {@link decryptPushPreview} returns it.
+ * @property {boolean} readRan  The read ran to the end: the snapshot was
+ *   restored and the rows were fetched and processed. `false` on every early
+ *   return, where nothing is known about the wake.
+ * @property {number} unreadableRows  Rows that did not decrypt and that the
+ *   app's message log does not hold: a message this device cannot read. A row
+ *   that does not decrypt but IS held is this device's own message coming
+ *   back (a sender cannot open its own message) and is not counted.
+ */
+
+/** @type {PushWakeOutcome} */
+const READ_DID_NOT_RUN = Object.freeze({ preview: null, readRan: false, unreadableRows: 0 });
+
+/**
+ * Whether a wake that produced no preview and no call notice still shows the
+ * generic "New message" notification.
+ *
+ * A notification means a message from someone else. A wake that brought only
+ * this device's own message, a message from another device of the same
+ * account, or service traffic (receipts, typing, reactions, profiles, ...)
+ * shows nothing. The generic notification is kept for what cannot be told
+ * apart: a read that did not run, or a row that did not decrypt and that the
+ * message log does not hold. The same rule as Android's
+ * `PushWakeOutcome.genericBannerWanted` (the "app on screen" half is
+ * `public/sw.js`'s, which does not run the read for a visible tab).
+ *
+ * Pure; exported for `public/sw.js` and the tests.
+ *
+ * @param {PushWakeOutcome | null | undefined} outcome
+ * @returns {boolean}
+ */
+export function genericNotificationWanted(outcome) {
+  if (outcome === null || outcome === undefined) return true;
+  if (outcome.preview !== null && outcome.preview !== undefined) return false;
+  return outcome.readRan !== true || outcome.unreadableRows > 0;
+}
+
+/**
+ * The DS message ids the decrypted message-log payload holds for `groupHex`,
+ * as numbers. The log stores ids as strings (`PersistedMessage.messageId`);
+ * anything malformed is skipped. Pure; exported for `public/sw.js` and the
+ * tests.
+ *
+ * @param {any} logPayload  the decrypted message-log row.
+ * @param {string} groupHex lowercase hex of the REAL group id.
+ * @returns {Set<number>}
+ */
+export function heldMessageIdsFromLogRow(logPayload, groupHex) {
+  /** @type {Set<number>} */
+  const out = new Set();
+  const slot = logPayload?.groups?.[groupHex];
+  if (slot === null || typeof slot !== "object" || !Array.isArray(slot.messages)) return out;
+  for (const m of slot.messages) {
+    const id = Number(m?.messageId);
+    if (Number.isSafeInteger(id) && id >= 0) out.add(id);
+  }
+  return out;
+}
+
+/**
+ * Produce a real decrypted notification preview for a GroupMessage
+ * wake, or `null` when the background path cannot (safely) yield one.
+ * {@link decryptPushWake} with the outcome reduced to its preview.
  *
  * @param {PushWake | null} wake
  * @param {DecryptPushDeps} deps
  * @returns {Promise<PushPreview | null>}
  */
+export async function decryptPushPreview(wake, deps) {
+  return (await decryptPushWake(wake, deps)).preview;
+}
+
 /**
  * The wake gate (ADR-0042, "A wake is shown only for the signed-in
  * account"): the account a wake may be handled as, or `null`.
@@ -463,7 +536,18 @@ export async function resolveWakeTarget(wakeHex, subHex, accountId, deps) {
   return { groupIdBytes: bytes, groupHex: bytesToHex(bytes) };
 }
 
-export async function decryptPushPreview(wake, deps) {
+/**
+ * The background read of one wake: the preview (or call notice) and what the
+ * read could tell about the rows that gave none. Never throws for a "cannot
+ * decrypt" reason; every such early return is {@link READ_DID_NOT_RUN}. (A
+ * programming error in a mock could still throw in tests — the SW wraps the
+ * whole call in try/catch regardless.)
+ *
+ * @param {PushWake | null} wake
+ * @param {DecryptPushDeps} deps
+ * @returns {Promise<PushWakeOutcome>}
+ */
+export async function decryptPushWake(wake, deps) {
   // 1. Only GroupMessage wakes carry a group + pointer. A Wakeup /
   //    MailboxMessage wake (no groupHex / no pointer) is not handled in
   //    this slice — fall back to generic.
@@ -476,7 +560,7 @@ export async function decryptPushPreview(wake, deps) {
     typeof wake.pointer !== "number" ||
     !Number.isFinite(wake.pointer)
   ) {
-    return null;
+    return READ_DID_NOT_RUN;
   }
   const wakeHex = wake.groupHex;
   const pointer = wake.pointer;
@@ -504,9 +588,9 @@ export async function decryptPushPreview(wake, deps) {
     }
   }
   const accountId = wakeBoundAccount(wake, binding);
-  if (accountId === null) return null;
+  if (accountId === null) return READ_DID_NOT_RUN;
   const target = await resolveWakeTarget(wakeHex, wake.subHex, accountId, deps);
-  if (target === null) return null;
+  if (target === null) return READ_DID_NOT_RUN;
   const groupIdBytes = target.groupIdBytes;
   const groupHex = target.groupHex;
 
@@ -514,16 +598,16 @@ export async function decryptPushPreview(wake, deps) {
   //    for AES-GCM decrypt without extraction). No key → can't unwrap
   //    the seed/snapshot → generic.
   const deviceKey = await deps.getDeviceKey(accountId);
-  if (deviceKey === null || deviceKey === undefined) return null;
+  if (deviceKey === null || deviceKey === undefined) return READ_DID_NOT_RUN;
 
   // 4. The AccountIdentity seed → the throwaway Identity.
   const identitySeed = await deps.getIdentitySeed(accountId, deviceKey);
-  if (identitySeed === null || identitySeed === undefined) return null;
+  if (identitySeed === null || identitySeed === undefined) return READ_DID_NOT_RUN;
 
   // 5. The last-persisted MLS provider snapshot (the ratchet state the
   //    foreground app relies on — we only READ it).
   const snapshot = await deps.loadSnapshot(accountId, deviceKey);
-  if (snapshot === null || snapshot === undefined) return null;
+  if (snapshot === null || snapshot === undefined) return READ_DID_NOT_RUN;
 
   // 6. Build a TEMPORARY, in-memory Identity + Group from the snapshot.
   //    Everything from here is throwaway — never snapshotted back.
@@ -536,11 +620,11 @@ export async function decryptPushPreview(wake, deps) {
   } catch {
     freeQuietly(group);
     freeQuietly(identity);
-    return null;
+    return READ_DID_NOT_RUN;
   }
   if (group === null || group === undefined) {
     freeQuietly(identity);
-    return null;
+    return READ_DID_NOT_RUN;
   }
 
   try {
@@ -588,7 +672,7 @@ export async function decryptPushPreview(wake, deps) {
     try {
       fetched = await deps.dsFetchGroup(groupIdBytes, after, signProof);
     } catch {
-      return null;
+      return READ_DID_NOT_RUN;
     } finally {
       freeQuietly(signer);
     }
@@ -618,14 +702,27 @@ export async function decryptPushPreview(wake, deps) {
     const words = readWords(deps.notificationWords ?? null);
     // ADR-0073 R.8 — the retired keys, read once for the batch.
     const retired = await supersededKeySet(deps, accountId);
+    // The ids the app's message log holds for this group, read at most once
+    // and only when a row does not decrypt.
+    /** @type {Set<number> | null} */
+    let held = null;
+    let unreadableRows = 0;
     for (const message of messages) {
       let processed;
       try {
         processed = group.processIncomingVerifyingRoles(identity, message.payload);
-      } catch {
+      } catch (err) {
         // Bad frame / wrong epoch / own echo / role-refused commit —
         // fail-closed skip. NOTE: this mutates the THROWAWAY provider
         // only; it is never persisted (read-only-throwaway discipline).
+        //
+        // A sender cannot open its own message. The app's log holds a row
+        // it sent (or one it already received), so a held id is quiet;
+        // anything else is a message this device cannot read, which keeps
+        // the generic notification.
+        if (isOwnMessageEcho(err)) continue;
+        if (held === null) held = await heldMessageIds(deps, accountId, deviceKey, groupHex);
+        if (!held.has(message.id)) unreadableRows += 1;
         continue;
       }
       // Nothing from a superseded sender acts: no ring, no preview. The
@@ -646,6 +743,11 @@ export async function decryptPushPreview(wake, deps) {
       if (await resendAlreadyHeld(deps, accountId, deviceKey, group, processed, groupHex)) {
         continue;
       }
+      // A message from this device's own account (this device, or another
+      // device of the same person) is not a notification here. Both keys are
+      // resolved against the roster of the epoch the frame decrypted at.
+      const senderPerson = personKeyAtLeaf(group, processed?.senderLeaf);
+      if (senderPerson !== null && senderPerson === ownPersonKey(group)) continue;
       const preview = previewFromProcessed(deps.wasm, processed, words);
       if (preview !== null) {
         latest = { title: "Lakko", body: preview, tag: groupHex };
@@ -703,10 +805,14 @@ export async function decryptPushPreview(wake, deps) {
       // entirely; `public/sw.js` reads `call` and builds the real ring shape
       // through `callRingNotification`.
       return {
-        title: notice.callerName ?? "Lakko",
-        body: notice.video ? words.videoCall : words.voiceCall,
-        tag: groupHex,
-        call: notice,
+        preview: {
+          title: notice.callerName ?? "Lakko",
+          body: notice.video ? words.videoCall : words.voiceCall,
+          tag: groupHex,
+          call: notice,
+        },
+        readRan: true,
+        unreadableRows,
       };
     }
 
@@ -742,7 +848,7 @@ export async function decryptPushPreview(wake, deps) {
         latest = { ...latest, title: name };
       }
     }
-    return latest;
+    return { preview: latest, readRan: true, unreadableRows };
   } finally {
     // Discard the throwaway MLS state. Freeing is best-effort — the GC
     // reclaims it regardless; we NEVER snapshot it back to IDB.
@@ -1379,6 +1485,64 @@ async function supersededKeySet(deps, accountId) {
     const keys = await deps.lookupSupersededKeys(accountId);
     if (!Array.isArray(keys)) return out;
     for (const k of keys) if (typeof k === "string" && k.length > 0) out.add(k);
+  } catch {
+    out.clear();
+  }
+  return out;
+}
+
+/**
+ * This device's own PERSON key in the throwaway group, read from its own
+ * leaf, or `null`.
+ *
+ * @param {any} group
+ * @returns {string | null}
+ */
+function ownPersonKey(group) {
+  let ownLeaf;
+  try {
+    ownLeaf = typeof group.ownLeafIndex === "function" ? group.ownLeafIndex() : group.ownLeafIndex;
+  } catch {
+    return null;
+  }
+  return personKeyAtLeaf(group, ownLeaf);
+}
+
+/**
+ * Whether a row's decrypt failure is this device's own message coming back:
+ * a sender cannot open what it sent. The core names the refusal: openmls's
+ * `ValidationError::CannotDecryptOwnMessage` reaches the client inside the
+ * error text (`process_message: ValidationError(CannotDecryptOwnMessage)`).
+ * It covers every row this device published (its typing, receipts and
+ * commits, which the message log never holds). A text that does not match
+ * (another openmls wording) only falls back to the held-id check.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+export function isOwnMessageEcho(err) {
+  const text = err instanceof Error ? err.message : String(err);
+  return text.includes("CannotDecryptOwnMessage");
+}
+
+/**
+ * The held message ids for this wake's group, as a set. Never throws; every
+ * miss is the empty set (each undecryptable row then counts as unreadable).
+ *
+ * @param {DecryptPushDeps} deps
+ * @param {string} accountId
+ * @param {any} deviceKey
+ * @param {string} groupHex
+ * @returns {Promise<Set<number>>}
+ */
+async function heldMessageIds(deps, accountId, deviceKey, groupHex) {
+  /** @type {Set<number>} */
+  const out = new Set();
+  if (typeof deps.lookupHeldMessageIds !== "function") return out;
+  try {
+    const ids = await deps.lookupHeldMessageIds(accountId, deviceKey, groupHex);
+    if (ids === null || ids === undefined) return out;
+    for (const id of ids) if (typeof id === "number" && Number.isSafeInteger(id)) out.add(id);
   } catch {
     out.clear();
   }

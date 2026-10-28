@@ -37,7 +37,6 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -68,7 +67,6 @@ import me.lakko.app.media.EmojiDataset
 import me.lakko.app.media.EmojiEntry
 import me.lakko.app.media.GIF_ATTRIBUTION
 import me.lakko.app.media.GIF_NO_RESULTS
-import me.lakko.app.media.GIF_PRIVACY_NOTE
 import me.lakko.app.media.GIF_RATE_LIMITED
 import me.lakko.app.media.GIF_UNAVAILABLE
 import me.lakko.app.media.GifItem
@@ -145,7 +143,7 @@ internal fun EmojiPickerSheet(
                 )
             } else if (gifModel != null) {
                 LaunchedEffect(gifModel) { gifModel.open() }
-                GifTab(gifModel, prefs, loadGifPreview, onGif = { item ->
+                GifTab(gifModel, loadGifPreview, onGif = { item ->
                     onGif(item)
                     onDismiss()
                 })
@@ -342,32 +340,15 @@ private fun CategoryStrip(dataset: EmojiDataset, gridState: LazyGridState, onJum
 @Composable
 private fun GifTab(
     model: GifPickerModel,
-    prefs: MediaPrefs,
     loadPreview: suspend (String) -> ByteArray?,
     onGif: (GifItem) -> Unit,
 ) {
     val state by model.state.collectAsStateWithLifecycle()
-    var noteDismissed by remember { mutableStateOf(prefs.gifNoteDismissed) }
     val gridState = rememberLazyGridState()
     val searchGifLabel = t("chat.gif.search")
     val loadingGifsLabel = t("chat.gif.loading")
 
     Column(Modifier.fillMaxSize()) {
-        if (!noteDismissed) {
-            Surface(
-                color = MaterialTheme.colorScheme.secondaryContainer,
-                shape = RoundedCornerShape(10.dp),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(8.dp)) {
-                    Text(t(GIF_PRIVACY_NOTE), style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-                    TextButton(onClick = {
-                        prefs.gifNoteDismissed = true
-                        noteDismissed = true
-                    }) { Text(t("chat.gif.note_dismiss")) }
-                }
-            }
-        }
         OutlinedTextField(
             value = state.query,
             onValueChange = model::onQueryChange,

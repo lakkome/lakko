@@ -4926,12 +4926,31 @@ public final class ChatRepository: ObservableObject {
             }
         }
         if let receivedEnd { groupCallEndSink?(receivedEnd) }
-        if route.forwardToOneToOne {
+        if route.forwardToOneToOne, case .offer = body,
+            Self.isOwnAccountSender(
+                senderKey: senderKey,
+                ownKey: groups[groupIdHex].flatMap { AuthorIdentity.own(group: $0.group) }) {
+            // ADR-0050 — this account's other device placed this call from
+            // its own leaf in the one-to-one. It is that device's outgoing
+            // call, never an incoming one here: ringing it rang the caller's
+            // own second phone.
+            NSLog("call offer from this account's other device: not rung")
+        } else if route.forwardToOneToOne {
             callSignalingSink?(
                 InboundCallRow(
                     groupIdHex: groupIdHex, messageId: messageId, createdAt: createdAt, body: body,
                     verifiedScreenShare: verifiedScreenShare))
         }
+    }
+
+    /// Did this account send the row? Only when both keys are known: an
+    /// unresolved sender or own key counts as someone else, so a resolution
+    /// failure never silences a real incoming call.
+    nonisolated static func isOwnAccountSender(
+        senderKey: MemberIdentity?, ownKey: MemberIdentity?
+    ) -> Bool {
+        guard let senderKey, let ownKey else { return false }
+        return senderKey == ownKey
     }
 
     /// `verifyCallScreenShare` for a one-to-one call (ADR-0083 section 4): the

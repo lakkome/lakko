@@ -73,6 +73,11 @@
  *     would desync the app's ratchet — G-34 class); the append-only
  *     cursor-based journal makes the app's own re-processing on
  *     foreground idempotent. See `public/sw-push-decrypt.js`.
+ *   * A wake whose read ran to the end and found only this device's own
+ *     message (held in the app's message log), a message from another
+ *     device of the same account, or service traffic shows NO
+ *     notification: the DS wakes every subscription of a group, the
+ *     sender's own included.
  *   * ANY failure in that path (unsupported module SW, wasm/IDB/DS/
  *     decrypt failure, an unhandled Wakeup / MailboxMessage kind)
  *     degrades to the generic "New message" notification. The push
@@ -339,17 +344,20 @@ async function handlePush(wake) {
     // case the background decrypt below exists for).
   }
 
-  // (b) Background decrypt — only when there is no visible tab (a
-  //     visible app drives the real preview itself). Never throws:
+  // (b) Background decrypt. A message wake is read with a tab visible too:
+  //     the read is what tells a message from someone else (a notification)
+  //     from this device's own message or service traffic (nothing). A call
+  //     wake with a visible tab is left to the app, as before. Never throws:
   //     `backgroundPreview` returns null on ANY failure.
-  let preview = null;
-  if (!hasVisibleTab) {
+  let background = null;
+  if (!hasVisibleTab || wake?.isCall !== true) {
     try {
-      preview = await backgroundPreview(wake);
+      background = await backgroundPreview(wake);
     } catch {
-      preview = null; // Belt-and-suspenders — degrade to generic.
+      background = null; // Belt-and-suspenders — degrade to generic.
     }
   }
+  const preview = background?.preview ?? null;
 
   // (c) The REAL group_id for the TAP deep-link (ADR-0042), already
   //     resolved by the gate for the bound account. Resolved at push time
@@ -369,6 +377,28 @@ async function handlePush(wake) {
   //      the decrypt core re-exports so this costs no second import.
   if (preview?.call != null) {
     await handleCallNotice(preview.call);
+    return;
+  }
+
+  // (c3) The read ran to the end and found nothing to tell: this device's
+  //      own message coming back (the DS wakes every subscription of the
+  //      group, the sender's own devices included), a message from another
+  //      device of the same account, or service traffic. No notification.
+  //      `showGeneric` comes from `genericNotificationWanted` in the decrypt
+  //      core; a read that did not run, or a row this device could not read,
+  //      keeps the generic notification below.
+  //
+  //      A push that shows nothing may make a browser show its own "updated
+  //      in the background" notice (Chrome, for a userVisibleOnly
+  //      subscription); that notice names no account and carries no content.
+  if (preview === null && background !== null && background.showGeneric === false) {
+    return;
+  }
+  // (c4) With a tab visible, only a message from someone else is shown; the
+  //      generic "New message" is not (the open app shows the conversation,
+  //      and an unread row is most often this device's own message coming
+  //      back before the app recorded it). Calls keep their path above.
+  if (preview === null && hasVisibleTab && wake?.isCall !== true) {
     return;
   }
 
@@ -640,10 +670,14 @@ let swWasmPromise = null;
 let swDecryptModulePromise = null;
 
 /**
- * Attempt the background decrypt. Returns `{ title, body, tag }` on
- * success, or `null` for ANY reason (unsupported module SW, wasm
- * unavailable, no local account/key/snapshot, DS failure, nothing
- * decryptable) so the caller shows the generic notification.
+ * Attempt the background decrypt. Returns `{ preview, showGeneric }`:
+ * `preview` is `{ title, body, tag }` (or a call notice) when the read found
+ * one, and `showGeneric` says whether a wake with no preview still shows the
+ * generic notification (`genericNotificationWanted` in the decrypt core:
+ * `false` only when the read ran to the end and every row was this device's
+ * own, its account's, or service traffic). `null` for ANY reason the read
+ * could not be attempted (unsupported module SW, wasm unavailable, a wake
+ * with no group), so the caller shows the generic notification.
  */
 async function backgroundPreview(wake) {
   // Only GroupMessage wakes carry a group + pointer; the pure core
@@ -661,7 +695,11 @@ async function backgroundPreview(wake) {
   // ADR-0061 — the words the page stored, so an attachment-only preview
   // reads in the interface language.
   deps.notificationWords = await readNotificationStrings();
-  return core.decryptPushPreview(wake, deps);
+  const outcome = await core.decryptPushWake(wake, deps);
+  return {
+    preview: outcome.preview,
+    showGeneric: core.genericNotificationWanted(outcome),
+  };
 }
 
 /** Dynamic-import the pure decrypt core (module SW only). */
@@ -858,6 +896,21 @@ function buildDecryptDeps(wasm, core) {
         createdAt: m.created_at,
       }));
       return { messages };
+    },
+    // The DS message ids the app's message log holds for this group
+    // (READ-ONLY): a row that does not decrypt but is held is this device's
+    // own message coming back, not a message it cannot read. `null` on any
+    // miss, which the core reads as "nothing held".
+    lookupHeldMessageIds: async (accountId, deviceKey, groupHex) => {
+      const row = await idbGet("lakko-message-log", "logs", accountId);
+      if (row === undefined || row.ciphertext === undefined) return null;
+      try {
+        const plain = await aesGcmUnwrap(deviceKey, row.ciphertext);
+        const payload = JSON.parse(new TextDecoder().decode(plain));
+        return core.heldMessageIdsFromLogRow(payload, groupHex);
+      } catch {
+        return null;
+      }
     },
     // The app's last-persisted per-group cursor (READ-ONLY). Used as
     // the fetch start so intervening commits replay + the epoch stays

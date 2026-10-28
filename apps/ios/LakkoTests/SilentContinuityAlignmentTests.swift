@@ -64,10 +64,16 @@ final class SilentContinuityAlignmentTests: XCTestCase {
     private final class Group: NseThrowawayGroup {
         let decode: (Data) -> NseProcessedRow?
         init(_ decode: @escaping (Data) -> NseProcessedRow?) { self.decode = decode }
-        func process(_ payload: Data) -> NseProcessedRow? { decode(payload) }
+        /// A row the table maps to `nil` models a row that does not decrypt.
+        func process(_ payload: Data) throws -> NseProcessedRow? {
+            guard let row = decode(payload) else { throw DecryptFailed() }
+            return row
+        }
         func dsProofHeader(method: String, path: String, query: String, body: Data) -> String? { "v1.fake" }
         func close() {}
     }
+
+    private struct DecryptFailed: Error {}
 
     private final class Deps: NsePushDecryptDeps {
         var group: Group?

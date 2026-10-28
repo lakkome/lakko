@@ -9,6 +9,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -30,6 +31,14 @@ class PushPreviewDecryptTest {
     private val groupHex = "a".repeat(64)
     private val groupIdBytes = ByteArray(32) { 0xAA.toByte() }
     private val accountId = "acct-b64=="
+
+    /** The preview words (attachment hint, newer-version sentence) come from
+     *  the catalog; load English here rather than rely on another class
+     *  having loaded it earlier in the same JVM. */
+    @Before
+    fun englishCatalog() {
+        me.lakko.app.l10n.EnglishForTests.install()
+    }
 
     // -----------------------------------------------------------------
     // Fakes

@@ -223,6 +223,8 @@ interface Harness {
   states: WebCallState[];
   reasons: (WebCallEndReason | undefined)[];
   published: string[];
+  /** The wake each entry of `published` asked for, in the same order. */
+  wakes: string[];
   /** One entry per `onLocalStream` report. */
   localStreams: unknown[];
 }
@@ -233,6 +235,7 @@ function makeSession(timing: Partial<CallSessionTiming> = {}): Harness {
     states: [],
     reasons: [],
     published: [],
+    wakes: [],
     localStreams: [],
   };
   const callbacks: CallSessionCallbacks = {
@@ -240,7 +243,10 @@ function makeSession(timing: Partial<CallSessionTiming> = {}): Harness {
     onLocalStream: (stream) => {
       h.localStreams.push(stream);
     },
-    onOutboundSignaling: (bytes) => h.published.push(new TextDecoder().decode(bytes)),
+    onOutboundSignaling: (bytes, wake) => {
+      h.published.push(new TextDecoder().decode(bytes));
+      h.wakes.push(wake);
+    },
     onStateChange: (s, r) => {
       h.states.push(s);
       h.reasons.push(r);
@@ -612,5 +618,105 @@ describe("a call given up on while its transport is being described", () => {
     await settle();
     expect(h.session.getState()).toBe("done");
     expect(h.published).toEqual(["offer", "end:error"]);
+  });
+});
+
+// ---- The wake each outbound frame asks for -----------------------------------
+
+/**
+ * A call wake reaches an iPhone as a VoIP push, which iOS always reports to
+ * CallKit as an incoming call, and the DS wakes the sender's own devices too.
+ * So only the frame that rings (the dial) and the End that stops a ring (a
+ * call that never connected here) ask for one. Seen live before this: the
+ * iPhone showed an incoming audio call when the web turned on a screen share
+ * (a renegotiation offer) and again after a connected call was hung up.
+ */
+describe("which outbound frames ask for a call wake", () => {
+  /** The wake asked for each published frame, paired with the frame. */
+  const asked = (h: Harness): string[] => h.published.map((p, i) => `${p}=${at(h.wakes, i)}`);
+
+  it("the dial offer asks for a wake", async () => {
+    const h = await dialled();
+    expect(asked(h)).toEqual(["offer=call"]);
+    await h.session.hangUp();
+  });
+
+  it("a caller cancelling before an answer: its End asks for a wake", async () => {
+    const h = await dialled();
+    await h.session.hangUp();
+    expect(asked(h)).toEqual(["offer=call", "end:hungUp=call"]);
+  });
+
+  it("a ring that times out unanswered: its End asks for a wake", async () => {
+    const h = await dialled();
+    await vi.advanceTimersByTimeAsync(RING_MS + 1);
+    await settle();
+    expect(asked(h)).toEqual(["offer=call", "end:timedOut=call"]);
+  });
+
+  it("a callee declining a ringing call: its End asks for a wake", async () => {
+    const h = makeSession();
+    await h.session.applyIncomingSignaling(offer());
+    await h.session.decline();
+    await settle();
+    expect(asked(h)).toEqual(["end:declined=call"]);
+  });
+
+  it("a callee that accepted but never connected: its End asks for a wake", async () => {
+    const h = makeSession();
+    await h.session.applyIncomingSignaling(offer());
+    const accept = h.session.accept();
+    await settle();
+    at(captures, 0).grant();
+    await accept;
+    await settle();
+    expect(h.session.getState()).toBe("connecting");
+    await h.session.hangUp();
+    expect(asked(h)).toEqual(["answer=none", "end:hungUp=call"]);
+  });
+
+  it("a mid-call renegotiation offer is silent", async () => {
+    const h = await connected();
+    h.pc.onnegotiationneeded?.();
+    await settle();
+    expect(asked(h)).toEqual(["offer=call", "offer=none"]);
+    await h.session.hangUp();
+  });
+
+  it("the End of a connected call is silent, for the caller", async () => {
+    const h = await connected();
+    await h.session.hangUp();
+    expect(asked(h)).toEqual(["offer=call", "end:hungUp=none"]);
+  });
+
+  it("the End of a connected call is silent, for the callee", async () => {
+    const h = makeSession();
+    await h.session.applyIncomingSignaling(offer());
+    const accept = h.session.accept();
+    await settle();
+    at(captures, 0).grant();
+    await accept;
+    await settle();
+    at(pcs, 0).setIce("connected");
+    expect(h.session.getState()).toBe("connected");
+    await h.session.hangUp();
+    expect(asked(h)).toEqual(["answer=none", "end:hungUp=none"]);
+  });
+
+  it("a connected call that later fails ends silently: the peer was in it", async () => {
+    const h = await connected();
+    h.pc.setIce("failed");
+    await settle();
+    expect(asked(h)).toEqual(["offer=call", "end:error=none"]);
+  });
+
+  it("ICE candidates are silent", async () => {
+    const h = await dialled();
+    h.pc.onicecandidate?.({
+      candidate: { candidate: "candidate:1 1 udp 1 1.2.3.4 5 typ host", sdpMid: "0", sdpMLineIndex: 0 },
+    });
+    await settle();
+    expect(asked(h)).toEqual(["offer=call", "ice=none"]);
+    await h.session.hangUp();
   });
 });

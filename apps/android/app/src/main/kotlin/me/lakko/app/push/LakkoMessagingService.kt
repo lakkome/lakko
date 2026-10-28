@@ -164,19 +164,16 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             Log.i(TAG, "wake dropped: the conversation moved")
             return
         }
-        // Silent-push background decrypt (mirror of web sw.js):
-        //   * Foreground → defer. The live poll loop does the durable
-        //     processing + its own preview; a background decrypt here
-        //     would be redundant (and could double-notify).
-        //   * Backgrounded + a GroupMessage wake → READ-ONLY THROWAWAY
-        //     decrypt for the real newest-message text.
-        // `isAppForegrounded` fails toward `false` (background), so a
-        // probe error never suppresses the real preview.
+        // READ-ONLY THROWAWAY decrypt of the wake's rows, on screen too: it
+        // is what tells a message from someone else (a banner) from this
+        // device's own message, another device of the same account, or
+        // service traffic (nothing). The live app keeps the durable
+        // processing; nothing here is written.
+        // `isAppForegrounded` fails toward `false` (background), so a probe
+        // error never suppresses the generic banner.
+        val appOnScreen = isAppForegrounded(applicationContext)
         val outcome: PushWakeOutcome? =
-            if (wake.groupHex != null &&
-                wake.pointer != null &&
-                !isAppForegrounded(applicationContext)
-            ) {
+            if (wake.groupHex != null && wake.pointer != null) {
                 backgroundPreviewBlocking(wake, accountIdB64)
             } else {
                 null
@@ -188,6 +185,10 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             return
         }
         if (outcome != null && handledAsCall(outcome)) return
+        if (outcome != null && outcome.preview == null && !outcome.genericBannerWanted(appOnScreen)) {
+            Log.i(TAG, "wake posts nothing: no message from someone else")
+            return
+        }
         showWakeNotification(wake, accountIdB64, outcome?.preview)
     }
 

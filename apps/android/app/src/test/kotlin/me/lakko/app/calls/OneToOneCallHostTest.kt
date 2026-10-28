@@ -50,7 +50,10 @@ class OneToOneCallHostTest {
     class FakeSession(
         override val callId: ByteArray,
         /** The real session ships its `End` through this on a hang-up. */
-        private val outbound: ((ByteArray) -> Unit)? = null,
+        private val outbound: ((ByteArray, CallSignalingWake) -> Unit)? = null,
+        /** The wake the session's own `End` asks for (a connected call's End
+         *  asks none, an unanswered one's asks a call wake). */
+        var endWake: CallSignalingWake = CallSignalingWake.CALL,
     ) : OneToOneCallSession {
         val mutableState = MutableStateFlow(CallSession.WebCallState.Idle)
         override val state: StateFlow<CallSession.WebCallState> = mutableState
@@ -99,7 +102,7 @@ class OneToOneCallHostTest {
 
         override fun hangUp(reason: CallSession.WebCallEndReason) {
             hangUps += reason
-            outbound?.invoke("end:session:${callIdHexOf(callId)}".toByteArray())
+            outbound?.invoke("end:session:${callIdHexOf(callId)}".toByteArray(), endWake)
             mutableState.value = CallSession.WebCallState.Done
         }
     }
@@ -107,6 +110,8 @@ class OneToOneCallHostTest {
     class FakePort : OneToOneCallPort<FakeSession> {
         val created = mutableListOf<Pair<String, FakeSession>>()
         val published = mutableListOf<Pair<String, String>>()
+        /** The wake each entry of [published] asked for, in the same order. */
+        val publishedWakes = mutableListOf<CallSignalingWake>()
 
         /** docs/ux/calls.md section 2.1 — conversations the person muted. */
         val mutedGroups = mutableSetOf<String>()
@@ -134,7 +139,7 @@ class OneToOneCallHostTest {
         override fun createSession(
             groupIdHex: String,
             callId: ByteArray,
-            outbound: (ByteArray) -> Unit,
+            outbound: (ByteArray, CallSignalingWake) -> Unit,
         ): FakeSession =
             FakeSession(callId, if (sessionsShipEnd) outbound else null).also { created += groupIdHex to it }
 
@@ -146,8 +151,9 @@ class OneToOneCallHostTest {
             return if (keyAvailable) OneToOneCallKey(ByteArray(32) { 7 }, 1) else null
         }
 
-        override suspend fun publish(groupIdHex: String, bytes: ByteArray) {
+        override suspend fun publish(groupIdHex: String, bytes: ByteArray, wake: CallSignalingWake) {
             published += groupIdHex to String(bytes)
+            publishedWakes += wake
         }
 
         override fun composeEnd(callId: ByteArray, reason: FfiCallEndReason): ByteArray =
@@ -316,6 +322,9 @@ class OneToOneCallHostTest {
         assertSame(first, h.session())
         assertEquals(1, h.port.created.size)
         assertEquals(listOf(groupB to "end:BUSY:${callIdHexOf(call2)}"), h.port.published)
+        // A busy End is for a call that never connected here: it stops the
+        // caller's ring, so it keeps its wake.
+        assertEquals(listOf(CallSignalingWake.CALL), h.port.publishedWakes)
     }
 
     @Test
@@ -659,6 +668,28 @@ class OneToOneCallHostTest {
     // ---- A one-to-one that closes under a call (UX 16.4) ----------------------
 
     @Test
+    fun `the wake a session asks for its frame reaches the publish unchanged`() = runTest {
+        // The session decides (OneToOneCallWakes); the host only carries it.
+        // A connected call's End asks none, so a hang-up publishes it silently.
+        val h = harness()
+        h.port.sessionsShipEnd = true
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        h.host.accept(withVideo = false)
+        runCurrent()
+        val session = h.session()!!
+        session.endWake = CallSignalingWake.NONE
+        session.mutableState.value = CallSession.WebCallState.Connected
+        runCurrent()
+
+        h.host.hangUp()
+        runCurrent()
+
+        assertEquals(listOf(groupA to "end:session:${callIdHexOf(call1)}"), h.port.published)
+        assertEquals(listOf(CallSignalingWake.NONE), h.port.publishedWakes)
+    }
+
+    @Test
     fun `a connected call ends locally when its chat closes, and no End is published`() = runTest {
         val h = harness()
         h.port.sessionsShipEnd = true
@@ -863,6 +894,9 @@ class OneToOneCallHostTest {
             listOf(groupA to "end:DECLINED:${callIdHexOf(call1)}"),
             h.port.published,
         )
+        // A decline stops the ring on the other devices of this account,
+        // including ones whose app is closed: it asks a call wake.
+        assertEquals(listOf(CallSignalingWake.CALL), h.port.publishedWakes)
         assertTrue(callIdHexOf(call1) in h.ringer.stopped)
         // The refused call must not ring when the app is next opened.
         h.host.setForeground(true)

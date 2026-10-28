@@ -74,7 +74,12 @@ import uniffi.lakko_ffi_uniffi.parseCallSignaling
 public class CallSession(
     private val applicationContext: Context,
     override val callId: ByteArray,
-    private val onOutboundSignaling: (ByteArray) -> Unit,
+    /**
+     * Each outbound frame, with whether it rings someone or stops a ring
+     * ([OneToOneCallWakes]): only the dial offer and the End of a call that
+     * never connected here ask for a call wake.
+     */
+    private val onOutboundSignaling: (ByteArray, CallSignalingWake) -> Unit,
     /**
      * This device's own leaf signature key in the conversation, the screen
      * share fold's own key (ADR-0083). `null`: no share is folded, and the
@@ -113,6 +118,10 @@ public class CallSession(
     public val endReason: StateFlow<WebCallEndReason?> = mutableEndReason.asStateFlow()
 
     private var isOfferer: Boolean = false
+
+    /** The wake each outbound frame asks for; remembers whether this call
+     *  ever connected on this device. */
+    private val wakes = OneToOneCallWakes()
 
     // ---- Perfect-negotiation state (piece B2b: 1×1 mid-call camera-on) ----
     // The 1×1 P2P path is SYMMETRIC, so glare (both peers renegotiating at
@@ -495,7 +504,7 @@ public class CallSession(
                         media = FfiCallMediaFlags(audio = audio, video = video),
                     ),
                 )
-                onOutboundSignaling(bytes)
+                onOutboundSignaling(bytes, wakes.dialOffer())
             } catch (cause: Throwable) {
                 android.util.Log.w("CallSession", "dial offer-build failed", cause)
                 endLocal(WebCallEndReason.Error)
@@ -936,7 +945,7 @@ public class CallSession(
                         sdp = answerSdp,
                     ),
                 )
-                onOutboundSignaling(bytes)
+                onOutboundSignaling(bytes, wakes.inCall())
                 // ADR-0032 piece B2b — the initial answer is sent + our local
                 // description is set, so the initial negotiation is applied on
                 // our side: arm renegotiation for a future mid-call camera-on,
@@ -1182,7 +1191,7 @@ public class CallSession(
                     sdpMLineIndex = sdpMLineIndex.toUInt(),
                 ),
             )
-            onOutboundSignaling(bytes)
+            onOutboundSignaling(bytes, wakes.inCall())
         } catch (cause: Throwable) {
             android.util.Log.w("CallSession", "shipLocalCandidate failed", cause)
         }
@@ -1198,6 +1207,7 @@ public class CallSession(
                     mutableState.value == WebCallState.Outgoing
                 ) {
                     mutableState.value = WebCallState.Connected
+                    wakes.markConnected()
                 }
                 // A recovery after a blip is what cancels the grace.
                 cancelIceGrace()
@@ -1302,7 +1312,8 @@ public class CallSession(
                     },
                 ),
             )
-            onOutboundSignaling(bytes)
+            // A wake here showed the peer's iPhone an incoming call mid-call.
+            onOutboundSignaling(bytes, wakes.renegotiationOffer())
             // makingOffer stays true until applyRenegotiationAnswer clears it.
         } catch (cause: Throwable) {
             makingOffer = false
@@ -1346,7 +1357,7 @@ public class CallSession(
             val bytes = composeCallSignaling(
                 FfiCallSignalingBody.Answer(callId = callId, sdp = answerSdp),
             )
-            onOutboundSignaling(bytes)
+            onOutboundSignaling(bytes, wakes.inCall())
         } catch (cause: Throwable) {
             android.util.Log.w("CallSession", "renegotiation offer apply failed", cause)
             return
@@ -1498,7 +1509,7 @@ public class CallSession(
                     reason = fromReason(reason),
                 ),
             )
-            onOutboundSignaling(bytes)
+            onOutboundSignaling(bytes, wakes.end())
         } catch (cause: Throwable) {
             android.util.Log.w("CallSession", "endLocal compose failed", cause)
         }

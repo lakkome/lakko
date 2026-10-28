@@ -215,7 +215,7 @@ final class ScreenShareReceiveTests: XCTestCase {
     }
 
     func testASessionFoldsOnlyItsOwnCallsShares() {
-        let session = CallSession(callId: callId, onOutboundSignaling: { _ in })
+        let session = CallSession(callId: callId, onOutboundSignaling: { _, _ in })
         session.applyScreenShare(verified(seq: 1, signer: key(0x0A), peerId: "p2p"), callId: otherCallId)
         XCTAssertNil(session.screenShare)
         session.applyScreenShare(verified(seq: 1, signer: key(0x0A), peerId: "p2p"), callId: callId)

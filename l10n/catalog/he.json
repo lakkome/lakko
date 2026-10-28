@@ -27,7 +27,7 @@
       "status": "machine"
     },
     "auth.brand.body": {
-      "text": "צ׳אטים, קבוצות, ערוצים ושיחות – מוצפנים מקצה לקצה כברירת מחדל. השרתים של Lakko אף פעם לא רואים את ההודעות שלכם.",
+      "text": "צ׳אטים, קבוצות, ערוצים ושיחות – מוצפנים מקצה לקצה כברירת מחדל.",
       "status": "machine"
     },
     "auth.brand.foot": {
@@ -1483,7 +1483,7 @@
       "status": "machine"
     },
     "channels.meta.desc": {
-      "text": "השם והתיאור מגיעים לכל מנוי כשהם מוצפנים. השרת אף פעם לא קורא אותם.",
+      "text": "השם והתיאור מגיעים לכל מנוי.",
       "status": "machine"
     },
     "channels.meta.error.description_bad_character": {
@@ -1575,7 +1575,7 @@
       "status": "machine"
     },
     "channels.new.subtitle": {
-      "text": "המנויים רואים את השם והתיאור. הם נשלחים מוצפנים; לשרת מגיע רק טקסט מוצפן.",
+      "text": "המנויים רואים את השם והתיאור.",
       "status": "machine"
     },
     "channels.new.title": {
@@ -2210,16 +2210,8 @@
       "text": "לא נמצאו GIF",
       "status": "machine"
     },
-    "chat.gif.note_dismiss": {
-      "text": "הבנתי",
-      "status": "machine"
-    },
     "chat.gif.open_full": {
       "text": "פתיחת GIF במסך מלא",
-      "status": "machine"
-    },
-    "chat.gif.privacy_note": {
-      "text": "חיפוש GIF עובר דרך השרת של Lakko, שרואה מה אתם מחפשים. קובצי GIF שנשלחים מוצפנים כמו כל קובץ.",
       "status": "machine"
     },
     "chat.gif.rate_limited": {
@@ -4710,10 +4702,6 @@
       "text": "לערבב נושאים אקראיים",
       "status": "machine"
     },
-    "discover.mix.off_line": {
-      "text": "פחות נתונים. השרת של Lakko יראה בדיוק אילו נושאים בחרתם.",
-      "status": "machine"
-    },
     "discover.nothing_yet": {
       "text": "אין הצעות עדיין. בחרו נושאים, או בקשו מאנשים בקבוצות שלכם לשתף את הערוצים שלהם.",
       "status": "machine"
@@ -4723,7 +4711,7 @@
       "status": "machine"
     },
     "discover.pick.body": {
-      "text": "Lakko מורידה הצעות בשבילם, מעורבבות עם כמה נושאים אקראיים, כך שהשרת של Lakko לא יכול לדעת בדיוק אילו בחרתם. הוא אף פעם לא רואה אילו ערוצים אתם פותחים.",
+      "text": "Lakko מורידה הצעות בשבילם, מעורבבות עם כמה נושאים אקראיים.",
       "status": "machine"
     },
     "discover.pick.title": {
@@ -4758,10 +4746,6 @@
       "text": "חיפוש",
       "status": "machine"
     },
-    "discover.search.helper": {
-      "text": "החיפושים נשלחים לשרת של Lakko.",
-      "status": "machine"
-    },
     "discover.search.no_results": {
       "text": "לא נמצאו ערוצים.",
       "status": "machine"
@@ -4791,11 +4775,11 @@
       "status": "machine"
     },
     "discover.share.line": {
-      "text": "אנשים בקבוצה הזו יכולים לראות אחרי אילו ערוצים אתם עוקבים. השרת של Lakko לא יכול.",
+      "text": "אנשים בקבוצה הזו יכולים לראות אחרי אילו ערוצים אתם עוקבים.",
       "status": "machine"
     },
     "discover.shared.desc": {
-      "text": "קבוצות שבהן אנשים יכולים לראות אחרי אילו ערוצים אתם עוקבים. השרת של Lakko לא יכול.",
+      "text": "קבוצות שבהן אנשים יכולים לראות אחרי אילו ערוצים אתם עוקבים.",
       "status": "machine"
     },
     "discover.shared.empty": {
@@ -6259,7 +6243,7 @@
       "status": "machine"
     },
     "new_group.name_hint": {
-      "text": "כל החברים רואים את השם. הוא נשלח מוצפן; השרת אף פעם לא קורא אותו.",
+      "text": "כל החברים רואים את השם.",
       "status": "machine"
     },
     "new_group.name_not_sent": {
@@ -6615,7 +6599,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "הזינו את שם המשתמש, ואז פתחו את Lakko במכשיר שעדיין מחובר והקלידו את הקוד שמוצג בו. לא נשלח שום דבר שהשרתים של Lakko יכולים לקרוא. לא צריך מצלמה; אפשר גם קוד QR אם נוח לכם יותר.",
+      "text": "הזינו את שם המשתמש, ואז פתחו את Lakko במכשיר שעדיין מחובר והקלידו את הקוד שמוצג בו. לא צריך מצלמה; אפשר גם קוד QR אם נוח לכם יותר.",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -7111,7 +7095,7 @@
       "status": "machine"
     },
     "restore_identity.device_intro": {
-      "text": "מכשיר שעדיין מחובר מציג קוד בן שש ספרות; הקלידו אותו כאן. ההעברה מוצפנת מקצה לקצה; השרתים של Lakko לא יכולים לקרוא אותה. לא צריך מצלמה; אפשר גם קוד QR אם נוח לכם יותר.",
+      "text": "מכשיר שעדיין מחובר מציג קוד בן שש ספרות; הקלידו אותו כאן. לא צריך מצלמה; אפשר גם קוד QR אם נוח לכם יותר.",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -7295,7 +7279,7 @@
       "status": "machine"
     },
     "settings.about.protection.body": {
-      "text": "הודעות, שיחות ובקשות קשר מוצפנות מקצה לקצה: רק האנשים בשיחה יכולים לקרוא אותן, אף פעם לא השרתים של Lakko. הסיסמה שלכם אף פעם לא יוצאת מהמכשיר, ולכל איש קשר יש מספר בטיחות שאפשר להשוות פנים אל פנים.",
+      "text": "הודעות, שיחות ובקשות קשר מוצפנות מקצה לקצה: רק האנשים בשיחה יכולים לקרוא אותן. הסיסמה שלכם אף פעם לא יוצאת מהמכשיר, ולכל איש קשר יש מספר בטיחות שאפשר להשוות פנים אל פנים.",
       "status": "machine"
     },
     "settings.about.protection.title": {
@@ -7519,7 +7503,7 @@
       "status": "machine"
     },
     "settings.devices.lede": {
-      "text": "הטלפונים, הטאבלטים והמחשבים המחוברים לחשבון שלכם. הוספת מכשיר מוצפנת מקצה לקצה; השרתים של Lakko לא יכולים לקרוא אותה.",
+      "text": "הטלפונים, הטאבלטים והמחשבים המחוברים לחשבון שלכם.",
       "status": "machine"
     },
     "settings.devices.list.lede": {

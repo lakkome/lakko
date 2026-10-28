@@ -19,13 +19,31 @@
  *
  * ## The rule, and why it is this narrow
  *
- * Exactly two of the seven signaling bodies wake anyone:
+ * Only two of the seven signaling bodies may wake anyone:
  *
  *   - **offer** — the ring itself. Nothing else can start one.
  *   - **end** — stops a ring the callee may already be showing, on every
  *     device of theirs, including the ones whose tab is shut. Without it a
  *     cancelled call keeps ringing a closed tab's notification until the user
  *     dismisses it by hand.
+ *
+ * And not every offer or end does. A call wake reaches an iPhone as a VoIP
+ * push, and iOS makes the app report every VoIP push to CallKit as an
+ * incoming call; the DS also wakes the sender's own devices. So a wake on a
+ * frame that rings nobody is not merely wasted: it rings. Two such frames
+ * share the tags above and cannot be told apart by them:
+ *
+ *   - a mid-call **renegotiation offer** (camera on, screen share) is an offer
+ *     for the same call id. Waking for it showed the peer's iPhone an
+ *     incoming audio call while the two were already talking;
+ *   - the **end of a connected call** is an end. The peer is in the call and
+ *     awake; waking for it rang the iPhone again after the call was over.
+ *
+ * Only the call session knows which offer is the dial and whether the call
+ * connected, so the session states the intent with each frame
+ * ({@link CallSignalingWake}) and the publisher wakes only when the session
+ * asked AND the bytes are an offer or an end. The tag check stays as a floor:
+ * a session that asks for a wake on an answer or a candidate still gets none.
  *
  * Everything else is deliberately silent:
  *
@@ -35,7 +53,9 @@
  *   - **groupStart** / **groupJoin** / **groupLeave** are group-call
  *     announcements, not a 1x1 ring. `docs/ux/calls.md` §9 puts the group
  *     call redesign out of scope, and waking for a join / leave would push
- *     once per participant churn.
+ *     once per participant churn. A group call's **end** is silent too
+ *     (`makeGroupCallControlPublisher`): a group call never rings a closed
+ *     device, so its end has no ring to stop.
  *
  * ## Why a byte peek rather than a parse
  *
@@ -52,6 +72,16 @@
  * the wake that the recipient's next poll would have made up anyway. Neither
  * can send a frame, drop a frame, or change what is published.
  */
+
+/**
+ * What a call session asks of the publisher for one outbound frame.
+ *
+ * `"call"`: this frame rings someone or stops a ring (the dial offer, the end
+ * of a call that never connected on this device). `"none"`: publish it
+ * silently. The session decides; {@link shouldWakeForCallSignaling} still
+ * refuses a wake for any frame that is not an offer or an end.
+ */
+export type CallSignalingWake = "call" | "none";
 
 /** The `CallSignalingPayload.body` variants, as the wire tags name them. */
 export type CallSignalingBodyKind =
@@ -121,11 +151,16 @@ export function looksLikeCallSignaling(bytes: Uint8Array): boolean {
  * Should publishing this signaling frame also fan a push wake out to the
  * group's subscribed devices?
  *
- * `true` for an offer and an end, `false` for everything else — including
- * anything that is not call signaling, so a caller that hands over the wrong
- * bytes fails toward silence rather than toward a push.
+ * `true` only when the sender asked for a call wake AND the frame is an offer
+ * or an end; `false` for everything else — including anything that is not
+ * call signaling, so a caller that hands over the wrong bytes fails toward
+ * silence rather than toward a push.
  */
-export function shouldWakeForCallSignaling(bytes: Uint8Array): boolean {
+export function shouldWakeForCallSignaling(
+  bytes: Uint8Array,
+  asked: CallSignalingWake,
+): boolean {
+  if (asked !== "call") return false;
   const kind = callSignalingBodyKind(bytes);
   return kind === "offer" || kind === "end";
 }

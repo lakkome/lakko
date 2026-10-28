@@ -289,7 +289,6 @@ public enum GifResult<T: Equatable>: Equatable {
 
 /// UX spec §5 copy.
 public enum GifCopy {
-    public static var privacyNote: String { Localization.text("chat.gif.privacy_note") }
     public static var noResults: String { Localization.text("chat.gif.no_results") }
     public static var unavailable: String { Localization.text("chat.gif.unavailable") }
     public static var rateLimited: String { Localization.text("chat.gif.rate_limited") }

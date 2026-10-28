@@ -228,13 +228,17 @@ class OwnEchoRegistryTest {
         override fun createSession(
             groupIdHex: String,
             callId: ByteArray,
-            outbound: (ByteArray) -> Unit,
+            outbound: (ByteArray, me.lakko.app.calls.CallSignalingWake) -> Unit,
         ): FakeSession = FakeSession(callId)
 
         override suspend fun deriveCallKey(groupIdHex: String, callId: ByteArray): OneToOneCallKey =
             OneToOneCallKey(ByteArray(32), 0)
 
-        override suspend fun publish(groupIdHex: String, bytes: ByteArray) = Unit
+        override suspend fun publish(
+            groupIdHex: String,
+            bytes: ByteArray,
+            wake: me.lakko.app.calls.CallSignalingWake,
+        ) = Unit
 
         override fun composeEnd(callId: ByteArray, reason: FfiCallEndReason): ByteArray? = null
     }

@@ -3175,21 +3175,6 @@ input.lk-sas-code {
   object-fit: cover;
   display: block;
 }
-.lakko-picker-note {
-  margin: 0 0.45rem 0.45rem;
-  padding: 0.4rem 0.5rem;
-  font-size: 0.75rem;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--surface-bg) 85%, var(--accent));
-  display: flex;
-  gap: 0.5rem;
-  align-items: flex-start;
-}
-.lakko-picker-note button {
-  padding: 0.1rem 0.5rem;
-  font-size: 0.75rem;
-  flex: 0 0 auto;
-}
 .lakko-picker-footer {
   font-size: 0.7rem;
   color: var(--surface-muted);
