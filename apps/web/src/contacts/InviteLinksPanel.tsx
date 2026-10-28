@@ -22,9 +22,11 @@
  * is listed, copied and revoked here too. Since the 2026-10-17 rework the
  * register also carries the ledger row's revocation seed, so revoking on any
  * device marks the register revoked (final) and deletes the ledger row at
- * once with that seed (`own-links.ts` `deleteLedgerRowOfRecord`); a deletion
- * the ledger could not be reached for is owed and retried. No device of the
- * account takes a request through the link from that moment.
+ * once with that seed (`own-links.ts` `deleteRevokedLinkRow`); a deletion
+ * the ledger could not be reached for is owed and retried by this device.
+ * Only the revoking device deletes the row, once; the other devices only
+ * forget their local record. No device of the account takes a request
+ * through the link from that moment.
  */
 import { createSignal, For, onMount, Show, type JSX } from "solid-js";
 import QRCode from "qrcode";
@@ -48,7 +50,7 @@ import {
   type MintedLinkRow,
 } from "./minted-links";
 import {
-  deleteLedgerRowOfRecord,
+  deleteRevokedLinkRow,
   forgetMintedLinkRecord,
   newRevocationKey,
   setOwedRowDeletion,
@@ -426,20 +428,28 @@ export function InviteLinksPanel(): JSX.Element {
     try {
       const secrets = auth.identitySecrets();
       if (secrets === null) throw new KeyedError("invite.links.error.sign_in_revoke");
-      // ADR-0079 section 4 — marked revoked in the register first: no device
-      // of the account takes a request through it from now on, whatever the
-      // ledger answers.
-      await sync.revokeLinkRecord(record.linkId);
-      // ADR-0079 (reworked 2026-10-17): the ledger row is deleted here, now,
-      // with the revocation seed the synced record carries - on whichever
-      // device revokes. A ledger that cannot be reached leaves the deletion
-      // owed (retried by `MailboxContext`); the register already refuses the
-      // link on every device. The reach key (ADR-0060 section 6) goes too.
+      // ADR-0079 (reworked 2026-10-17): the ledger row is deleted by this
+      // device, the one that revokes, with the revocation seed the synced
+      // record carries; no other device sends the ledger anything. The
+      // deletion is owed before the register changes, so a crash in between
+      // leaves it owed, and `MailboxContext` retries it (joining this call
+      // while it runs, so the row is deleted once).
       const account = base64Encode(secrets.accountId);
       const linkIdHex = hexOf(record.linkId);
       setOwedRowDeletion(account, linkIdHex, true);
-      const outcome = await deleteLedgerRowOfRecord(discovery, record);
-      if (outcome !== "unreachable") setOwedRowDeletion(account, linkIdHex, false);
+      // ADR-0079 section 4 — marked revoked in the register: no device of
+      // the account takes a request through it from now on, whatever the
+      // ledger answers.
+      try {
+        await sync.revokeLinkRecord(record.linkId);
+      } catch (err) {
+        setOwedRowDeletion(account, linkIdHex, false);
+        throw err;
+      }
+      // A ledger that cannot be reached leaves the deletion owed; the
+      // register already refuses the link on every device. The reach key
+      // (ADR-0060 section 6) goes too.
+      const outcome = await deleteRevokedLinkRow(discovery, account, record);
       await reachSession()?.revokeLink(record.linkId).catch(() => undefined);
       const local = links().find((l) => l.kind === "contact" && bytesEqual(l.linkId, record.linkId));
       if (local !== undefined) {

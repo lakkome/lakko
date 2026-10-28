@@ -59,11 +59,10 @@ import { waitingSentRequests } from "./contact-list-model";
 import { forgetInviteLinkSecret } from "./invite-link-secrets";
 import { listMintedLinks } from "./minted-links";
 import {
-  deleteLedgerRowOfRecord,
+  deleteRevokedLinkRow,
+  forgetLinksRevokedElsewhere,
   owedRowDeletions,
-  revokeLinksRevokedElsewhere,
   revokeMintedLink,
-  setOwedRowDeletion,
   type OwnLinkRevokeOutcome,
 } from "./own-links";
 import { forgetSentRequest, loadSentRequests, recordSentRequest } from "./sent-requests";
@@ -364,34 +363,33 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   const [joinFailure, setJoinFailure] = createLiveText();
 
   // ADR-0079 section 4 (reworked 2026-10-17) - the device that revokes a
-  // link deletes its ledger row itself with the seed the synced record
-  // carries (`InviteLinksPanel`). Re-run on every change of the register:
-  // a deletion this device owes (the ledger was unreachable) is tried again,
-  // and the minting device drops its own local record of a link revoked
-  // elsewhere (deleting the row again, which the ledger answers as gone).
+  // link deletes its ledger row itself, once, with the seed the synced
+  // record carries (`InviteLinksPanel`). Re-run on every change of the
+  // register: a deletion this device still owes (the ledger was unreachable,
+  // or the app stopped in between) is tried again, and a link another device
+  // revoked only loses this device's local record of it; the ledger is not
+  // asked again.
   createEffect(() => {
     const s = auth.state();
     if (s.kind !== "session") return;
     const account = s.account.accountId;
     const revokedRecords = sync.linkRecords().filter((r) => r.revoked);
     if (revokedRecords.length === 0) return;
-    const owed = owedRowDeletions(account);
     void (async () => {
+      const owed = owedRowDeletions(account);
       for (const r of revokedRecords) {
         if (!owed.has(r.linkIdHex)) continue;
         try {
-          if ((await deleteLedgerRowOfRecord(spentDiscovery, r)) !== "unreachable") {
-            setOwedRowDeletion(account, r.linkIdHex, false);
-          }
+          await deleteRevokedLinkRow(spentDiscovery, account, r);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("owed ledger row deletion failed", err instanceof Error ? err.name : "");
         }
       }
-      await revokeLinksRevokedElsewhere(
+      await forgetLinksRevokedElsewhere(
         spentDiscovery,
         account,
-        new Set(revokedRecords.map((r) => r.linkIdHex)),
+        revokedRecords.filter((r) => !owedRowDeletions(account).has(r.linkIdHex)),
       );
     })();
   });

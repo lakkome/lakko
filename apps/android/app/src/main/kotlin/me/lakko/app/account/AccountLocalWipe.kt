@@ -306,6 +306,8 @@ public object AccountLocalWipe {
             // ADR-0078 section 10: this device's records of the links it
             // minted, with their revocation seeds.
             me.lakko.app.contacts.EncryptedOwnLinkStore(ctx).clearForAccount(acct)
+            // ADR-0079 section 4: the ledger-row deletions this device owes.
+            me.lakko.app.contacts.SharedPrefsOwedLinkRowDeletionStore.clear(ctx, acct)
         },
 
         // ---- feed + Discover (ADR-0063, ADR-0059) ---------------------------

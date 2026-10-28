@@ -124,8 +124,8 @@ export async function deleteLedgerRowOfRecord(
 
 const OWED_PREFIX = "lakko.link-row-deletions-owed.v1.";
 
-/** The links (hex ids) whose ledger row this device revoked but could not
- *  delete yet; retried at every change of the register and at start. */
+/** The links (hex ids) whose ledger row this device revoked and has not
+ *  deleted yet; retried at every change of the register and at start. */
 export function owedRowDeletions(accountIdB64: string): Set<string> {
   try {
     const raw = localStorage.getItem(OWED_PREFIX + accountIdB64);
@@ -159,31 +159,73 @@ export function clearOwedRowDeletions(accountIdB64: string): void {
   }
 }
 
+/** The row deletions running on this device, by account and link id. */
+const rowDeletionsInFlight = new Map<string, Promise<OwnLinkRevokeOutcome>>();
+
 /**
- * ADR-0079 section 4 — a link another device of the account revoked: the
- * minting device still holds a local record of it (`minted-links.ts`).
- * The device that revoked it has already deleted the ledger row with the
- * seed the synced record carries; this drops the local record (and deletes
- * the row again, which the ledger answers as gone, or deletes it when the
- * revoking device could not reach the ledger). Returns how many could not
- * be reached (tried again at the next change). Never throws.
+ * Delete the ledger row of a link this device revoked, exactly once
+ * (ADR-0079 section 4). The ledger holds ONE row per link, and only the
+ * device that revokes the link deletes it: the caller marks the deletion
+ * owed ({@link setOwedRowDeletion}) before it revokes the link in the
+ * register, so a crash in between leaves it owed. This runs the deletion
+ * while it is owed, clears it once the ledger answered (gone included), and
+ * keeps it owed when the ledger could not be reached. A call while the same
+ * deletion is running joins it; a call once it is no longer owed sends
+ * nothing and answers `"done"`. Throws what the ledger refusal throws (the
+ * deletion then stays owed).
  */
-export async function revokeLinksRevokedElsewhere(
+export function deleteRevokedLinkRow(
+  discovery: Pick<DiscoveryClient, "revokeInvite" | "revokeCallInvite">,
+  accountIdB64: string,
+  record: LedgerRowRef & { readonly linkIdHex: string },
+): Promise<OwnLinkRevokeOutcome> {
+  const key = `${accountIdB64}|${record.linkIdHex}`;
+  const running = rowDeletionsInFlight.get(key);
+  if (running !== undefined) return running;
+  if (!owedRowDeletions(accountIdB64).has(record.linkIdHex)) return Promise.resolve("done");
+  const run = (async (): Promise<OwnLinkRevokeOutcome> => {
+    const outcome = await deleteLedgerRowOfRecord(discovery, record);
+    if (outcome !== "unreachable") setOwedRowDeletion(accountIdB64, record.linkIdHex, false);
+    return outcome;
+  })().finally(() => rowDeletionsInFlight.delete(key));
+  rowDeletionsInFlight.set(key, run);
+  return run;
+}
+
+/**
+ * ADR-0079 section 4 — links another device of the account revoked, of
+ * which this device still holds a local record (`minted-links.ts`, the
+ * device that minted them). The revoking device deletes the ledger row
+ * itself, and keeps the deletion owed until the ledger answered; so this
+ * sends the ledger nothing and only drops what is local: the record and the
+ * link's reach key. The one exception is a synced record with no revocation
+ * seed, whose row no other device can delete: this device deletes it with
+ * the seed of its own record. Returns how many could not be reached (tried
+ * again at the next change). Never throws.
+ */
+export async function forgetLinksRevokedElsewhere(
   discovery: DiscoveryClient,
   accountIdB64: string,
-  revokedLinkIdsHex: ReadonlySet<string>,
+  revoked: readonly { readonly linkIdHex: string; readonly revocationSeed: Uint8Array }[],
 ): Promise<number> {
-  if (revokedLinkIdsHex.size === 0) return 0;
+  if (revoked.length === 0) return 0;
+  const seedless = new Set(revoked.filter((r) => r.revocationSeed.length === 0).map((r) => r.linkIdHex));
+  const all = new Set(revoked.map((r) => r.linkIdHex));
   let unreachable = 0;
   for (const link of await listMintedLinks(accountIdB64)) {
     let hex = "";
     for (const b of link.linkId) hex += b.toString(16).padStart(2, "0");
-    if (!revokedLinkIdsHex.has(hex)) continue;
+    if (!all.has(hex)) continue;
     try {
-      if ((await revokeMintedLink(discovery, accountIdB64, link)) === "unreachable") unreachable += 1;
+      if (seedless.has(hex) && link.revocationSeed !== null) {
+        if ((await revokeMintedLink(discovery, accountIdB64, link)) === "unreachable") unreachable += 1;
+        continue;
+      }
+      await reachSession()?.revokeLink(link.linkId).catch(() => undefined);
+      await forgetMintedLink(accountIdB64, link.kind, link.blobIdSlug);
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.warn("own-links: a link revoked elsewhere could not be revoked", err instanceof Error ? err.name : "");
+      console.warn("own-links: a link revoked elsewhere could not be forgotten", err instanceof Error ? err.name : "");
     }
   }
   return unreachable;

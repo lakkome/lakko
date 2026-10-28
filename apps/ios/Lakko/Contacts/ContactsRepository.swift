@@ -1557,56 +1557,76 @@ public final class ContactsRepository: ObservableObject {
             )
         }
         let accountIdB64 = base64Encode(secrets.accountId)
-        // ADR-0079 section 4 — the revocation is marked in the synced register
-        // first, from whichever device: every device stops accepting through
-        // the link at once. Since the 2026-10-17 rework the register carries
-        // the revocation seed, so THIS device deletes the ledger row now,
-        // whichever device minted the link; the seed of this device's own
-        // record is the fallback for a record written before that.
+        let slug = base64UrlEncodeNoPad(blobId)
+        // ADR-0079 section 4 — the ledger holds ONE row per link and only the
+        // device that revokes the link deletes it, once, with the revocation
+        // seed the synced record carries (the seed of this device's own record
+        // for a record written before the 2026-10-17 rework). The deletion is
+        // marked owed BEFORE the register changes, so a crash or an
+        // unreachable ledger leaves it owed for this device to retry after
+        // every poll (``LinkRowSweep``); the other devices of the account,
+        // seeing the link revoked, send the ledger nothing.
         let record = deviceGroupSync?.linkRecords.first { $0.kind == .contact && $0.ledgerId == blobId }
+        let own = OwnLinkStore.shared.link(accountIdB64: accountIdB64, kind: .contact, slug: slug)
+        let seed: Data? = record.flatMap { $0.revocationSeed.count == 32 ? $0.revocationSeed : nil } ?? own?.seed
+        let deleter = LinkRowDeleter.shared
+        if seed != nil { deleter.owed.set(accountIdB64: accountIdB64, slug: slug, owed: true) }
+        // Marked revoked in the register first, from whichever device: every
+        // device stops accepting through the link at once.
         if let record { await deviceGroupSync?.revokeLinkRecord(linkId: record.linkId) }
-        let own = OwnLinkStore.shared.link(
-            accountIdB64: accountIdB64, kind: .contact, slug: base64UrlEncodeNoPad(blobId))
-        let seed: Data
-        if let recordSeed = record?.revocationSeed, recordSeed.count == 32 {
-            seed = recordSeed
-        } else if let ownSeed = own?.seed {
-            seed = ownSeed
-        } else {
+        guard let seed else {
             throw ContactsError.wrap(ContactsError.simple(
                 "this device keeps no revocation key for that link"))
         }
         let discovery = authenticatedDiscoveryClient()
         let bound = binding.capture()
-        let result: RevokeInviteResult
+        let outcome: LinkRowDeleter.Outcome
         do {
-            result = try await discovery.revokeInvite(blobId: blobId, signingSeed: seed)
+            outcome = try await deleter.deleteOwed(
+                accountIdB64: accountIdB64, blobId: blobId, seed: seed,
+                delete: { try await discovery.revokeInvite(blobId: $0, signingSeed: $1) })
         } catch {
             throw ContactsError.wrap(error)
         }
-        OwnLinkStore.shared.remove(
-            accountIdB64: accountIdB64, kind: .contact, slug: base64UrlEncodeNoPad(blobId))
-        guard bound.isCurrent else {
-            // Revoked on the server as the account that asked. This device's
-            // secret for it is filed under that account and goes; the reach
-            // record and the list are by now someone else's.
-            InviteLinkSecretStore.shared.remove(
-                accountIdB64: base64Encode(secrets.accountId), slug: base64UrlEncodeNoPad(blobId))
-            return result
+        if outcome == .unreachable {
+            // Still owed: this device's own record (the fallback seed) stays
+            // until the ledger answers; the link is dead on every device
+            // already (the register refuses it).
+            if bound.isCurrent {
+                ReachCenter.shared.removeLink(blobId: blobId)
+                dropOutstandingInvite(blobId: blobId)
+            }
+            throw ContactsError.wrap(LinkRowDeletionOwed())
         }
-        // ADR-0060 — the link's key goes with it (also on "already gone").
+        forgetRevokedLinkLocally(accountIdB64: accountIdB64, blobId: blobId, bound: bound.isCurrent)
+        if case .deleted(let result) = outcome { return result }
+        return .revoked
+    }
+
+    /// The ledger could not be reached for a revoked link's row: the deletion
+    /// is owed and retried after every poll.
+    struct LinkRowDeletionOwed: Error {}
+
+    /// Drop this device's local traces of a contact link whose ledger row is
+    /// dealt with: its own record, its secret, its reach key and the session
+    /// row. Idempotent. `bound == false` (the account changed during a wait)
+    /// keeps to the stores filed under `accountIdB64`.
+    private func forgetRevokedLinkLocally(accountIdB64: String, blobId: Data, bound: Bool) {
+        let slug = base64UrlEncodeNoPad(blobId)
+        OwnLinkStore.shared.remove(accountIdB64: accountIdB64, kind: .contact, slug: slug)
+        // `docs/ux/client-redesign.md` section 5.3 — the link is gone, so is
+        // this device's secret.
+        InviteLinkSecretStore.shared.remove(accountIdB64: accountIdB64, slug: slug)
+        guard bound else { return }
+        // ADR-0060 — the link's key goes with it.
         ReachCenter.shared.removeLink(blobId: blobId)
-        if result == .revoked {
-            state = state.with(
-                outstandingInvites: state.outstandingInvites
-                    .filter { $0.blobId != blobId }
-            )
-        }
-        // `docs/ux/client-redesign.md` section 5.3 — the link is gone (revoked
-        // now, or already gone on the server), so is this device's secret.
-        InviteLinkSecretStore.shared.remove(
-            accountIdB64: base64Encode(secrets.accountId), slug: base64UrlEncodeNoPad(blobId))
-        return result
+        dropOutstandingInvite(blobId: blobId)
+    }
+
+    private func dropOutstandingInvite(blobId: Data) {
+        guard state.outstandingInvites.contains(where: { $0.blobId == blobId }) else { return }
+        state = state.with(
+            outstandingInvites: state.outstandingInvites.filter { $0.blobId != blobId })
     }
 
     // MARK: - Spent by a key rotation (ADR-0074 section 3.5a rule 5)
@@ -2434,23 +2454,33 @@ public final class ContactsRepository: ObservableObject {
         }
     }
 
-    /// ADR-0079 section 4 (reworked 2026-10-17) — a link this device minted
-    /// that another device of the account revoked: that device already
-    /// deleted the ledger row with the seed the register carries; this drops
-    /// this device's own record of it (deleting the row again, which the
-    /// ledger answers as gone, or deleting it when the revoking device could
-    /// not reach the ledger). Run after every poll; a link already revoked
-    /// here has no record left.
+    /// ADR-0079 section 4 (reworked 2026-10-17) — run after every poll
+    /// (``LinkRowSweep``): retry the ledger-row deletions this device owes
+    /// (it revoked the link and the ledger could not be reached, or the app
+    /// stopped in between), and for a link another device of the account
+    /// revoked drop this device's local traces only, sending the ledger
+    /// nothing: the revoking device deletes the row. The one exception is a
+    /// record with no seed (written before the rework), whose row no other
+    /// device can delete: this device deletes it once with its own seed.
     public func revokeLinksRevokedElsewhere() async {
-        guard let sync = deviceGroupSync, let accountIdB64 = boundAccountIdB64 else { return }
-        let revokedSlugs = Set(sync.linkRecords.filter { $0.revoked && !$0.ledgerId.isEmpty }
-            .map { base64UrlEncodeNoPad($0.ledgerId) })
-        guard !revokedSlugs.isEmpty else { return }
-        for own in OwnLinkStore.shared.all(accountIdB64: accountIdB64)
-        where own.kind == .contact && revokedSlugs.contains(own.slug) {
-            guard let blobId = own.blobId else { continue }
-            _ = try? await revokeInviteLink(blobId: blobId)
-        }
+        guard let accountIdB64 = boundAccountIdB64 else { return }
+        let revoked = (deviceGroupSync?.linkRecords ?? [])
+            .filter { $0.kind == .contact && $0.revoked && !$0.ledgerId.isEmpty }
+            .map { LinkRowSweep.RevokedLink(blobId: $0.ledgerId, recordSeed: $0.revocationSeed) }
+        let deleter = LinkRowDeleter.shared
+        guard !revoked.isEmpty || !deleter.owed.slugs(accountIdB64: accountIdB64).isEmpty else { return }
+        let discovery = authenticatedDiscoveryClient()
+        let bound = binding.capture()
+        await LinkRowSweep.run(
+            accountIdB64: accountIdB64,
+            revoked: revoked,
+            ownSeed: { OwnLinkStore.shared.link(accountIdB64: accountIdB64, kind: .contact, slug: $0)?.seed },
+            deleter: deleter,
+            delete: { try await discovery.revokeInvite(blobId: $0, signingSeed: $1) },
+            forget: { [weak self] blobId in
+                self?.forgetRevokedLinkLocally(
+                    accountIdB64: accountIdB64, blobId: blobId, bound: bound.isCurrent)
+            })
     }
 }
 

@@ -173,6 +173,10 @@ public class ContactsRepository(
     /** ADR-0078 section 10: the links this device minted, with their
      *  revocation seeds; `null` = the process-wide [OwnLinkStores.current]. */
     private val ownLinkStoreOverride: OwnLinkStore? = null,
+    /** ADR-0079 section 4 - the ledger-row deletions this device owes (it
+     *  revoked the link and the ledger has not answered yet). */
+    private val owedLinkRowDeletionStore: OwedLinkRowDeletionStore =
+        appContext?.let { SharedPrefsOwedLinkRowDeletionStore.of(it) } ?: InMemoryOwedLinkRowDeletionStore(),
     /** ADR-0073 R.2 - the accepted generation, the retired keys and the
      *  reset's `signed_at` per peer account (public values only). */
     private val resetLedgerStore: ResetLedgerStore =
@@ -203,6 +207,9 @@ public class ContactsRepository(
     /** ADR-0078 section 10 - where this device keeps its own links. */
     private val ownLinkStore: OwnLinkStore
         get() = ownLinkStoreOverride ?: OwnLinkStores.current
+
+    /** ADR-0079 section 4 - deletes a revoked link's ledger row once. */
+    private val linkRowDeleter: LinkRowDeleter = LinkRowDeleter(owedLinkRowDeletionStore)
 
     // -----------------------------------------------------------------
     // ADR-0073 "Phase 2 revised: silent continuity" - a contact reset their
@@ -2803,31 +2810,63 @@ public class ContactsRepository(
     }
 
     /**
-     * ADR-0079 section 4 — a link this device minted that another device of
-     * the account revoked: only this device holds the seed that deletes the
-     * ledger row ([OwnLinkStore]), so it does so when the register's mark
-     * arrives. Run after every poll; a link already revoked here has no
-     * record left.
+     * ADR-0079 section 4 — after every poll: retry the ledger-row deletions
+     * this device owes (it revoked the link and the ledger was unreachable,
+     * or the app stopped in between), and drop this device's local traces of
+     * the links another device of the account revoked. The revoking device
+     * deletes the row itself, so this sends the ledger nothing for those; the
+     * one exception is a synced record with no revocation seed (written
+     * before the 2026-10-17 rework), whose row this device deletes with the
+     * seed of its own record. See [LinkRowSweep].
      */
     public suspend fun revokeLinksRevokedElsewhere() {
-        val sync = deviceGroupSync ?: return
         val accountB64 = boundAccountB64 ?: return
-        val revoked = sync.linkRecords.value
+        val revoked = deviceGroupSync?.linkRecords?.value.orEmpty()
             .filter { it.revoked && it.kind == uniffi.lakko_ffi_uniffi.LinkRecordKind.CONTACT && it.ledgerId.isNotEmpty() }
-            .map { base64UrlEncodeNoPad(it.ledgerId) }
-            .toSet()
-        if (revoked.isEmpty()) return
-        for (own in ownLinkStore.all(accountB64)) {
-            if (own.kind != OwnLink.KIND_CONTACT || own.slug !in revoked) continue
-            val blobId = me.lakko.app.discovery.decodeInviteBlobId(own.slug) ?: continue
-            try {
-                revokeInviteLink(blobId)
-            } catch (e: Throwable) {
-                me.lakko.app.rethrowIfCancelled(e)
-                // Tried again after the next poll.
+            .map { LinkRowSweep.RevokedLink(it.ledgerId.copyOf(), it.revocationSeed.copyOf()) }
+        if (revoked.isEmpty() && linkRowDeleter.owed.slugs(accountB64).isEmpty()) return
+        val report = LinkRowSweep.run(
+            accountIdB64 = accountB64,
+            revoked = revoked,
+            ownSeed = { slug -> ownLinkStore.get(accountB64, OwnLink.KIND_CONTACT, slug)?.seed() },
+            deleter = linkRowDeleter,
+            delete = ::deleteLinkLedgerRow,
+            forget = { blobId -> forgetLinkTraces(accountB64, blobId) },
+        )
+        for (link in revoked) link.recordSeed.fill(0)
+        if (report.unreachable > 0) {
+            Log.w(TAG, "invite links: ${report.unreachable} ledger row deletion(s) still owed")
+        }
+    }
+
+    /** The ledger call of a contact link's row deletion. */
+    private suspend fun deleteLinkLedgerRow(
+        blobId: ByteArray,
+        seed: ByteArray,
+    ): me.lakko.app.discovery.RevokeInviteResult =
+        authenticatedDiscoveryClient().use { discovery -> discovery.revokeInvite(blobId, seed) }
+
+    /** Drop this device's local traces of a contact link whose ledger row is
+     *  dealt with: its own record (seed), the link's reach key, its secret
+     *  and its session row. Idempotent; touches nothing that is not there. */
+    private suspend fun forgetLinkTraces(accountB64: String, blobId: ByteArray) {
+        val slug = base64UrlEncodeNoPad(blobId)
+        if (ownLinkStore.get(accountB64, OwnLink.KIND_CONTACT, slug) != null) {
+            ownLinkStore.remove(accountB64, OwnLink.KIND_CONTACT, slug)
+        }
+        // ADR-0060 §6 — the link's key comes off the mailbox (no-op when this
+        // device never registered it).
+        reach()?.retireLinkByBlob(blobId)
+        // UX 5.3 — a revoked link's secret leaves with it.
+        if (inviteSecretStore.get(accountB64, slug) != null) inviteSecretStore.remove(accountB64, slug)
+        val blobIdList = blobId.toList()
+        if (mutableState.value.outstandingInvites.any { it.blobId?.toList() == blobIdList }) {
+            mutableState.update { state ->
+                state.copy(outstandingInvites = state.outstandingInvites.filterNot { it.blobId?.toList() == blobIdList })
             }
         }
     }
+
     /**
      * Generate a fresh capability-based invite link.
      *
@@ -3024,17 +3063,26 @@ public class ContactsRepository(
 
 
     /**
-     * Revoke an outstanding invite link via the discovery service's `DELETE`
-     * endpoint, signed by the link's own revocation seed from this device's
-     * record (ADR-0078 section 10), + drop the row from
-     * [ContactsState.outstandingInvites]. A link this device keeps no record
-     * of answers [me.lakko.app.discovery.RevokeInviteResult.NotFoundOrNotOwner].
+     * Revoke an outstanding invite link: marked revoked in the synced
+     * register, its ledger row deleted with `DELETE /discovery/invite/{id}`
+     * (signed by the link's own revocation seed, ADR-0078 section 10), and
+     * this device's traces of it dropped.
      *
-     * Returns the underlying [me.lakko.app.discovery.RevokeInviteResult]
-     * so the UI can branch on `Revoked` vs `NotFoundOrNotOwner`.
-     * The row is dropped from local state on `Revoked` **only**;
-     * `NotFoundOrNotOwner` keeps it so the user can retry (the
-     * 404-folding-of-bad-signature path may be transient).
+     * ADR-0079 section 4 — the ledger holds one row per link and only the
+     * device that revokes deletes it, once ([LinkRowRevoke]): the deletion is
+     * marked owed BEFORE the register changes (cleared again if that fails),
+     * a call while the same deletion runs joins it, and an unreachable ledger
+     * leaves it owed for [revokeLinksRevokedElsewhere] to retry after every
+     * poll. The seed comes from the register's record (any device holds it)
+     * or, for a record written before the 2026-10-17 rework, from this
+     * device's own record.
+     *
+     * Returns the ledger's answer; `Revoked` too when another call on this
+     * device already got it. Both `Revoked` and `NotFoundOrNotOwner` (no row:
+     * gone, expired, deleted earlier) drop the local traces. With no seed at
+     * all the link is only revoked in the register and the answer is
+     * `NotFoundOrNotOwner`. An unreachable ledger throws [ContactsError] (the
+     * row stays listed until the retry gets an answer).
      */
     public suspend fun revokeInviteLink(
         blobId: ByteArray,
@@ -3047,47 +3095,44 @@ public class ContactsRepository(
             )
         val accountB64 = base64Encode(secrets.accountId)
         val ownSlug = base64UrlEncodeNoPad(blobId)
-        // ADR-0079 section 4 — the revocation is marked in the synced register
-        // first, from whichever device: every device stops accepting through
-        // the link at once. Since the 2026-10-17 rework the register carries
-        // the revocation seed, so THIS device deletes the ledger row now,
-        // whichever device minted the link; the seed of this device's own
-        // record is the fallback for a record written before that.
-        val record = deviceGroupSync?.linkRecords?.value?.firstOrNull {
+        val sync = deviceGroupSync
+        val record = sync?.linkRecords?.value?.firstOrNull {
             it.kind == uniffi.lakko_ffi_uniffi.LinkRecordKind.CONTACT && it.ledgerId.contentEquals(blobId)
         }
-        if (record != null) deviceGroupSync?.revokeLinkRecord(record.linkId)
-        val signingSeed = record?.revocationSeed?.takeIf { it.size == 32 }?.copyOf()
-            ?: ownLinkStore.get(accountB64, OwnLink.KIND_CONTACT, ownSlug)?.seed()
-            ?: return me.lakko.app.discovery.RevokeInviteResult.NotFoundOrNotOwner
-        return run {
-            try {
-                val result = authenticatedDiscoveryClient().use { discovery ->
-                    discovery.revokeInvite(blobId, signingSeed)
-                }
-                // Revoked now, or already gone because another device of the
-                // account deleted the row with the record's seed: either way
-                // this device's own traces of the link go.
-                if (result is me.lakko.app.discovery.RevokeInviteResult.Revoked || record != null) {
-                    ownLinkStore.remove(accountB64, OwnLink.KIND_CONTACT, ownSlug)
-                    // ADR-0060 §6 — the link's key comes off the mailbox.
-                    reach()?.retireLinkByBlob(blobId)
-                    // UX 5.3 — a revoked link's secret leaves with it.
-                    inviteSecretStore.remove(base64Encode(secrets.accountId), base64UrlEncodeNoPad(blobId))
-                    val blobIdHex = blobId.toList()
-                    mutableState.update { state ->
-                        state.copy(
-                            outstandingInvites = state.outstandingInvites
-                                .filterNot { it.blobId?.toList() == blobIdHex },
-                        )
-                    }
-                }
-                result
-            } catch (e: Throwable) {
-                throw ContactsError.wrap(e)
-            } finally {
-                signingSeed.fill(0)
-            }
+        val recordSeed = record?.revocationSeed?.takeIf { it.size == 32 }?.copyOf()
+        val ownSeed = ownLinkStore.get(accountB64, OwnLink.KIND_CONTACT, ownSlug)?.seed()
+        val outcome = try {
+            LinkRowRevoke.run(
+                accountIdB64 = accountB64,
+                blobId = blobId,
+                recordSeed = recordSeed,
+                ownSeed = ownSeed,
+                // ADR-0079 section 4 — marked revoked in the synced register:
+                // no device of the account takes a request through the link
+                // from now on, whatever the ledger answers.
+                revokeRegister = if (record != null && sync != null) {
+                    { sync.revokeLinkRecord(record.linkId) }
+                } else {
+                    null
+                },
+                deleter = linkRowDeleter,
+                delete = ::deleteLinkLedgerRow,
+                forget = { id -> forgetLinkTraces(accountB64, id) },
+            )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            throw ContactsError.wrap(e)
+        } finally {
+            recordSeed?.fill(0)
+            ownSeed?.fill(0)
+        }
+        return when (outcome) {
+            is LinkRowDeleter.Outcome.Deleted -> outcome.result
+            LinkRowDeleter.Outcome.AlreadyDone -> me.lakko.app.discovery.RevokeInviteResult.Revoked
+            LinkRowDeleter.Outcome.NoKey -> me.lakko.app.discovery.RevokeInviteResult.NotFoundOrNotOwner
+            LinkRowDeleter.Outcome.Unreachable ->
+                throw ContactsError.wrap(IllegalStateException("invite ledger unreachable; the deletion is retried"))
         }
     }
 

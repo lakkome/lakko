@@ -222,6 +222,11 @@ enum AccountLocalDataWipe {
             // minted, with their revocation seeds.
             OwnLinkStore.shared.clear(accountIdB64: accountIdB64)
         }
+        step("owed-link-row-deletions") {
+            // ADR-0079 section 4: the ledger rows this device revoked and
+            // still owes a deletion of.
+            OwedLinkRowDeletionStore.clear(accountIdB64: accountIdB64)
+        }
         step("anon-tokens") {
             // This account's stored tokens; any other account's stay. The
             // pool stops writing for this account too, so the token the
