@@ -62,8 +62,12 @@ public enum HistoryBundleCodec {
         for hex in groupHexes {
             guard let slot = log.groups[hex] else { continue }
             guard let groupIdBytes = Self.hexToBytes(hex) else { continue }
-            let trimmed = Array(slot.messages.suffix(perGroupCap))
-            let capped = trimmed.count < slot.messages.count
+            // The MLS bookkeeping rows (a commit, an external-join request)
+            // are never carried: this client hides them, and a receiver that
+            // draws them as "Members changed" showed one per device commit.
+            let carried = bundledMessages(slot.messages)
+            let trimmed = Array(carried.suffix(perGroupCap))
+            let capped = trimmed.count < carried.count
             var messages: [StructuredHistoryMessage] = []
             for m in trimmed {
                 // G-6 step 2: encode the canonical cross-platform
@@ -147,6 +151,9 @@ public enum HistoryBundleCodec {
                 guard let decoded = Self.decodePlaceholder(m.payloadBytes) else {
                     continue
                 }
+                // A bookkeeping row from a sender that still carries them is
+                // dropped: it is nothing the person reads.
+                if Self.isBookkeepingSystemRow(decoded) { continue }
                 if existingIds.contains(decoded.messageId) { continue }
                 merged.append(decoded)
                 existingIds.insert(decoded.messageId)
@@ -173,6 +180,22 @@ public enum HistoryBundleCodec {
             )
         )
         return applied
+    }
+
+    // MARK: - Bookkeeping rows
+
+    /// A system row the receive loop files for an MLS commit or an
+    /// external-join request (`[mls commit]`, `[mls external join]`, the
+    /// same `[mls <kind>]` text on every client). A call row is a system
+    /// row too and is not one of these.
+    static func isBookkeepingSystemRow(_ m: PersistedMessage) -> Bool {
+        m.direction == "system" && m.text.hasPrefix("[mls ") && m.text.hasSuffix("]")
+    }
+
+    /// The rows of a group a history bundle carries: every row but the
+    /// bookkeeping ones.
+    static func bundledMessages(_ messages: [PersistedMessage]) -> [PersistedMessage] {
+        messages.filter { !isBookkeepingSystemRow($0) }
     }
 
     // MARK: - Placeholder codec (G-6 step 2)

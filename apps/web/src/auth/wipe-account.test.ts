@@ -154,6 +154,7 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     { db: "lakko-minted-links", store: "rows", row: { key: `${acct}|call|slug2`, ciphertext: ct } },
     byId("lakko-sent-request-intros", "rows"),
     byId("lakko-pending-contacts", "rows"),
+    byId("lakko-carried-copies", "rows"),
     // ADR-0073 R.8: the service worker's plaintext copy of the retired keys.
     { db: "lakko-superseded-keys", store: "rows", row: { accountId: acct, keys: ["a2V5"] } },
     {
@@ -300,7 +301,6 @@ function seedDeviceSettings(): void {
   local.setItem("lakko.push.token.v1", "cHNldWRv");
   local.setItem("lakko.composer.recordMode", "voice");
   local.setItem("lakko.media.autoplayVideoNotes", "1");
-  local.setItem("lakko.gif.privacyNoteDismissed", "1");
   local.setItem("lakko.feed.device-banner-dismissed", "1");
 }
 
@@ -383,7 +383,6 @@ describe("wipeAccountLocalData", () => {
       "lakko.push.token.v1",
       "lakko.composer.recordMode",
       "lakko.media.autoplayVideoNotes",
-      "lakko.gif.privacyNoteDismissed",
     ]) {
       expect(local.getItem(k), k).not.toBeNull();
     }
@@ -571,6 +570,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko-minted-links": "account",
   "lakko-sent-request-intros": "account",
   "lakko-pending-contacts": "account",
+  "lakko-carried-copies": "account",
   "lakko-superseded-keys": "account",
   "lakko-push-routing": "account",
   "lakko-anon-tokens": "account",

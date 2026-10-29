@@ -177,7 +177,25 @@ struct LakkoApp: App {
                   AcceptedContactsStore.boundAccountIdB64 == target.accountIdB64 else { return }
             Task { @MainActor [weak chat] in
                 try? await chat?.pollGroup(groupIdHex: target.groupIdHex, waitSecs: 0)
+                // The row behind a ringing placeholder that rang nothing here
+                // ends the placeholder now, not at its timeout.
+                VoipPushRegistrar.shared.wakeFetched(
+                    groupIdHex: target.groupIdHex,
+                    appliedThrough: chat?.journalCursor(groupIdHex: target.groupIdHex))
             }
+        }
+        // A wake for a conversation this device is already in a 1x1 call in
+        // (its own echo, a renegotiation, the end of the call on screen)
+        // rings nothing.
+        // A group call never rings a closed device, so a call wake for a
+        // GROUP conversation, or for one whose group call this device is in or
+        // just left, rings nothing either (older senders woke for group ends).
+        VoipPushRegistrar.shared.callWakeSuppressed = {
+            [weak host, weak groupHost, weak chat] groupIdHex in
+            CallWakeSuppression.anySource(
+                oneToOne: host?.suppressesCallWake(groupIdHex: groupIdHex) ?? false,
+                groupCall: groupHost?.suppressesCallWake(groupIdHex: groupIdHex) ?? false,
+                kind: chat?.groupKind(groupIdHex: groupIdHex))
         }
         self._chatRepository = StateObject(wrappedValue: chat)
         self._callHost = StateObject(wrappedValue: host)
@@ -670,6 +688,9 @@ struct LakkoApp: App {
                     // ADR-0080 — the person's touches refresh this device's
                     // card (the recogniser is put on any new window).
                     UserActionObserver.install()
+                    // ADR-0080 — the first foreground counts as an action,
+                    // and a growth re-send owed from the background goes.
+                    DeviceCardCenter.shared.noteForeground()
                 }
             }
             // ADR-0061 — the mirrored names carry words of the interface
@@ -682,6 +703,13 @@ struct LakkoApp: App {
             .task {
                 foregroundReceive.scheduler.start()
                 foregroundReceive.scheduler.setForeground(scenePhase == .active)
+                // ADR-0080 — `onChange(of: scenePhase)` does not run for the
+                // initial value, so a cold launch installed no recogniser and
+                // took no foreground. Both are idempotent.
+                if scenePhase == .active {
+                    UserActionObserver.install()
+                    DeviceCardCenter.shared.noteForeground()
+                }
             }
             .task(id: scenePhase) {
                 // ADR-0049 section 2 — a sign-in request waiting for this

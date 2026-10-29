@@ -383,6 +383,37 @@ public final class ProfileDirectory: ObservableObject {
         return outcome
     }
 
+    /// ADR-0050 section 2.9, bundle v3 — the profiles a pairing state bundle
+    /// carries to a new device of `accountIdB64`: every received profile kept
+    /// for that account (the caller leaves out the account's own keys).
+    func profilesForBundle(accountIdB64: String) -> [String: ProfileClaim] {
+        received.all(accountIdB64: accountIdB64)
+    }
+
+    /// ADR-0050 section 2.9, bundle v3 — store the profiles a pairing state
+    /// bundle carried, each under its person key, through the store a
+    /// received profile lands in (strictly newer wins: a newer profile held
+    /// here is kept). Works whether or not `accountIdB64` is the active
+    /// account (a join by name stores before its session starts). Returns how
+    /// many were stored.
+    @discardableResult
+    func adoptCarriedProfiles(
+        _ claims: [(personKeyB64: String, claim: ProfileClaim)], accountIdB64: String
+    ) -> Int {
+        var stored = 0
+        for entry in claims {
+            let outcome = received.accept(
+                entry.claim.withoutGrants, signatureKeyB64: entry.personKeyB64, intoAccount: accountIdB64)
+            guard outcome == .stored else { continue }
+            stored += 1
+            if accountIdB64 == self.accountIdB64, let username = entry.claim.username {
+                startVerification(signatureKeyB64: entry.personKeyB64, username: username)
+            }
+        }
+        if stored > 0, accountIdB64 == self.accountIdB64 { bump() }
+        return stored
+    }
+
     /// Every received profile, by signature key (b64): what local people
     /// search reads (ADR-0060 section 3).
     func receivedProfiles() -> [String: ProfileClaim] {

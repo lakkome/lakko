@@ -138,7 +138,11 @@ import {
 } from "./quiet-call-offer";
 import { ChatClient } from "../chat/client";
 import { sealedWakeForGroup } from "../push/group-routing";
-import { makeCallSignalingPublisher } from "../chat/call-signaling-publish";
+import {
+  makeCallSignalingPublisher,
+  makeGroupCallControlPublisher,
+} from "../chat/call-signaling-publish";
+import type { CallSignalingWake } from "./call-signaling-wake";
 import { readIsActive } from "../chat/membership-ended";
 import { memberKeysOf, peerName } from "../chat/peer-name";
 import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
@@ -800,7 +804,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     return memberKeysOf(entry.group).find((k) => k !== ownKeyB64) ?? null;
   }
 
-  function publisherFor(groupIdB64: string): (bytes: Uint8Array) => Promise<void> {
+  function publisherFor(
+    groupIdB64: string,
+  ): (bytes: Uint8Array, wake: CallSignalingWake) => Promise<void> {
     return makeCallSignalingPublisher({
       chat,
       identity: () => auth.identitySecrets(),
@@ -880,7 +886,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
               detachScreenShare: () => session.detachScreenShare(),
             },
             publish: (signal) => {
-              void publisherFor(groupIdB64)(signal);
+              // Screen-share state belongs to a connected call: never a wake.
+              void publisherFor(groupIdB64)(signal, "none");
             },
             nameOf: (personKeyB64) => callNameOfPerson(personKeyB64) ?? "",
             notice: (text) => callActions.showNotice(text, SCREEN_SHARE_NOTICE_MS),
@@ -1222,7 +1229,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           return;
         case "busy":
           endedCallIds.add(hex);
-          await publisherFor(item.groupIdB64)(wasm.composeCallEndSignaling(parsed.callId, "busy"));
+          // An End for a call this device never took: it stops the ring the
+          // caller started, so it keeps its wake like any unanswered call's End.
+          await publisherFor(item.groupIdB64)(
+            wasm.composeCallEndSignaling(parsed.callId, "busy"),
+            "call",
+          );
           return;
         case "ring":
         case "silent": {
@@ -1604,7 +1616,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       try {
         const wasm = await loadWasm();
         const bytes = compose(wasm);
-        await makeCallSignalingPublisher({
+        // No group-call frame wakes anyone, an End included: a group call
+        // never rings a closed device, so there is no ring to stop.
+        await makeGroupCallControlPublisher({
           chat,
           identity: () => auth.identitySecrets(),
           group: () => {

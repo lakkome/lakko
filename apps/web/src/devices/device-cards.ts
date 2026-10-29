@@ -174,6 +174,36 @@ export function browserFacts(userAgent: string): BrowserFacts {
   return { model, os };
 }
 
+/** What the own card says about this app, before the city. */
+export interface OwnDeviceFacts {
+  readonly platform: DevicePlatform;
+  readonly model: string;
+  readonly appVersion: string;
+  readonly os: string;
+}
+
+/** `app_version` of the web client: the row reads "Lakko web". */
+export const WEB_APP_VERSION = "web";
+/** `app_version` of the desktop app (ADR-0085): the row reads "Lakko desktop". */
+export const DESKTOP_APP_VERSION = "desktop";
+
+/**
+ * The own card's platform, model, app and system. The desktop app is a
+ * computer, not a browser: its web view's user agent names a browser engine
+ * that says nothing about the app, so only the system is read from it and
+ * the model is the kind of computer.
+ */
+export function ownDeviceFacts(desktop: boolean, userAgent: string): OwnDeviceFacts {
+  const facts = browserFacts(userAgent);
+  if (!desktop) {
+    return { platform: "web", model: facts.model, appVersion: WEB_APP_VERSION, os: facts.os };
+  }
+  const system = facts.os.split(" ")[0] ?? "";
+  const model =
+    system === "macOS" ? "Mac" : system === "Windows" ? "Windows PC" : system === "Linux" ? "Linux PC" : "Computer";
+  return { platform: "desktop", model, appVersion: DESKTOP_APP_VERSION, os: facts.os };
+}
+
 /** Which icon a row shows. */
 export type DeviceIconKind = "phone" | "tablet" | "computer" | "browser" | "unknown";
 

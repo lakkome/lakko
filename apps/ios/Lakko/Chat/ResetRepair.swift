@@ -186,9 +186,17 @@ public enum ResetRepair {
     /// the PAIR is unchanged. This judges one commit with the memory of the
     /// halves seen before it, and returns the memory to keep.
     ///
+    /// The inputs are PERSON keys (ADR-0050 account keys, one per person), so
+    /// a commit that only adds or retires DEVICE leaves of the people already
+    /// there (a new device admitted, a removed device retired) leaves the key
+    /// set equal: the people did not change, and no row is shown for it. (The
+    /// table used to keep the row for "changes no key"; written before person
+    /// keys, it put three "Members changed" rows into a one-to-one whose two
+    /// people never changed.)
+    ///
     /// | the commit ...                                                  | row        | memory                 |
     /// |-----------------------------------------------------------------|------------|------------------------|
-    /// | changes no key                                                  | kept       | unchanged              |
+    /// | changes no person key (devices only)                            | suppressed | unchanged              |
     /// | changes keys, not people (one batch)                            | suppressed | unchanged              |
     /// | only REMOVES people, each present through superseded keys alone | suppressed | those people are added |
     /// | only ADDS people, each one awaited                              | suppressed | those people leave it  |
@@ -208,8 +216,9 @@ public enum ResetRepair {
         guard let before = personKeysBefore, let after = personKeysAfter else {
             return SwapVerdict(suppress: false, awaited: live)
         }
-        // No key changed at all: not a membership change of this kind.
-        if Set(before) == Set(after) { return SwapVerdict(suppress: false, awaited: live) }
+        // No person key changed: only devices did. The people are the same,
+        // so there is nothing to tell.
+        if Set(before) == Set(after) { return SwapVerdict(suppress: true, awaited: live) }
         let peopleBefore = peopleByAccount(before, accountOfKey: accountOfKey)
         let peopleAfter = peopleByAccount(after, accountOfKey: accountOfKey)
         let gone = peopleBefore.filter { !peopleAfter.contains($0) }

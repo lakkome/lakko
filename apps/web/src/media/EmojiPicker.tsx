@@ -33,7 +33,6 @@ import {
 import {
   GIF_ATTRIBUTION,
   GIF_NO_RESULTS,
-  GIF_PRIVACY_NOTE,
   GIF_RATE_LIMITED,
   GIF_SEARCH_DEBOUNCE_MS,
   GIF_UNAVAILABLE,
@@ -43,7 +42,7 @@ import {
   fetchGifPage,
   type GifItem,
 } from "./gif-client";
-import { dismissGifNote, gifNoteDismissed, gifProviderMissing, setGifProviderMissing } from "./media-prefs";
+import { gifProviderMissing, setGifProviderMissing } from "./media-prefs";
 import { ObjectUrlRegistry } from "./object-url-registry";
 import { t } from "../l10n";
 
@@ -461,14 +460,6 @@ function GifTab(props: {
 
   return (
     <>
-      <Show when={!gifNoteDismissed()}>
-        <div class="lakko-picker-note" role="note">
-          <span style={{ flex: 1 }}>{GIF_PRIVACY_NOTE()}</span>
-          <button type="button" onClick={dismissGifNote}>
-            {t("chat.gif.note_dismiss")}
-          </button>
-        </div>
-      </Show>
       <div class="lakko-picker-search">
         <input
           type="search"

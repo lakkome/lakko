@@ -45,7 +45,7 @@ hiding them:
 2. **The server cannot rank for you.** "Your own algorithm" is a set of
    rules the device runs, not a service you subscribe to. Rules can be
    shared as a file; they contain no messages.
-3. **Recommendations cost a little privacy, stated per source.** The
+3. **Recommendations cost a little privacy.** The
    shortlist tells the server which topics you picked; a search tells it
    what you typed; group-shared channels tell it nothing.
 
@@ -236,23 +236,22 @@ encrypted until you subscribe):
 The first time the person opens Discover, one card:
 
 > **Pick a few topics.** Lakko downloads suggestions for them, mixed with
-> a few random topics so Lakko's server can't tell exactly which ones you
-> picked. It never sees which channels you open.
+> a few random topics.
 > [topic chips] [Language] [Save] [Not now]
 
 Topics come from a fixed list (the same list a channel owner picks from).
 Along with the picked topics the client downloads a few random ones and
 discards them (maintainer, 2026-09-28: on by default); a switch in the
-Discover menu, "Mix in random topics", turns it off, with the line "Uses
-less data. Lakko's server will see exactly which topics you picked."
+Discover menu, "Mix in random topics", turns it off. No line sits under
+the switch (maintainer decision, 2026-10-28).
 The language defaults to the app language. The choice is editable from the
 Discover menu. With no topics picked, the shortlist is not downloaded at
 all and Discover shows only group-shared suggestions and search.
 
 ### 6.2 Search
 
-A search field at the top of Discover, with helper text under it the first
-time: "Searches are sent to Lakko's server." Results are channel cards.
+A search field at the top of Discover, with no helper text under it
+(maintainer decision, 2026-10-28). Results are channel cards.
 Search is Discover's own: the global search of `navigation.md` section 4
 (exact names only) is unchanged.
 
@@ -267,7 +266,7 @@ interested, no Hide this topic.
 
 Group info gains a switch, **Share my channels with this group**, off by
 default, with one line under it: "People in this group can see which
-channels you follow. Lakko's server cannot." When on, the person's
+channels you follow." When on, the person's
 subscribed channels that are **listed in Discover** are shared with that
 group; unlisted channels are never shared, since their handle may be a
 secret invitation.

@@ -253,7 +253,8 @@ ids, crate or function names.
 | "OPAQUE-PAKE login. Wrong username and wrong password produce the same error by design." | (nothing; the login screen needs no subtitle) |
 | "The server only sees an OPRF-blinded envelope." | "Your password never leaves your device." |
 | "Start MLS group" | "Start chat" / "New group" |
-| "Pairing is E2EE: the server sees only the rendezvous pseudonym + opaque MLS bytes." | "Linking is end-to-end encrypted. Lakko's servers cannot read it." |
+| "Pairing is E2EE: the server sees only the rendezvous pseudonym + opaque MLS bytes." | (nothing; say what the person does: "Type the code your other device shows.") |
+| "It is sent encrypted; the server never reads it." / "Lakko's servers can't see this." | (nothing; say who CAN see it: "Every member sees the name.") |
 | "Removing a device revokes its access via an MLS commit." | "This device will lose access to your messages." |
 | "Refused by design" | "Not allowed from a signed-in session. Use your recovery phrase instead." |
 | "Identity mismatch / supersession refused" | "Alex's security code changed. Verify it before continuing." |
@@ -265,6 +266,14 @@ establish a secure connection. Nothing was sent."), never as a shrug.
 Security is surfaced where the user benefits: the E2EE lock in a call
 when it is real, the safety number, "Verify security code" on a contact,
 the recovery phrase warning. Everywhere else it is silent.
+
+**No statements about what Lakko's servers cannot see, read or know**
+(maintainer decision, 2026-10-28). "The server never reads it", "Lakko's
+servers cannot read it", "only ciphertext reaches the server" add nothing a
+person acts on. Say who can see a thing, if that matters to the choice in
+front of them. Where Lakko's server DOES see something because of a choice
+the person makes (GIF search, Discover search), such lines are not shown
+either, maintainer decision 2026-10-28.
 
 ## 6. Cross-platform mapping
 

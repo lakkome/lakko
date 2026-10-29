@@ -23,7 +23,7 @@ final class CallAwaitRaceTests: XCTestCase {
     private let seed = Data(repeating: 0x07, count: 32)
 
     private func session(_ outbox: Outbox) -> CallSession {
-        let session = CallSession(callId: callId) { bytes in
+        let session = CallSession(callId: callId) { bytes, _ in
             if let body = try? parseCallSignaling(plaintext: bytes) { outbox.bodies.append(body) }
         }
         session.setCallKey(seed: seed, localLeaf: 0)

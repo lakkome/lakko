@@ -191,4 +191,7 @@ public object DeviceCards {
     public fun cardsKey(accountIdB64: String): String = "lakko.device-cards.v1.$accountIdB64"
     public fun cityKey(accountIdB64: String): String = "lakko.device-city.v1.$accountIdB64"
     public fun showCityKey(accountIdB64: String): String = "lakko.device-city-shown.v1.$accountIdB64"
+
+    /** Whether the stored own card is still owed to the other devices. */
+    public fun owedKey(accountIdB64: String): String = "lakko.device-card-owed.v1.$accountIdB64"
 }

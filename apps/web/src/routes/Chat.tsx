@@ -188,6 +188,12 @@ import {
   subscribeHeldFlushed,
   type HeldMessage,
 } from "../chat/held-send-queue";
+import {
+  carriedCopiesFor,
+  loadCarriedCopies,
+  matchCarriedCopies,
+  type CarriedCopy,
+} from "../contacts/carried-copies";
 import { heldResendPredicate } from "../chat/resend-receive";
 import { unrepairableBy } from "../chat/successor-claim";
 import { READMISSION_INTERVAL_MS } from "../chat/device-readmission";
@@ -2413,7 +2419,7 @@ function ChatView(props: {
       suppressDeviceSwapRow(
         personsBefore,
         personKeysOrNull(props.entry.group),
-        outcome.commitMessageId,
+        outcome.commitMessageId === undefined ? "latest" : [outcome.commitMessageId],
       );
       // ADR-0045 UX §6.2.8 item 3 — captured synchronously alongside the
       // post-sweep roster, so the eviction and the shrink it caused are judged
@@ -3360,14 +3366,21 @@ function ChatView(props: {
    * who stay leaves no `Members changed` row. Called at both membership-diff
    * sites (the poll and this device's own sweep) with the PERSON keys either
    * side; people are compared by the account this device knows each key
-   * under, so a superseded key and its successor are one person. A torn read
-   * suppresses nothing.
+   * under, so a superseded key and its successor are one person. A commit
+   * that changes no person (a device admitted or retired, ADR-0050) leaves
+   * no row either. A torn read suppresses nothing.
+   *
+   * `commitMessageIds` names the commit rows of the batch being judged; an
+   * empty list judges nothing, so a poll with no commit can never hide a
+   * row an earlier batch rightly kept. `"latest"` (the sweep, when the
+   * commit's id is unknown) keeps the earlier behaviour: the newest row.
    */
   function suppressDeviceSwapRow(
     personsBefore: readonly string[] | null,
     personsAfter: readonly string[] | null,
-    commitMessageId: number | undefined,
+    commitMessageIds: readonly number[] | "latest",
   ): void {
+    if (commitMessageIds !== "latest" && commitMessageIds.length === 0) return;
     const s = auth.state();
     if (s.kind !== "session") return;
     const superseded = supersededKeys();
@@ -3381,9 +3394,11 @@ function ChatView(props: {
     });
     setAwaitedSwaps(s.account.accountId, props.entry.groupIdB64, swap.awaited);
     if (!swap.suppress) return;
-    const messageId =
-      commitMessageId ??
-      rows().reduce((max, r) => (r.kind === "incoming" ? Math.max(max, r.event.messageId) : max), 0);
+    const ids = new Set(
+      commitMessageIds === "latest"
+        ? [rows().reduce((max, r) => (r.kind === "incoming" ? Math.max(max, r.event.messageId) : max), 0)]
+        : commitMessageIds,
+    );
     setRows(
       rows().filter(
         (r) =>
@@ -3391,7 +3406,7 @@ function ChatView(props: {
             r.kind === "incoming" &&
             r.event.kind === "system" &&
             r.event.systemKind === "commit" &&
-            r.event.messageId === messageId
+            ids.has(r.event.messageId)
           ),
       ),
     );
@@ -4244,14 +4259,10 @@ function ChatView(props: {
           // ADR-0073 R.7 case 2 — a batch that only swapped the devices of
           // people who stay leaves no `Members changed` row.
           {
-            const commit = [...result.events]
-              .reverse()
-              .find((e) => e.kind === "system" && e.systemKind === "commit");
-            suppressDeviceSwapRow(
-              personsBeforePoll,
-              personKeysOrNull(props.entry.group),
-              commit?.messageId,
-            );
+            const commits = result.events
+              .filter((e) => e.kind === "system" && e.systemKind === "commit")
+              .map((e) => e.messageId);
+            suppressDeviceSwapRow(personsBeforePoll, personKeysOrNull(props.entry.group), commits);
           }
           // ADR-0045 UX §6.2.8 item 3 — and this is the site the finding was
           // about. Snapshotted here, in the same synchronous region as the
@@ -6432,6 +6443,52 @@ function ChatView(props: {
 
   const conversationHex = (): string => hexOf(conversationIdBytes());
 
+  // ---- State bundle v3: what was written on another device, display only --
+  //
+  // A pending contact's messages typed on ANOTHER device of this account
+  // reached this device as copies (`contacts/carried-copies.ts`) and moved
+  // here when this one-to-one landed. They are shown waiting at the end of
+  // the timeline and never sent from here: the device where they were typed
+  // sends them. Each goes when the real message arrives from that device
+  // with the same text and the same number of attachments.
+
+  /** The keys the copies may be filed under: the conversation id and this
+   *  group's own id (the same for a one-to-one that never moved). */
+  const carriedKeys = (): string[] => {
+    const keys = [conversationHex()];
+    try {
+      const own = hexOf(props.entry.group.groupId);
+      if (!keys.includes(own)) keys.push(own);
+    } catch {
+      /* a freed handle: the conversation key alone */
+    }
+    return keys;
+  };
+  createEffect(() => {
+    const account = accountIdB64ForLog();
+    if (account !== null) void loadCarriedCopies(account);
+  });
+  /** Reactive: the copies to draw, in order. */
+  const carriedCopies = createMemo<CarriedCopy[]>(() => carriedKeys().flatMap((k) => carriedCopiesFor(k)));
+  createEffect(() => {
+    const copies = carriedCopies();
+    const account = accountIdB64ForLog();
+    if (copies.length === 0 || account === null) return;
+    const own = ownPersonKeyB64(chats.identity());
+    if (own === null) return;
+    // An own message in this view that is an incoming row came from another
+    // device of this account (this device's own are outgoing rows).
+    const arrivals = rows().flatMap((r) =>
+      r.kind === "incoming" && r.event.kind === "application" && r.event.senderKey === own
+        ? [{ messageId: r.event.messageId, text: r.event.text, attachmentCount: r.event.attachments.length }]
+        : [],
+    );
+    if (arrivals.length === 0) return;
+    untrack(() => {
+      for (const key of carriedKeys()) void matchCarriedCopies(account, key, arrivals);
+    });
+  });
+
   /** The superseded account that makes THIS group unrepairable, read off the
    *  live group and store (never a memo: the send path asks right after a
    *  check may have re-pinned). `null` once the view is on the successor. */
@@ -8505,7 +8562,7 @@ function ChatView(props: {
       </Show>
 
       <Show
-        when={timelineEntries().length > 0}
+        when={timelineEntries().length > 0 || carriedCopies().length > 0}
         fallback={
           <p
             style={{
@@ -8630,6 +8687,20 @@ function ChatView(props: {
               </>
               );
             }}
+          </For>
+          {/* State bundle v3 — display-only copies of what was written on
+              another device of this account; never sent from here. */}
+          <For each={carriedCopies()}>
+            {(m) => (
+              <li class="lk-bubble-row outgoing run-start run-end">
+                <div class="lk-bubble outgoing run-start run-end">
+                  <div class="lk-bubble-text">{m.text}</div>
+                  <div class="lk-bubble-meta">
+                    <span>{t("chat.message.sending")}</span>
+                  </div>
+                </div>
+              </li>
+            )}
           </For>
         </ol>
       </Show>

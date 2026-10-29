@@ -78,11 +78,19 @@ export function receiveDeviceCardEnvelope(
   const card = decodeDeviceCardEnvelope(wasm, envelope);
   if (card === null) return false;
   const key = senderKeyAtReceipt(senderLeaf, roster);
-  if (key === null || roster === null) return true;
-  receiveOwnDeviceCard(
+  if (key === null || roster === null) {
+    // eslint-disable-next-line no-console
+    console.info(`[device-card] card received from a ${card.platform} device: refused, sender not resolved`);
+    return true;
+  }
+  const stored = receiveOwnDeviceCard(
     key,
     card,
     roster.map((m) => m.key),
+  );
+  // eslint-disable-next-line no-console
+  console.info(
+    `[device-card] card received from a ${card.platform} device: ${stored ? "stored" : "refused, not newer or not in the roster"}`,
   );
   return true;
 }

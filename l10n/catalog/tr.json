@@ -27,7 +27,7 @@
       "status": "machine"
     },
     "auth.brand.body": {
-      "text": "Sohbetler, gruplar, kanallar ve aramalar varsayılan olarak uçtan uca şifreli. Lakko sunucuları mesajlarınızı asla göremez.",
+      "text": "Sohbetler, gruplar, kanallar ve aramalar varsayılan olarak uçtan uca şifreli.",
       "status": "machine"
     },
     "auth.brand.foot": {
@@ -1491,7 +1491,7 @@
       "status": "machine"
     },
     "channels.meta.desc": {
-      "text": "Ad ve açıklama tüm abonelere şifreli olarak ulaşır. Sunucu bunları asla okumaz.",
+      "text": "Ad ve açıklama tüm abonelere ulaşır.",
       "status": "machine"
     },
     "channels.meta.error.description_bad_character": {
@@ -1583,7 +1583,7 @@
       "status": "machine"
     },
     "channels.new.subtitle": {
-      "text": "Aboneler adı ve açıklamayı görür. Bunlar şifreli iletilir; sunucuya yalnızca şifreli metin ulaşır.",
+      "text": "Aboneler adı ve açıklamayı görür.",
       "status": "machine"
     },
     "channels.new.title": {
@@ -2218,16 +2218,8 @@
       "text": "GIF bulunamadı",
       "status": "machine"
     },
-    "chat.gif.note_dismiss": {
-      "text": "Anladım",
-      "status": "machine"
-    },
     "chat.gif.open_full": {
       "text": "GIF'i tam ekran aç",
-      "status": "machine"
-    },
-    "chat.gif.privacy_note": {
-      "text": "GIF araması, ne aradığınızı gören Lakko sunucusu üzerinden yapılır. Gönderilen GIF'ler her dosya gibi şifrelenir.",
       "status": "machine"
     },
     "chat.gif.rate_limited": {
@@ -4718,10 +4710,6 @@
       "text": "Rastgele konular karıştır",
       "status": "machine"
     },
-    "discover.mix.off_line": {
-      "text": "Daha az veri kullanır. Lakko sunucusu hangi konuları seçtiğinizi tam olarak görür.",
-      "status": "machine"
-    },
     "discover.nothing_yet": {
       "text": "Henüz öneri yok. Konu seçin ya da gruplarınızdaki kişilerden kanallarını paylaşmalarını isteyin.",
       "status": "machine"
@@ -4731,7 +4719,7 @@
       "status": "machine"
     },
     "discover.pick.body": {
-      "text": "Lakko bunlar için önerileri, Lakko sunucusu tam olarak hangilerini seçtiğinizi anlamasın diye birkaç rastgele konuyla karıştırarak indirir. Hangi kanalları açtığınızı asla görmez.",
+      "text": "Lakko bunlar için önerileri birkaç rastgele konuyla karıştırarak indirir.",
       "status": "machine"
     },
     "discover.pick.title": {
@@ -4766,10 +4754,6 @@
       "text": "Ara",
       "status": "machine"
     },
-    "discover.search.helper": {
-      "text": "Aramalar Lakko sunucusuna gönderilir.",
-      "status": "machine"
-    },
     "discover.search.no_results": {
       "text": "Kanal bulunamadı.",
       "status": "machine"
@@ -4799,11 +4783,11 @@
       "status": "machine"
     },
     "discover.share.line": {
-      "text": "Bu gruptaki kişiler hangi kanalları takip ettiğinizi görebilir. Lakko sunucusu göremez.",
+      "text": "Bu gruptaki kişiler hangi kanalları takip ettiğinizi görebilir.",
       "status": "machine"
     },
     "discover.shared.desc": {
-      "text": "Kişilerin hangi kanalları takip ettiğinizi görebildiği gruplar. Lakko sunucusu göremez.",
+      "text": "Kişilerin hangi kanalları takip ettiğinizi görebildiği gruplar.",
       "status": "machine"
     },
     "discover.shared.empty": {
@@ -6267,7 +6251,7 @@
       "status": "machine"
     },
     "new_group.name_hint": {
-      "text": "Adı tüm üyeler görür. Şifreli gönderilir; sunucu onu asla okumaz.",
+      "text": "Adı tüm üyeler görür.",
       "status": "machine"
     },
     "new_group.name_not_sent": {
@@ -6623,7 +6607,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "Kullanıcı adınızı girin, ardından Lakko'yu oturumu hâlâ açık olan bir cihazda açın ve gösterdiği kodu buraya yazın. Lakko'nun sunucularının okuyabileceği hiçbir şey gönderilmez. Kamera gerekmez; isterseniz QR kodu da kullanabilirsiniz.",
+      "text": "Kullanıcı adınızı girin, ardından Lakko'yu oturumu hâlâ açık olan bir cihazda açın ve gösterdiği kodu buraya yazın. Kamera gerekmez; isterseniz QR kodu da kullanabilirsiniz.",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -7119,7 +7103,7 @@
       "status": "machine"
     },
     "restore_identity.device_intro": {
-      "text": "Oturumu hâlâ açık olan bir cihaz altı haneli bir kod gösterir; kodu buraya yazın. Aktarım uçtan uca şifrelidir; Lakko'nun sunucuları onu okuyamaz. Kamera gerekmez; isterseniz QR kodu da kullanabilirsiniz.",
+      "text": "Oturumu hâlâ açık olan bir cihaz altı haneli bir kod gösterir; kodu buraya yazın. Kamera gerekmez; isterseniz QR kodu da kullanabilirsiniz.",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -7303,7 +7287,7 @@
       "status": "machine"
     },
     "settings.about.protection.body": {
-      "text": "Mesajlar, aramalar ve kişi istekleri uçtan uca şifrelenir: onları yalnızca sohbetteki kişiler okuyabilir, Lakko'nun sunucuları asla okuyamaz. Şifreniz cihazınızdan hiç çıkmaz ve her kişinin yüz yüze karşılaştırabileceğiniz bir güvenlik numarası vardır.",
+      "text": "Mesajlar, aramalar ve kişi istekleri uçtan uca şifrelenir: onları yalnızca sohbetteki kişiler okuyabilir. Şifreniz cihazınızdan hiç çıkmaz ve her kişinin yüz yüze karşılaştırabileceğiniz bir güvenlik numarası vardır.",
       "status": "machine"
     },
     "settings.about.protection.title": {
@@ -7527,7 +7511,7 @@
       "status": "machine"
     },
     "settings.devices.lede": {
-      "text": "Hesabınızda oturum açık olan telefonlar, tabletler ve bilgisayarlar. Cihaz eklemek uçtan uca şifrelidir; Lakko'nun sunucuları bunu okuyamaz.",
+      "text": "Hesabınızda oturum açık olan telefonlar, tabletler ve bilgisayarlar.",
       "status": "machine"
     },
     "settings.devices.list.lede": {

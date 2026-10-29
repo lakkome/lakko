@@ -361,7 +361,6 @@ struct GifTab: View {
     let onSent: () -> Void
 
     @StateObject private var model: GifSearchModel
-    @AppStorage(MediaPrefs.gifNoteKey) private var noteDismissed = false
 
     init(media: ChatMediaController, onSent: @escaping () -> Void) {
         self.media = media
@@ -373,19 +372,6 @@ struct GifTab: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            if !noteDismissed {
-                // UX spec §5 — what the server learns, stated before searching.
-                HStack(alignment: .top, spacing: 8) {
-                    Text(GifCopy.privacyNote).font(.footnote)
-                    Spacer(minLength: 0)
-                    Button(Localization.text("chat.gif.note_dismiss")) { noteDismissed = true }
-                        .font(.footnote.bold())
-                }
-                .padding(10)
-                .background(Color(.secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .padding(.horizontal, 16)
-            }
             TextField(Localization.text("chat.gif.search"), text: $model.query)
                 .textFieldStyle(.roundedBorder)
                 .submitLabel(.search)

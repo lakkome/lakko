@@ -237,6 +237,44 @@ final class DsWakeTests: XCTestCase {
             "ADR-0054 — the send path must not make a push-gw request of its own")
     }
 
+    /// The two production call publish ports, over a real repository: a group
+    /// call's frames (its `end` included) carry no wake; a one-to-one carries
+    /// one only when the session asks and the bytes are an offer or an end.
+    func testTheCallPublishPortsWakeOnlyForTheDialAndAnUnconnectedEnd() async throws {
+        let f = try makeOwnerRepo()
+        defer { try? FileManager.default.removeItem(at: f.outboxDir) }
+        let callId = Data(repeating: 0x0A, count: 16)
+        let end = try composeCallSignaling(body: .end(callId: callId, reason: .hungUp))
+        let endedForAll = try composeCallSignaling(body: .end(callId: callId, reason: .endedForAll))
+        let leave = try composeCallSignaling(body: .groupLeave(callId: callId, leafIndex: 0, reason: .hungUp))
+        let offer = try composeCallSignaling(body: .offer(
+            callId: callId, sdp: "v=0", createdAtMs: 1,
+            media: FfiCallMediaFlags(audio: true, video: false)))
+
+        let group = GroupCallHost.livePublish(repository: f.repo)
+        let groupOk1 = await group(f.groupIdHex, end)
+        let groupOk2 = await group(f.groupIdHex, endedForAll)
+        let groupOk3 = await group(f.groupIdHex, leave)
+        XCTAssertTrue(groupOk1 && groupOk2 && groupOk3)
+
+        let oneToOne = CallHost.livePublish(repository: f.repo)
+        let dialOk = await oneToOne(f.groupIdHex, offer, true)
+        let renegOk = await oneToOne(f.groupIdHex, offer, false)
+        let cancelOk = await oneToOne(f.groupIdHex, end, true)
+        let hangUpOk = await oneToOne(f.groupIdHex, end, false)
+        XCTAssertTrue(dialOk && renegOk && cancelOk && hangUpOk)
+
+        let wakes = WakeRecordingDsURLProtocol.publishes(f.dsScope).map(\.wake)
+        XCTAssertEqual(wakes.count, 7)
+        XCTAssertNil(wakes[0], "a group call's end wakes nobody")
+        XCTAssertNil(wakes[1], "nor its end for everyone")
+        XCTAssertNil(wakes[2], "nor a leave")
+        XCTAssertEqual(wakes[3]?.count, DsWake.headerValueLength, "the dial wakes")
+        XCTAssertNil(wakes[4], "a renegotiation offer does not")
+        XCTAssertEqual(wakes[5]?.count, DsWake.headerValueLength, "a cancel wakes")
+        XCTAssertNil(wakes[6], "the end of a connected call does not")
+    }
+
     /// ADR-0042 defer: with no routing secret for the group, the answer is no
     /// wake at all, never a wake named by the group id.
     func testAGroupWithNoRoutingSecretGetsNoWake() async throws {

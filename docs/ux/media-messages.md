@@ -270,11 +270,8 @@ the model the previous app used. Two things change from it:
   Recipients only ever fetch the encrypted blob from Lakko storage — they never contact
   GIPHY or the proxy.
 
-**What the Lakko server learns is stated in the UI once:** the first time the GIF tab is
-opened, a one-line note above the grid reads
-`GIF search goes through Lakko's server, which sees what you search for. Sent GIFs are encrypted like any file.`
-with a dismiss **Got it** (remembered per device). This is the honest cost of the
-feature and the user sees it before searching.
+The Lakko server sees what is searched for. The picker shows no note about it
+(maintainer decision, 2026-10-28).
 
 ### GIF tab
 

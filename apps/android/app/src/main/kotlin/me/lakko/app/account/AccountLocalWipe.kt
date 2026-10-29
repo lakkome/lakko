@@ -228,6 +228,7 @@ public object AccountLocalWipe {
         Step("reset-continuity") { ctx, acct -> me.lakko.app.chat.SharedPrefsContinuityBackend.deleteAccount(ctx, acct) },
         Step("lineage-mirror") { ctx, acct -> me.lakko.app.chat.LineageMirror.deleteAccount(ctx, acct) },
         Step("held-sends") { ctx, acct -> me.lakko.app.chat.SealedHeldSendBackend.deleteAccount(ctx, acct) },
+        Step("held-copies") { ctx, acct -> me.lakko.app.chat.SealedHeldCopyBackend.deleteAccount(ctx, acct) },
         // ADR-0074 part 3 - a key rotation's sealed files (the prepared
         // entropy and proof, pending envelopes, this account's previous
         // identities), its owed record and the kept device's notice flag.

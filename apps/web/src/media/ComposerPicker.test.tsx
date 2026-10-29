@@ -247,21 +247,6 @@ describe("picking a GIF", () => {
     expect(requested.every((u) => u.includes("/gifs/"))).toBe(true);
     expect(requested.some((u) => u.includes("giphy"))).toBe(false);
   });
-
-  it("says what it costs, once, before anything is searched", async () => {
-    // Section 5: the Lakko server learns a signed-in account's search terms,
-    // and the UI says so. It is dismissible, and the dismissal sticks.
-    const picked = mountPicker();
-    tab("GIF").click();
-
-    const note = await vi.waitFor(() => one('[role="note"]'));
-    expect(note.textContent ?? "").toMatch(/search/i);
-
-    one<HTMLButtonElement>('[role="note"] button').click();
-
-    expect(present('[role="note"]')).toBe(false);
-    expect(picked.closes).toBe(0);
-  });
 });
 
 describe("paging GIF results across a new search", () => {

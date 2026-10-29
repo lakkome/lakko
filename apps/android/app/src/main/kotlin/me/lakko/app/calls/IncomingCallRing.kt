@@ -13,8 +13,9 @@ import me.lakko.app.l10n.Strings
  *
  * `docs/ux/calls.md` section 2.1 asks for a call that rings with the app
  * backgrounded, closed, or the phone locked. Two halves were missing. The
- * outbound half landed with [shouldWakeForCallSignaling]: an offer and an end
- * now request a high-priority push wake. This file is the receiving half's
+ * outbound half landed with [shouldWakeForCallSignaling]: the dial offer and
+ * the end of a call that never connected now request a high-priority push
+ * wake ([OneToOneCallWakes]). This file is the receiving half's
  * vocabulary — every decision about ringing that does NOT need a
  * [android.content.Context], so it can be unit tested on a plain JVM where
  * neither the framework nor `liblakko_ffi_uniffi.so` exists.

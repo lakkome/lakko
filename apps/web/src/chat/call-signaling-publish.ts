@@ -41,13 +41,18 @@
  * control envelope must not wake devices. That rule swept up the call offer,
  * so a callee with a closed or backgrounded tab never rang
  * (`docs/ux/calls.md` §2.1). This publisher is the one caller that opts back
- * in, and only for the two frames `shouldWakeForCallSignaling` names: the
- * offer that starts the ring and the end that stops it. The decision is made
- * from the composed bytes rather than passed in by the session, so there is
- * no second place a caller could get it wrong.
+ * in: the session states with each frame whether it rings someone or stops a
+ * ring (the dial offer, the End of a call that never connected), and the
+ * publisher wakes only when it asked and the bytes are an offer or an end.
+ * The bytes alone cannot decide: a mid-call renegotiation offer and the End
+ * of a connected call carry the same tags, and a call wake on either rang the
+ * peer's iPhone (`calls/call-signaling-wake.ts`).
  */
 import type { ChatClient } from "./client";
-import { shouldWakeForCallSignaling } from "../calls/call-signaling-wake";
+import {
+  shouldWakeForCallSignaling,
+  type CallSignalingWake,
+} from "../calls/call-signaling-wake";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import type { Group as WasmGroup } from "../../wasm/lakko_ffi_wasm";
 
@@ -63,6 +68,22 @@ export interface CallSignalingPublisherDeps {
 }
 
 /**
+ * Build the publisher for group-call control frames (start, join, leave, end).
+ *
+ * Every one of them is published with no wake, `end` included. A group call
+ * never rings a closed device (start / join / leave were always silent), so a
+ * group `end` stops no ring anywhere; its call wake reached iPhones as a VoIP
+ * push, which iOS reports to CallKit as an incoming call, and showed a phantom
+ * incoming call after every group call ended.
+ */
+export function makeGroupCallControlPublisher(
+  deps: CallSignalingPublisherDeps,
+): (bytes: Uint8Array) => Promise<void> {
+  const publish = makeCallSignalingPublisher(deps);
+  return (bytes: Uint8Array): Promise<void> => publish(bytes, "none");
+}
+
+/**
  * Build the `onOutboundSignaling` sink.
  *
  * The returned function NEVER rejects — a failed publish is reported through
@@ -73,8 +94,8 @@ export interface CallSignalingPublisherDeps {
  */
 export function makeCallSignalingPublisher(
   deps: CallSignalingPublisherDeps,
-): (bytes: Uint8Array) => Promise<void> {
-  return async (bytes: Uint8Array): Promise<void> => {
+): (bytes: Uint8Array, wake: CallSignalingWake) => Promise<void> {
+  return async (bytes: Uint8Array, wake: CallSignalingWake): Promise<void> => {
     try {
       // The wake rides the DS publish itself as an `x-lakko-wake` header
       // (ADR-0054); the DS forwards it to push-gw after the row is appended.
@@ -85,7 +106,7 @@ export function makeCallSignalingPublisher(
         deps.identity(),
         deps.group(),
         bytes,
-        shouldWakeForCallSignaling(bytes) ? { wake: "call" } : {},
+        shouldWakeForCallSignaling(bytes, wake) ? { wake: "call" } : {},
       );
     } catch (err) {
       if (deps.onError !== undefined) {

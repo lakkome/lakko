@@ -215,6 +215,12 @@ public final class DeviceLinkClient: DeviceLinkRelay {
 /// (a chosen limit, not a measured one), persisted per device. Over it the
 /// modal says so and the request is declined, so a stream of requests cannot
 /// keep putting a code in front of the person.
+///
+/// An answer is given back (``refund(_:)``) when the code was RIGHT and the
+/// device was then not added for a reason on this side (the result did not
+/// land, the pairing failed, the keys were not handed over): a right code is
+/// not a guess, and the person must not run out of tries because of our own
+/// failure. A wrong code is never given back.
 public final class DeviceLinkAnswerLimit {
     public static let maxAnswers = 5
     public static let window: TimeInterval = 24 * 60 * 60
@@ -242,11 +248,22 @@ public final class DeviceLinkAnswerLimit {
         recent(now: now).count < Self.maxAnswers
     }
 
-    /// Record one answer.
-    public func record(now: Date = Date()) {
+    /// Record one answer; returns its time, for ``refund(_:)``.
+    @discardableResult
+    public func record(now: Date = Date()) -> Double {
         var list = recent(now: now)
-        list.append(now.timeIntervalSince1970)
+        let at = now.timeIntervalSince1970
+        list.append(at)
         defaults.set(list, forKey: key)
+        return at
+    }
+
+    /// Give back the answer recorded at `at` (one entry, if still kept).
+    public func refund(_ at: Double) {
+        var all = defaults.array(forKey: key) as? [Double] ?? []
+        guard let index = all.firstIndex(of: at) else { return }
+        all.remove(at: index)
+        defaults.set(all, forKey: key)
     }
 }
 
@@ -571,7 +588,9 @@ public final class DeviceLinkResponderFlow: ObservableObject {
     /// The new device's payload verified and the decision is made, but the
     /// result could not be posted for the proof (it ran out). Kept so the
     /// one-use responder's outcome is not lost while the person proves again.
-    private var owedResult: (requestIdB64: String, accepted: DeviceLinkAccepted?)?
+    private var owedResult: (requestIdB64: String, accepted: DeviceLinkAccepted?, answeredAt: Double?)?
+    /// When the answer to ``requestIdB64`` was counted (``DeviceLinkAnswerLimit/refund(_:)``).
+    private var answeredAt: Double?
 
     public init(ports: Ports) {
         self.ports = ports
@@ -657,7 +676,8 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         } catch {
             accepted = nil
         }
-        owedResult = (id, accepted)
+        owedResult = (id, accepted, answeredAt)
+        answeredAt = nil
         await finishOwedResult(token: token)
     }
 
@@ -683,6 +703,7 @@ public final class DeviceLinkResponderFlow: ObservableObject {
                 return
             }
             owedResult = nil
+            if owed.accepted != nil { giveBack(owed.answeredAt) }
             modal = owed.accepted == nil ? .wrongCode : .failed
             return
         }
@@ -693,10 +714,18 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         }
         do {
             let keysSent = try await ports.runPairing(accepted.pairingPayload)
+            if !keysSent { giveBack(owed.answeredAt) }
             modal = keysSent ? nil : .keysNotSent
         } catch {
+            giveBack(owed.answeredAt)
             modal = .failed
         }
+    }
+
+    /// A right code that ended without the device added for a reason on
+    /// this side: not a guess, so the answer is given back.
+    private func giveBack(_ at: Double?) {
+        if let at { ports.limit.refund(at) }
     }
 
     /// The proof block of ``Modal/proofNeeded`` was answered: prove, then
@@ -759,7 +788,7 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         ports.proof.closed()
         switch result {
         case .answered:
-            ports.limit.record(now: now)
+            answeredAt = ports.limit.record(now: now)
             responder = fresh
             requestIdB64 = id
             let code = fresh.code()

@@ -74,6 +74,7 @@ import { clearSpendOwed } from "../contacts/rotation-spent";
 import { clearInviteLinkSecrets } from "../contacts/invite-link-secrets";
 import { deleteMintedLinksForAccount } from "../contacts/minted-links";
 import { deletePendingContactsForAccount } from "../contacts/pending-contacts";
+import { deleteCarriedCopiesForAccount } from "../contacts/carried-copies";
 import { deleteMlsSnapshot } from "../chat/mls-store";
 import { deleteOutboxForAccount } from "../chat/commit-outbox";
 import { deleteMessageLog } from "../chat/message-log-store";
@@ -240,6 +241,9 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // ADR-0079: the inviters added through a link, and what was written to
     // them before their app answered.
     { name: "pending-contacts", run: () => deletePendingContactsForAccount(accountIdB64) },
+    // The display-only copies of what this account wrote to a pending
+    // contact on another of its devices (pairing state bundle v3).
+    { name: "carried-copies", run: () => deleteCarriedCopiesForAccount(accountIdB64) },
     { name: "push-routing", run: () => clearGroupRoutingForAccount(accountIdB64) },
     // ADR-0073 R.8: the service worker's copy of the keys a reset retired.
     { name: "superseded-mirror", run: () => clearSupersededMirrorForAccount(accountIdB64) },

@@ -139,6 +139,7 @@ import { receiveServiceEnvelope } from "../../reach/service-envelope-intake";
 import {
   bindDeviceCards,
   noteDeviceAction,
+  noteDeviceForeground,
   pruneOwnDeviceCards,
   scheduleOwnCardResend,
   unbindDeviceCards,
@@ -152,6 +153,7 @@ import { installKeyRotationPort, type JournalCatchUp } from "./key-rotation-port
 import {
   flushServiceEnvelopes,
   registerServiceEnvelopeSender,
+  retryDirtyServiceEnvelopes,
 } from "../../reach/service-envelope-outbox";
 import {
   groupIdHex,
@@ -686,11 +688,18 @@ export function DeviceGroupSyncProvider(props: {
   // ignored inside `noteDeviceAction`.
   if (typeof document !== "undefined") {
     const onAction = (): void => noteDeviceAction();
+    // A growth re-send that fell due while the page was hidden goes at the
+    // next foreground (it is not an action: no fresh card is decided here).
+    const onVisible = (): void => {
+      if (document.visibilityState === "visible") noteDeviceForeground();
+    };
     document.addEventListener("pointerdown", onAction, { capture: true, passive: true });
     document.addEventListener("keydown", onAction, { capture: true });
+    document.addEventListener("visibilitychange", onVisible);
     onCleanup(() => {
       document.removeEventListener("pointerdown", onAction, { capture: true });
       document.removeEventListener("keydown", onAction, { capture: true });
+      document.removeEventListener("visibilitychange", onVisible);
     });
   }
 
@@ -1635,6 +1644,9 @@ export function DeviceGroupSyncProvider(props: {
 
       // The journal answered, so this device is online: send what waited.
       if (outbox().length > 0) void drainFolderOutbox();
+      // A service envelope whose publish failed (the own device card, the
+      // setting, the own name) is sent again on every pass until it goes.
+      void retryDirtyServiceEnvelopes();
 
       // ADR-0081 decision 2, step 6 - a DeviceGroup commit of this device
       // that did not finish (the DS could not be reached, a write failed, a

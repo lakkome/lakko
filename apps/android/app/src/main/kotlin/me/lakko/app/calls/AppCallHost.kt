@@ -288,7 +288,7 @@ public class ChatRepositoryCallPort(
     override fun createSession(
         groupIdHex: String,
         callId: ByteArray,
-        outbound: (ByteArray) -> Unit,
+        outbound: (ByteArray, CallSignalingWake) -> Unit,
     ): CallSession = CallSession(
         applicationContext = applicationContext,
         callId = callId,
@@ -319,14 +319,16 @@ public class ChatRepositoryCallPort(
      * ICE candidate, end — drained by [OneToOneCallHost]'s outbound queue.
      *
      * The push wake that makes a closed callee ring (`docs/ux/calls.md` §2.1)
-     * is fired inside [ChatRepository.publishApplicationMessage], decided from
-     * these very bytes by [shouldWakeForCallSignaling], not chosen here: this
-     * sink sees all four 1x1 frames and only two of them may wake anyone, so
-     * asking it to pass a flag would put the rule in a place that has no way to
-     * tell them apart without re-reading the bytes anyway.
+     * is fired inside [ChatRepository.publishApplicationMessage]: the session
+     * says which frames ring someone or stop a ring ([OneToOneCallWakes]: the
+     * dial offer, the End of a call that never connected), and
+     * [shouldWakeForCallSignaling] still refuses a wake for any frame that is
+     * not an offer or an end. The bytes alone cannot decide: a renegotiation
+     * offer and the End of a connected call carry the same tags, and a wake on
+     * either rang the peer's iPhone.
      */
-    override suspend fun publish(groupIdHex: String, bytes: ByteArray) {
-        repository.publishApplicationMessage(groupIdHex = groupIdHex, plaintextBytes = bytes)
+    override suspend fun publish(groupIdHex: String, bytes: ByteArray, wake: CallSignalingWake) {
+        repository.publishApplicationMessage(groupIdHex = groupIdHex, plaintextBytes = bytes, wake = wake)
     }
 
     override fun composeEnd(callId: ByteArray, reason: FfiCallEndReason): ByteArray? =

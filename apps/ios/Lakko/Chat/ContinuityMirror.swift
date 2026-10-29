@@ -104,3 +104,11 @@ public enum ContinuityMirror {
 public enum LakkoQuietNotification {
     public static let userInfoKey = "lakko_quiet"
 }
+
+/// A message notification the extension delivered with the generic line, not
+/// a decrypted preview: the read did not run, or a row could not be read. The
+/// app does not present it over itself (the open app shows the conversation),
+/// as Android posts no generic banner while the app is on screen.
+public enum LakkoGenericNotification {
+    public static let userInfoKey = "lakko_generic"
+}

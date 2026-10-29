@@ -2218,16 +2218,8 @@
       "text": "未找到 GIF",
       "status": "machine"
     },
-    "chat.gif.note_dismiss": {
-      "text": "知道了",
-      "status": "machine"
-    },
     "chat.gif.open_full": {
       "text": "全屏打开 GIF",
-      "status": "machine"
-    },
-    "chat.gif.privacy_note": {
-      "text": "GIF 搜索会经过 Lakko 的服务器，服务器能看到你搜索的内容。发送的 GIF 会像任何文件一样被加密。",
       "status": "machine"
     },
     "chat.gif.rate_limited": {
@@ -4718,10 +4710,6 @@
       "text": "混入随机主题",
       "status": "machine"
     },
-    "discover.mix.off_line": {
-      "text": "流量更少。Lakko 服务器将确切知道你选了哪些主题。",
-      "status": "machine"
-    },
     "discover.nothing_yet": {
       "text": "暂无推荐。选择一些主题，或请群组中的人分享他们的频道。",
       "status": "machine"
@@ -4764,10 +4752,6 @@
     },
     "discover.search.action": {
       "text": "搜索",
-      "status": "machine"
-    },
-    "discover.search.helper": {
-      "text": "搜索内容会发送到 Lakko 服务器。",
       "status": "machine"
     },
     "discover.search.no_results": {

@@ -196,9 +196,13 @@ public data class DeviceSwapVerdict(val suppress: Boolean, val awaited: Map<Stri
  * unchanged. This judges one commit with the memory of the halves seen
  * before it, and returns the memory to keep.
  *
+ * The inputs are PERSON keys (account keys, ADR-0050): a commit that only
+ * adds or retires DEVICE leaves of the people already in the group leaves
+ * them equal. Such a commit changed nobody, so it draws no row.
+ *
  * | the commit ...                                                  | row        | memory                 |
  * |-----------------------------------------------------------------|------------|------------------------|
- * | changes no key                                                  | kept       | unchanged              |
+ * | changes no person key (device leaves only, or nothing)          | suppressed | unchanged              |
  * | changes keys, not people (one batch)                            | suppressed | unchanged              |
  * | only REMOVES people, each present through superseded keys alone | suppressed | those people are added |
  * | only ADDS people, each one awaited                              | suppressed | those people leave it  |
@@ -218,8 +222,9 @@ public fun deviceSwapAcrossCommits(
     val live = LinkedHashMap<String, Long>()
     for ((person, sinceMs) in awaited) if (nowMs - sinceMs < DEVICE_SWAP_PAIR_WINDOW_MS) live[person] = sinceMs
     if (personKeysBefore == null || personKeysAfter == null) return DeviceSwapVerdict(false, live)
-    // The same KEYS: nothing happened to the membership at all.
-    if (personKeysBefore.toSet() == personKeysAfter.toSet()) return DeviceSwapVerdict(false, live)
+    // The same PERSON keys: no person joined or left (a commit that only
+    // added or retired devices). No row, and the memory stays as it is.
+    if (personKeysBefore.toSet() == personKeysAfter.toSet()) return DeviceSwapVerdict(true, live)
     val name = { k: String -> accountOfKey(k) ?: k }
     val peopleBefore = peopleByAccount(personKeysBefore, accountOfKey)
     val peopleAfter = peopleByAccount(personKeysAfter, accountOfKey)

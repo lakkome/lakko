@@ -15,10 +15,12 @@
  * was created, then the shared group name, then a title built from the
  * members - never an id.
  *
- * Pure: every lookup it needs arrives as a parameter, so it can be run by a
- * test (vitest has no jsdom and no Solid transform here) and so neither
- * screen's context leaks into the rule.
+ * Pure apart from the catalog word for an unnamed member: every lookup it
+ * needs arrives as a parameter, so it can be run by a test (vitest has no
+ * jsdom and no Solid transform here) and so neither screen's context leaks
+ * into the rule.
  */
+import { UNNAMED_MEMBER } from "../profile/member-label";
 
 /** What the caller must be able to answer about the conversation. */
 export interface ConversationTitleInput {
@@ -68,9 +70,13 @@ export function conversationTitle(input: ConversationTitleInput): string {
   ) {
     return input.contactNameByMember;
   }
+  // A member this device cannot name is left out of a group title rather
+  // than shown as "Member" (docs/ux/client-redesign.md section 5.1, the iOS
+  // rule): "Anna, Ivan" reads as a group, "Anna, Member, Member" does not.
+  const unnamed = UNNAMED_MEMBER();
   return input.groupTitle(
     input.sharedName ?? input.fallbackLabel,
-    peers.map(input.nameOf),
+    peers.map(input.nameOf).filter((n) => n.length > 0 && n !== unnamed),
   );
 }
 

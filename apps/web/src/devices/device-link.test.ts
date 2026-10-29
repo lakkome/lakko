@@ -48,6 +48,7 @@ import {
   createDeviceLinkResponder,
   deviceLinkCoreOf,
   initiatorEndMessage,
+  refundAnswer,
   type AnswerLogStore,
   type DeviceLinkCore,
   type InitiatorPorts,
@@ -532,6 +533,51 @@ describe("old device: the answer limit (5 per 24 h, chosen, not measured)", () =
     expect(h.ports.answer).toHaveBeenCalledTimes(6);
     expect(h.flow.view().kind).toBe("showing");
     expect(h.answers.times).toHaveLength(5);
+  });
+
+  it("a right code whose pairing fails on this side gives the answer back", async () => {
+    const h = responderHarness({
+      pair: vi.fn(async () => {
+        throw new Error("commit refused");
+      }),
+    });
+    await h.flow.poll();
+    await h.flow.consent();
+    expect(h.answers.times).toHaveLength(1);
+    h.setListed(sealedRequest(GOOD_CONFIRM_A));
+    await h.flow.poll();
+    expect(h.flow.view().kind).toBe("closed");
+    expect(h.answers.times).toEqual([]);
+  });
+
+  it("a right code whose outcome could not be recorded gives the answer back", async () => {
+    const h = responderHarness({
+      result: vi.fn(async () => {
+        throw new TypeError("fetch failed");
+      }),
+    });
+    await h.flow.poll();
+    await h.flow.consent();
+    h.setListed(sealedRequest(GOOD_CONFIRM_A));
+    await h.flow.poll();
+    expect(h.answers.times).toEqual([]);
+  });
+
+  it("a wrong code keeps the answer counted", async () => {
+    const h = responderHarness();
+    await h.flow.poll();
+    await h.flow.consent();
+    h.setListed(sealedRequest(0xee));
+    await h.flow.poll();
+    expect(h.answers.times).toHaveLength(1);
+  });
+
+  it("refundAnswer removes one entry and leaves the rest", () => {
+    const log = memoryAnswerLog([5, 7, 7, 9]);
+    refundAnswer(log, 7);
+    expect(log.times).toEqual([5, 7, 9]);
+    refundAnswer(log, 42);
+    expect(log.times).toEqual([5, 7, 9]);
   });
 
   it("answersInWindow drops old, future and non-finite times", () => {

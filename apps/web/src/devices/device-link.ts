@@ -187,9 +187,25 @@ export function canAnswer(store: AnswerLogStore, now: number): boolean {
   return answersInWindow(store.load(), now).length < DEVICE_LINK_ANSWER_LIMIT;
 }
 
-/** Record an answer at `now`, dropping the ones the window left behind. */
-export function recordAnswer(store: AnswerLogStore, now: number): void {
+/** Record an answer at `now`, dropping the ones the window left behind;
+ *  returns `now`, for {@link refundAnswer}. */
+export function recordAnswer(store: AnswerLogStore, now: number): number {
   store.save([...answersInWindow(store.load(), now), now]);
+  return now;
+}
+
+/**
+ * Give back the answer recorded at `at` (one entry, if still kept). Used
+ * when the code was RIGHT and the device was then not added for a reason on
+ * this side (the result did not land, the pairing failed): a right code is
+ * not a guess, and the person must not run out of tries because of our own
+ * failure. A wrong code is never given back.
+ */
+export function refundAnswer(store: AnswerLogStore, at: number): void {
+  const times = store.load();
+  const index = times.indexOf(at);
+  if (index < 0) return;
+  store.save([...times.slice(0, index), ...times.slice(index + 1)]);
 }
 
 function answerLogKey(accountId: string): string {
@@ -339,12 +355,18 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
     readonly requestId: string;
     readonly responder: ResponderHandle;
     readonly ownHandle: Uint8Array;
+    /** When the answer was counted ({@link refundAnswer}). */
+    readonly answeredAt: number;
   };
   let active: Active | null = null;
   /** A verified exchange whose `accepted` outcome the server refused for
    *  want of a fresh proof; kept until `resume`, a decline or its expiry. */
-  let owed: { readonly requestId: string; readonly confirmB: Uint8Array; readonly payload: Uint8Array } | null =
-    null;
+  let owed: {
+    readonly requestId: string;
+    readonly confirmB: Uint8Array;
+    readonly payload: Uint8Array;
+    readonly answeredAt: number | null;
+  } | null = null;
   /** The request "Is this you?" is asked about; nothing sent for it yet. */
   let asking: PendingDeviceRequest | null = null;
   /** Requests the person said "Yes, it's me" to whose answer has not landed
@@ -431,8 +453,8 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
       return;
     }
     consented.delete(req.requestId);
-    recordAnswer(ports.answers, now);
-    active = { requestId: req.requestId, responder, ownHandle };
+    const answeredAt = recordAnswer(ports.answers, now);
+    active = { requestId: req.requestId, responder, ownHandle, answeredAt };
     show({ kind: "showing", requestId: req.requestId, code: ports.core.formatCode(responder.code) });
   }
 
@@ -460,10 +482,21 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
       show({ kind: "closed", message: ports.failureMessage(err) });
       return;
     }
-    await recordAndPair(a.requestId, opened.confirmB, opened.pairingPayload);
+    await recordAndPair(a.requestId, opened.confirmB, opened.pairingPayload, a.answeredAt);
   }
 
-  async function recordAndPair(requestId: string, confirmB: Uint8Array, payload: Uint8Array): Promise<void> {
+  /** A right code that ended without the device added for a reason on this
+   *  side: not a guess, so the answer is given back. */
+  const giveBack = (answeredAt: number | null): void => {
+    if (answeredAt !== null) refundAnswer(ports.answers, answeredAt);
+  };
+
+  async function recordAndPair(
+    requestId: string,
+    confirmB: Uint8Array,
+    payload: Uint8Array,
+    answeredAt: number | null,
+  ): Promise<void> {
     show({ kind: "adding", requestId });
     try {
       await ports.result(requestId, { outcome: "accepted", confirmB });
@@ -471,12 +504,13 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
       if (ports.proofRefused?.(err) === true) {
         // The proof ran out while the code was being typed: keep the
         // verified exchange and ask for the proof again.
-        owed = { requestId, confirmB, payload };
+        owed = { requestId, confirmB, payload, answeredAt };
         show({ kind: "proving", requestId });
         return;
       }
       // Without the recorded outcome the new device never sees `confirm_b`
       // and would refuse the Welcome: pair nothing.
+      giveBack(answeredAt);
       show({ kind: "closed", message: LINK_RESULT_NOT_RECORDED });
       return;
     }
@@ -484,6 +518,7 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
       await ports.pair(payload);
       show({ kind: "closed", message: LINK_DEVICE_ADDED });
     } catch (err) {
+      giveBack(answeredAt);
       show({ kind: "closed", message: ports.failureMessage(err) });
     }
   }
@@ -605,7 +640,7 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
         await serial(async () => {
           if (owed === null || owed.requestId !== pending.requestId) return;
           owed = null;
-          await recordAndPair(pending.requestId, pending.confirmB, pending.payload);
+          await recordAndPair(pending.requestId, pending.confirmB, pending.payload, pending.answeredAt);
         });
       } catch {
         // recordAndPair does not throw.

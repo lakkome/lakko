@@ -30,6 +30,8 @@ import { noteDeviceLetIn } from "./added-notice";
 import { useAuth } from "../auth/AuthContext";
 import { AuthClient } from "../auth/client";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
+import { useChats } from "../chat/ChatContext";
+import { ownKeysB64Of } from "../profile/own-key";
 import { getDeviceKey } from "../auth/key-store";
 import { base64Decode } from "../auth/account-id";
 import { loadWasm } from "../wasm";
@@ -63,6 +65,8 @@ export function DeviceRequestPrompt(): JSX.Element {
   const auth = useAuth();
   // ADR-0050 section 2.8 — the confirmed device is admitted to every chat.
   const receive = useBackgroundReceive();
+  // The state bundle never carries this account's own profile.
+  const chats = useChats();
   const [view, setView] = createSignal<ResponderView>({ kind: "idle" });
   // The last confirmed device was added without the keys (this device does
   // not hold the recovery phrase, or the hand-over failed).
@@ -175,6 +179,7 @@ export function DeviceRequestPrompt(): JSX.Element {
       accountIdBytes: base64Decode(s.account.accountId),
       accountIdB64: s.account.accountId,
       deviceKey,
+      ownKeysB64: ownKeysB64Of(chats.identity(), [chats.conversationAccountIdentity()?.signaturePublicKey]),
       ...(recovery !== undefined ? { recovery } : {}),
     });
     // Without the recovery row the new device is added to the account's

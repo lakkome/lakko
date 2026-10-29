@@ -67,6 +67,7 @@ import {
   pollForRecoveryPayload,
   publishRecoveryPayload,
 } from "./recovery-payload";
+import { applyCarriedExtras, collectCarriedExtras } from "./carried-state-io";
 import {
   STATE_EXPORTER_KEY_LENGTH,
   STATE_EXPORTER_LABEL,
@@ -79,7 +80,7 @@ import {
   pollForStateBundle,
   publishStateBundle,
   type CarriedOwnPredecessor,
-  type StateBundleV2,
+  type StateBundleV3,
 } from "./state-bundle";
 import { loadMlsSnapshot } from "../chat/mls-store";
 
@@ -309,8 +310,14 @@ export async function prepareJoinFlow(args: {
                 await args.onOwnPredecessorsStored();
               }
               const applied = applyStateBundle(bundle, args.accountIdB64);
+              // v3: group names, profiles, pending contacts.
+              const extras = await applyCarriedExtras(bundle, args.accountIdB64, await loadWasm());
               // eslint-disable-next-line no-console
-              console.info(`state bundle: ${applied.contacts} contacts, ${applied.pins} pins`);
+              console.info(
+                `state bundle: ${applied.contacts} contacts, ${applied.pins} pins, ` +
+                  `${extras.groupNames} group names, ${extras.profiles} profiles, ` +
+                  `${extras.pendingContacts} pending contacts`,
+              );
             }
           } catch (err) {
             // eslint-disable-next-line no-console
@@ -361,7 +368,7 @@ function accountKeyHexOfSeed(wasm: Wasm, seed: Uint8Array): string {
  *  effort and never throws: a failure leaves the device as one that knows
  *  only the current key (logged without any key material). */
 async function storeOwnPredecessors(
-  bundle: StateBundleV2,
+  bundle: StateBundleV3,
   accountIdB64: string,
   deviceKey: DeviceCipher,
 ): Promise<void> {
@@ -390,7 +397,7 @@ async function receiveStateBundle(
   identity: WasmIdentity,
   rendezvous: Uint8Array,
   welcomeCursor: number,
-): Promise<StateBundleV2 | null> {
+): Promise<StateBundleV3 | null> {
   const outcome = await pollForStateBundle(rendezvous, welcomeCursor);
   if (outcome.kind !== "received") return null;
   const wasm = await loadWasm();
@@ -606,7 +613,7 @@ export async function prepareAnonymousJoinFlow(args: {
   // scanner published was never read on this route, and a confirmed device
   // opened every chat empty.
   let pendingHistory: { secret: Uint8Array; sealedBytes: Uint8Array } | null = null;
-  let pendingState: StateBundleV2 | null = null;
+  let pendingState: StateBundleV3 | null = null;
 
   return {
     qrPayload,
@@ -730,10 +737,18 @@ export async function prepareAnonymousJoinFlow(args: {
         // identities (the caller's next step), so the conversation identity
         // is minted under the account key the sending device's leaves use.
         await storeOwnPredecessors(pendingState, account.b64, deviceKey);
-        const applied = applyStateBundle(pendingState, account.b64);
+        const state = pendingState;
         pendingState = null;
+        const applied = applyStateBundle(state, account.b64);
+        // v3: group names, profiles, pending contacts. The names wait for the
+        // session stores of this account, which bind when the session lands.
+        const extras = await applyCarriedExtras(state, account.b64, await loadWasm());
         // eslint-disable-next-line no-console
-        console.info(`state bundle: ${applied.contacts} contacts, ${applied.pins} pins`);
+        console.info(
+          `state bundle: ${applied.contacts} contacts, ${applied.pins} pins, ` +
+            `${extras.groupNames} group names, ${extras.profiles} profiles, ` +
+            `${extras.pendingContacts} pending contacts`,
+        );
       }
     },
     dispose(): void {
@@ -802,6 +817,10 @@ export async function runScanFlow(args: {
   readonly accountIdBytes: Uint8Array;
   readonly accountIdB64: string;
   readonly deviceKey: DeviceCipher;
+  /** This account's own keys (standard base64: the account key, its
+   *  predecessor, this device's key). The state bundle never carries a
+   *  profile filed under one of them. */
+  readonly ownKeysB64?: readonly string[];
   /** ADR-0018 factor (a) — when present, the scanner also mints a
    *  device-authorization grant and publishes the sealed
    *  `grant ‖ phrase_entropy` recovery row (v2) after the Welcome, so
@@ -964,11 +983,17 @@ async function finishScan(
           err instanceof Error ? err.name : "unknown",
         );
       }
-      const bundle = buildStateBundle(
-        snapshot?.knownGroupIds ?? [],
-        args.accountIdB64,
-        ownPredecessors,
-      );
+      const knownGroupIds = snapshot?.knownGroupIds ?? [];
+      // v3: the names and pending contacts this device holds. Best-effort
+      // per part, inside `collectCarriedExtras`.
+      const extras = await collectCarriedExtras({
+        wasm,
+        accountIdB64: args.accountIdB64,
+        deviceKey: args.deviceKey,
+        knownGroupIdsB64: knownGroupIds,
+        ownKeysB64: args.ownKeysB64 ?? [],
+      });
+      const bundle = buildStateBundle(knownGroupIds, args.accountIdB64, ownPredecessors, extras);
       key = ensured.group.exportSecret(
         ensured.identity,
         STATE_EXPORTER_LABEL,

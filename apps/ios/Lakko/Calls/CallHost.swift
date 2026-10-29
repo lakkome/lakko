@@ -50,8 +50,9 @@ final class CallHost: ObservableObject {
     /// Everything the host needs from outside, injectable for tests.
     struct Ports {
         /// Publish call-signaling plaintext to a group's journal through the
-        /// serialized application-send path. `false` on failure.
-        var publish: @MainActor (_ groupIdHex: String, _ bytes: Data) async -> Bool
+        /// serialized application-send path. `false` on failure. `wake` is
+        /// the sender's ask for a call push wake (``CallSignalingWake``).
+        var publish: @MainActor (_ groupIdHex: String, _ bytes: Data, _ wake: Bool) async -> Bool
         /// The per-call SFrame seed + this device's leaf, from the group's MLS
         /// exporter. `nil` fails the call closed (invariant #4).
         var deriveCallKey: @MainActor (_ groupIdHex: String, _ callId: Data) -> (seed: Data, localLeaf: UInt32)?
@@ -177,6 +178,9 @@ final class CallHost: ObservableObject {
     private var seenRows: Set<String> = []
     /// Hex call ids of 1x1 calls that ended here. Such a call never rings again.
     private(set) var endedCallIds: Set<String> = []
+    /// When the last 1x1 call of each conversation ended here, for
+    /// ``suppressesCallWake(groupIdHex:)``.
+    private var wakeSuppression = CallWakeSuppression()
 
     /// The group (SFU) or call-link call occupying the app's one call slot, if
     /// any. Wired by the composition root (``CallSlotWiring``) to
@@ -245,6 +249,18 @@ final class CallHost: ObservableObject {
     /// ending, or a start past its tap.
     var occupiesSlot: Bool { hasLiveCall || callStarting }
 
+    /// Does a call push wake for `groupIdHex` ring nothing here? This device
+    /// is in a 1x1 call in that conversation (ringing, dialling, connecting,
+    /// connected, ending) or left one moments ago. Read synchronously by
+    /// ``VoipPushRegistrar`` at report time; see ``CallWakeSuppression``.
+    func suppressesCallWake(groupIdHex: String) -> Bool {
+        wakeSuppression.suppresses(
+            groupIdHex: groupIdHex,
+            activeGroupIdHex: activeGroupIdHex,
+            activeState: activeCall?.state,
+            nowMs: ports.nowMs())
+    }
+
     /// A 1x1 call occupies the slot (anything short of `.done`).
     var hasLiveCall: Bool {
         guard let call = activeCall else { return false }
@@ -302,7 +318,11 @@ final class CallHost: ObservableObject {
             // and a later offer row for the same call is answered busy again.
             let callId = CallSession.callId(of: row.body)
             if let bytes = try? composeCallSignaling(body: .end(callId: callId, reason: .busy)) {
-                enqueuePublish(groupIdHex: row.groupIdHex, bytes: bytes)
+                // The end of a call that never connected here, so it asks for
+                // a wake like a decline does.
+                enqueuePublish(
+                    groupIdHex: row.groupIdHex, bytes: bytes,
+                    wake: CallSignalingWake.sessionAsks(.end, everConnected: false))
             }
         case .silent, .ring:
             // `docs/ux/calls.md` section 2.1.1 — a muted conversation and an
@@ -492,6 +512,7 @@ final class CallHost: ObservableObject {
         callStarting = false
         seenRows.removeAll()
         endedCallIds.removeAll()
+        wakeSuppression.reset()
         callError = nil
     }
 
@@ -553,8 +574,8 @@ final class CallHost: ObservableObject {
         activeCallDirection = direction
         outgoingButton = button
         outgoingSurface = surface
-        let session = CallSession(callId: callId) { [weak self] bytes in
-            self?.enqueuePublish(groupIdHex: groupIdHex, bytes: bytes)
+        let session = CallSession(callId: callId) { [weak self] bytes, wake in
+            self?.enqueuePublish(groupIdHex: groupIdHex, bytes: bytes, wake: wake)
         }
         if let key = ports.deriveCallKey(groupIdHex, callId) {
             session.setCallKey(seed: key.seed, localLeaf: key.localLeaf)
@@ -678,6 +699,9 @@ final class CallHost: ObservableObject {
         case .done:
             cancelTimer()
             endedCallIds.insert(CallHostRouting.hex(session.callId))
+            if let groupIdHex = activeGroupIdHex {
+                wakeSuppression.noteEnded(groupIdHex: groupIdHex, atMs: ports.nowMs())
+            }
             recordFinishedCall(session)
             if !sessionWasPresented {
                 // Declined, timed out or ended remotely while ringing — nothing
@@ -736,12 +760,12 @@ final class CallHost: ObservableObject {
         }
     }
 
-    private func enqueuePublish(groupIdHex: String, bytes: Data) {
+    private func enqueuePublish(groupIdHex: String, bytes: Data, wake: Bool) {
         let previous = publishTail
         let publish = ports.publish
         publishTail = Task { @MainActor in
             await previous?.value
-            if await !publish(groupIdHex, bytes) {
+            if await !publish(groupIdHex, bytes, wake) {
                 NSLog("CallHost: call-signaling publish failed")
             }
         }
@@ -751,6 +775,27 @@ final class CallHost: ObservableObject {
 // MARK: - Production ports
 
 extension CallHost {
+    /// The production publish port. The session says whether this frame is
+    /// the dial or the end of a call that never connected; the bytes bound it
+    /// to an offer or an end. See ``CallSignalingWake``.
+    static func livePublish(
+        repository: ChatRepository
+    ) -> @MainActor (_ groupIdHex: String, _ bytes: Data, _ wake: Bool) async -> Bool {
+        { [weak repository] groupIdHex, bytes, wake in
+            guard let repository else { return false }
+            do {
+                try await repository.publishApplicationMessage(
+                    groupIdHex: groupIdHex,
+                    plaintextBytes: bytes,
+                    wake: CallSignalingWake.wakeKind(for: bytes, sessionAsks: wake))
+                return true
+            } catch {
+                NSLog("CallHost publish failed: %@", error.localizedDescription)
+                return false
+            }
+        }
+    }
+
     /// The composition root's ports over the live repository.
     ///
     /// `sessionTokenProvider` gates the TURN mint on a signed-in session: the
@@ -760,23 +805,7 @@ extension CallHost {
         sessionTokenProvider: @escaping @MainActor () -> String? = { nil }
     ) -> CallHost {
         CallHost(ports: Ports(
-            publish: { [weak repository] groupIdHex, bytes in
-                guard let repository else { return false }
-                do {
-                    // The wake is decided from the composed bytes rather than
-                    // passed in by the session, so there is no second place a
-                    // caller could get it wrong. Two of the seven bodies ask
-                    // for one; see ``CallSignalingWake``.
-                    try await repository.publishApplicationMessage(
-                        groupIdHex: groupIdHex,
-                        plaintextBytes: bytes,
-                        wake: CallSignalingWake.shouldWake(bytes) ? .call : nil)
-                    return true
-                } catch {
-                    NSLog("CallHost publish failed: %@", error.localizedDescription)
-                    return false
-                }
-            },
+            publish: livePublish(repository: repository),
             deriveCallKey: { [weak repository] groupIdHex, callId in
                 repository?.deriveCallKey(groupIdHex: groupIdHex, callId: callId)
             },

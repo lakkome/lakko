@@ -312,6 +312,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         DeviceCardCenter.shared.bind(accountIdB64: accountIdB64) { [weak self] envelope in
             await self?.sendServiceEnvelope(envelope)
         }
+        // A touch before the account bound was not noted: an account bound
+        // while the app is in front counts as the person's action once.
+        DeviceCardCenter.shared.noteForeground()
 
         let groupId: Data
         do {
@@ -1724,6 +1727,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         let envelopes = Self.handOverEnvelopes(
             accountIdB64: accountIdB64, reach: .shared, profiles: .shared)
             + [DeviceCardCenter.shared.ownEnvelope()].compactMap { $0 }
+        if DeviceCardCenter.shared.ownEnvelope() != nil {
+            NSLog("device card: own card queued to send to a newly added device")
+        }
         Task { @MainActor [weak self] in
             for envelope in envelopes {
                 await self?.sendServiceEnvelope(envelope)
@@ -1878,7 +1884,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     func receiveDeviceCard(_ envelope: Data, senderLeaf: UInt32?, group g: DeviceGroup) -> Bool {
         guard let card = try? decodeDeviceCardEnvelope(plaintext: envelope) else { return false }
         guard let senderLeaf, let roster = try? g.devices(),
-              let sender = roster.first(where: { $0.leafIndex == senderLeaf }) else { return true }
+              let sender = roster.first(where: { $0.leafIndex == senderLeaf }) else {
+            NSLog("device card: received a card from no device of the roster and refused it")
+            return true
+        }
         DeviceCardCenter.shared.receive(
             senderKeyHex: hexEncode(sender.signaturePublicKey),
             card: DeviceCardCenter.stored(card),

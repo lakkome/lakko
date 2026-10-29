@@ -17,8 +17,7 @@ import java.util.concurrent.Executors
  *
  *   * the composer's record mode, mic or camera (UX spec §1, "remembered per
  *     device");
- *   * "Autoplay video notes", default OFF (§3 — autoplay downloads media);
- *   * the GIF privacy note's "Got it" (§5, "remembered per device").
+ *   * "Autoplay video notes", default OFF (§3 — autoplay downloads media).
  *
  * The emoji Recent row and the per-emoji skin-tone defaults (§4) are account
  * data (maintainer decision, 2026-10-01): they live in the same preferences
@@ -55,12 +54,6 @@ public class MediaPrefs internal constructor(context: Context) {
         get() = prefs.getBoolean(KEY_AUTOPLAY, false)
         set(value) {
             prefs.edit().putBoolean(KEY_AUTOPLAY, value).apply()
-        }
-
-    public var gifNoteDismissed: Boolean
-        get() = prefs.getBoolean(KEY_GIF_NOTE, false)
-        set(value) {
-            prefs.edit().putBoolean(KEY_GIF_NOTE, value).apply()
         }
 
     /** The signed-in account's Recent row; empty with no account bound, and
@@ -173,7 +166,6 @@ public class MediaPrefs internal constructor(context: Context) {
         }
         private const val KEY_MODE = "composer.recordMode"
         private const val KEY_AUTOPLAY = "media.autoplayVideoNotes"
-        private const val KEY_GIF_NOTE = "gif.privacyNoteDismissed"
         /** The device-wide rows of builds before 2026-10-01, never read. */
         private const val RETIRED_KEY_RECENT = "emoji.recent"
         private const val RETIRED_KEY_TONES = "emoji.tones"

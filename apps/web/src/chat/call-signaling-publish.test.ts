@@ -50,7 +50,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ChatClient } from "./client";
-import { makeCallSignalingPublisher } from "./call-signaling-publish";
+import {
+  makeCallSignalingPublisher,
+  makeGroupCallControlPublisher,
+} from "./call-signaling-publish";
+import type { CallSignalingWake } from "../calls/call-signaling-wake";
 import { withGroupMlsLock } from "../mls/group-lock";
 import { base64Encode } from "../auth/account-id";
 import type { DsClient, DsGroupPublishOptions } from "../ds/client";
@@ -224,7 +228,7 @@ describe("call signaling publishes through the locked, persisting seam", () => {
     });
 
     await settle();
-    const signaling = publish(new Uint8Array([1, 2, 3]));
+    const signaling = publish(new Uint8Array([1, 2, 3]), "none");
     await settle();
 
     verdictGate.resolve();
@@ -262,7 +266,7 @@ describe("call signaling publishes through the locked, persisting seam", () => {
       onError: () => {},
     });
 
-    await within(1000, publish(new Uint8Array([1])), "signaling publish");
+    await within(1000, publish(new Uint8Array([1]), "none"), "signaling publish");
 
     expect(order).toEqual(["persist", "publish"]);
   });
@@ -290,7 +294,7 @@ describe("call signaling publishes through the locked, persisting seam", () => {
       onError: (err) => errors.push(err),
     });
 
-    await within(1000, publish(new Uint8Array([1])), "signaling publish");
+    await within(1000, publish(new Uint8Array([1]), "none"), "signaling publish");
 
     expect(journal.length).toBe(0);
     expect(errors.length).toBe(1);
@@ -318,7 +322,7 @@ describe("call signaling publishes through the locked, persisting seam", () => {
       onError: () => {},
     });
 
-    await within(1000, publish(new Uint8Array([1])), "signaling publish");
+    await within(1000, publish(new Uint8Array([1]), "none"), "signaling publish");
     expect(journal.length).toBe(1);
 
     // The DS hands the sender its own row back.
@@ -344,13 +348,15 @@ describe("call signaling publishes through the locked, persisting seam", () => {
  * the group's `push_gid`, and that a failure to resolve the id cannot reach
  * the caller.
  */
-describe("a call offer and a call end wake the group; nothing else does", () => {
+describe("the dial offer and an unanswered call's end wake the group; nothing else does", () => {
   /** Leading `CallSignalingPayload.body` oneof tags. */
   const OFFER = new Uint8Array([0x52, 0x00]);
   const ANSWER = new Uint8Array([0x5a, 0x00]);
   const CANDIDATE = new Uint8Array([0x62, 0x00]);
   const END = new Uint8Array([0x6a, 0x00]);
   const GROUP_START = new Uint8Array([0x72, 0x00]);
+  const GROUP_JOIN = new Uint8Array([0x7a, 0x00]);
+  const GROUP_LEAVE = new Uint8Array([0x82, 0x01, 0x00]);
   const SEALED = (kind: string): string => (kind === "call" ? "c" : "m").repeat(312);
 
   async function publishOne(
@@ -360,6 +366,7 @@ describe("a call offer and a call end wake the group; nothing else does", () => 
       kind,
     ) => SEALED(kind),
     errors: unknown[] = [],
+    asked: CallSignalingWake = "call",
   ): Promise<ReturnType<typeof journalDs>> {
     const g = stampingGroup(freshGid(), 5);
     const recorded = journalDs();
@@ -373,7 +380,7 @@ describe("a call offer and a call end wake the group; nothing else does", () => 
       group: () => g.group,
       onError: (err) => errors.push(err),
     });
-    await within(1000, publish(frame), "signaling publish");
+    await within(1000, publish(frame, asked), "signaling publish");
     return recorded;
   }
 
@@ -389,12 +396,51 @@ describe("a call offer and a call end wake the group; nothing else does", () => 
     expect(wakes[0]?.headerValue).toBe(SEALED("call"));
   });
 
-  it("stays silent for answer, candidate and group control", async () => {
+  it("stays silent for an offer or an end the session did not ask a wake for", async () => {
+    // A mid-call renegotiation offer and the End of a connected call: their
+    // tags match the dial and the cancel, and a wake on them rang the peer's
+    // iPhone as an incoming call.
+    for (const frame of [OFFER, END]) {
+      const resolver = vi.fn(async () => SEALED("call"));
+      const { journal, wakes } = await publishOne(frame, resolver, [], "none");
+      expect(journal.length).toBe(1);
+      expect(wakes).toEqual([null]);
+      expect(resolver).not.toHaveBeenCalled();
+    }
+  });
+
+  it("stays silent for answer, candidate and group control even when asked", async () => {
     for (const frame of [ANSWER, CANDIDATE, GROUP_START]) {
       const resolver = vi.fn(async () => SEALED("call"));
       const { wakes } = await publishOne(frame, resolver);
       expect(wakes).toEqual([null]);
       expect(resolver).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a group-call end publishes with no wake; so does every group-control frame", async () => {
+    // A group call never rings a closed device, so a group End stops no ring;
+    // its wake reached iPhones as a VoIP push and showed a phantom call.
+    for (const frame of [END, GROUP_START, GROUP_JOIN, GROUP_LEAVE]) {
+      const g = stampingGroup(freshGid(), 5);
+      const recorded = journalDs();
+      const resolver = vi.fn(async () => SEALED("call"));
+      const chat = new ChatClient(recorded.ds, {
+        identityProvider: () => IDENTITY_TOKEN,
+        wakeSealer: resolver,
+      });
+      const errors: unknown[] = [];
+      const publish = makeGroupCallControlPublisher({
+        chat,
+        identity: () => null,
+        group: () => g.group,
+        onError: (err) => errors.push(err),
+      });
+      await within(1000, publish(frame), "group control publish");
+      expect(recorded.journal.length).toBe(1);
+      expect(recorded.wakes).toEqual([null]);
+      expect(resolver).not.toHaveBeenCalled();
+      expect(errors).toEqual([]);
     }
   });
 

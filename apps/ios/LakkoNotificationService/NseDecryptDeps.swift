@@ -127,6 +127,21 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
         return held(received)
     }
 
+    /// The DS message ids of the group the app's message log holds, sent or
+    /// received; what tells this device's own message coming back from one
+    /// it cannot read. READ-ONLY: the log the app wrote (C-59).
+    func heldMessageIds(accountIdB64: String, groupIdHex: String) -> Set<Int64> {
+        guard let messages = messageLog.getLog(accountIdB64: accountIdB64)?
+            .groups[groupIdHex.lowercased()]?.messages else { return [] }
+        return Set(messages.lazy.map(\.messageId).filter { $0 > 0 })
+    }
+
+    /// This account's own person key, from the App Group mirror the APP
+    /// writes (``ContinuityMirror``). READ-ONLY.
+    func ownPersonKeyB64(accountIdB64: String) -> String? {
+        ContinuityMirror.read(accountIdB64: accountIdB64).ownPersonKeyB64
+    }
+
     func loadIdentitySeed(accountIdB64: String) -> Data? {
         // ADR-0050 — the app's MLS snapshot is taken under this device's
         // DEVICE identity (the conversation leaf), so that seed rebuilds the
@@ -270,16 +285,13 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         return signer.sign(method: method, path: path, query: query, body: body)
     }
 
-    func process(_ payload: Data) -> NseProcessedRow? {
+    func process(_ payload: Data) throws -> NseProcessedRow? {
         // ADR-0022 — the same role-verifying receive path the live poll loop
         // uses. A bad frame / wrong epoch / own echo / role-refused commit
-        // throws and is dropped (fail-closed, invariant #4).
-        let processed: ProcessedMessage
-        do {
-            processed = try group.processIncomingVerifyingRoles(identity: identity, bytes: payload)
-        } catch {
-            return nil
-        }
+        // throws, and the throw reaches the caller's loop, which drops the
+        // row (fail-closed, invariant #4) and tells this device's own message
+        // apart from one it cannot read.
+        let processed = try group.processIncomingVerifyingRoles(identity: identity, bytes: payload)
         // Only Application messages carry a user-visible preview. A Commit /
         // Proposal / ExternalJoinProposal advances state (in the THROWAWAY
         // provider only) but has no body to show.

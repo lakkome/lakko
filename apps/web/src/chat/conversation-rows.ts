@@ -104,7 +104,7 @@ export function createConversationRows() {
       contactNameById: accepted().find((c) => c.groupIdB64 === g.groupIdB64)?.displayName,
       contactNameByMember: peerContactByMemberPubkeys(memberB64s, ownB64, accepted(), aliases())
         ?.displayName,
-      nameOf: (k) => profiles.resolve(k).name,
+      nameOf: (k) => memberNameOf(profiles.resolve(k)),
       groupTitle,
     });
   };

@@ -212,23 +212,31 @@ class SilentWakeTest {
 
     @Test
     fun `a marker is believed only against the held row - another author, another conversation, a later segment`() = runTest {
+        // Seen from the peer's device: the re-sender is the peer, whose
+        // original this device received. (A re-send from this device's own
+        // account is never a notification at all.)
+        val heldFromPeer = mapOf((oldHex to 42L) to HeldRow(HeldRowDirection.INCOMING, peer))
         // The held row is someone else's: the sender did not write it.
-        val foreign = mapOf((oldHex to 42L) to HeldRow(HeldRowDirection.INCOMING, peer))
+        val foreign = mapOf((oldHex to 42L) to HeldRow(HeldRowDirection.INCOMING, "key-third"))
         assertEquals(
             "x",
-            wake(deps(oneToOne(peer), listOf(chat("x", me, marker)), lineage = lineage, held = foreign), newHex).preview?.body,
+            wake(deps(oneToOne(peer), listOf(chat("x", peer, marker)), lineage = lineage, held = foreign), newHex).preview?.body,
         )
         // No lineage: the named group is another conversation.
         assertEquals(
             "x",
-            wake(deps(oneToOne(peer), listOf(chat("x", me, marker)), held = heldOwn), newHex).preview?.body,
+            wake(deps(oneToOne(peer), listOf(chat("x", peer, marker)), held = heldFromPeer), newHex).preview?.body,
         )
         // The marker names the receiving group itself.
         val self = ResendOrigin(groupB64OfHex(newHex), 42)
-        val heldHere = mapOf((newHex to 42L) to HeldRow(HeldRowDirection.OUTGOING, null))
+        val heldHere = mapOf((newHex to 42L) to HeldRow(HeldRowDirection.INCOMING, peer))
         assertEquals(
             "x",
-            wake(deps(oneToOne(peer), listOf(chat("x", me, self)), lineage = lineage, held = heldHere), newHex).preview?.body,
+            wake(deps(oneToOne(peer), listOf(chat("x", peer, self)), lineage = lineage, held = heldHere), newHex).preview?.body,
+        )
+        // And the same row against the held original IS a re-send.
+        assertNull(
+            wake(deps(oneToOne(peer), listOf(chat("x", peer, marker)), lineage = lineage, held = heldFromPeer), newHex).preview,
         )
     }
 

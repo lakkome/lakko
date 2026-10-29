@@ -38,12 +38,12 @@ import java.util.Base64
  * repository and every screen must agree on the same names.
  */
 public class ProfileDirectory internal constructor(
-    persistence: ProfilePersistence,
+    private val persistence: ProfilePersistence,
     private val scope: CoroutineScope,
     /** Where the retired device-wide rows live, removed on forget; `null`
      *  in host tests. */
     private val persistenceContext: Context? = null,
-    isNewer: (ULong, ULong) -> Boolean =
+    private val isNewer: (ULong, ULong) -> Boolean =
         { incoming, stored -> uniffi.lakko_ffi_uniffi.profileIsNewer(incoming, stored) },
     passesRule: ((String) -> Boolean)? = null,
     initialRenames: Map<String, String> = emptyMap(),
@@ -146,6 +146,26 @@ public class ProfileDirectory internal constructor(
             val key = signatureKeyB64 ?: return offer
             profile.username?.let { verifyInBackground(key, it) }
         }
+        return offer
+    }
+
+    /**
+     * ADR-0050 section 2.9 (state bundle v3) — store a profile a pairing
+     * bundle carried for [accountIdB64], under the same strictly-newer rule
+     * as a received one. When that account is the one signed in it goes
+     * through [onProfileReceived] (so screens re-read and the username is
+     * verified); otherwise it is filed in that account's rows directly, which
+     * the live store reads when the account binds.
+     */
+    public fun offerForAccount(accountIdB64: String, signatureKeyB64: String, profile: PeerProfile): ProfileOffer {
+        val account = me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+        val bound = persistence.currentAccount()?.let { me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(it) }
+        if (bound == account) return onProfileReceived(signatureKeyB64, profile)
+        val fixed = object : ProfilePersistence by persistence {
+            override fun currentAccount(): String = account
+        }
+        val offer = PeerProfileStore(fixed, isNewer).offer(signatureKeyB64, profile)
+        if (offer == ProfileOffer.STORED) bump()
         return offer
     }
 

@@ -35,6 +35,8 @@ import { newWordsShown } from "../auth/protect/account-protection";
 import { phraseProtectedHere } from "../auth/protect/protection-state";
 import { AuthClient } from "../auth/client";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
+import { useChats } from "../chat/ChatContext";
+import { ownKeysB64Of } from "../profile/own-key";
 import { deviceIdB64Url } from "../auth/session-device";
 import { useDeviceRemoval } from "../devices/removal-runtime";
 import { removalRowState } from "../devices/removal";
@@ -1227,6 +1229,8 @@ function ScanView(props: {
   const auth = useAuth();
   // ADR-0050 section 2.8 — the admission fan-out over every chat.
   const receive = useBackgroundReceive();
+  // The state bundle never carries this account's own profile.
+  const chats = useChats();
   type State =
     | { kind: "idle" }
     | { kind: "opening" }
@@ -1330,6 +1334,9 @@ function ScanView(props: {
         accountIdBytes: props.accountIdBytes,
         accountIdB64: props.accountIdB64,
         deviceKey,
+        ownKeysB64: ownKeysB64Of(chats.identity(), [
+          chats.conversationAccountIdentity()?.signaturePublicKey,
+        ]),
         ...(recovery !== undefined ? { recovery } : {}),
       });
       // ADR-0050 section 2.8 — admit the new device to every chat. Not

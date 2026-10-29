@@ -45,6 +45,7 @@ import { conversationTitle } from "../chat/conversation-title";
 import { groupTitle } from "../chat/group-title";
 import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { useGroupNames } from "../chat/GroupNameContext";
+import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
@@ -84,7 +85,7 @@ export default function Calls(): JSX.Element {
       sharedName: groupNames.nameOf(groupIdB64),
       contactNameById: undefined,
       contactNameByMember: undefined,
-      nameOf: (k) => profiles.resolve(k).name,
+      nameOf: (k) => memberNameOf(profiles.resolve(k)),
       groupTitle,
     });
   };

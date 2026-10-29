@@ -58,6 +58,11 @@ final class VoipPushRegistrar: NSObject {
     /// (``decide(_:binding:routes:defaults:)``). A refused wake fetches nothing.
     var onWake: ((VoipWakeTarget) -> Void)?
 
+    /// Is this device already in (or just out of) a 1x1 call in the given
+    /// conversation (real group id hex)? Set by the composition root to
+    /// ``CallHost/suppressesCallWake(groupIdHex:)``; unset reads as "no".
+    var callWakeSuppressed: (@MainActor (String) -> Bool)?
+
     /// The bound account (ADR-0042, amended 2026-09-30, with ADR-0078) every
     /// wake is checked against.
     private let bindingStore: PushAccountBindingStore
@@ -67,6 +72,10 @@ final class VoipPushRegistrar: NSObject {
     private let tokens: VoipTokenRegistration
     private var pushRegistry: PKPushRegistry?
     private var placeholderTimeout: Task<Void, Never>?
+    /// The ringing placeholder, with the row its wake pointed at, so the poll
+    /// that fetches that row can end it when the row is not a call here
+    /// (``wakeFetched(groupIdHex:appliedThrough:)``).
+    private var pendingWake: PendingVoipWake?
 
     /// `registry` is `nil`-defaulted rather than `= .shared` because a default
     /// argument is evaluated in a NON-isolated context, and the registry is
@@ -152,7 +161,9 @@ final class VoipPushRegistrar: NSObject {
     /// record and no name to show.
     private func handleIncoming(payload: [AnyHashable: Any], completion: @escaping () -> Void) {
         let wake = VoipWakePayload.parse(payload)
-        let decision = Self.decide(wake, binding: bindingStore.current())
+        let decision = Self.decide(
+            wake, binding: bindingStore.current(),
+            callWakeSuppressed: callWakeSuppressed ?? { _ in false })
         let endAtOnce: Bool
         switch decision {
         case .refuse:
@@ -170,6 +181,11 @@ final class VoipPushRegistrar: NSObject {
             provider.reportEnded(uuid: superseded, reason: .unanswered)
         }
         armPlaceholderTimeout(uuid: uuid)
+        if case .ring(let target?) = decision, let pointer = wake.pointer {
+            pendingWake = PendingVoipWake(uuid: uuid, groupIdHex: target.groupIdHex, pointer: pointer)
+        } else {
+            pendingWake = nil
+        }
         provider.reportIncomingCall(uuid: uuid, update: IncomingCallReport.placeholder()) {
             [weak self] error in
             if let error {
@@ -235,11 +251,18 @@ final class VoipPushRegistrar: NSObject {
     /// can be read; a wake with no `g` cannot pass it. `defaults` is the App
     /// Group suite the mute mirror lives in, a parameter only so a test can
     /// supply its own.
+    ///
+    /// A wake for a conversation this device is already in a 1x1 call in, or
+    /// has just left one in (`callWakeSuppressed`, ``CallWakeSuppression``),
+    /// is ``VoipWakeDecision/silent(_:)`` like a muted one: it is this
+    /// device's own echo, a renegotiation, or the end of the call on screen,
+    /// never a new call. Still fetched, so the row reaches the call.
     static func decide(
         _ wake: VoipWakePayload,
         binding: PushAccountBinding?,
         routes: PushRoutingStore = PushRoutingStore(),
-        defaults: UserDefaults? = SharedStorage.sharedDefaults()
+        defaults: UserDefaults? = SharedStorage.sharedDefaults(),
+        callWakeSuppressed: @MainActor (String) -> Bool = { _ in false }
     ) -> VoipWakeDecision {
         guard let accountIdB64 = PushAccountBinding.boundAccount(
             wakeSubscriptionIdHex: wake.subscriptionIdHex, binding: binding),
@@ -251,11 +274,54 @@ final class VoipPushRegistrar: NSObject {
             return .refuse
         }
         let target = VoipWakeTarget(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        if callWakeSuppressed(groupIdHex) {
+            log.info("voip wake for a call already on this device: ending the placeholder")
+            return .silent(target)
+        }
         let muted = ConversationMuteMirror.isMuted(
             accountIdB64: accountIdB64, groupIdHex: groupIdHex, defaults: defaults)
         return LakkoCore.ringDecision(muted: muted, offerAgeMs: 0) == .silent
             ? .silent(target)
             : .ring(target)
+    }
+
+    /// The poll a wake started has applied `groupIdHex` through
+    /// `appliedThrough` (its journal cursor; `nil` when the group is not
+    /// loaded). Ends the ringing placeholder at once when that covers the row
+    /// the wake pointed at and no call took the placeholder over.
+    func wakeFetched(groupIdHex: String, appliedThrough: Int64?) {
+        guard let uuid = Self.placeholderToEnd(
+            pending: pendingWake, groupIdHex: groupIdHex, appliedThrough: appliedThrough,
+            pendingPlaceholder: registry.pendingPlaceholder) else { return }
+        Self.log.info("voip wake row is not a call here: ending the placeholder")
+        pendingWake = nil
+        placeholderTimeout?.cancel()
+        registry.releasePlaceholder()
+        provider.reportEnded(uuid: uuid, reason: .unanswered)
+    }
+
+    /// Which placeholder, if any, a fetched wake row ends.
+    ///
+    /// A call row that rings here is adopted by ``CallKitCallRegistry``
+    /// synchronously as it is applied, which clears the pending placeholder.
+    /// So a placeholder still pending once the journal is applied past the
+    /// wake's row belongs to a row that rang nothing: this account's own offer
+    /// from its other device, an end for a call this device does not know, a
+    /// group-call frame, a stale offer. Without this it rang until the
+    /// 45-second placeholder timeout. `nil` when the row is not reached yet,
+    /// the wake is for another conversation, or the placeholder is no longer
+    /// the pending one (adopted, or superseded by a later wake).
+    static func placeholderToEnd(
+        pending: PendingVoipWake?,
+        groupIdHex: String,
+        appliedThrough: Int64?,
+        pendingPlaceholder: UUID?
+    ) -> UUID? {
+        guard let pending, let appliedThrough,
+              pending.groupIdHex.lowercased() == groupIdHex.lowercased(),
+              appliedThrough >= pending.pointer,
+              pendingPlaceholder == pending.uuid else { return nil }
+        return pending.uuid
     }
 
     private func armPlaceholderTimeout(uuid: UUID) {
@@ -346,6 +412,15 @@ struct VoipWakeTarget: Equatable {
     let groupIdHex: String
 }
 
+/// A ringing placeholder and the journal row its wake pointed at.
+struct PendingVoipWake: Equatable {
+    let uuid: UUID
+    /// The real group id the wake resolved to.
+    let groupIdHex: String
+    /// The DS message id of the row that carried the wake.
+    let pointer: Int64
+}
+
 /// What ``VoipPushRegistrar`` does with a VoIP wake. Every case reports a call
 /// to CallKit first — Apple's rule — and differs in what follows.
 enum VoipWakeDecision: Equatable {
@@ -355,8 +430,9 @@ enum VoipWakeDecision: Equatable {
     case refuse
     /// Ring, and fetch the offer. `nil` when the wake names no conversation.
     case ring(VoipWakeTarget?)
-    /// The conversation is muted: ended at once, but still fetched, so the
-    /// call is recorded.
+    /// The conversation is muted, or this device is already in (or just out
+    /// of) a 1x1 call in it: ended at once, but still fetched, so the call is
+    /// recorded and the row reaches the call it belongs to.
     case silent(VoipWakeTarget)
 }
 

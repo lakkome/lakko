@@ -135,4 +135,88 @@ final class DeviceCardsTests: XCTestCase {
         center.bind(accountIdB64: "other") { _ in }
         XCTAssertNil(center.own)
     }
+
+    // MARK: - Cold launch and the background growth re-send
+
+    private func freshCenter() throws -> (DeviceCardCenter, UserDefaults, String) {
+        let suite = "lakko.tests.device-cards.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let center = DeviceCardCenter(defaults: defaults)
+        center.antiCensorshipArmed = { false }
+        center.locate = { ("Almere", "NL") }
+        return (center, defaults, suite)
+    }
+
+    /// On a cold launch no touch is noted before the account binds: the first
+    /// foreground of the binding is the action, once.
+    func testTheFirstForegroundAfterAColdLaunchNotesAnAction() async throws {
+        let (center, defaults, suite) = try freshCenter()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        center.isForeground = { true }
+        var sent = 0
+
+        center.noteForeground(nowMs: now)
+        XCTAssertNil(center.own, "nothing before the account binds")
+
+        center.bind(accountIdB64: "acct") { _ in sent += 1 }
+        XCTAssertNil(center.own, "binding alone sends nothing")
+        center.noteForeground(nowMs: now)
+        for _ in 0..<100 where sent == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertNotNil(center.own)
+        XCTAssertEqual(sent, 1)
+
+        center.noteForeground(nowMs: now + 60 * 60 * 1000)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(sent, 1, "only the first foreground of a binding counts")
+        center.unbind()
+    }
+
+    func testABackgroundGrowthReSendIsSentAtTheNextForeground() async throws {
+        let (center, defaults, suite) = try freshCenter()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var foreground = true
+        center.isForeground = { foreground }
+        var sent = 0
+        center.bind(accountIdB64: "acct") { _ in sent += 1 }
+        center.noteForeground(nowMs: now)
+        for _ in 0..<100 where sent == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(sent, 1)
+
+        foreground = false
+        center.scheduleResend(random: 0)
+        for _ in 0..<100 where !center.resendOwed { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(center.resendOwed)
+        XCTAssertEqual(sent, 1, "nothing is sent from the background")
+        XCTAssertTrue(defaults.bool(forKey: DeviceCards.resendOwedKey(accountIdB64: "acct")), "kept across a relaunch")
+
+        center.noteForeground()
+        XCTAssertEqual(sent, 1, "still in the background")
+
+        foreground = true
+        center.noteForeground()
+        for _ in 0..<100 where sent == 1 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(sent, 2)
+        XCTAssertFalse(center.resendOwed)
+        XCTAssertFalse(defaults.bool(forKey: DeviceCards.resendOwedKey(accountIdB64: "acct")))
+
+        center.noteForeground()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(sent, 2, "sent once")
+        center.unbind()
+    }
+
+    func testAGrowthReSendInTheForegroundIsSentAtOnceAndOwesNothing() async throws {
+        let (center, defaults, suite) = try freshCenter()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        center.isForeground = { true }
+        var sent = 0
+        center.bind(accountIdB64: "acct") { _ in sent += 1 }
+        center.noteForeground(nowMs: now)
+        for _ in 0..<100 where sent == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+        center.scheduleResend(random: 0)
+        for _ in 0..<100 where sent == 1 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(sent, 2)
+        XCTAssertFalse(center.resendOwed)
+        center.unbind()
+    }
 }

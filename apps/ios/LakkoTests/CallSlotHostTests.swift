@@ -769,6 +769,31 @@ final class GroupCallHostTests: XCTestCase {
         XCTAssertNil(host.presentation)
     }
 
+    /// The VoIP report reads this: a call wake for the conversation of the
+    /// group call this device is in, or left moments ago, rings nothing (older
+    /// senders woke for group-call ends). Another conversation, and the same
+    /// one after the window, decide nothing here.
+    func testACallWakeForTheGroupCallOnThisDeviceIsSuppressed() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        XCTAssertFalse(host.suppressesCallWake(groupIdHex: group))
+        let handle = try await startLiveCall(host, h)
+        XCTAssertTrue(host.suppressesCallWake(groupIdHex: group))
+        XCTAssertTrue(host.suppressesCallWake(groupIdHex: group.uppercased()))
+        XCTAssertFalse(host.suppressesCallWake(groupIdHex: otherGroup))
+
+        try XCTUnwrap(host.presentation).endCall()
+        try await waitUntil { handle.hangUps == 1 }
+        XCTAssertNil(host.activeCall)
+        XCTAssertTrue(host.suppressesCallWake(groupIdHex: group), "the end that raced the poll")
+
+        h.nowMs = t0 + CallWakeSuppression.recentEndWindowMs
+        XCTAssertFalse(host.suppressesCallWake(groupIdHex: group))
+        h.nowMs = t0
+        host.reset()
+        XCTAssertFalse(host.suppressesCallWake(groupIdHex: group))
+    }
+
     /// The participant heartbeat: every interval the live call re-publishes its
     /// own Join and advances its own last-seen time; hanging up stops it.
     func testTheLiveCallHeartbeatsItsJoinUntilItEnds() async throws {
@@ -1642,7 +1667,7 @@ final class CallSlotWiringTests: XCTestCase {
     private func makeOneToOne(_ published: Published) -> CallHost {
         let now = t0
         return CallHost(ports: CallHost.Ports(
-            publish: { _, bytes in
+            publish: { _, bytes, _ in
                 if case .end(_, let reason)? = try? parseCallSignaling(plaintext: bytes) {
                     published.ends.append(reason)
                 }

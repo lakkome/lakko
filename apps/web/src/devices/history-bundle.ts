@@ -53,6 +53,22 @@ import {
   type PersistedMessage,
 } from "../chat/message-log-store";
 
+/**
+ * A bookkeeping system row: what a receive loop files for an MLS commit or
+ * an external-join request (`[mls commit]`, `[mls external-join-proposal]`
+ * on web, `[mls external join]` on iOS and Android: `[mls <kind>]` on every
+ * client). A history bundle neither carries nor applies them: the sending
+ * device never shows them as what they were (iOS and Android hide them, and
+ * web cannot tell a commit that changed people from one that only admitted
+ * or retired a device), and a joiner restores every such row as `Members
+ * changed`. A join request that is still waiting is shown from the group's
+ * own pending set, not from a row, so dropping it loses nothing. Call rows
+ * are system rows too and are not these. Pure.
+ */
+export function isBookkeepingSystemRow(m: Pick<PersistedMessage, "direction" | "text">): boolean {
+  return m.direction === "system" && m.text.startsWith("[mls ") && m.text.endsWith("]");
+}
+
 /** Hard cap on the total `HistoryMessage` count across every
  *  group in a single bundle. Must match
  *  `lakko_mls::history_bundle::MAX_BUNDLE_MESSAGES`. */
@@ -104,8 +120,9 @@ export async function buildHistoryBundleFromLog(args: {
     if (slot === undefined) continue;
     const groupIdBytes = hexToBytes(hex);
     if (groupIdBytes === null) continue;
-    const trimmed = slot.messages.slice(-perGroupCap);
-    const capped = trimmed.length < slot.messages.length;
+    const carried = slot.messages.filter((m) => !isBookkeepingSystemRow(m));
+    const trimmed = carried.slice(-perGroupCap);
+    const capped = trimmed.length < carried.length;
     const messages: HistoryMessageInput[] = [];
     for (const m of trimmed) {
       // G-6 step 2: `payload_bytes` is now the canonical
@@ -186,6 +203,8 @@ export async function applyHistoryBundleToLog(args: {
       const msg = m as OpenedHistoryMessage;
       const decoded = decodeMessagePlaceholder(wasm, msg);
       if (decoded === null) continue;
+      // A sender older than this rule (or another client) may carry them.
+      if (isBookkeepingSystemRow(decoded)) continue;
       if (existingIds.has(decoded.messageId)) continue;
       merged.push(decoded);
       existingIds.add(decoded.messageId);

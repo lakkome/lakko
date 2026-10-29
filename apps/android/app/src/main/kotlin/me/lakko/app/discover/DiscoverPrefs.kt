@@ -165,8 +165,6 @@ public object DiscoverCopy {
     public val PICK_TITLE: UiText = UiText("discover.pick.title")
     public val PICK_BODY: UiText = UiText("discover.pick.body")
     public val MIX_LABEL: UiText = UiText("discover.mix.label")
-    public val MIX_OFF_LINE: UiText = UiText("discover.mix.off_line")
-    public val SEARCH_HELPER: UiText = UiText("discover.search.helper")
     public val UNAVAILABLE: UiText = UiText("discover.unavailable")
     public val NO_RESULTS: UiText = UiText("discover.search.no_results")
     public val GONE: UiText = UiText("discover.gone")

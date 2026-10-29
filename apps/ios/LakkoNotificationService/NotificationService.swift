@@ -99,6 +99,10 @@ public final class NotificationService: UNNotificationServiceExtension {
         // server's generic placeholder: in the interface language, not the
         // server's English (ADR-0061).
         best.body = nseGenericBody(best.body)
+        // Marked generic until a decrypted preview replaces the line.
+        var genericInfo = best.userInfo
+        genericInfo[LakkoGenericNotification.userInfoKey] = true
+        best.userInfo = genericInfo
 
         // Grouping FIRST — retained regardless of the decrypt outcome so
         // per-conversation stacking works even under memory pressure or on a
@@ -148,6 +152,9 @@ public final class NotificationService: UNNotificationServiceExtension {
             switch outcome {
             case .preview(let preview):
                 best.body = preview.body
+                var info = best.userInfo
+                info.removeValue(forKey: LakkoGenericNotification.userInfoKey)
+                best.userInfo = info
                 // ADR-0073 R.5 — the wake is grouped by its routing id, which
                 // is per GROUP; a group that continues a conversation is
                 // grouped under the conversation instead (the tag differs

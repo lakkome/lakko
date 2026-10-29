@@ -295,9 +295,11 @@ public enum NsePushOutcome: Equatable {
     case callSilent(NseCallAlert)
     /// A call this device may be showing an alert for is over.
     case callEnded(callIdHex: String)
-    /// ADR-0073 R.8 / R.7 — every row this wake brought is one the APP shows
-    /// nothing for: a row from a key an accepted reset retired, or a re-send
-    /// of a message this device already holds. The extension must still
+    /// The read ran and found nothing to post: every row this wake brought
+    /// is this device's own message coming back, a message from another
+    /// device of the same person, or a row the APP shows nothing for
+    /// (service traffic, a row from a key an accepted reset retired, a
+    /// re-send of a message this device already holds). The extension must still
     /// deliver something (it cannot post nothing), so it delivers the
     /// quietest thing it can: passive and silent, in the conversation's
     /// stack (``tag``).
@@ -333,10 +335,15 @@ public struct NsePushPreview: Equatable {
 /// persist / snapshot them back (read-only-throwaway discipline).
 public protocol NseThrowawayGroup: AnyObject {
     /// Process ONE wire row through the throwaway group. Returns the decoded
-    /// row, or `nil` when the frame does not decrypt / authenticate, is our
-    /// own echo, or is a control frame (fail-closed skip — never a plaintext
-    /// guess). MUST NOT persist any MLS state.
-    func process(_ payload: Data) -> NseProcessedRow?
+    /// row, or `nil` when the frame was processed but carries nothing a
+    /// notification could show (a commit, a proposal, a service envelope).
+    /// THROWS when the frame does not decrypt / authenticate — a wrong epoch,
+    /// a role-refused commit, or this device's own message coming back (a
+    /// sender cannot open its own message). The two are kept apart because
+    /// the caller decides between "post nothing" and the generic banner on
+    /// exactly that difference. Either way the row is skipped, never guessed
+    /// at. MUST NOT persist any MLS state.
+    func process(_ payload: Data) throws -> NseProcessedRow?
 
     /// ADR-0053 client contract point 9 — the `x-lakko-ds-proof` header for
     /// one read of this group's journal, signed with the access key the
@@ -453,6 +460,21 @@ public protocol NsePushDecryptDeps {
         accountIdB64: String, receivedGroupIdHex: String,
         origin: NseResendOrigin, senderKeyB64: String?
     ) -> Bool
+
+    /// The DS message ids of `groupIdHex` the app's message log holds, sent
+    /// or received. A row that does not decrypt but is held here is this
+    /// device's own message coming back (or one the app already has), not a
+    /// message this device cannot read. READ-ONLY: the log the app wrote
+    /// (C-59). Defaulted empty: when the log cannot be read every row that
+    /// does not decrypt counts as unreadable, and the generic banner stands.
+    func heldMessageIds(accountIdB64: String, groupIdHex: String) -> Set<Int64>
+
+    /// This account's own person key (standard base64, the form of
+    /// ``NseProcessedRow/senderKeyB64``): a message from it was sent by
+    /// another device of the same person and is not a notification.
+    /// READ-ONLY, from the App Group mirror the APP writes. Defaulted `nil`:
+    /// no row is taken for the person's own.
+    func ownPersonKeyB64(accountIdB64: String) -> String?
 }
 
 public extension NsePushDecryptDeps {
@@ -464,6 +486,8 @@ public extension NsePushDecryptDeps {
     func callerName(accountIdB64: String, groupIdHex: String) -> String? { nil }
     func isMuted(accountIdB64: String, groupIdHex: String) -> Bool { false }
     func conversationHex(accountIdB64: String, groupIdHex: String) -> String { groupIdHex }
+    func heldMessageIds(accountIdB64: String, groupIdHex: String) -> Set<Int64> { [] }
+    func ownPersonKeyB64(accountIdB64: String) -> String? { nil }
 }
 
 /// Produce a real decrypted notification preview for a GroupMessage wake, or
@@ -614,8 +638,9 @@ public func decryptPushOutcome(
 
     // 8. Process each row through the TEMP group and keep the NEWEST frame
     //    that yields a user-visible preview. A frame that will not decrypt /
-    //    authenticate (wrong epoch, our own echo, a control frame, a
-    //    role-refused commit) is skipped — never guessed. NOTE: `process`
+    //    authenticate (wrong epoch, our own echo, a role-refused commit) or
+    //    carries nothing to show (a control frame) is skipped — never
+    //    guessed. NOTE: `process`
     //    mutates the THROWAWAY provider ONLY; it is never persisted.
     //    A call-signaling row is classified separately and OUTRANKS a message
     //    (see this function's docs): the newest call event decides, and an
@@ -626,10 +651,27 @@ public func decryptPushOutcome(
         accountIdB64: account.accountIdB64, groupIdHex: realGroupHex)
     var latest: NsePushPreview?
     var latestCall: (row: NseProcessedRow, createdAt: String)?
-    // Did the batch hold a row the app shows nothing for?
-    var silenced = false
+    // Rows that did not decrypt and that the app's log does not hold: a
+    // message this device cannot read yet, which only the generic banner can
+    // stand for.
+    var unreadableRows = 0
+    // Both read once, and only when a row asks.
+    lazy var heldIds = deps.heldMessageIds(accountIdB64: account.accountIdB64, groupIdHex: realGroupHex)
+    lazy var ownPersonKey = deps.ownPersonKeyB64(accountIdB64: account.accountIdB64)
     for row in rows {
-        guard let processed = group.process(row.payload) else { continue }
+        let decoded: NseProcessedRow?
+        do {
+            decoded = try group.process(row.payload)
+        } catch {
+            // A sender cannot open its own message, so the wake the DS sends
+            // this device for its own message brings back a row that does not
+            // decrypt. The app's log holds that row (or one it already
+            // received): a held id is quiet, anything else is unreadable.
+            if nseIsOwnMessageEcho(error) { continue }
+            if !heldIds.contains(row.id) { unreadableRows += 1 }
+            continue
+        }
+        guard let processed = decoded else { continue }
         // ADR-0073 R.8 — nothing from a superseded sender acts: its call does
         // not ring and its message is not previewed (the app drops the same
         // row before storage). Asked before the kind, so a kind added later
@@ -637,13 +679,15 @@ public func decryptPushOutcome(
         if nseDropsSilently(
             processed, accountIdB64: account.accountIdB64, receivedGroupIdHex: realGroupHex, deps: deps
         ) {
-            silenced = true
             continue
         }
         switch processed.kind {
         case .callOffer, .callEnd:
             latestCall = (row: processed, createdAt: row.createdAt)
         default:
+            // A message from another device of this same person is not a
+            // notification. Calls keep their own rules above.
+            if let sender = processed.senderKeyB64, let own = ownPersonKey, sender == own { continue }
             guard let body = previewBody(of: processed) else { continue }
             latest = NsePushPreview(
                 title: "Lakko", body: body, tag: conversationTag,
@@ -692,11 +736,15 @@ public func decryptPushOutcome(
         }
     }
     if let latest { return .preview(latest) }
-    // Only rows the app shows nothing for: the quietest delivery there is.
-    // (A batch with nothing readable at all stays `.none`: the generic line,
-    // because an unread message may be behind it.)
-    if silenced { return .quiet(tag: conversationTag) }
-    return .none
+    // The read ran to the end and found no message from someone else. A row
+    // this device could not read may be one, so it keeps the generic line.
+    // Otherwise the wake brought only this device's own message, a message
+    // from another device of the same person, or rows the app shows nothing
+    // for (service traffic, a superseded sender, a held re-send): nothing is
+    // to be posted, and `.quiet` is the nearest the extension can come to
+    // that.
+    if unreadableRows > 0 { return .none }
+    return .quiet(tag: conversationTag)
 }
 
 /// ADR-0073 R.8 / R.7 case 1 — the rows the background reader shows nothing
@@ -1519,4 +1567,15 @@ private func isLowerHex(_ s: String) -> Bool {
         if !isDigit && !isLower { return false }
     }
     return true
+}
+
+/// Whether a row's decrypt failure is this device's own message coming back: a
+/// sender cannot open what it sent. The core names the refusal: openmls's
+/// `ValidationError::CannotDecryptOwnMessage` reaches the client inside the
+/// error text (`process_message: ValidationError(CannotDecryptOwnMessage)`).
+/// It covers every row this device published (its typing, receipts and
+/// commits, which the message log never holds). A text that does not match
+/// (another openmls wording) only falls back to the held-id check.
+func nseIsOwnMessageEcho(_ error: Error) -> Bool {
+    String(describing: error).contains("CannotDecryptOwnMessage")
 }

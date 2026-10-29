@@ -63,7 +63,8 @@ import { ProfilePublishScheduler, type PublishReason } from "./publish-scheduler
 import { resolveDisplay, type ResolvedName } from "./resolver";
 import type { ReceivedGrantWire } from "./profile-envelope";
 import { UsernameVerifier } from "./username-verification";
-import { isOwnKeyB64 } from "./own-key";
+import { isOwnKeyB64, ownKeysB64Of } from "./own-key";
+import { subscribeCarriedNames, takeCarriedProfiles } from "../devices/carried-state";
 import {
   decideProfileRequest,
   lastProfileRequestAt,
@@ -583,10 +584,40 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     const account = accountId();
     if (account !== null) store.resave(account);
   });
+
+  /**
+   * The pairing state bundle v3 (`devices/carried-state.ts`): the profiles
+   * the confirming device holds, taken for the bound account once this
+   * device knows its own keys, and filed through the same `ingest` a
+   * received profile goes through ("strictly newer" wins, a newer one held
+   * here stays). A profile filed under one of this account's own keys is
+   * never stored.
+   */
+  function takeCarriedProfilesNow(): void {
+    const account = accountId();
+    const own = chats.identity();
+    if (account === null || own === null) return;
+    const ownKeys = ownKeysB64Of(own, [chats.conversationAccountIdentity()?.signaturePublicKey]);
+    const carried = takeCarriedProfiles(account);
+    for (const [keyB64, profile] of carried) {
+      if (ownKeys.includes(keyB64)) continue;
+      void store.ingest(account, keyB64, profile).then((replaced) => {
+        if (replaced) verifyIfClaimed(keyB64, store.get(keyB64)?.username ?? null);
+      });
+    }
+  }
+  createEffect(() => {
+    accountId();
+    chats.identity();
+    untrack(takeCarriedProfilesNow);
+  });
+  const unsubscribeCarried = subscribeCarriedNames(takeCarriedProfilesNow);
+
   onCleanup(() => {
     unsubscribeStore();
     unsubscribeRenames();
     unsubscribeOwnAdopted();
+    unsubscribeCarried();
     scheduler.stop();
   });
 

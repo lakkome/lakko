@@ -344,7 +344,7 @@ class AccountLocalWipeTest {
         }
         DeviceGroupJournalAccess.markFoundingUnconfirmed(context, acct)
         StateBundle.saveKnownGroupIds(context, acct, listOf(group))
-        check(deviceLinkAnswerLimit(context, acct).tryConsume())
+        check(deviceLinkAnswerLimit(context, acct).tryConsume() != null)
         DeviceReadmission.recordRemoved(context, acct, group, before = listOf("k1", "k2"), after = listOf("k1"))
         KnownGroupsStore(context).add(acct, group)
         SharedPrefsBeaconObservationStore(context).save(acct, group, mapOf("key" to 1L))

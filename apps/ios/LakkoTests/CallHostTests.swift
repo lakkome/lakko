@@ -39,6 +39,8 @@ final class CallHostTests: XCTestCase {
         var nowMs: Int64
         var timers: [FakeTimer] = []
         var published: [(group: String, body: FfiCallSignalingBody)] = []
+        /// The wake each published frame asked for, in publish order.
+        var wakes: [Bool] = []
         var micGranted = true
         var camGranted = true
         /// `docs/ux/calls.md` section 6 — the rows the host filed.
@@ -65,10 +67,11 @@ final class CallHostTests: XCTestCase {
 
     private func makeHost(_ h: Harness) -> CallHost {
         CallHost(ports: CallHost.Ports(
-            publish: { group, bytes in
+            publish: { group, bytes, wake in
                 if h.publishFails { return false }
                 if let body = try? parseCallSignaling(plaintext: bytes) {
                     h.published.append((group, body))
+                    h.wakes.append(wake)
                 }
                 return true
             },
@@ -577,6 +580,51 @@ final class CallHostTests: XCTestCase {
 
         host.receive(row(offer(callA), group: groupA, id: 2, atMs: t0))
         XCTAssertNil(host.activeCall)
+    }
+
+    // MARK: - Call push wakes
+
+    /// A decline and a busy answer are ends of a call that never connected
+    /// here: both ask for a call wake, so the other side's ring stops.
+    func testADeclineAndABusyAnswerAskForACallWake() async throws {
+        let h = Harness(nowMs: t0)
+        let host = makeHost(h)
+        host.receive(row(offer(callA), group: groupA, id: 1, atMs: t0))
+        host.receive(row(offer(callB), group: groupB, id: 2, atMs: t0))
+        await host.whenPublishesSettle()
+        XCTAssertEqual(endReasons(h).map(\.2), [.busy])
+        XCTAssertEqual(h.wakes, [true])
+
+        host.declineIncomingCall()
+        try await waitUntil { host.activeCall == nil }
+        await host.whenPublishesSettle()
+        XCTAssertEqual(endReasons(h).map(\.2), [.busy, .declined])
+        XCTAssertEqual(h.wakes, [true, true])
+    }
+
+    /// The VoIP report reads this: a wake for the conversation of the call on
+    /// this device rings nothing while the call is up and for a short window
+    /// after it ended; another conversation, and the same one later, ring.
+    func testACallWakeForTheConversationOfACallHereIsSuppressed() async throws {
+        let h = Harness(nowMs: t0)
+        let host = makeHost(h)
+        XCTAssertFalse(host.suppressesCallWake(groupIdHex: groupA))
+
+        host.receive(row(offer(callA), group: groupA, id: 1, atMs: t0))
+        XCTAssertTrue(host.suppressesCallWake(groupIdHex: groupA))
+        XCTAssertTrue(host.suppressesCallWake(groupIdHex: groupA.uppercased()))
+        XCTAssertFalse(host.suppressesCallWake(groupIdHex: groupB))
+
+        host.receive(row(.end(callId: callA, reason: .hungUp), group: groupA, id: 2, atMs: t0))
+        try await waitUntil { host.activeCall == nil }
+        XCTAssertTrue(host.suppressesCallWake(groupIdHex: groupA), "the end that raced the poll")
+
+        h.nowMs = t0 + CallWakeSuppression.recentEndWindowMs
+        XCTAssertFalse(host.suppressesCallWake(groupIdHex: groupA), "a new call later rings")
+
+        h.nowMs = t0
+        host.reset()
+        XCTAssertFalse(host.suppressesCallWake(groupIdHex: groupA))
     }
 
     // MARK: - Timers

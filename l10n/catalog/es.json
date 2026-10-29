@@ -27,7 +27,7 @@
       "status": "machine"
     },
     "auth.brand.body": {
-      "text": "Chats, grupos, canales y llamadas, con cifrado de extremo a extremo por defecto. Los servidores de Lakko nunca ven tus mensajes.",
+      "text": "Chats, grupos, canales y llamadas, con cifrado de extremo a extremo por defecto.",
       "status": "machine"
     },
     "auth.brand.foot": {
@@ -1491,7 +1491,7 @@
       "status": "machine"
     },
     "channels.meta.desc": {
-      "text": "El nombre y la descripción llegan cifrados a todos los suscriptores. El servidor nunca los lee.",
+      "text": "El nombre y la descripción llegan a todos los suscriptores.",
       "status": "machine"
     },
     "channels.meta.error.description_bad_character": {
@@ -1583,7 +1583,7 @@
       "status": "machine"
     },
     "channels.new.subtitle": {
-      "text": "Los suscriptores ven el nombre y la descripción. Viajan cifrados: al servidor solo llega texto cifrado.",
+      "text": "Los suscriptores ven el nombre y la descripción.",
       "status": "machine"
     },
     "channels.new.title": {
@@ -2218,16 +2218,8 @@
       "text": "No se encontraron GIF",
       "status": "machine"
     },
-    "chat.gif.note_dismiss": {
-      "text": "Entendido",
-      "status": "machine"
-    },
     "chat.gif.open_full": {
       "text": "Abrir GIF en pantalla completa",
-      "status": "machine"
-    },
-    "chat.gif.privacy_note": {
-      "text": "La búsqueda de GIF pasa por el servidor de Lakko, que ve lo que buscas. Los GIF enviados se cifran como cualquier archivo.",
       "status": "machine"
     },
     "chat.gif.rate_limited": {
@@ -4718,10 +4710,6 @@
       "text": "Mezclar temas al azar",
       "status": "machine"
     },
-    "discover.mix.off_line": {
-      "text": "Usa menos datos. El servidor de Lakko verá exactamente qué temas elegiste.",
-      "status": "machine"
-    },
     "discover.nothing_yet": {
       "text": "Aún no hay sugerencias. Elige temas o pide a la gente de tus grupos que comparta sus canales.",
       "status": "machine"
@@ -4731,7 +4719,7 @@
       "status": "machine"
     },
     "discover.pick.body": {
-      "text": "Lakko descarga sugerencias sobre ellos, mezcladas con algunos temas al azar para que el servidor de Lakko no sepa exactamente cuáles elegiste. Nunca ve qué canales abres.",
+      "text": "Lakko descarga sugerencias sobre ellos, mezcladas con algunos temas al azar.",
       "status": "machine"
     },
     "discover.pick.title": {
@@ -4766,10 +4754,6 @@
       "text": "Buscar",
       "status": "machine"
     },
-    "discover.search.helper": {
-      "text": "Las búsquedas se envían al servidor de Lakko.",
-      "status": "machine"
-    },
     "discover.search.no_results": {
       "text": "No se encontraron canales.",
       "status": "machine"
@@ -4799,11 +4783,11 @@
       "status": "machine"
     },
     "discover.share.line": {
-      "text": "La gente de este grupo puede ver qué canales sigues. El servidor de Lakko no.",
+      "text": "La gente de este grupo puede ver qué canales sigues.",
       "status": "machine"
     },
     "discover.shared.desc": {
-      "text": "Grupos donde la gente puede ver qué canales sigues. El servidor de Lakko no puede.",
+      "text": "Grupos donde la gente puede ver qué canales sigues.",
       "status": "machine"
     },
     "discover.shared.empty": {
@@ -6267,7 +6251,7 @@
       "status": "machine"
     },
     "new_group.name_hint": {
-      "text": "Todos los miembros ven el nombre. Se envía cifrado; el servidor nunca lo lee.",
+      "text": "Todos los miembros ven el nombre.",
       "status": "machine"
     },
     "new_group.name_not_sent": {
@@ -6623,7 +6607,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "Introduce tu nombre de usuario y luego abre Lakko en un dispositivo que siga con la sesión iniciada y escribe el código que muestra. No se envía nada que los servidores de Lakko puedan leer. No hace falta cámara; si lo prefieres, hay un código QR.",
+      "text": "Introduce tu nombre de usuario y luego abre Lakko en un dispositivo que siga con la sesión iniciada y escribe el código que muestra. No hace falta cámara; si lo prefieres, hay un código QR.",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -7119,7 +7103,7 @@
       "status": "machine"
     },
     "restore_identity.device_intro": {
-      "text": "Un dispositivo que sigue con la sesión iniciada muestra un código de seis dígitos; escríbelo aquí. La transferencia está cifrada de extremo a extremo; los servidores de Lakko no pueden leerla. No hace falta cámara; si lo prefieres, hay un código QR.",
+      "text": "Un dispositivo que sigue con la sesión iniciada muestra un código de seis dígitos; escríbelo aquí. No hace falta cámara; si lo prefieres, hay un código QR.",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -7303,7 +7287,7 @@
       "status": "machine"
     },
     "settings.about.protection.body": {
-      "text": "Los mensajes, las llamadas y las solicitudes de contacto tienen cifrado de extremo a extremo: solo las personas de una conversación pueden leerlos, nunca los servidores de Lakko. Tu contraseña nunca sale de tu dispositivo, y cada contacto tiene un número de seguridad que puedes comparar en persona.",
+      "text": "Los mensajes, las llamadas y las solicitudes de contacto tienen cifrado de extremo a extremo: solo las personas de una conversación pueden leerlos. Tu contraseña nunca sale de tu dispositivo, y cada contacto tiene un número de seguridad que puedes comparar en persona.",
       "status": "machine"
     },
     "settings.about.protection.title": {
@@ -7527,7 +7511,7 @@
       "status": "machine"
     },
     "settings.devices.lede": {
-      "text": "Los teléfonos, tabletas y computadoras con sesión iniciada en tu cuenta. Añadir uno tiene cifrado de extremo a extremo; los servidores de Lakko no pueden leerlo.",
+      "text": "Los teléfonos, tabletas y computadoras con sesión iniciada en tu cuenta.",
       "status": "machine"
     },
     "settings.devices.list.lede": {

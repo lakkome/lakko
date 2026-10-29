@@ -1098,6 +1098,8 @@ public class ChatRepository(
             mutableState.update { it.copy(bootstrapped = true) }
             // ADR-0073 R.7 case 1 — the messages held when the process died.
             restoreHeldSends()
+            // State bundle v3 — the display copies already in a one-to-one.
+            restoreHeldCopies()
         }
         if (!bound.isCurrent) return
         // ADR-0053 — sign reads of both own mailboxes and claim them.
@@ -2654,7 +2656,13 @@ public class ChatRepository(
             return false
         }
         try {
-            publishApplicationMessage(groupIdHex = groupIdHex, plaintextBytes = bytes)
+            // No group-call frame wakes anyone, an End included: a group call
+            // never rings a closed device, so there is no ring to stop.
+            publishApplicationMessage(
+                groupIdHex = groupIdHex,
+                plaintextBytes = bytes,
+                wake = me.lakko.app.calls.GROUP_CALL_CONTROL_WAKE,
+            )
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
         } catch (cause: Throwable) {
@@ -4092,25 +4100,33 @@ public class ChatRepository(
      * Publish a raw application payload — a call-signaling frame, a service
      * envelope — with no chat bubble and no message log entry.
      *
-     * Fires a push wake for exactly the two call-signaling frames
-     * [me.lakko.app.calls.shouldWakeForCallSignaling] names (an offer and an
-     * end) and for nothing else, so a backgrounded or closed callee rings
-     * (`docs/ux/calls.md` §2.1 / §7). The decision is taken from the composed
-     * bytes here rather than passed in by the caller, so there is no second
-     * place a caller could get it wrong: the group-call control frames that
-     * reach this same method through [publishGroupCallSignal] stay silent
-     * because their tag is not an offer or an end, not because someone
-     * remembered to say so.
+     * Fires a push wake when the caller asked for one ([wake]) AND the frame
+     * is a call offer or end ([me.lakko.app.calls.shouldWakeForCallSignaling]),
+     * so a backgrounded or closed callee rings (`docs/ux/calls.md` §2.1 / §7).
+     * A 1x1 session asks only for its dial offer and for the End of a call
+     * that never connected: a renegotiation offer and the End of a connected
+     * call carry the same tags, and a wake on either rang the peer's iPhone.
+     * The group-call control frames that reach this method through
+     * [publishGroupCallSignal] ask for no wake, an End included
+     * ([me.lakko.app.calls.GROUP_CALL_CONTROL_WAKE]).
      */
     public suspend fun publishApplicationMessage(
         groupIdHex: String,
         plaintextBytes: ByteArray,
+        wake: me.lakko.app.calls.CallSignalingWake,
     ): Unit =
-        forSession { publishApplicationMessageOnMlsThread(groupIdHex = groupIdHex, plaintextBytes = plaintextBytes) }
+        forSession {
+            publishApplicationMessageOnMlsThread(
+                groupIdHex = groupIdHex,
+                plaintextBytes = plaintextBytes,
+                wake = wake,
+            )
+        }
 
     private suspend fun publishApplicationMessageOnMlsThread(
         groupIdHex: String,
         plaintextBytes: ByteArray,
+        wake: me.lakko.app.calls.CallSignalingWake,
     ): Unit {
         // ADR-0073 R.7 case 1 — nothing goes into a dead one-to-one but the claim.
         if (deadOneToOne(groupIdHex)) throw deadSessionError()
@@ -4144,17 +4160,18 @@ public class ChatRepository(
             }
             // docs/ux/calls.md §2.1 — a call must arrive when the app is closed.
             // ADR-0054 — the wake rides this signed publish as a header and the
-            // DS fans it out after appending the row; only an offer and an end
-            // ask for one, every other frame published here stays silent.
-            val wake = sealedWakeFor(
+            // DS fans it out after appending the row; only an offer or an end
+            // the caller asked a wake for gets one, every other frame published
+            // here stays silent.
+            val sealedWake = sealedWakeFor(
                 groupIdHex,
-                if (me.lakko.app.calls.shouldWakeForCallSignaling(plaintextBytes)) DsWakeKind.CALL else null,
+                if (me.lakko.app.calls.shouldWakeForCallSignaling(plaintextBytes, wake)) DsWakeKind.CALL else null,
             )
             // ADR-0045 — the publish is INSIDE the per-group lock (see
             // [runGroupSend]): a message sealed at one epoch and published on the
             // far side of a commit is permanently undecryptable for every
             // recipient, because `lakko-mls` retains no past-epoch secrets.
-            chatClient.publishPreparedSend(prepared, wake = wake)
+            chatClient.publishPreparedSend(prepared, wake = sealedWake)
         }
     }
 
@@ -6162,14 +6179,108 @@ public class ChatRepository(
         return true
     }
 
-    /** What was written to the pending contact [queueKey], in order. */
-    public fun pendingInvitedMessages(queueKey: String): List<PersistedHeldSend> =
-        pendingInvitedHeld[queueKey]?.let { synchronized(it) { it.toList() } }.orEmpty()
+    /** What was written to the pending contact [queueKey], in order: what
+     *  this device holds to send, and the display-only copies of what was
+     *  written on another of this account's devices ([HeldCopyStore], state
+     *  bundle v3), which this device never sends. */
+    public fun pendingInvitedMessages(queueKey: String): List<PersistedHeldSend> {
+        val own = pendingInvitedHeld[queueKey]?.let { synchronized(it) { it.toList() } }.orEmpty()
+        val account = currentAccountIdB64.get() ?: return own
+        val copies = try {
+            heldCopyStore.copies(account, queueKey)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        if (copies.isEmpty()) return own
+        val shown = copies.map {
+            PersistedHeldSend(conversationHex = queueKey, groupIdHex = queueKey, heldAtMs = it.heldAtMs, text = it.text)
+        }
+        return (own + shown).sortedBy { it.heldAtMs }
+    }
 
     /** B deletes a pending contact, or the account is wiped: what was
-     *  written to them goes. */
+     *  written to them goes, and so do the display copies. */
     public fun clearPendingInvitedMessages(queueKey: String) {
         if (pendingInvitedHeld.remove(queueKey) != null) persistHeldSends()
+        val account = currentAccountIdB64.get() ?: return
+        try {
+            heldCopyStore.clear(account, queueKey)
+        } catch (_: Throwable) {
+            // best-effort
+        }
+    }
+
+    // ---- display copies of messages held on another device (bundle v3) ----
+
+    /** The copy store (sealed, per account). */
+    private val heldCopyStore: HeldCopyStore = HeldCopyStore.onDevice(applicationContext)
+
+    /** The rows the display copies show in a one-to-one, by group id hex:
+     *  each copy with the local id of its waiting row. In memory; rebuilt
+     *  from [heldCopyStore] at every bootstrap ([restoreHeldCopies]). */
+    private val heldCopyRows = java.util.concurrent.ConcurrentHashMap<String, MutableList<Pair<HeldCopy, Long>>>()
+
+    /** Show [copies] in [record] as own outgoing rows in the waiting state.
+     *  Never enqueued: this device does not send them. */
+    private fun showHeldCopies(groupIdHex: String, record: GroupRecord, copies: List<HeldCopy>) {
+        if (copies.isEmpty()) return
+        val rows = heldCopyRows.getOrPut(groupIdHex) { java.util.Collections.synchronizedList(ArrayList()) }
+        for (copy in copies) {
+            val localId = record.nextLocalId()
+            record.appendPending(
+                localId = localId,
+                text = copy.text,
+                attachments = emptyList(),
+                createdAt = java.time.Instant.ofEpochMilli(copy.heldAtMs).toString(),
+                authorKey = null,
+            )
+            rows += copy to localId
+        }
+    }
+
+    /** At bootstrap: the copies already moved to a one-to-one show again. */
+    private fun restoreHeldCopies() {
+        val account = currentAccountIdB64.get() ?: return
+        if (heldCopyRows.isNotEmpty()) return
+        val all = try {
+            heldCopyStore.load(account)
+        } catch (_: Throwable) {
+            return
+        }
+        var shown = false
+        for ((key, copies) in all) {
+            if (PendingInvitedQueue.isQueueKey(key)) continue
+            val record = groups[key] ?: continue
+            showHeldCopies(key, record, copies)
+            shown = true
+        }
+        if (shown) publishThreadList()
+    }
+
+    /**
+     * A message from this account's OTHER device landed in [groupIdHex]: it
+     * replaces the first display copy with the same text and the same number
+     * of attachments (the real message is what shows now). Called after the
+     * batch was consumed; this device's own sends never arrive here (they are
+     * own-echo filtered).
+     */
+    private fun settleHeldCopies(groupIdHex: String, record: GroupRecord, events: List<IncomingChatEvent>) {
+        val rows = heldCopyRows[groupIdHex] ?: return
+        val account = currentAccountIdB64.get() ?: return
+        val own = ownIdentity(record.group) ?: return
+        for (event in events) {
+            if (event !is IncomingChatEvent.Application || event.senderKey != own) continue
+            val removed = try {
+                heldCopyStore.replace(account, groupIdHex, event.text, event.attachments.size)
+            } catch (_: Throwable) {
+                null
+            } ?: continue
+            synchronized(rows) {
+                val at = rows.indexOfFirst { it.first == removed }
+                if (at >= 0) record.removeLocal(rows.removeAt(at).second)
+            }
+        }
+        if (rows.isEmpty()) heldCopyRows.remove(groupIdHex)
     }
 
     /**
@@ -6198,6 +6309,17 @@ public class ChatRepository(
             enqueueHeld(HeldMessage(toGroupIdHex, localId, now, row.text, emptyList(), null, null), persist = false)
         }
         persistHeldSends()
+        // State bundle v3 — what was written on another device moves too, as
+        // display-only waiting rows (never sent from here).
+        val copies = currentAccountIdB64.get()?.let { account ->
+            try {
+                heldCopyStore.move(account, queueKey, toGroupIdHex)
+            } catch (_: Throwable) {
+                emptyList()
+            }
+        }.orEmpty()
+        showHeldCopies(toGroupIdHex, record, copies)
+        if (copies.isNotEmpty() && rows.isEmpty()) publishThreadList()
         if (rows.isNotEmpty()) {
             publishThreadList()
             val conversation = lineageNow().conversationOf(toGroupIdHex.lowercase())
@@ -6651,19 +6773,26 @@ public class ChatRepository(
         accountKeysAfter: List<String>?,
     ): Boolean {
         val account = currentAccountIdB64.get() ?: return false
+        // No early return for an account that never saw a key reset: a commit
+        // that only adds or retires DEVICE leaves (ADR-0050) leaves the set of
+        // people equal, and that alone suppresses the row.
         val superseded = supersededKeys()
-        if (superseded.isEmpty() && continuityStore.row(account).swapping[groupIdHex].isNullOrEmpty()) return false
+        val awaited = continuityStore.row(account).swapping[groupIdHex].orEmpty()
         val currentToAccount = HashMap<String, String>()
-        for ((id, key) in pinnedKeysByAccount(superseded.values.toSet())) currentToAccount[key] = id
+        if (superseded.isNotEmpty()) {
+            for ((id, key) in pinnedKeysByAccount(superseded.values.toSet())) currentToAccount[key] = id
+        }
         val verdict = deviceSwapAcrossCommits(
             personKeysBefore = accountKeysBefore,
             personKeysAfter = accountKeysAfter,
             accountOfKey = { k -> superseded[k] ?: currentToAccount[k] },
             isSuperseded = { it in superseded },
-            awaited = continuityStore.row(account).swapping[groupIdHex].orEmpty(),
+            awaited = awaited,
             nowMs = System.currentTimeMillis(),
         )
-        continuityStore.update(account) { it.withAwaitedSwaps(groupIdHex, verdict.awaited) }
+        if (verdict.awaited != awaited) {
+            continuityStore.update(account) { it.withAwaitedSwaps(groupIdHex, verdict.awaited) }
+        }
         return verdict.suppress
     }
 
@@ -8230,6 +8359,9 @@ public class ChatRepository(
                     )
                 },
             )
+            // State bundle v3 — a message from another own device replaces
+            // its display copy.
+            settleHeldCopies(groupIdHex, record, batchEvents)
             // ADR-0057 S2 finding 1 — the ownership moved away from this
             // account in this batch: hand the journal root over (scheduled).
             noteOwnerTransition(groupIdHex, ownerBeforeBatch, roleTableOrNull(record.group)?.owner)
@@ -9368,6 +9500,7 @@ public class ChatRepository(
             preparedGroups.clear()
             heldSends.clear()
             pendingInvitedHeld.clear()
+            heldCopyRows.clear()
         }
         // An unsent text belongs to the session that typed it.
         composerCarry.clear()
@@ -11939,6 +12072,9 @@ public class ChatRepository(
                     // The MLS apply is what the verdict reads, so it is deliberately
                     // OUTSIDE the guard below: a throw here must reach `adjudicate`,
                     // which skips the row exactly as the poll loop does.
+                    // The people before the row, so a swept commit that only
+                    // changes devices draws no `Members changed` row.
+                    val accountKeysBeforeRow = memberAccountKeysOrNull(record.group)
                     val processed =
                         record.group.processIncomingVerifyingRoles(identity, row.payload)
                     try {
@@ -11965,6 +12101,13 @@ public class ChatRepository(
                         record.consumeEvents(
                             events = sweptEvents,
                             heldResend = heldResendPredicate(groupIdHex, sweptEvents),
+                            suppressCommitRows = sweptEvents.any {
+                                it is IncomingChatEvent.System && it.systemKind == SystemKind.Commit
+                            } && suppressMembersChangedRow(
+                                groupIdHex,
+                                accountKeysBeforeRow,
+                                memberAccountKeysOrNull(record.group),
+                            ),
                             callSignalingSink = { messageId, payload, createdAt, senderLeaf, senderKey, senderPersonKey ->
                                 routeIncomingCallSignaling(
                                     groupIdHex, messageId, payload, createdAt, senderLeaf, senderKey, senderPersonKey,
@@ -12024,6 +12167,7 @@ public class ChatRepository(
                             },
                         )
                         persistReadWatermarksIfReceipts(groupIdHex, record, sweptEvents)
+                        settleHeldCopies(groupIdHex, record, sweptEvents)
                         // A swept chat message counts toward the chat list's
                         // unread badge exactly as a polled one does.
                         localUnread.onIncomingApplied(

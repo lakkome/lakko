@@ -28,7 +28,7 @@
       "comment": "Update banner button while the page is reloading."
     },
     "auth.brand.body": {
-      "text": "Chats, groups, channels and calls, end-to-end encrypted by default. Lakko's servers never see your messages.",
+      "text": "Chats, groups, channels and calls, end-to-end encrypted by default.",
       "comment": "Text under the headline on the brand panel beside the sign-in and sign-up forms.",
       "security_critical": true
     },
@@ -1610,7 +1610,7 @@
       "comment": "The reader's own row in a channel's member list."
     },
     "channels.meta.desc": {
-      "text": "The name and description reach every subscriber, encrypted. The server never reads them.",
+      "text": "The name and description reach every subscriber.",
       "comment": "Description of the channel details card on the manage screen.",
       "security_critical": true
     },
@@ -1704,8 +1704,8 @@
       "comment": "Example in the empty handle field. Keep the @ and Latin letters."
     },
     "channels.new.subtitle": {
-      "text": "Subscribers see the name and description. They travel encrypted; only ciphertext reaches the server.",
-      "comment": "Line under \"New channel\": who sees the name and description, and that the server sees only ciphertext.",
+      "text": "Subscribers see the name and description.",
+      "comment": "Line under \"New channel\": who sees the name and description.",
       "security_critical": true
     },
     "channels.new.title": {
@@ -2365,18 +2365,9 @@
       "text": "No GIFs found",
       "comment": "GIF search found nothing."
     },
-    "chat.gif.note_dismiss": {
-      "text": "Got it",
-      "comment": "Button that dismisses the note about how GIF search works."
-    },
     "chat.gif.open_full": {
       "text": "Open GIF full screen",
       "comment": "Accessible name of a GIF in a message; tapping shows it full screen."
-    },
-    "chat.gif.privacy_note": {
-      "text": "GIF search goes through Lakko's server, which sees what you search for. Sent GIFs are encrypted like any file.",
-      "comment": "Note at the top of the GIF picker: GIF search goes through Lakko's server, which learns the search terms; a sent GIF is encrypted.",
-      "security_critical": true
     },
     "chat.gif.rate_limited": {
       "text": "Too many searches — try again in a moment",
@@ -5057,11 +5048,6 @@
       "text": "Mix in random topics",
       "comment": "Discover settings switch: fetch a few random topics with the picked ones."
     },
-    "discover.mix.off_line": {
-      "text": "Uses less data. Lakko's server will see exactly which topics you picked.",
-      "comment": "Line under the 'Mix in random topics' switch while it is off.",
-      "security_critical": true
-    },
     "discover.nothing_yet": {
       "text": "No suggestions yet. Pick topics, or ask people in your groups to share their channels.",
       "comment": "Empty Discover."
@@ -5071,8 +5057,8 @@
       "comment": "Accessible name of the pick-topics card."
     },
     "discover.pick.body": {
-      "text": "Lakko downloads suggestions for them, mixed with a few random topics so Lakko's server can't tell exactly which ones you picked. It never sees which channels you open.",
-      "comment": "Text of the pick-topics card: what the server can and cannot learn.",
+      "text": "Lakko downloads suggestions for them, mixed with a few random topics.",
+      "comment": "Text of the pick-topics card: what Lakko does with the picked topics.",
       "security_critical": true
     },
     "discover.pick.title": {
@@ -5107,11 +5093,6 @@
       "text": "Search",
       "comment": "Button beside the Discover search field."
     },
-    "discover.search.helper": {
-      "text": "Searches are sent to Lakko's server.",
-      "comment": "Line under the Discover search field.",
-      "security_critical": true
-    },
     "discover.search.no_results": {
       "text": "No channels found.",
       "comment": "A Discover search found nothing."
@@ -5141,12 +5122,12 @@
       "comment": "Switch in group info that shares the reader's listed channels with the group."
     },
     "discover.share.line": {
-      "text": "People in this group can see which channels you follow. Lakko's server cannot.",
+      "text": "People in this group can see which channels you follow.",
       "comment": "Line under the 'Share my channels with this group' switch.",
       "security_critical": true
     },
     "discover.shared.desc": {
-      "text": "Groups where people can see which channels you follow. Lakko's server cannot.",
+      "text": "Groups where people can see which channels you follow.",
       "comment": "Text at the top of the 'Channels I share' screen.",
       "security_critical": true
     },
@@ -6668,8 +6649,8 @@
       "comment": "Web: hint in the empty main pane of the groups screen."
     },
     "new_group.name_hint": {
-      "text": "Every member sees the name. It is sent encrypted; the server never reads it.",
-      "comment": "Hint under the group name field: who sees the name, and that the server cannot read it.",
+      "text": "Every member sees the name.",
+      "comment": "Hint under the group name field: who sees the name.",
       "security_critical": true
     },
     "new_group.name_not_sent": {
@@ -7192,7 +7173,7 @@
       "comment": "On a recovery form, names the account saved on this device. {username} is '@name'."
     },
     "recovery.device.intro": {
-      "text": "Enter your username, then open Lakko on a device that is still logged in and type the code it shows. Nothing is sent that Lakko's servers can read. No camera needed; a QR code is there if you prefer.",
+      "text": "Enter your username, then open Lakko on a device that is still logged in and type the code it shows. No camera needed; a QR code is there if you prefer.",
       "comment": "Line at the top of recovery from another device (signed out): the signed-in device shows a code that the person types here.",
       "security_critical": true
     },
@@ -7730,7 +7711,7 @@
       "security_critical": true
     },
     "restore_identity.device_intro": {
-      "text": "A device that is still logged in shows a six-digit code; type it here. The transfer is end-to-end encrypted; Lakko's servers cannot read it. No camera needed; a QR code is there if you prefer.",
+      "text": "A device that is still logged in shows a six-digit code; type it here. No camera needed; a QR code is there if you prefer.",
       "comment": "Line on the restore-identity screen when Another device is chosen: the signed-in device shows a code that the person types here.",
       "security_critical": true
     },
@@ -7985,7 +7966,7 @@
       "comment": "{licence} is the licence name, e.g. AGPL-3.0-or-later; keep it untranslated."
     },
     "settings.about.protection.body": {
-      "text": "Messages, calls and contact requests are end-to-end encrypted: only the people in a conversation can read them, never Lakko's servers. Your password never leaves your device, and each contact has a safety number you can compare in person.",
+      "text": "Messages, calls and contact requests are end-to-end encrypted: only the people in a conversation can read them. Your password never leaves your device, and each contact has a safety number you can compare in person.",
       "comment": "Explains end-to-end encryption and safety numbers.",
       "security_critical": true
     },
@@ -8229,7 +8210,7 @@
       "comment": "Adding a scanned device failed."
     },
     "settings.devices.lede": {
-      "text": "The phones, tablets and computers signed in to your account. Adding one is end-to-end encrypted; Lakko's servers cannot read it.",
+      "text": "The phones, tablets and computers signed in to your account.",
       "comment": "Line under the Devices title.",
       "security_critical": true
     },
@@ -8604,7 +8585,7 @@
       "comment": "Switch in Settings > Privacy, on by default. When on, this device tells the person's other devices which city it is in, shown on their Devices screen."
     },
     "settings.privacy.show_city.sub": {
-      "text": "Your other devices show the city this one is in. Lakko's servers keep no record of it.",
+      "text": "Your other devices show the city this one is in.",
       "comment": "Line under the Show my city to my other devices switch.",
       "security_critical": true
     },

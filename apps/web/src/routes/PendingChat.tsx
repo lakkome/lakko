@@ -19,6 +19,11 @@
  * When the inviter's Welcome lands, the mailbox moves the messages to the
  * held-send queue of the new one-to-one and drops the record; this view then
  * follows to the real chat.
+ *
+ * Above them: what this account wrote to the same person on ANOTHER of its
+ * devices before this one was paired (state bundle v3), as display-only
+ * copies in the same waiting state. They are never sent from here; the
+ * device where they were typed sends them (`contacts/carried-copies.ts`).
  */
 import { createEffect, createMemo, createSignal, For, Show, type JSX } from "solid-js";
 import { useNavigate, useParams } from "@solidjs/router";
@@ -29,6 +34,7 @@ import { useChats } from "../chat/ChatContext";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { personKeysOf } from "../chat/person-key";
 import { heldSends, persistHeldSends, restoreHeldSends } from "../chat/held-send-queue";
+import { carriedCopiesFor, loadCarriedCopies } from "../contacts/carried-copies";
 import {
   loadPendingContacts,
   pendingContacts,
@@ -61,6 +67,7 @@ export default function PendingChat(): JSX.Element {
     const account = accountIdB64();
     if (account === null) return;
     void loadPendingContacts(account).then(() => setLoaded(true));
+    void loadCarriedCopies(account);
     // The held messages survive a reload in the message log.
     void restoreHeldSends(account).then(() => setQueueVersion((v) => v + 1));
   });
@@ -76,6 +83,12 @@ export default function PendingChat(): JSX.Element {
     if (c === undefined) return [];
     const key = pendingQueueKey(c);
     return heldSends.all().find(([k]) => k === key)?.[1] ?? [];
+  });
+  /** What was written to this person on another device of this account
+   *  (display only, never sent from here), in order. */
+  const carried = createMemo(() => {
+    const c = contact();
+    return c === undefined ? [] : carriedCopiesFor(pendingQueueKey(c));
   });
   const name = (): string => {
     const c = contact();
@@ -158,6 +171,18 @@ export default function PendingChat(): JSX.Element {
                   : t("chat.pending.waiting", { name: name() })}
               </span>
             </li>
+            <For each={carried()}>
+              {(m) => (
+                <li class="lk-bubble-row outgoing run-start run-end">
+                  <div class="lk-bubble outgoing run-start run-end">
+                    <div class="lk-bubble-text">{m.text}</div>
+                    <div class="lk-bubble-meta">
+                      <span>{t("chat.message.sending")}</span>
+                    </div>
+                  </div>
+                </li>
+              )}
+            </For>
             <For each={queued()}>
               {(m) => (
                 <li class="lk-bubble-row outgoing run-start run-end">

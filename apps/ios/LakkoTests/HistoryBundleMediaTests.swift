@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import XCTest
+import LakkoCore
 @testable import Lakko
 
 /// ADR-0047 §5: a media message moved to a new device through the history
@@ -61,5 +62,64 @@ final class HistoryBundleMediaTests: XCTestCase {
         XCTAssertNil(back.durationMs)
         XCTAssertNil(back.width)
         XCTAssertNil(back.height)
+    }
+
+    // MARK: - MLS bookkeeping rows never travel
+
+    private func row(_ id: Int64, _ direction: String, _ text: String) -> PersistedMessage {
+        PersistedMessage(
+            messageId: id, direction: direction, text: text, attachments: [],
+            createdAt: "2026-10-28T12:00:0\(id)Z")
+    }
+
+    private let secret = Data(repeating: 0x42, count: 32)
+    private let groupHex = String(repeating: "cd", count: 32)
+
+    func testTheBuilderLeavesOutCommitAndExternalJoinRows() throws {
+        let account = "history-bookkeeping-build-\(UUID().uuidString)"
+        let store = MessageLogStore()
+        defer { store.deleteLog(accountIdB64: account) }
+        store.putLog(accountIdB64: account, payload: MessageLogPayload(groups: [
+            groupHex: PersistedGroup(cursor: 4, messages: [
+                row(1, "incoming", "hello"),
+                row(2, "system", "[mls commit]"),
+                row(3, "system", "[mls external join]"),
+                row(4, "outgoing", "[mls commit]"),
+            ]),
+        ]))
+        XCTAssertNotNil(store.getLog(accountIdB64: account), "the test log was written")
+
+        let sealed = try XCTUnwrap(HistoryBundleCodec.buildFromMessageLog(
+            accountIdB64: account, secret: secret, store: store))
+        let opened = try openHistoryBundleStructured(secret: secret, sealedBytes: sealed)
+        let rows = opened.groups.flatMap(\.messages).compactMap {
+            HistoryBundleCodec.decodePlaceholder($0.payloadBytes)
+        }
+        XCTAssertEqual(rows.map(\.messageId), [1, 4], "a message reading like the marker is still carried")
+    }
+
+    func testTheReceiverDropsCommitRowsItIsSent() throws {
+        let account = "history-bookkeeping-apply-\(UUID().uuidString)"
+        let store = MessageLogStore()
+        defer { store.deleteLog(accountIdB64: account) }
+        let messages = try [
+            row(1, "incoming", "hello"),
+            row(2, "system", "[mls commit]"),
+        ].map { m in
+            StructuredHistoryMessage(
+                payloadBytes: try HistoryBundleCodec.encodePlaceholder(m), senderLeaf: 0,
+                messageId: withUnsafeBytes(of: m.messageId.bigEndian) { Data($0) }, receivedAtMs: 0)
+        }
+        let sealed = try sealHistoryBundleStructured(
+            secret: secret,
+            groups: [StructuredHistoryGroup(
+                groupId: try XCTUnwrap(StateBundle.hexDecode(groupHex)), messages: messages, countCapped: false)],
+            maxHlc: 2)
+
+        let applied = try HistoryBundleCodec.applyToMessageLog(
+            accountIdB64: account, secret: secret, sealedBytes: sealed, store: store)
+
+        XCTAssertEqual(applied, 1)
+        XCTAssertEqual(store.getLog(accountIdB64: account)?.groups[groupHex]?.messages.map(\.text), ["hello"])
     }
 }

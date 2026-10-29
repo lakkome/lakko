@@ -24,9 +24,11 @@ struct DiscoverView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             searchField
-            Text(model.unavailable ? DiscoverCopy.unavailable : DiscoverCopy.searchHelper)
-                .font(.caption)
-                .foregroundStyle(Color.lakkoTextMuted)
+            if model.unavailable {
+                Text(DiscoverCopy.unavailable)
+                    .font(.caption)
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
             if let notice = model.notice {
                 Text(notice)
                     .font(.subheadline)
@@ -119,9 +121,6 @@ struct DiscoverView: View {
                 Toggle(DiscoverCopy.mixLabel, isOn: Binding(
                     get: { model.prefs.mixRandom },
                     set: { model.setMixRandom($0) }))
-                Text(DiscoverCopy.mixOffLine)
-                    .font(.caption)
-                    .foregroundStyle(Color.lakkoTextMuted)
             }
             .padding(.top, 8)
         }
