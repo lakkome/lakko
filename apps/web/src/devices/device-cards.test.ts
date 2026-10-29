@@ -85,10 +85,10 @@ describe("sending the own card", () => {
     expect(shouldSendOwnCard(card({ updatedAtMs: NOW + 5_000 }), fields, NOW)).toBe(true);
   });
 
-  it("waits up to 30 s before the growth re-send", () => {
+  it("waits up to 300 ms before the growth re-send", () => {
     expect(cardGrowthDelayMs(() => 0)).toBe(0);
-    expect(cardGrowthDelayMs(() => 0.5)).toBe(15_000);
-    expect(cardGrowthDelayMs(() => 1)).toBeLessThan(30_000);
+    expect(cardGrowthDelayMs(() => 0.5)).toBe(150);
+    expect(cardGrowthDelayMs(() => 1)).toBeLessThan(300);
     expect(cardGrowthDelayMs(() => Number.NaN)).toBe(0);
   });
 });

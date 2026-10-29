@@ -1268,6 +1268,13 @@ public class ContactsRepository(
                 java.util.Base64.getEncoder().encodeToString(c.request.fromPubkey) to name
             }.toMap(),
         )
+        pushPendingToDirectory()
+    }
+
+    /** ADR-0079 — hand the pending contacts' link-stated names to the
+     *  directory, so a roster names a pending contact as the lists do. */
+    private fun pushPendingToDirectory() {
+        profileDirectory?.setPendingContacts(mutableInvited.value)
     }
 
     /**
@@ -2360,6 +2367,7 @@ public class ContactsRepository(
             val next = change(mutableInvited.value)
             mutableInvited.value = next
             pendingContactsStore?.save(accountB64, next)
+            pushPendingToDirectory()
         }
     }
 

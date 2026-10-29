@@ -16,7 +16,8 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { fingerprintLabel, resolveDisplay } from "./resolver";
+import { memberListLabelOf, memberNameOf, UNNAMED_MEMBER } from "./member-label";
+import { fingerprintLabel, profileInputOf, resolveDisplay, resolvePerson } from "./resolver";
 
 const KEY = new Uint8Array([0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, ...new Array<number>(26).fill(0)]);
 
@@ -135,5 +136,89 @@ describe("resolveDisplay — a username is shown only when verified", () => {
 describe("fingerprint + own preview", () => {
   it("groups the first four bytes", () => {
     expect(fingerprintLabel(new Uint8Array([0, 1, 0xab, 0xff, 9]))).toBe("0001 abff");
+  });
+});
+
+// ADR-0079 — a pending contact (an inviter added through their /i/ link, no
+// one-to-one yet) is named in rosters from what the link states, below a
+// rename and a received profile (seen live 2026-10-29: such a member read
+// `Member` in a group roster while the contact list named them).
+describe("resolvePerson — a pending contact's link statement", () => {
+  const LINK = { displayName: "VG2", username: "vg2" };
+  const seen: string[] = [];
+  const verifiedFor =
+    (state: "verified" | "pending" | "mismatch" | undefined) =>
+    (username: string): "verified" | "pending" | "mismatch" | undefined => {
+      seen.push(username);
+      return state;
+    };
+
+  it("a key known only from a pending contact resolves to the link's name", () => {
+    const r = resolvePerson({ signatureKey: KEY, linkStatement: LINK, verificationOf: verifiedFor("verified") });
+    expect(r.name).toBe("VG2");
+    expect(r.source).toBe("profile");
+    expect(r.username).toBe("@vg2");
+    expect(memberNameOf(r)).toBe("VG2");
+    expect(memberListLabelOf(r)).toBe("VG2 · @vg2");
+  });
+
+  it("the link's username is shown only once verified", () => {
+    seen.length = 0;
+    const r = resolvePerson({ signatureKey: KEY, linkStatement: LINK, verificationOf: verifiedFor("pending") });
+    expect(seen).toEqual(["vg2"]);
+    expect(r.name).toBe("VG2");
+    expect(r.username).toBeNull();
+    expect(memberListLabelOf(r)).toBe("VG2");
+
+    const nameless = resolvePerson({
+      signatureKey: KEY,
+      linkStatement: { displayName: "", username: "vg2" },
+      verificationOf: verifiedFor("mismatch"),
+    });
+    expect(nameless.source).toBe("fingerprint");
+    expect(nameless.usernameNotVerified).toBe(true);
+    expect(memberNameOf(nameless)).toBe(UNNAMED_MEMBER());
+  });
+
+  it("a received profile wins over the link", () => {
+    const r = resolvePerson({
+      signatureKey: KEY,
+      received: { displayName: "Vadim", username: null },
+      linkStatement: LINK,
+      verificationOf: verifiedFor("verified"),
+    });
+    expect(r.name).toBe("Vadim");
+    expect(r.source).toBe("profile");
+    expect(r.username).toBeNull();
+  });
+
+  it("a received profile with no name still wins: it is the current statement", () => {
+    expect(profileInputOf(undefined, { displayName: null, username: null }, LINK)).toEqual({
+      displayName: null,
+      username: null,
+    });
+  });
+
+  it("a local rename wins over the link, which is then not used at all", () => {
+    const r = resolvePerson({
+      signatureKey: KEY,
+      rename: "Brother",
+      linkStatement: LINK,
+      verificationOf: verifiedFor("verified"),
+    });
+    expect(r.name).toBe("Brother");
+    expect(r.source).toBe("rename");
+    expect(r.theirName).toBeNull();
+    expect(r.username).toBeNull();
+  });
+
+  it("once the pending contact is gone the key reads as `Member` again", () => {
+    const r = resolvePerson({ signatureKey: KEY, verificationOf: verifiedFor("verified") });
+    expect(r.source).toBe("fingerprint");
+    expect(memberNameOf(r)).toBe(UNNAMED_MEMBER());
+  });
+
+  it("a link that states nothing is no profile", () => {
+    expect(profileInputOf(undefined, undefined, { displayName: "  ", username: "" })).toBeUndefined();
   });
 });

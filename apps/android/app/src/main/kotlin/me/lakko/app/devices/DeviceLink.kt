@@ -147,10 +147,22 @@ public const val DEVICE_LINK_REQUEST_TTL_MS: Long = 600_000L
 public class NewDeviceLink(
     private val api: DeviceLinkApi,
     private val initiatorFor: (requestId: ByteArray) -> DeviceLinkInitiatorPort,
-    private val pairingPayload: ByteArray,
+    /** The pairing payload, built when the code is sealed (after it is
+     *  typed), so the card's place has had time to arrive (UX
+     *  second-device.md section 2.1). */
+    private val payloadForSeal: suspend () -> ByteArray,
     private val nowMs: () -> Long = System::currentTimeMillis,
     private val pollIntervalMs: Long = DEFAULT_POLL_MS,
 ) {
+    /** A payload fixed in advance. */
+    public constructor(
+        api: DeviceLinkApi,
+        initiatorFor: (requestId: ByteArray) -> DeviceLinkInitiatorPort,
+        pairingPayload: ByteArray,
+        nowMs: () -> Long = System::currentTimeMillis,
+        pollIntervalMs: Long = DEFAULT_POLL_MS,
+    ) : this(api, initiatorFor, { pairingPayload }, nowMs, pollIntervalMs)
+
     private var requestId: ByteArray? = null
     private var initiator: DeviceLinkInitiatorPort? = null
     private var pakeB: ByteArray? = null
@@ -195,7 +207,7 @@ public class NewDeviceLink(
         val id = requireNotNull(requestId) { "start first" }
         val b = requireNotNull(pakeB) { "await the answer first" }
         val init = requireNotNull(initiator)
-        val sealed = init.finish(b, typedCode, pairingPayload)
+        val sealed = init.finish(b, typedCode, payloadForSeal())
         api.postPayload(id, sealed.pakeA, sealed.sealedPayload, sealed.confirmA)
         while (true) {
             if (expired()) return NewDeviceLinkState.Expired
@@ -334,6 +346,8 @@ public class DeviceLinkAnswerLimit(
  *   account's own login handle (`parsePairingQr`); throws when it names
  *   another account or is malformed.
  * @param pair runs the unchanged add-device pairing with the parsed payload.
+ * @param addedCopy the closing line once the device is added, naming it from
+ *   the card its payload carried (UX second-device.md section 2.1).
  */
 public class OldDeviceLink<P>(
     private val api: DeviceLinkApi,
@@ -342,6 +356,7 @@ public class OldDeviceLink<P>(
     private val openPayload: (ByteArray) -> P,
     private val pair: suspend (P) -> Unit,
     private val limit: DeviceLinkAnswerLimit,
+    private val addedCopy: (P) -> UiText = { DEVICE_LINK_ADDED_COPY },
 ) {
     private var answeredId: String? = null
     private var responder: DeviceLinkResponderPort? = null
@@ -496,7 +511,7 @@ public class OldDeviceLink<P>(
         state = try {
             pair(pending.payload)
             owed = null
-            OldDeviceLinkState.Notice(DEVICE_LINK_ADDED_COPY)
+            OldDeviceLinkState.Notice(addedCopy(pending.payload))
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: me.lakko.app.auth.FreshAuthRequired) {

@@ -34,8 +34,49 @@ and the one per-chat state (waiting) that replaces this label on every route
 are [`conversation-backup.md`](conversation-backup.md) (ADR-0064, proposed).
 The ADR-0049 "Your identity is restored" block stays removed.
 
-The old device shows nothing extra during pairing beyond the existing
-"Device added". The fan-out runs on the journal and needs no screen.
+The old device shows nothing extra during pairing beyond naming the device
+it adds (section 2.1). The fan-out runs on the journal and needs no screen.
+
+### 2.1 Naming the device being added (2026-10-29)
+
+Seen live: after scanning a code the signed-in device asked "Link this
+device?" and then said "Device added.", and the person could not tell which
+device either line meant. The signed-in device now names it.
+
+The new device puts its own device card (ADR-0080: platform, model or
+browser, app and system version, city and country when known) into the
+pairing payload it shows as a code or seals for the code route. The card is
+what the new device says about itself; nothing checks it, so the copy states
+it and the warning stays.
+
+- **After scanning a code.** Title **Link "Chrome on macOS"?** (the card's
+  model or browser name). Under it the card's other lines, as on a Devices
+  row: "Lakko web · macOS 26", then "Almere, Netherlands" when the card has a
+  place. Then the existing warning ("This gives the scanned device full
+  access ... Continue only if the code is on your own new device."). Buttons
+  unchanged. A payload with no card, or a card that does not decode, keeps
+  today's title **Link this device?** and no detail lines.
+- **When it is done**, on both routes (code scanned, or the six-digit code
+  typed on the new device): **"Chrome on macOS" added.** With no card:
+  **Device added.**
+- **The new device's row** on the signed-in device's Devices screen uses the
+  card from the payload at once, until the device's own card arrives over
+  the DeviceGroup and replaces it.
+
+**The place in the payload card (decided 2026-10-29).** The new device asks
+for its city when the screen that will show a code (or take a code) opens,
+signed in or not, and waits at most 1.5 s for the answer before it shows the
+code; with no answer by then the card has no place and the code is not
+replaced later. On the code route the payload is sealed after the code is
+typed, so the answer is there in practice. No city is asked with the
+anti-censorship connection armed or with "Show my city to my other devices"
+off (a device not signed in uses the default, on). The request names no
+account and the server keeps nothing; it sees the address the device's next
+request shows anyway.
+
+A place in the card that is not where the person is (another city, another
+country) is the one thing on this screen that can tell them the code is not
+theirs; the warning line stays because the card may also lie.
 
 ## 3. Devices screen
 
@@ -66,6 +107,12 @@ shape people know from other messengers' "active sessions".
 A device whose card has not arrived yet (it was added before this change, or
 its card is still on the way) shows its platform icon, "Device" and the date
 it was added, until the card arrives.
+
+**This device never waits for a card.** Its row is built from what the
+device knows about itself (the same fields it would put in its card), so it
+is never "Device". Seen live 2026-10-29: on all three clients the row looked
+up this device among the cards received from the other devices, where its
+own card never is, and read "Device".
 
 **Remove one.** Confirmation dialog: title **Remove "iPhone 16 Pro"?**, body
 "It will be signed out and lose access to your messages.", buttons **Remove**
@@ -154,5 +201,7 @@ not a screen.
   here.
 - Per member: the resolved account key (people, not leaves, in every list).
 - Per device in the DeviceGroup roster: binding `issued_at`, self flag.
+- In the pairing payload (QR and the sealed code-route payload): the new
+  device's device card, optional (section 2.1).
 - Whether this device's own DeviceGroup is still active (`DeviceGroup.isActive`),
   which drives section 3.1.

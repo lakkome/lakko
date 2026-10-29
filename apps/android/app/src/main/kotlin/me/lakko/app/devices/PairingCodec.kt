@@ -53,6 +53,10 @@ public object PairingCodec {
      * carries it). `keyPackage` is the TLS-encoded `KeyPackage` from the
      * joining device's DeviceIdentity. `rendezvousPseudonym` is the
      * 32-byte slot from [generateRendezvousPseudonym].
+     * `deviceCardEnvelope` is the joining device's own ADR-0080 card
+     * envelope ([DeviceCardCenter.pairingCardEnvelope]), so the signed-in
+     * device can name it (UX second-device.md section 2.1); display only,
+     * `null` for none.
      *
      * Throws the underlying `FfiException.Codec` on a wrong-length
      * `loginHandle` / `rendezvousPseudonym` (programmer errors).
@@ -61,10 +65,12 @@ public object PairingCodec {
         loginHandle: ByteArray,
         keyPackage: ByteArray,
         rendezvousPseudonym: ByteArray,
+        deviceCardEnvelope: ByteArray? = null,
     ): ByteArray = buildPairingQr(
         loginHandle = loginHandle,
         keyPackage = keyPackage,
         rendezvousPseudonym = rendezvousPseudonym,
+        deviceCardEnvelope = deviceCardEnvelope,
     )
 
     /**

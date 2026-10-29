@@ -101,12 +101,13 @@ final class DeviceLinkTests: XCTestCase {
 
     private let handle = Data(repeating: 0x5C, count: 32)
 
-    private func pairingPayload(handle: Data? = nil) throws -> Data {
+    private func pairingPayload(handle: Data? = nil, card: Data? = nil) throws -> Data {
         let identity = try Identity.fromSeed(seed: Data(repeating: 0x6D, count: 32))
         return try buildPairingQr(
             loginHandle: handle ?? self.handle,
             keyPackage: identity.createKeyPackage(),
-            rendezvousPseudonym: Data(repeating: 0x7E, count: 32))
+            rendezvousPseudonym: Data(repeating: 0x7E, count: 32),
+            deviceCardEnvelope: card)
     }
 
     private func limit() throws -> DeviceLinkAnswerLimit {
@@ -211,8 +212,80 @@ final class DeviceLinkTests: XCTestCase {
         XCTAssertTrue(trusted, "accepted AND the old device's confirmation verified")
         XCTAssertEqual(new.phase, .confirmed)
         XCTAssertEqual(paired.payloads, [payload], "the old device pairs the new device's payload")
+        XCTAssertEqual(old.modal, .added, "UX 2.1: the result is said, not closed silently")
+        XCTAssertNil(old.addedName, "a payload with no card names no device")
+        XCTAssertEqual(DeviceLinkModalCopy.added(old.addedName), Localization.text("device_link.request.added"))
+        old.dismiss()
         XCTAssertNil(old.modal)
         XCTAssertEqual(server.log, ["create", "pake", "payload", "result:accepted"])
+    }
+
+    /// UX section 2.1 — on the code route too, the result names the new
+    /// device by the card it sealed into its payload.
+    func testTheCodeRouteResultNamesTheDeviceByItsCard() async throws {
+        let server = FakeDeviceLinkServer()
+        let paired = Paired()
+        let old = responder(server, limit: try limit(), paired: paired)
+        let card = FfiDeviceCard(
+            updatedAtMs: 1, lastActiveMs: 1, platform: .web, model: "Chrome on macOS",
+            appVersion: "web", os: "macOS 26", city: "Almere", country: "NL")
+        let payload = try pairingPayload(card: try composeDeviceCardEnvelope(card: card))
+        let new = joiner(server, payload: payload)
+
+        let start = Task { await new.start() }
+        while server.row == nil { await Task.yield() }
+        await old.check()
+        await old.yesItsMe()
+        guard case .code(let shown) = old.modal else { return XCTFail("the code is shown after the 200") }
+        while new.phase != .enterCode { await Task.yield() }
+        let submit = Task { await new.submit(code: shown) }
+        await runOldDevice(old) { !paired.payloads.isEmpty }
+        _ = await submit.value
+        await start.value
+
+        XCTAssertEqual(old.modal, .added)
+        XCTAssertEqual(old.addedName, "Chrome on macOS")
+        let line = DeviceLinkModalCopy.added(old.addedName)
+        XCTAssertEqual(line, Localization.text("device_link.request.added_named", texts: ["name": "Chrome on macOS"]))
+        XCTAssertTrue(line.contains("Chrome on macOS"))
+        XCTAssertNotEqual(line, Localization.text("device_link.request.added"))
+    }
+
+    /// UX section 2.1 — the code route builds its payload when the code is
+    /// typed, so a city that arrived after the screen opened is in the card
+    /// the other device reads.
+    func testTheCodeRouteBuildsItsPayloadWhenTheCodeIsTyped() async throws {
+        let server = FakeDeviceLinkServer()
+        let paired = Paired()
+        let old = responder(server, limit: try limit(), paired: paired)
+        let card = FfiDeviceCard(
+            updatedAtMs: 1, lastActiveMs: 1, platform: .ios, model: "iPhone 16 Pro",
+            appVersion: "1.0", os: "iOS 26", city: "Almere", country: "NL")
+        let payload = try pairingPayload(card: try composeDeviceCardEnvelope(card: card))
+        var built = 0
+        let new = DeviceLinkJoin(
+            ports: .init(relay: server, sleep: { _ in await Task.yield() }),
+            handle: handle,
+            pairingPayloadAtSeal: { @MainActor in
+                built += 1
+                return payload
+            })
+
+        let start = Task { await new.start() }
+        while server.row == nil { await Task.yield() }
+        await old.check()
+        await old.yesItsMe()
+        guard case .code(let shown) = old.modal else { return XCTFail("the code is shown after the 200") }
+        while new.phase != .enterCode { await Task.yield() }
+        XCTAssertEqual(built, 0, "nothing is built before the code is typed")
+        let submit = Task { await new.submit(code: shown) }
+        await runOldDevice(old) { !paired.payloads.isEmpty }
+        _ = await submit.value
+        await start.value
+
+        XCTAssertEqual(built, 1)
+        XCTAssertEqual(paired.payloads, [payload])
+        XCTAssertEqual(old.addedName, "iPhone 16 Pro")
     }
 
     /// The old device added the new one but could not hand over the keys (it
@@ -606,7 +679,7 @@ final class DeviceLinkTests: XCTestCase {
         await start.value
         XCTAssertTrue(trusted)
         XCTAssertEqual(paired.payloads, [payload])
-        XCTAssertNil(old.modal)
+        XCTAssertEqual(old.modal, .added)
         XCTAssertEqual(server.log, ["create", "pake", "payload", "result:accepted"])
     }
 

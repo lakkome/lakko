@@ -4178,6 +4178,10 @@
       "text": "أُضيف الجهاز.",
       "status": "machine"
     },
+    "device_link.request.added_named": {
+      "text": "أُضيف «{name}».",
+      "status": "machine"
+    },
     "device_link.request.adding": {
       "text": "جارٍ إضافة الجهاز...",
       "status": "machine"
@@ -4544,6 +4548,10 @@
     },
     "devices.scan.confirm.title": {
       "text": "ربط هذا الجهاز؟",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title_named": {
+      "text": "ربط «{name}»؟",
       "status": "machine"
     },
     "devices.scan.error.camera_denied": {
@@ -7552,6 +7560,10 @@
     },
     "settings.devices.scan.done": {
       "text": "أُضيف الجهاز. سيظهر في القائمة بعد أن يكتمل انضمامه.",
+      "status": "machine"
+    },
+    "settings.devices.scan.done_named": {
+      "text": "أُضيف «{name}». سيظهر في القائمة بعد أن يكتمل انضمامه.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {

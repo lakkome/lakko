@@ -70,6 +70,7 @@ import {
 import RestoreViaDevicePanel, {
   type DeviceRestoreFlowHandle,
 } from "../devices/RestoreViaDevicePanel";
+import type { PairingPlace } from "../devices/device-card-runtime";
 import { loginHandleFor } from "./login-handle";
 import { UsernameField } from "./recover/UsernameField";
 import { RESET_CONFIRM_WORD, resetConfirmed } from "./reset-confirm";
@@ -198,7 +199,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
   // flow; a fresh browser (access came from a recovery code) uses the
   // anonymous one, which mints an in-memory device seed. Either way the seed
   // and the session land via `completeFromPairing`.
-  async function prepareDeviceFlow(): Promise<DeviceRestoreFlowHandle> {
+  async function prepareDeviceFlow(place: PairingPlace): Promise<DeviceRestoreFlowHandle> {
     const acct = account();
     if (acct === null) {
       throw new KeyedError("restore_identity.error.nothing");
@@ -216,6 +217,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       const anon = await prepareAnonymousJoinFlow({
         loginHandle,
         known: { accountIdBytes, accountIdB64: acct.accountIdB64 },
+        place,
       });
       // No device key yet: the join holds its device seed, the history
       // bundle and the pairing state bundle in memory until
@@ -223,6 +225,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       persistAnonymousJoin = (key) => anon.persistTo(key);
       return {
         qrPayload: anon.qrPayload,
+        pairingPayloadAtSeal: () => anon.pairingPayloadAtSeal(),
         awaitWelcome: (signal) => anon.awaitWelcome(signal),
         accept: async (welcome, welcomeCursor) => {
           const outcome = await anon.accept(welcome, { welcomeCursor });
@@ -240,9 +243,11 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       accountIdB64: acct.accountIdB64,
       deviceKey,
       loginHandle,
+      place,
     });
     return {
       qrPayload: session.qrPayload,
+      pairingPayloadAtSeal: () => session.pairingPayloadAtSeal(),
       awaitWelcome: (signal) => session.awaitWelcome(signal),
       accept: async (welcome, welcomeCursor) => {
         const outcome = await session.accept(welcome, {

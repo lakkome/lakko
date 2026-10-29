@@ -163,7 +163,16 @@ public final class ContactsRepository: ObservableObject {
 
     /// ADR-0079 section 5 — the inviters added through their link whose app
     /// has not answered yet, for the bound account.
-    @Published public private(set) var invited: [PendingContact] = []
+    @Published public private(set) var invited: [PendingContact] = [] {
+        didSet {
+            // ADR-0079 — a pending contact is named by its link's statement
+            // on every surface (a group roster included), so the resolver
+            // must see the list as it changes, like the renames above.
+            if invited != oldValue {
+                ProfileDirectory.shared.setPendingContacts(invited)
+            }
+        }
+    }
 
     /// The one-to-one each pending contact moved into this session (account
     /// id hex to group id hex): an open pending chat follows it there.

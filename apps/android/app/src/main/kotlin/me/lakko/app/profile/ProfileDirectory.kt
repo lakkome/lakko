@@ -69,6 +69,18 @@ public class ProfileDirectory internal constructor(
     @Volatile
     private var aliases: Map<String, String> = emptyMap()
 
+    /** ADR-0079 — what each pending contact's invite link states about the
+     *  inviter (display name, username), keyed by the inviter's account key
+     *  (standard base64): the profile input of a key nothing else names. */
+    @Volatile
+    private var pendingStatements: Map<String, PeerProfile> = emptyMap()
+
+    /** The profile input for [signatureKeyB64]: the received profile, else
+     *  the statement of a pending contact's link. A received profile always
+     *  wins: it is the person's current statement. */
+    private fun profileFor(signatureKeyB64: String): PeerProfile? =
+        profiles.get(signatureKeyB64) ?: pendingStatements[signatureKeyB64]
+
     private val mutableVersion = MutableStateFlow(0L)
 
     /** Bumped on every change that can alter a resolved name. */
@@ -124,6 +136,28 @@ public class ProfileDirectory internal constructor(
     public fun setRenames(byKey: Map<String, String>) {
         if (byKey == renames) return
         renames = byKey
+        bump()
+    }
+
+    /**
+     * ADR-0079 — replace the pending contacts whose link statements name a
+     * key no rename and no received profile names (the precedence is local
+     * rename > received profile > the link's statement > placeholder). Called
+     * wherever the pending list changes, so a roster re-reads when a pending
+     * contact is added, removed or handed over.
+     *
+     * The stated username is shown only when this `(key, username)` pair is
+     * ALREADY verified (from a profile that carried a certificate). No check
+     * is started for it: verification needs the discovery-signed certificate
+     * a profile envelope carries (ADR-0060 section 5), and an invite link
+     * carries none, so a check could only end "not yet" or, through the
+     * lookup path, as a false "not verified". A link that states only a
+     * username therefore stays the placeholder until a profile arrives.
+     */
+    public fun setPendingContacts(list: List<me.lakko.app.contacts.PendingContact>) {
+        val next = pendingStatementsOf(list)
+        if (next == pendingStatements) return
+        pendingStatements = next
         bump()
     }
 
@@ -224,7 +258,7 @@ public class ProfileDirectory internal constructor(
         }
         val own = resolveName(
             localRename = renames[signatureKeyB64],
-            profile = profiles.get(signatureKeyB64),
+            profile = profileFor(signatureKeyB64),
             verificationOf = { username -> verifications.get(signatureKeyB64, username) },
             signatureKey = keyBytes,
         )
@@ -239,7 +273,7 @@ public class ProfileDirectory internal constructor(
         }
         val inherited = resolveName(
             localRename = renames[previous],
-            profile = profiles.get(previous),
+            profile = profileFor(previous),
             verificationOf = { username -> verifications.get(previous, username) },
             signatureKey = previousBytes,
         )
@@ -354,10 +388,13 @@ public class ProfileDirectory internal constructor(
  * persisted stores once and resolves, with no write, no verification and no
  * network. A name the app has not already learned resolves to the placeholder.
  */
-public class ProfileNameSnapshot private constructor(
+public class ProfileNameSnapshot internal constructor(
     private val profiles: Map<String, PeerProfile>,
     private val verifications: Map<String, UsernameVerification>,
     private val renames: Map<String, String>,
+    /** ADR-0079 — the pending contacts' link statements, the profile input
+     *  of a key with no received profile ([pendingStatementsOf]). */
+    private val pendingStatements: Map<String, PeerProfile> = emptyMap(),
 ) {
     /** The resolved name for a signature key, standard base64. */
     public fun resolve(signatureKeyB64: String): ResolvedName {
@@ -368,7 +405,7 @@ public class ProfileNameSnapshot private constructor(
         }
         return resolveName(
             localRename = renames[signatureKeyB64],
-            profile = profiles[signatureKeyB64],
+            profile = profiles[signatureKeyB64] ?: pendingStatements[signatureKeyB64],
             verificationOf = { username ->
                 verifications[UsernameVerificationStore.pairKey(signatureKeyB64, username)]
             },
@@ -377,7 +414,8 @@ public class ProfileNameSnapshot private constructor(
     }
 
     /** `true` when the viewer knows SOMETHING about this person (a rename, a
-     *  profile name or a verified username). */
+     *  profile name, a pending contact's link-stated name, or a verified
+     *  username). */
     public fun isKnown(signatureKeyB64: String): Boolean = !resolve(signatureKeyB64).isPlaceholder
 
     public companion object {
@@ -392,10 +430,35 @@ public class ProfileNameSnapshot private constructor(
                 profiles = account?.let { persistence.loadProfiles(it) } ?: emptyMap(),
                 verifications = account?.let { persistence.loadVerifications(it) } ?: emptyMap(),
                 renames = ProfileDirectory.renamesFromAcceptedContacts(context.applicationContext, accountIdB64),
+                pendingStatements = account?.let { a ->
+                    try {
+                        pendingStatementsOf(
+                            me.lakko.app.contacts.PendingContactsFiles.onDevice(context.applicationContext).load(a),
+                        )
+                    } catch (_: Throwable) {
+                        emptyMap()
+                    }
+                } ?: emptyMap(),
             )
         }
     }
 }
+
+/**
+ * ADR-0079 — the link statement of each pending contact as a profile input,
+ * keyed by the inviter's account key (standard base64): the display name the
+ * link states and the username it states (shown only when that pair is
+ * already verified; no check is ever started for it), at stamp 0. A contact whose link states neither is left out, so it does not
+ * count as known.
+ */
+internal fun pendingStatementsOf(list: List<me.lakko.app.contacts.PendingContact>): Map<String, PeerProfile> =
+    list.mapNotNull { c ->
+        val key = c.signaturePubkeyB64.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+        val name = c.displayName.trim().takeIf { it.isNotEmpty() }
+        val username = c.username.trim().takeIf { it.isNotEmpty() }
+        if (name == null && username == null) return@mapNotNull null
+        key to PeerProfile(displayName = name, username = username, updatedAtMs = 0uL)
+    }.toMap()
 
 /**
  * [ProfilePersistence] over plain `SharedPreferences` (JSON), one pair of rows

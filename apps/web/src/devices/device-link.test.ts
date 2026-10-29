@@ -410,6 +410,17 @@ describe("old device: the decision", () => {
     expect(h.flow.view()).toEqual({ kind: "closed", message: LINK_DEVICE_ADDED });
   });
 
+  it("names the added device when its payload carried a card (UX second-device 2.1)", async () => {
+    const h = responderHarness({ pair: vi.fn(async () => "Chrome on macOS") });
+    await h.flow.poll();
+    await h.flow.consent();
+    h.setListed(sealedRequest(GOOD_CONFIRM_A));
+    await h.flow.poll();
+    const view = h.flow.view();
+    expect(view.kind).toBe("closed");
+    expect(view.kind === "closed" ? view.message() : "").toBe("“Chrome on macOS” added.");
+  });
+
   it("a wrong code posts wrong_code and pairs nothing", async () => {
     const h = responderHarness();
     await h.flow.poll();
@@ -592,7 +603,10 @@ describe("old device: the answer limit (5 per 24 h, chosen, not measured)", () =
 // New device
 // ---------------------------------------------------------------------------
 
-function initiatorHarness(over: Partial<InitiatorPorts> = {}) {
+function initiatorHarness(
+  over: Partial<InitiatorPorts> = {},
+  atSeal?: () => Promise<Uint8Array>,
+) {
   const views: InitiatorView[] = [];
   let status: DeviceRequestStatus = { pending: true, pakeB: null, outcome: null, confirmB: null };
   let clock = 0;
@@ -607,7 +621,11 @@ function initiatorHarness(over: Partial<InitiatorPorts> = {}) {
     onView: (v) => views.push(v),
     ...over,
   };
-  const flow = createDeviceLinkInitiator(ports, { loginHandle: OWN_HANDLE, pairingPayload: PAYLOAD });
+  const flow = createDeviceLinkInitiator(ports, {
+    loginHandle: OWN_HANDLE,
+    pairingPayload: PAYLOAD,
+    ...(atSeal !== undefined ? { pairingPayloadAtSeal: atSeal } : {}),
+  });
   return {
     flow,
     ports,
@@ -662,6 +680,39 @@ describe("new device: the code field", () => {
       confirmA: new Uint8Array([GOOD_CONFIRM_A]),
     });
     expect(h.flow.view().kind).toBe("checking");
+  });
+});
+
+describe("new device: the payload is read when the code seals it", () => {
+  // docs/ux/second-device.md section 2.1: a city that arrived by the time
+  // the code is typed rides the sealed payload.
+  it("seals the payload the session gives at that moment", async () => {
+    const late = new Uint8Array([8, 8, 8]);
+    const h = initiatorHarness({}, async () => late);
+    await toReady(h);
+    await h.flow.submit("471903");
+    expect(h.core.finishes).toEqual([{ code: "471903", payload: late }]);
+    expect(h.flow.view().kind).toBe("checking");
+  });
+
+  it("falls back to the QR payload when reading it fails", async () => {
+    const h = initiatorHarness({}, async () => {
+      throw new Error("no card");
+    });
+    await toReady(h);
+    await h.flow.submit("471903");
+    expect(h.core.finishes).toEqual([{ code: "471903", payload: PAYLOAD }]);
+  });
+
+  it("a second Continue while the payload is read seals once", async () => {
+    let release: (b: Uint8Array) => void = () => undefined;
+    const h = initiatorHarness({}, () => new Promise<Uint8Array>((r) => (release = r)));
+    await toReady(h);
+    const first = h.flow.submit("471903");
+    await h.flow.submit("471903");
+    release(PAYLOAD);
+    await first;
+    expect(h.core.finishes).toHaveLength(1);
   });
 });
 

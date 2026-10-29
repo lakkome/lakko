@@ -171,6 +171,68 @@ class DeviceLinkTest {
     }
 
     @Test
+    fun `the code route builds its payload when the code is sealed, not before`() = runTest {
+        // UX second-device.md section 2.1: the card's place has had time to
+        // arrive by the time the typed code seals the payload.
+        val server = Server()
+        val initiator = Initiator()
+        var built = 0
+        val new = NewDeviceLink(
+            api = server,
+            initiatorFor = { initiator },
+            payloadForSeal = {
+                built += 1
+                payload
+            },
+            pollIntervalMs = 1L,
+        )
+        val paired = mutableListOf<ByteArray>()
+        val old = oldDevice(server, paired = paired)
+        new.start(handle)
+        old.poll()
+        old.confirm()
+        assertEquals(NewDeviceLinkState.EnterCode, new.awaitAnswer())
+        assertEquals(0, built)
+        val submit = async { new.submitCode("471903") }
+        yield()
+        while (server.pakeA == null) yield()
+        assertEquals(1, built)
+        old.poll()
+        assertEquals(NewDeviceLinkState.Confirmed, submit.await())
+        assertArrayEquals(payload, paired.single())
+    }
+
+    @Test
+    fun `the closing line names the added device from its payload`() = runTest {
+        // UX second-device.md section 2.1: the code route names the device
+        // the same way the scan does ([DeviceCards.addedCopy]).
+        val server = Server()
+        val new = newDevice(server)
+        val named = namedCopy("device_link.request.added_named", "Pixel 7a")
+        val old = OldDeviceLink(
+            api = server,
+            responderFor = { Responder("471903") },
+            formatCode = { "${it.substring(0, 2)} ${it.substring(2, 4)} ${it.substring(4, 6)}" },
+            openPayload = { it },
+            pair = { },
+            limit = Limit().limit,
+            addedCopy = { opened ->
+                assertArrayEquals(payload, opened)
+                named
+            },
+        )
+        new.start(handle)
+        old.poll()
+        old.confirm()
+        new.awaitAnswer()
+        val submit = async { new.submitCode("471903") }
+        yield()
+        while (server.pakeA == null) yield()
+        assertEquals(OldDeviceLinkState.Notice(named), old.poll())
+        assertEquals(NewDeviceLinkState.Confirmed, submit.await())
+    }
+
+    @Test
     fun `the code is never shown before the answer landed`() = runTest {
         val server = Server().apply { answeredElsewhere = true }
         val old = oldDevice(server)
@@ -581,4 +643,7 @@ class DeviceLinkTest {
         server.requestId = null
         assertEquals(OldDeviceLinkState.Idle, old.poll())
     }
+
+    private fun namedCopy(key: String, name: String) =
+        me.lakko.app.l10n.UiText(key, texts = mapOf("name" to name))
 }

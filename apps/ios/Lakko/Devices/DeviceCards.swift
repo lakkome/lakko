@@ -37,9 +37,13 @@ public enum DeviceCards {
     /// than this (ADR-0080 section 3).
     public static let refreshMs: Int64 = 30 * 60 * 1000
     /// The longest wait before the growth re-send of the own card.
-    public static let growthMaxDelayMs: Int64 = 30_000
+    public static let growthMaxDelayMs: Int64 = 300
     /// The city is asked for again at most this often (chosen, not measured).
     public static let cityRefreshMs: Int64 = 6 * 60 * 60 * 1000
+    /// UX section 2.1 — the longest wait, from the moment the pairing screen
+    /// opens, for the city answer before the payload is built without a place
+    /// (chosen, not measured).
+    public static let pairingPlaceWaitSeconds: Double = 1.5
 
     /// Keep a received card, keyed by the sender's DeviceGroup leaf key (hex)
     /// resolved at receipt. `nil` when nothing changes: the sender is not in
@@ -54,6 +58,26 @@ public enum DeviceCards {
         if let stored = cards[senderKeyHex], card.updatedAtMs <= stored.updatedAtMs { return nil }
         var next = cards
         next[senderKeyHex] = card
+        return next
+    }
+
+    /// UX section 2.1 — the card a pairing payload carried for the device
+    /// just added, kept as that leaf's card until the device's own card
+    /// arrives over the DeviceGroup. Stored with the lowest stamp (`0`), so
+    /// the receive rule above replaces it with any real card. `nil` when
+    /// nothing changes: the leaf is not in the roster, or a card from it is
+    /// already stored (a real card is never overwritten by the payload's).
+    public static func seedFromPairing(
+        _ cards: [String: StoredDeviceCard],
+        keyHex: String,
+        card: StoredDeviceCard,
+        rosterKeysHex: [String]
+    ) -> [String: StoredDeviceCard]? {
+        guard rosterKeysHex.contains(keyHex), cards[keyHex] == nil else { return nil }
+        var seeded = card
+        seeded.updatedAtMs = 0
+        var next = cards
+        next[keyHex] = seeded
         return next
     }
 
@@ -75,7 +99,7 @@ public enum DeviceCards {
         return age < 0 || age >= refreshMs
     }
 
-    /// A random delay in `[0, 30 s)` for the growth re-send.
+    /// A random delay in `[0, 300 ms)` for the growth re-send.
     public static func growthDelayMs(random: Double = Double.random(in: 0..<1)) -> Int64 {
         let clamped = random.isFinite ? min(max(random, 0), 0.999_999) : 0
         return Int64(clamped * Double(growthMaxDelayMs))
@@ -141,6 +165,33 @@ public enum DeviceCards {
         public var icon: IconKind
     }
 
+    /// The card a row reads: this device's row is built from what this
+    /// device knows about itself (`ownCard`, the fields it would put in its
+    /// own card), never from the cards the other devices sent, where its own
+    /// never is (UX section 3, seen live 2026-10-29: the row read "Device").
+    public static func rowCard(
+        keyHex: String, isSelf: Bool, cards: [String: StoredDeviceCard], ownCard: StoredDeviceCard?
+    ) -> StoredDeviceCard? {
+        isSelf ? ownCard : cards[keyHex]
+    }
+
+    /// The second and third lines of a row for `card`: app and system, then
+    /// the place when the card has one.
+    static func lines(_ card: StoredDeviceCard, words: Words) -> (detail: String, place: String) {
+        let app = words.app(card.appVersion)
+        let detail = card.os.isEmpty ? app : "\(app) · \(card.os)"
+        let country = card.country.isEmpty ? "" : words.countryName(card.country)
+        let place: String
+        if !card.city.isEmpty, !country.isEmpty {
+            place = words.place(card.city, country)
+        } else if !card.city.isEmpty {
+            place = card.city
+        } else {
+            place = country
+        }
+        return (detail, place)
+    }
+
     public static func view(
         _ row: RowInput, words: Words, nowMs: Int64, calendar: Calendar, locale: Locale
     ) -> RowView {
@@ -156,20 +207,45 @@ public enum DeviceCards {
         guard let card = row.card else {
             return RowView(title: words.device, detail: "", place: "", activity: activity, icon: .unknown)
         }
-        let app = words.app(card.appVersion)
-        let detail = card.os.isEmpty ? app : "\(app) · \(card.os)"
-        let country = card.country.isEmpty ? "" : words.countryName(card.country)
-        let place: String
-        if !card.city.isEmpty, !country.isEmpty {
-            place = words.place(card.city, country)
-        } else if !card.city.isEmpty {
-            place = card.city
-        } else {
-            place = country
-        }
+        let (detail, place) = lines(card, words: words)
         return RowView(
             title: card.model.isEmpty ? words.device : card.model,
             detail: detail, place: place, activity: activity, icon: iconKind(card.platform))
+    }
+
+    // MARK: Pairing (UX section 2.1)
+
+    /// The name the new device's card in a pairing payload gives it: the
+    /// title a Devices row shows from that card. `nil` with no card, or a
+    /// card with no model: then the copy names no device.
+    public static func pairingName(_ card: StoredDeviceCard?) -> String? {
+        guard let card else { return nil }
+        let model = card.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        return model.isEmpty ? nil : model
+    }
+
+    /// What the confirm step shows above the warning.
+    public struct PairingConfirm: Equatable {
+        public var title: String
+        public var detail: String
+        public var place: String
+    }
+
+    /// The confirm step after a scanned code: `Link "<name>"?` and the
+    /// card's other lines as a Devices row shows them; with no card, the
+    /// unnamed title and no detail lines. The card is what the new device
+    /// says about itself and nothing checks it, so the warning stays under
+    /// it either way.
+    public static func pairingConfirm(
+        _ card: StoredDeviceCard?,
+        words: Words,
+        titleNamed: (String) -> String,
+        titleUnnamed: String
+    ) -> PairingConfirm {
+        guard let card else { return PairingConfirm(title: titleUnnamed, detail: "", place: "") }
+        let (detail, place) = lines(card, words: words)
+        return PairingConfirm(
+            title: pairingName(card).map(titleNamed) ?? titleUnnamed, detail: detail, place: place)
     }
 
     // MARK: This device

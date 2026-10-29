@@ -4178,6 +4178,10 @@
       "text": "دستگاه اضافه شد.",
       "status": "machine"
     },
+    "device_link.request.added_named": {
+      "text": "«{name}» افزوده شد.",
+      "status": "machine"
+    },
     "device_link.request.adding": {
       "text": "در حال افزودن دستگاه...",
       "status": "machine"
@@ -4544,6 +4548,10 @@
     },
     "devices.scan.confirm.title": {
       "text": "این دستگاه متصل شود؟",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title_named": {
+      "text": "«{name}» پیوند داده شود؟",
       "status": "machine"
     },
     "devices.scan.error.camera_denied": {
@@ -7552,6 +7560,10 @@
     },
     "settings.devices.scan.done": {
       "text": "دستگاه افزوده شد. پس از پایان پیوستن در فهرست نمایش داده می‌شود.",
+      "status": "machine"
+    },
+    "settings.devices.scan.done_named": {
+      "text": "«{name}» افزوده شد. پس از پایان پیوستن در فهرست نمایش داده می‌شود.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {

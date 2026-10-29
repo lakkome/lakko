@@ -90,6 +90,19 @@ message PairingQr {
     // Field 16: 6..15 stay reserved for the fingerprint-attestation slot.
     bytes self_removal_proof = 16;
 
+    // The new device's ADR-0080 device card: the bytes of a
+    // `lakko_contacts::device_card` envelope (platform, model or
+    // browser, app and system version, city and country when known),
+    // at most 270 bytes. Set on a pairing payload: the QR and the
+    // ADR-0049 code-route sealed payload, which carries the same
+    // PairingQr bytes. Empty when absent, and always empty on a
+    // DeviceGroup rejoin knock. Display only: it is what the new
+    // device says about itself, so the confirming device shows it to
+    // name the device it adds and trusts nothing in it
+    // (docs/ux/second-device.md section 2.1). The decoder refuses a
+    // card longer than the envelope bound; it does not decode it.
+    bytes device_card = 17;
+
     // Reserved for future use — never re-purpose. Slot for the
     // optional fingerprint-attestation extension landing in
     // 2a3b's safety-number follow-up.

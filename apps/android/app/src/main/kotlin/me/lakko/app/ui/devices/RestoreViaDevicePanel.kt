@@ -22,6 +22,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import me.lakko.app.devices.DeviceCardCenter
 import me.lakko.app.devices.PairingOrchestrator
 import me.lakko.app.devices.WelcomeCourier
 import me.lakko.app.l10n.UiText
@@ -70,12 +71,17 @@ public fun RestoreViaDevicePanel(
     // ADR-0049 section 2 (amended 2026-09-28) — the code route is the
     // default; the QR route stays one tap away ("Show a QR code instead").
     var showQr by remember { mutableStateOf(false) }
+    // UX second-device.md section 2.1 - one city request for this screen,
+    // started when it opens; both routes take their card's place from it.
+    val place = remember { DeviceCardCenter.startPairingPlace() }
+    DisposableEffect(place) { onDispose { place.cancel() } }
     if (!showQr) {
         DeviceLinkCodePanel(
             loginHandle = loginHandle,
             known = known,
             onRecovered = onRecovered,
             onShowQr = { showQr = true },
+            place = place,
             modifier = modifier,
         )
         return
@@ -109,52 +115,59 @@ public fun RestoreViaDevicePanel(
             RestoreViaDeviceUi.Idle -> Button(
                 onClick = {
                     ui = RestoreViaDeviceUi.Preparing
-                    try {
-                        val js = PairingOrchestrator.prepareJoinFlow(
-                            context = context,
-                            loginHandle = loginHandle,
-                            known = known,
-                        )
-                        session = js
-                        ui = RestoreViaDeviceUi.Waiting(js.qrPayload)
-                        pollJob = scope.launch {
-                            try {
-                                when (val outcome = js.awaitWelcome()) {
-                                    is WelcomeCourier.WelcomeOutcome.Received -> {
-                                        ui = RestoreViaDeviceUi.Joining
-                                        val recovery = js.accept(
-                                            welcomeBytes = outcome.welcomeBytes,
-                                            welcomeCursor = outcome.welcomeCursor,
-                                            recovery = true,
-                                        )
-                                        if (recovery == null) {
-                                            ui = RestoreViaDeviceUi.Error(
-                                                UiText("device_link.error.no_identity"),
+                    scope.launch {
+                        // UX second-device.md section 2.1 - the card takes the place that
+                        // has arrived within the bound; the code is never rebuilt for it.
+                        val envelope = DeviceCardCenter.pairingCardEnvelope(place.settled())
+                        try {
+                            val js = PairingOrchestrator.prepareJoinFlow(
+                                context = context,
+                                loginHandle = loginHandle,
+                                known = known,
+                                deviceCardEnvelope = envelope,
+                            )
+                            session = js
+                            ui = RestoreViaDeviceUi.Waiting(js.qrPayload)
+                            pollJob = scope.launch {
+                                try {
+                                    when (val outcome = js.awaitWelcome()) {
+                                        is WelcomeCourier.WelcomeOutcome.Received -> {
+                                            ui = RestoreViaDeviceUi.Joining
+                                            val recovery = js.accept(
+                                                welcomeBytes = outcome.welcomeBytes,
+                                                welcomeCursor = outcome.welcomeCursor,
+                                                recovery = true,
                                             )
-                                        } else {
-                                            onRecovered(recovery)
-                                            ui = RestoreViaDeviceUi.Done
+                                            if (recovery == null) {
+                                                ui = RestoreViaDeviceUi.Error(
+                                                    UiText("device_link.error.no_identity"),
+                                                )
+                                            } else {
+                                                onRecovered(recovery)
+                                                ui = RestoreViaDeviceUi.Done
+                                            }
+                                        }
+                                        WelcomeCourier.WelcomeOutcome.Timeout -> {
+                                            ui = RestoreViaDeviceUi.Error(
+                                                UiText("device_link.error.timeout"),
+                                            )
+                                        }
+                                        WelcomeCourier.WelcomeOutcome.Cancelled -> {
+                                            ui = RestoreViaDeviceUi.Idle
                                         }
                                     }
-                                    WelcomeCourier.WelcomeOutcome.Timeout -> {
-                                        ui = RestoreViaDeviceUi.Error(
-                                            UiText("device_link.error.timeout"),
-                                        )
-                                    }
-                                    WelcomeCourier.WelcomeOutcome.Cancelled -> {
-                                        ui = RestoreViaDeviceUi.Idle
-                                    }
+                                } catch (cause: Throwable) {
+                                    me.lakko.app.rethrowIfCancelled(cause)
+                                    ui = RestoreViaDeviceUi.Error(deviceRestoreErrorText(cause))
+                                } finally {
+                                    session?.dispose()
+                                    session = null
                                 }
-                            } catch (cause: Throwable) {
-                                me.lakko.app.rethrowIfCancelled(cause)
-                                ui = RestoreViaDeviceUi.Error(deviceRestoreErrorText(cause))
-                            } finally {
-                                session?.dispose()
-                                session = null
                             }
+                        } catch (cause: Throwable) {
+                            me.lakko.app.rethrowIfCancelled(cause)
+                            ui = RestoreViaDeviceUi.Error(deviceRestoreErrorText(cause))
                         }
-                    } catch (cause: Throwable) {
-                        ui = RestoreViaDeviceUi.Error(deviceRestoreErrorText(cause))
                     }
                 },
             ) { Text(t("device_link.show_code")) }

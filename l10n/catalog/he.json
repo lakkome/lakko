@@ -4178,6 +4178,10 @@
       "text": "המכשיר נוסף.",
       "status": "machine"
     },
+    "device_link.request.added_named": {
+      "text": "„{name}” נוסף.",
+      "status": "machine"
+    },
     "device_link.request.adding": {
       "text": "מוסיפים את המכשיר...",
       "status": "machine"
@@ -4544,6 +4548,10 @@
     },
     "devices.scan.confirm.title": {
       "text": "לקשר את המכשיר הזה?",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title_named": {
+      "text": "לקשר את „{name}”?",
       "status": "machine"
     },
     "devices.scan.error.camera_denied": {
@@ -7552,6 +7560,10 @@
     },
     "settings.devices.scan.done": {
       "text": "המכשיר נוסף. הוא יופיע ברשימה כשיסיים להצטרף.",
+      "status": "machine"
+    },
+    "settings.devices.scan.done_named": {
+      "text": "„{name}” נוסף. הוא יופיע ברשימה כשיסיים להצטרף.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {

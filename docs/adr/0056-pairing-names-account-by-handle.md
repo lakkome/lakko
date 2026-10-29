@@ -220,3 +220,15 @@ handle check on decode are unchanged: the signed-in device decodes the opened
 bytes with `pairing::decode(bytes, own_handle)` exactly as a scanned QR, and
 the SPAKE2 transcript binds the same handle, so a request routed to the wrong
 account fails as a wrong code before any decode. The QR route is untouched.
+
+## Amendment (2026-10-29): field 17 carries the new device's card
+
+`PairingQr` gains `bytes device_card = 17`: the joining device's ADR-0080
+device card envelope, 0 to 270 bytes, refused above that by encode and
+decode, never decoded by `lakko-mls` (display only, ADR-0080 amendment of
+2026-10-29). `pairing::encode` takes it as a fourth argument;
+`encode_rejoin_knock` sends none. Version stays 2: no deployed payload
+exists. Property tests (`prop_round_trip` with and without a card,
+`prop_over_long_card_refused`) and the `pairing_qr` fuzz assertion cover the
+bound. A `lakko-mls` codec change under invariant #3; G-39's surface grows by
+one bounded length field.
