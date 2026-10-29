@@ -180,6 +180,17 @@ export function answersInWindow(times: readonly number[], now: number): number[]
   return times.filter((t) => Number.isFinite(t) && t <= now && now - t < DEVICE_LINK_ANSWER_WINDOW_MS);
 }
 
+/**
+ * Whether this build keeps the answer limit. A build made with
+ * `VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT=off` (the test stack's) allows every
+ * answer, so testing sign-ins does not run out of answers (maintainer,
+ * 2026-10-29); any other build keeps the limit.
+ */
+export function answerLimitEnforcedInThisBuild(): boolean {
+  const env = import.meta.env as Record<string, string | undefined>;
+  return env["VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT"] !== "off";
+}
+
 /** `true` while this device may answer one more request. */
 export function canAnswer(store: AnswerLogStore, now: number): boolean {
   return answersInWindow(store.load(), now).length < DEVICE_LINK_ANSWER_LIMIT;
@@ -406,7 +417,7 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
 
   async function answerNew(req: PendingDeviceRequest): Promise<void> {
     const now = ports.now();
-    if (!canAnswer(ports.answers, now)) {
+    if (answerLimitEnforcedInThisBuild() && !canAnswer(ports.answers, now)) {
       handled.add(req.requestId);
       consented.delete(req.requestId);
       show({ kind: "limited", message: LINK_TOO_MANY_REQUESTS });

@@ -228,14 +228,33 @@ public final class DeviceLinkAnswerLimit {
 
     private let defaults: UserDefaults
     private let key: String
+    /// `false` turns the limit off: every answer is allowed. Off in debug
+    /// builds only (``enforcedInThisBuild``), so testing sign-ins on one phone
+    /// does not run out of answers (maintainer, 2026-10-29); a release build
+    /// keeps the limit.
+    private let enforced: Bool
+
+    /// Whether the app's own limit is on in this build.
+    public static var enforcedInThisBuild: Bool {
+        #if DEBUG
+        return false
+        #else
+        return true
+        #endif
+    }
 
     /// Where the answers are kept: device-wide, and removed with the account
     /// by ``AccountLocalDataWipe``.
     public static let defaultKey = "me.lakko.device-link.answers.v1"
 
-    public init(defaults: UserDefaults = .standard, key: String = DeviceLinkAnswerLimit.defaultKey) {
+    public init(
+        defaults: UserDefaults = .standard,
+        key: String = DeviceLinkAnswerLimit.defaultKey,
+        enforced: Bool = true
+    ) {
         self.defaults = defaults
         self.key = key
+        self.enforced = enforced
     }
 
     private func recent(now: Date) -> [Double] {
@@ -245,7 +264,7 @@ public final class DeviceLinkAnswerLimit {
 
     /// Whether one more answer is allowed at `now`.
     public func canAnswer(now: Date = Date()) -> Bool {
-        recent(now: now).count < Self.maxAnswers
+        !enforced || recent(now: now).count < Self.maxAnswers
     }
 
     /// Record one answer; returns its time, for ``refund(_:)``.
@@ -576,7 +595,7 @@ public final class DeviceLinkResponderFlow: ObservableObject {
             },
             checkPayload: @escaping (Data, Data) throws -> Void,
             runPairing: @escaping @MainActor (Data) async throws -> Bool,
-            limit: DeviceLinkAnswerLimit = DeviceLinkAnswerLimit(),
+            limit: DeviceLinkAnswerLimit = DeviceLinkAnswerLimit(enforced: DeviceLinkAnswerLimit.enforcedInThisBuild),
             proof: ProofPorts
         ) {
             self.proof = proof

@@ -642,4 +642,16 @@ class DeviceLinkTest {
         server.requestId = null
         assertEquals(OldDeviceLinkState.Idle, old.poll())
     }
+
+    /** A limit built with `enforced = false` (debug builds) allows every
+     *  answer; a default one stops at the fifth. */
+    @Test
+    fun an_unenforced_limit_allows_every_answer() {
+        var times = emptyList<Long>()
+        val off = DeviceLinkAnswerLimit(load = { times }, save = { times = it }, nowMs = { 1_000L }, enforced = false)
+        repeat(DeviceLinkAnswerLimit.MAX_ANSWERS + 3) { assertNotNull(off.tryConsume()) }
+        val on = DeviceLinkAnswerLimit(load = { times }, save = { times = it }, nowMs = { 1_000L })
+        assertNull(on.tryConsume())
+    }
+
 }

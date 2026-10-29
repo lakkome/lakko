@@ -110,6 +110,17 @@ final class DeviceLinkTests: XCTestCase {
             deviceCardEnvelope: card)
     }
 
+    /// A limit built with `enforced: false` (debug builds) allows every
+    /// answer; a default one stops at the fifth.
+    func testAnUnenforcedLimitAllowsEveryAnswer() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "dl-off-\(UUID().uuidString)"))
+        let off = DeviceLinkAnswerLimit(defaults: defaults, enforced: false)
+        let on = DeviceLinkAnswerLimit(defaults: defaults)
+        for _ in 0..<(DeviceLinkAnswerLimit.maxAnswers + 3) { off.record() }
+        XCTAssertTrue(off.canAnswer())
+        XCTAssertFalse(on.canAnswer())
+    }
+
     private func limit() throws -> DeviceLinkAnswerLimit {
         DeviceLinkAnswerLimit(
             defaults: try XCTUnwrap(UserDefaults(suiteName: "dl-limit-\(UUID().uuidString)")))
