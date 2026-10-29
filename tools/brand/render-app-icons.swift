@@ -13,6 +13,7 @@
 //   apps/android/app/src/main/res/mipmap-*/              adaptive foreground per density
 //   apps/android/app/src/main/res/drawable-*/            notification icon (ic_stat_lakko)
 //   apps/web/public/                                     favicon, 96/192/512, maskable, apple-touch, badge
+//   apps/desktop/src-tauri/icons/icon.png                macOS app icon (1024, on the Apple icon grid)
 //
 // The glyph is a raster cut from the original icon (the design system asks
 // for a vector trace before a store submission); the 1024 iOS icon is
@@ -114,11 +115,14 @@ enum GlyphFill {
     case gradient(CGColor, CGColor)
 }
 
-/// Draws one icon of `size` pixels. The tile (the area the composition is
-/// measured on) is `tileFraction` of the canvas, centred; `cornerFraction`
-/// rounds the background (0 = full bleed square).
+/// Draws one icon of `size` pixels. The background body is `bodyFraction`
+/// of the canvas, centred, with a soft drop shadow when it is smaller than
+/// the canvas; the tile (the area the composition is measured on) is
+/// `tileFraction` of the body, centred; `cornerFraction` rounds the body
+/// (0 = square).
 func render(size: Int, glyph: Glyph, background: Background, fill: GlyphFill,
-            tileFraction: CGFloat = 1, cornerFraction: CGFloat = 0, opaque: Bool) -> CGImage {
+            bodyFraction: CGFloat = 1, tileFraction: CGFloat = 1, cornerFraction: CGFloat = 0,
+            opaque: Bool) -> CGImage {
     let s = CGFloat(size)
     let info = opaque ? CGImageAlphaInfo.noneSkipLast.rawValue : CGImageAlphaInfo.premultipliedLast.rawValue
     let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: 0,
@@ -130,22 +134,36 @@ func render(size: Int, glyph: Glyph, background: Background, fill: GlyphFill,
     ctx.scaleBy(x: 1, y: -1)
 
     let canvas = CGRect(x: 0, y: 0, width: s, height: s)
+    let bodySide = s * bodyFraction
+    let body = CGRect(x: (s - bodySide) / 2, y: (s - bodySide) / 2, width: bodySide, height: bodySide)
+    if bodyFraction < 1, !opaque {
+        ctx.clear(canvas)
+        // The shadow of the body; drawn in an unflipped sense, so a positive
+        // y offset in the flipped context reads as "below".
+        ctx.saveGState()
+        ctx.setShadow(offset: CGSize(width: 0, height: -s * 0.010), blur: s * 0.020,
+                      color: rgb(0, 0, 0, 0.30))
+        ctx.setFillColor(gradientStart)
+        fillRounded(ctx, body, cornerFraction)
+        ctx.restoreGState()
+    }
     switch background {
     case .none:
         ctx.clear(canvas)
     case .solid(let c):
         ctx.setFillColor(c)
-        fillRounded(ctx, canvas, cornerFraction)
+        fillRounded(ctx, body, cornerFraction)
     case .brandGradient:
         ctx.saveGState()
-        addRounded(ctx, canvas, cornerFraction)
+        addRounded(ctx, body, cornerFraction)
         ctx.clip()
         let g = CGGradient(colorsSpace: sRGB, colors: [gradientStart, gradientEnd] as CFArray, locations: [0, 1])!
-        ctx.drawLinearGradient(g, start: CGPoint(x: 0, y: 0), end: CGPoint(x: s, y: s), options: [])
+        ctx.drawLinearGradient(g, start: CGPoint(x: body.minX, y: body.minY),
+                               end: CGPoint(x: body.maxX, y: body.maxY), options: [])
         ctx.restoreGState()
     }
 
-    let tile = s * tileFraction
+    let tile = bodySide * tileFraction
     let origin = (s - tile) / 2
     let gw = tile * glyphWidthOnTile
     let gh = gw * CGFloat(glyph.image.height) / CGFloat(glyph.image.width)
@@ -254,3 +272,11 @@ for (density, scale) in [("mdpi", 1), ("hdpi", 1.5), ("xhdpi", 2), ("xxhdpi", 3)
 writePNG(render(size: 96, glyph: glyph, background: .none, fill: .white,
                 tileFraction: statTile, opaque: false),
          "\(web)/badge-96.png")
+
+// macOS (the desktop app, ADR-0085): macOS draws an app icon as given, with
+// no mask, and its own icons sit on the Apple icon grid: an 824-point body
+// on a 1024-point canvas, the rest transparent. A full-bleed tile reads
+// larger than every other icon in the Dock.
+writePNG(render(size: 1024, glyph: glyph, background: .brandGradient, fill: .white,
+                bodyFraction: 824.0 / 1024.0, cornerFraction: corner, opaque: false),
+         "\(root)/apps/desktop/src-tauri/icons/icon.png")

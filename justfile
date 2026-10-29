@@ -499,6 +499,40 @@ dev-sfu:
 dev-web:
     cd apps/web && npm run dev
 
+# Build the web client for the desktop app (ADR-0085) into apps/web/dist,
+# which the desktop binary embeds at compile time. Run before dev-desktop
+# whenever the web client changed.
+build-desktop-web:
+    cd apps/web && VITE_LAKKO_PLATFORM=desktop npm run build
+
+# Build, sign and run the desktop app (macOS debug build).
+#
+# The linker only ad-hoc signs a debug binary, with an identifier derived
+# from its own hash, so after every rebuild macOS takes it for a new app and
+# asks again for the login-keychain password the debug device-key fallback
+# needs. Signing with a fixed identifier and a real certificate lets
+# "Always Allow" survive rebuilds. The identity is the first
+# "Apple Development" certificate in the keychain unless
+# LAKKO_DESKTOP_SIGN_IDENTITY names one; with neither, the binary runs
+# ad-hoc signed, as before.
+dev-desktop:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd apps/desktop/src-tauri
+    cargo build
+    bin=target/debug/lakko-desktop
+    identity="${LAKKO_DESKTOP_SIGN_IDENTITY:-}"
+    if [ -z "$identity" ]; then
+        identity=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -n 1)
+    fi
+    if [ -n "$identity" ]; then
+        codesign --force --sign "$identity" --identifier me.lakko.desktop.dev "$bin"
+        echo "signed with: $identity"
+    else
+        echo "WARN no Apple Development certificate; running ad-hoc signed (keychain will ask after each rebuild)"
+    fi
+    RUST_LOG="${RUST_LOG:-info}" "./$bin"
+
 # Production build of apps/web — wasm-pack release + tsc --noEmit +
 # `vite build`. Output lands in `apps/web/dist/`.
 build-web:
