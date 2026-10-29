@@ -382,6 +382,10 @@ export async function saveMessageLog(
   deviceKey: DeviceCipher,
   payload: MessageLogPayload,
 ): Promise<void> {
+  // A wiped account takes no late write (ADR-0077), and its device key may
+  // already be gone (the desktop host releases it at the wipe), so ask
+  // before the key is used, and again before the write lands.
+  if (!accountStoresWritable(accountIdB64)) return;
   const plaintext = new TextEncoder().encode(JSON.stringify(payload));
   const ciphertext = await encryptBlob(deviceKey, plaintext);
   const row: PersistedRow = { accountId: accountIdB64, ciphertext };
@@ -465,6 +469,8 @@ export function updateMessageLog(
 ): Promise<void> {
   const prev = writeChains.get(accountIdB64) ?? Promise.resolve();
   const run = prev.then(async () => {
+    // Nothing to read or write for a wiped account (ADR-0077).
+    if (!accountStoresWritable(accountIdB64)) return;
     const current = await loadMessageLog(accountIdB64, deviceKey);
     const next = mutate(current);
     // The held sends ride every writer's rewrite of the payload untouched.
