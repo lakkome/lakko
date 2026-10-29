@@ -27,6 +27,7 @@ import { createSignal } from "solid-js";
 import { loadWasm } from "../wasm";
 import { DEFAULT_BASE_URL } from "../discovery/client";
 import {
+  adoptPairingCard,
   browserFacts,
   cardGrowthDelayMs,
   cardsStorageKey,
@@ -50,6 +51,10 @@ export const CITY_REFRESH_MS = 6 * 60 * 60 * 1000;
 
 /** What the web client puts in `app_version`: the row reads "Lakko web". */
 export const WEB_APP_VERSION = "web";
+
+/** How long building a pairing payload, or the first card after a join,
+ *  waits for the city before going without it (chosen, not measured). */
+export const PAIRING_CITY_WAIT_MS = 2_000;
 
 
 interface PersistedCards {
@@ -85,6 +90,10 @@ let deciding = false;
 let growthTimer: ReturnType<typeof setTimeout> | null = null;
 let ownUnsent = false;
 let resendOwed = false;
+/** docs/ux/second-device.md section 3: this device joined the DeviceGroup of
+ *  this account before the runtime was bound to it (the restore routes); its
+ *  card goes as soon as it is. */
+let joinedPendingFor: string | null = null;
 
 function readJson<T>(key: string): T | null {
   try {
@@ -134,6 +143,8 @@ function ownCardSent(): void {
 /** Bind the runtime to an account (on sign-in) and register the composer. */
 export function bindDeviceCards(accountIdB64: string): void {
   if (account === accountIdB64) return;
+  const joined = joinedPendingFor;
+  joinedPendingFor = null;
   unbindDeviceCards();
   account = accountIdB64;
   const row = readJson<PersistedCards>(cardsStorageKey(accountIdB64));
@@ -156,6 +167,8 @@ export function bindDeviceCards(accountIdB64: string): void {
   if (ownUnsent && row?.own != null) markServiceEnvelopeDirty("deviceCard");
   // A growth re-send that fell due while hidden waits for a foreground.
   if (resendOwed) noteDeviceForeground();
+  // Joined on a restore route before this bind: the card goes now.
+  if (joined === accountIdB64) void sendOwnCardNow(accountIdB64, Date.now());
 }
 
 /** Sign-out: nothing of one account is used for the next. */
@@ -177,6 +190,10 @@ export function unbindDeviceCards(): void {
 async function composeOwnCardEnvelope(): Promise<Uint8Array | null> {
   const own = ownCard();
   if (own === null) return null;
+  return composeCardEnvelope(own);
+}
+
+async function composeCardEnvelope(own: StoredDeviceCard): Promise<Uint8Array> {
   const wasm = await loadWasm();
   const card = new wasm.DeviceCard(
     BigInt(own.updatedAtMs),
@@ -310,7 +327,7 @@ export function pruneOwnDeviceCards(rosterKeysHex: readonly string[]): void {
 }
 
 /** The DeviceGroup grew: re-send the stored own card, unchanged, after up to
- *  30 s, so the new device learns this one (ADR-0058 discipline). */
+ *  300 ms, so the new device learns this one (ADR-0058 discipline). */
 export function scheduleOwnCardResend(random: () => number = Math.random): void {
   if (account === null || ownCard() === null || growthTimer !== null) return;
   const bound = account;
@@ -333,4 +350,95 @@ export function noteDeviceForeground(): void {
   if (account === null || !resendOwed || !visible()) return;
   resendOwed = false;
   markOwnCardDirty();
+}
+
+/** `p`, or `undefined` once `ms` passed. */
+async function within<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
+/**
+ * docs/ux/second-device.md section 2.1: the fields of the card this device
+ * puts in its pairing payload, the same fields it puts in its own card. A
+ * device bound to its account asks for its city as its card does (the city
+ * switch holds), waiting at most `waitMs`, past which the card goes without
+ * one. A device that is not signed in yet (the restore routes) asks for
+ * nothing: no request leaves a fresh device before its session (ADR-0056),
+ * so its payload card carries no place.
+ */
+export async function pairingCardFields(
+  waitMs: number = PAIRING_CITY_WAIT_MS,
+  nowMs: number = Date.now(),
+): Promise<DeviceCardFields> {
+  const bound = account;
+  if (bound !== null) await within(refreshCity(bound, nowMs), waitMs);
+  return currentOwnFields();
+}
+
+/**
+ * The device-card envelope for this device's pairing payload, or `null` when
+ * it cannot be composed: a payload without a card is a pairing like any
+ * other, so this never throws.
+ */
+export async function composePairingCardEnvelope(
+  waitMs: number = PAIRING_CITY_WAIT_MS,
+  nowMs: number = Date.now(),
+): Promise<Uint8Array | null> {
+  try {
+    const fields = await pairingCardFields(waitMs, nowMs);
+    return await composeCardEnvelope({ ...fields, updatedAtMs: nowMs, lastActiveMs: nowMs });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The device that let a new one in keeps the card from its pairing payload
+ * for the new leaf (`adoptPairingCard`: only when none is stored, stamped
+ * lowest so the device's own card replaces it). `false` when nothing changed.
+ */
+export function adoptPairedDeviceCard(keyHex: string, card: StoredDeviceCard): boolean {
+  if (account === null) return false;
+  const next = adoptPairingCard(cards(), keyHex, card);
+  if (next === null) return false;
+  setCards(next);
+  persistCards();
+  return true;
+}
+
+/** A fresh own card, sent now (the city wait is bounded). */
+async function sendOwnCardNow(bound: string, nowMs: number): Promise<void> {
+  await within(refreshCity(bound, nowMs), PAIRING_CITY_WAIT_MS);
+  if (account !== bound) return;
+  const last = ownCard();
+  // Strictly newer than any card this device sent before, whatever the clock.
+  const stamp = Math.max(nowMs, (last?.updatedAtMs ?? 0) + 1);
+  setOwnCard({ ...currentOwnFields(), updatedAtMs: stamp, lastActiveMs: nowMs });
+  markOwnCardDirty();
+}
+
+/**
+ * docs/ux/second-device.md section 3: this device has just joined the
+ * account's DeviceGroup from a pairing Welcome. Its card goes at once, not
+ * after the growth delay (that is for the devices that were already there)
+ * and not after the next action: the person is looking at it. When the
+ * runtime is not bound to the account yet (a restore route lands the session
+ * after the join), the card goes when it is.
+ */
+export function sendOwnCardAfterJoin(accountIdB64: string, nowMs: number = Date.now()): Promise<void> {
+  if (account !== accountIdB64) {
+    joinedPendingFor = accountIdB64;
+    return Promise.resolve();
+  }
+  return sendOwnCardNow(accountIdB64, nowMs);
 }

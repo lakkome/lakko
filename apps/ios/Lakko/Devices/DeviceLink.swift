@@ -474,6 +474,12 @@ public enum DeviceLinkModalCopy {
     public static var handledElsewhere: String { t("device_link.request.handled_elsewhere") }
     public static var failed: String { t("device_link.request.error.generic") }
     public static var keysNotSent: String { t("device_link.keys_not_sent") }
+    /// UX section 2.1 — the new device was added: named by the card in its
+    /// payload (`"Chrome on macOS" added.`), else `Device added.`.
+    public static func added(_ name: String?) -> String {
+        guard let name else { return t("device_link.request.added") }
+        return Localization.text("device_link.request.added_named", texts: ["name": name])
+    }
     public static var expired: String { t("device_link.request.expired") }
 }
 
@@ -488,6 +494,9 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         /// Showing the code (`47 19 03`); the request is answered.
         case code(String)
         case adding
+        /// The new device was added and given the keys (UX section 2.1: the
+        /// line names it by ``DeviceLinkResponderFlow/addedName``).
+        case added
         /// The new device was added, but this device could not hand over
         /// the keys (it holds no recovery phrase, or the hand-over failed):
         /// the person is told to use a passkey or the phrase on the new
@@ -546,6 +555,9 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         /// recovery row + the chat fan-out). Returns whether the keys were
         /// handed over (the recovery row was published).
         public var runPairing: @MainActor (_ payload: Data) async throws -> Bool
+        /// UX section 2.1 — the card the new device put in the opened
+        /// payload, for the result line; `nil` when it carried none.
+        public var payloadCard: (_ payload: Data, _ handle: Data) -> StoredDeviceCard?
         public var limit: DeviceLinkAnswerLimit
         public var proof: ProofPorts
 
@@ -558,6 +570,10 @@ public final class DeviceLinkResponderFlow: ObservableObject {
             },
             checkPayload: @escaping (Data, Data) throws -> Void,
             runPairing: @escaping @MainActor (Data) async throws -> Bool,
+            payloadCard: @escaping (Data, Data) -> StoredDeviceCard? = { payload, handle in
+                (try? PairingCodec.parsePairingQrPayload(wireBytes: payload, expectedLoginHandle: handle))
+                    .flatMap(PairingCodec.deviceCard(of:))
+            },
             limit: DeviceLinkAnswerLimit = DeviceLinkAnswerLimit(),
             proof: ProofPorts
         ) {
@@ -568,11 +584,16 @@ public final class DeviceLinkResponderFlow: ObservableObject {
             self.makeResponder = makeResponder
             self.checkPayload = checkPayload
             self.runPairing = runPairing
+            self.payloadCard = payloadCard
             self.limit = limit
         }
     }
 
     @Published public private(set) var modal: Modal?
+    /// UX section 2.1 — the name of the device the last pairing added, from
+    /// the card in its payload; `nil` when it carried none. Read with
+    /// ``Modal/added`` and ``Modal/keysNotSent``.
+    @Published public private(set) var addedName: String?
 
     private let ports: Ports
     /// Kept in memory only: if it is lost (a relaunch), the request can only
@@ -588,7 +609,9 @@ public final class DeviceLinkResponderFlow: ObservableObject {
     /// The new device's payload verified and the decision is made, but the
     /// result could not be posted for the proof (it ran out). Kept so the
     /// one-use responder's outcome is not lost while the person proves again.
-    private var owedResult: (requestIdB64: String, accepted: DeviceLinkAccepted?, answeredAt: Double?)?
+    private var owedResult: (
+        requestIdB64: String, accepted: DeviceLinkAccepted?, answeredAt: Double?, name: String?
+    )?
     /// When the answer to ``requestIdB64`` was counted (``DeviceLinkAnswerLimit/refund(_:)``).
     private var answeredAt: Double?
 
@@ -676,7 +699,8 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         } catch {
             accepted = nil
         }
-        owedResult = (id, accepted, answeredAt)
+        let name = accepted.flatMap { DeviceCards.pairingName(ports.payloadCard($0.pairingPayload, handle)) }
+        owedResult = (id, accepted, answeredAt, name)
         answeredAt = nil
         await finishOwedResult(token: token)
     }
@@ -702,6 +726,7 @@ public final class DeviceLinkResponderFlow: ObservableObject {
                 modal = .proofNeeded
                 return
             }
+            NSLog("[device-link] result not recorded: %@", String(describing: error))
             owedResult = nil
             if owed.accepted != nil { giveBack(owed.answeredAt) }
             modal = owed.accepted == nil ? .wrongCode : .failed
@@ -715,8 +740,10 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         do {
             let keysSent = try await ports.runPairing(accepted.pairingPayload)
             if !keysSent { giveBack(owed.answeredAt) }
-            modal = keysSent ? nil : .keysNotSent
+            addedName = owed.name
+            modal = keysSent ? .added : .keysNotSent
         } catch {
+            NSLog("[device-link] adding the device failed: %@", String(describing: error))
             giveBack(owed.answeredAt)
             modal = .failed
         }

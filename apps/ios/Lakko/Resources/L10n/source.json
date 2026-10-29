@@ -4391,6 +4391,10 @@
       "text": "Device added.",
       "comment": "Shown after a new device was added."
     },
+    "device_link.request.added_named": {
+      "text": "“{name}” added.",
+      "comment": "Shown after a new device was added. {name} is what the new device says it is, e.g. 'Chrome on macOS'."
+    },
     "device_link.request.adding": {
       "text": "Adding the device...",
       "comment": "Busy label while the new device is added."
@@ -4859,6 +4863,11 @@
     "devices.scan.confirm.title": {
       "text": "Link this device?",
       "comment": "Asked after a pairing code was scanned, before the new device is let in.",
+      "security_critical": true
+    },
+    "devices.scan.confirm.title_named": {
+      "text": "Link “{name}”?",
+      "comment": "Asked after a pairing code was scanned, before the new device is let in. {name} is what the new device says it is, e.g. 'Chrome on macOS' or 'iPhone 16 Pro'. Followed by the device's other details and the warning.",
       "security_critical": true
     },
     "devices.scan.error.camera_denied": {
@@ -8263,6 +8272,10 @@
     "settings.devices.scan.done": {
       "text": "Device added. It will appear in the list once it has finished joining.",
       "comment": "The scanned device was let in."
+    },
+    "settings.devices.scan.done_named": {
+      "text": "“{name}” added. It will appear in the list once it has finished joining.",
+      "comment": "The scanned device was let in. {name} is what the new device says it is, e.g. 'Chrome on macOS'."
     },
     "settings.devices.scan.opening": {
       "text": "Opening the camera...",

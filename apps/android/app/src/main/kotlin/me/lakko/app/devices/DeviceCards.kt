@@ -6,6 +6,7 @@ package me.lakko.app.devices
 import java.time.ZoneId
 import java.util.Locale
 import kotlinx.serialization.Serializable
+import me.lakko.app.l10n.UiText
 import me.lakko.app.ui.chat.formatListTime
 
 /**
@@ -43,7 +44,7 @@ public object DeviceCards {
     public const val REFRESH_MS: Long = 30L * 60 * 1000
 
     /** The longest wait before the growth re-send of the own card. */
-    public const val GROWTH_MAX_DELAY_MS: Long = 30_000
+    public const val GROWTH_MAX_DELAY_MS: Long = 300
 
     /** The city is asked for again at most this often (chosen, not measured). */
     public const val CITY_REFRESH_MS: Long = 6L * 60 * 60 * 1000
@@ -82,7 +83,72 @@ public object DeviceCards {
         return age < 0 || age >= REFRESH_MS
     }
 
-    /** A random delay in `[0, 30 s)` for the growth re-send. */
+    /**
+     * The card a pairing payload carried (UX second-device.md section 2.1),
+     * stored for the new device's leaf ([keyHex]) until the device's own card
+     * arrives over the DeviceGroup. Stored at the lowest stamp (0), so any
+     * card the device sends itself is strictly newer and replaces it (the
+     * [receive] rule). `null` when nothing changes: no card, or a card from
+     * that leaf is already stored.
+     */
+    public fun pairingCard(
+        cards: Map<String, StoredDeviceCard>,
+        keyHex: String,
+        card: StoredDeviceCard?,
+    ): Map<String, StoredDeviceCard>? {
+        if (card == null || keyHex.isEmpty() || cards.containsKey(keyHex)) return null
+        return cards + (keyHex to card.copy(updatedAtMs = 0))
+    }
+
+    /** The card a Devices row is built from: this device's own fields for
+     *  its own row (it never waits for a card, UX section 3), else the card
+     *  received from that device. */
+    public fun cardFor(
+        isSelf: Boolean,
+        keyHex: String,
+        cards: Map<String, StoredDeviceCard>,
+        ownFields: StoredDeviceCard,
+    ): StoredDeviceCard? = if (isSelf) ownFields else cards[keyHex]
+
+    /** The name a pairing names the new device by (its card's model or
+     *  browser name), or `null` when the payload carried no card or a card
+     *  with no name. */
+    public fun pairingName(card: StoredDeviceCard?): String? = card?.model?.trim()?.takeIf { it.isNotEmpty() }
+
+    /** The confirm title after a scan: `Link "Pixel 7a"?`, or
+     *  `Link this device?` with no name. */
+    public fun confirmTitle(card: StoredDeviceCard?): UiText =
+        pairingName(card)?.let { UiText("devices.scan.confirm.title_named", texts = mapOf("name" to it)) }
+            ?: UiText("devices.scan.confirm.title")
+
+    /** The result line on both routes: `"Pixel 7a" added.`, or
+     *  `Device added.` with no name. */
+    public fun addedCopy(card: StoredDeviceCard?): UiText =
+        pairingName(card)?.let { UiText("device_link.request.added_named", texts = mapOf("name" to it)) }
+            ?: UiText("device_link.request.added")
+
+    /** The confirm's lines under the title: the same second and third lines
+     *  a Devices row shows from [card] (app and system, then the place).
+     *  Empty with no card. */
+    public fun pairingLines(card: StoredDeviceCard?, words: Words): List<String> {
+        if (card == null) return emptyList()
+        val (detail, place) = detailAndPlace(card, words)
+        return listOf(detail, place).filter { it.isNotEmpty() }
+    }
+
+    private fun detailAndPlace(card: StoredDeviceCard, words: Words): Pair<String, String> {
+        val app = words.app(card.appVersion)
+        val detail = if (card.os.isEmpty()) app else "$app · ${card.os}"
+        val country = if (card.country.isEmpty()) "" else words.countryName(card.country)
+        val place = when {
+            card.city.isNotEmpty() && country.isNotEmpty() -> words.place(card.city, country)
+            card.city.isNotEmpty() -> card.city
+            else -> country
+        }
+        return detail to place
+    }
+
+    /** A random delay in `[0, 300 ms)` for the growth re-send. */
     public fun growthDelayMs(random: Double): Long {
         val clamped = if (random.isFinite()) random.coerceIn(0.0, 0.999_999) else 0.0
         return (clamped * GROWTH_MAX_DELAY_MS).toLong()
@@ -159,14 +225,7 @@ public object DeviceCards {
             else -> formatListTime(card.lastActiveMs, nowMs, zone, use24h, locale)
         }
         if (card == null) return RowView(words.device, "", "", activity, IconKind.UNKNOWN)
-        val app = words.app(card.appVersion)
-        val detail = if (card.os.isEmpty()) app else "$app · ${card.os}"
-        val country = if (card.country.isEmpty()) "" else words.countryName(card.country)
-        val place = when {
-            card.city.isNotEmpty() && country.isNotEmpty() -> words.place(card.city, country)
-            card.city.isNotEmpty() -> card.city
-            else -> country
-        }
+        val (detail, place) = detailAndPlace(card, words)
         return RowView(
             title = card.model.ifEmpty { words.device },
             detail = detail,

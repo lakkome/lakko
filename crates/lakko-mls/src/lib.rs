@@ -223,7 +223,8 @@ pub mod fuzz_api {
     /// Try to decode a device-pairing payload (`pairing::decode`, v2 since
     /// ADR-0056). Returns `true` on a successful prost decode + the
     /// structural binding checks (version == 2 / login-handle length +
-    /// constant-time match / rendezvous-pseudonym length). The bytes are the
+    /// constant-time match / rendezvous-pseudonym length / device-card
+    /// length). The bytes are the
     /// MOST attacker-controllable input in the system — a victim physically
     /// scans a QR a malicious actor crafted, or a relay serves the posted
     /// payload — so this parser must stay panic-free on arbitrary input. The
@@ -234,9 +235,10 @@ pub mod fuzz_api {
     }
 
     /// The guard oracle for the `pairing_qr` target: `false` exactly when
-    /// [`decode_pairing_qr`] accepts a payload whose version is not 2 or
-    /// whose embedded handle is not [`PAIRING_QR_EXPECTED_HANDLE`]. The
-    /// harness asserts it; it never panics itself.
+    /// [`decode_pairing_qr`] accepts a payload whose version is not 2, whose
+    /// embedded handle is not [`PAIRING_QR_EXPECTED_HANDLE`], or whose device
+    /// card is longer than [`crate::pairing::PAIRING_DEVICE_CARD_MAX_LEN`].
+    /// The harness asserts it; it never panics itself.
     #[must_use]
     pub fn pairing_qr_acceptance_is_bound(bytes: &[u8]) -> bool {
         use prost::Message as _;
@@ -246,6 +248,7 @@ pub mod fuzz_api {
         lakko_proto::wire::device_pairing::v1::PairingQr::decode(bytes).is_ok_and(|p| {
             p.version == crate::pairing::PAIRING_VERSION
                 && p.login_handle.as_slice() == PAIRING_QR_EXPECTED_HANDLE.as_slice()
+                && p.device_card.len() <= crate::pairing::PAIRING_DEVICE_CARD_MAX_LEN
         })
     }
 

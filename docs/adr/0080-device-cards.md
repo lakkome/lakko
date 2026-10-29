@@ -57,7 +57,8 @@ leaves the DeviceGroup its card is dropped.
   the city switch).
 - When the DeviceGroup grows, so a new device learns the others: each existing
   device re-sends its stored own card, unchanged, after a random delay of up to
-  30 s (the ADR-0058 growth re-send discipline).
+  300 ms (the ADR-0058 growth re-send discipline; 30 s until 2026-10-29, when
+  the maintainer found a joined device waiting most of that for a name).
 - Never on a timer, and never while the app is in the background: a device
   nobody touches sends nothing, so its last-active time stays put.
 
@@ -177,7 +178,7 @@ features off; `cargo deny check licenses` passed with it.
   about its location should not change another's.
 - The growth re-send: every device that was in the DeviceGroup before a
   device joined re-sends its stored card unchanged after a uniform random
-  delay below 30 s, only while in the foreground. The pairing hand-over also
+  delay below 300 ms (30 s until 2026-10-29), only while in the foreground. The pairing hand-over also
   carries the own card (web through the service-envelope outbox, iOS through
   `handOverEnvelopes`; Android only through the growth re-send).
 - Received cards are stored per account (web `localStorage`, iOS
@@ -216,3 +217,33 @@ TRACE-level capture that finds neither the address nor the answer). Clients:
 web `device-cards.test.ts` (store rules, send rule, order, row text, user
 agent, sender resolution, codec round trip through the real wasm); iOS
 `DeviceCardsTests.swift`; Android `DeviceCardsTest.kt`.
+
+## Amendment (2026-10-29): the card travels in the pairing payload; this device's row; a joined device sends at once
+
+Seen live: after scanning a code the signed-in device asked "Link this
+device?" and said "Device added.", naming nothing; both rows of the Devices
+screen read "Device"; a newly joined web device appeared by name on the
+iPhone after 22 s. UX `docs/ux/second-device.md` section 2.1.
+
+- **The card rides in the pairing payload.** `PairingQr` field 17
+  `device_card` carries the new device's card envelope (at most 270 bytes,
+  `lakko_mls::pairing::PAIRING_DEVICE_CARD_MAX_LEN`, pinned equal to
+  `DEVICE_CARD_ENVELOPE_MAX_LEN`), empty when absent and on a rejoin knock.
+  The ADR-0049 code route seals the same bytes. It is the new device's own
+  statement and nothing trusts it: the signed-in device shows it in the
+  confirmation ("Link "Chrome on macOS"?" with the row's detail lines, the
+  warning kept) and in the result ("..." added.), and stores it for the new
+  leaf at stamp 0 so the device's own card over the DeviceGroup replaces it.
+  `lakko-mls` bounds the length and does not decode it; both FFI surfaces
+  decode it for display (`DecodedPairingQr.deviceCard`, an undecodable card
+  is absent, never an error). Built on web, iOS and Android; host-tested only.
+  A device not yet signed in puts no place in it (it asks no server before a
+  session); Android puts none in either case.
+- **This device's own row** is built from the device's own current fields,
+  never from the received cards (where its own card never is). All three
+  clients looked it up there and read "Device".
+- **A device that has just joined sends its card at once**, without the
+  growth delay; if its card runtime is not bound to the account yet, the
+  send goes when it binds (in memory).
+- **The growth re-send delay** of the devices already there is 0-300 ms (was
+  0-30 s).

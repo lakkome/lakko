@@ -12,7 +12,7 @@
  */
 
 import type { Wasm } from "../wasm";
-import { isDevicePlatform, type StoredDeviceCard } from "./device-cards";
+import { storedCardOf, type StoredDeviceCard } from "./device-cards";
 import { receiveOwnDeviceCard } from "./device-card-runtime";
 
 type WasmDeviceCard = InstanceType<Wasm["DeviceCard"]>;
@@ -38,18 +38,7 @@ export function decodeDeviceCardEnvelope(
     return null;
   }
   try {
-    const platform = card.platform;
-    if (!isDevicePlatform(platform)) return null;
-    return {
-      platform,
-      model: card.model,
-      appVersion: card.appVersion,
-      os: card.os,
-      city: card.city,
-      country: card.country,
-      updatedAtMs: Number(card.updatedAtMs),
-      lastActiveMs: Number(card.lastActiveMs),
-    };
+    return storedCardOf(card);
   } finally {
     card.free();
   }

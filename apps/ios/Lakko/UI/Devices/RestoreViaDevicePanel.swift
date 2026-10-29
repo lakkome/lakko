@@ -226,10 +226,14 @@ public struct RestoreViaDevicePanel: View {
             return try PairingOrchestrator.prepareJoinFlow(
                 loginHandle: loginHandle,
                 accountIdBytes: accountIdBytes,
-                accountIdB64: accountIdB64
+                accountIdB64: accountIdB64,
+                // UX section 2.1 — the other device names this one by it.
+                deviceCardEnvelope: DeviceCardCenter.shared.pairingCardEnvelope()
             )
         case .byName(let loginHandle):
-            return try PairingOrchestrator.prepareRestoreByNameFlow(loginHandle: loginHandle)
+            return try PairingOrchestrator.prepareRestoreByNameFlow(
+                loginHandle: loginHandle,
+                deviceCardEnvelope: DeviceCardCenter.shared.pairingCardEnvelope())
         }
     }
 

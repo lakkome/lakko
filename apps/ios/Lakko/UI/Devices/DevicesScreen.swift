@@ -330,7 +330,9 @@ private struct PairView: View {
             let s = try PairingOrchestrator.prepareJoinFlow(
                 loginHandle: loginHandle,
                 accountIdBytes: accountIdBytes,
-                accountIdB64: accountIdB64
+                accountIdB64: accountIdB64,
+                // UX section 2.1 — the other device names this one by it.
+                deviceCardEnvelope: DeviceCardCenter.shared.pairingCardEnvelope()
             )
             session = s
             state = .waiting(qrPayload: s.qrPayload)
@@ -425,12 +427,13 @@ private struct ScanView: View {
         /// A decoded pairing QR parks here until the user explicitly
         /// confirms: the scan transfers DeviceGroup membership AND the
         /// account's keys AND a session grant, so it must not run on a
-        /// bare camera glance.
-        case confirm(Data)
+        /// bare camera glance. `card` is what the payload says the new
+        /// device is (UX section 2.1), `nil` when it carries none.
+        case confirm(Data, card: StoredDeviceCard?)
         case processing
         /// The device was added; `keysSent` says whether this device could
-        /// hand over the keys with it.
-        case done(keysSent: Bool)
+        /// hand over the keys with it; `name` is what its card names it.
+        case done(keysSent: Bool, name: String?)
         case error(UiText)
     }
 
@@ -460,19 +463,30 @@ private struct ScanView: View {
                         .padding(.top, 4)
                 }
 
-            case .confirm(let scannedBytes):
+            case .confirm(let scannedBytes, let card):
+                let lines = DevicePairingCopy.confirm(card, l10n: l10n)
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(l10n.t("devices.scan.confirm.title"))
-                        .font(.headline)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(lines.title)
+                            .font(.headline)
+                        // UX section 2.1 — the card's other lines, as its row
+                        // will show them.
+                        if !lines.detail.isEmpty {
+                            Text(lines.detail).font(.footnote).foregroundStyle(Color.lakkoTextMuted)
+                        }
+                        if !lines.place.isEmpty {
+                            Text(lines.place).font(.footnote).foregroundStyle(Color.lakkoTextMuted)
+                        }
+                    }
                     Text(l10n.t("devices.scan.confirm.body"))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     // UX 17.4 — the same block as "Is this you?", between
                     // the body and `Link device`. A failure leaves this step
                     // open with the scanned code kept.
-                    FreshAuthBlock(model: proof, onSubmit: { link(bytes: scannedBytes) })
+                    FreshAuthBlock(model: proof, onSubmit: { link(bytes: scannedBytes, card: card) })
                     HStack {
-                        Button(action: { link(bytes: scannedBytes) }) {
+                        Button(action: { link(bytes: scannedBytes, card: card) }) {
                             Text(l10n.t(proof.layout.working
                                 ? "common.checking" : "devices.scan.confirm.submit"))
                         }
@@ -489,8 +503,8 @@ private struct ScanView: View {
             case .processing:
                 ProgressView(l10n.t("device_link.request.adding"))
 
-            case .done(let keysSent):
-                Label(l10n.t("device_link.request.added"), systemImage: "checkmark.circle.fill")
+            case .done(let keysSent, let name):
+                Label(DeviceLinkModalCopy.added(name), systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
                 .font(.footnote)
                 if !keysSent {
@@ -519,23 +533,27 @@ private struct ScanView: View {
             return
         }
         // Park for explicit confirmation (lakko-security #1) rather
-        // than running the transfer on a bare decode.
-        state = .confirm(bytes)
+        // than running the transfer on a bare decode. UX section 2.1: the
+        // step names the device by the card in the payload; a payload this
+        // account cannot open names nothing (the transfer reports why).
+        let decoded = try? PairingCodec.parsePairingQrPayload(
+            wireBytes: bytes, expectedLoginHandle: ownLoginHandle)
+        state = .confirm(bytes, card: decoded.flatMap(PairingCodec.deviceCard(of:)))
     }
 
     /// `Link device`: the proof first; nothing of the hand-over starts
     /// before it passes.
-    private func link(bytes: Data) {
+    private func link(bytes: Data, card: StoredDeviceCard?) {
         guard proof.layout.ready else { return }
         Task { @MainActor in
             guard await proof.ensure() else { return }
             guard case .confirm = state else { return }
             proof.closed()
-            runTransfer(bytes: bytes)
+            runTransfer(bytes: bytes, card: card)
         }
     }
 
-    private func runTransfer(bytes: Data) {
+    private func runTransfer(bytes: Data, card: StoredDeviceCard?) {
         state = .processing
         Task { @MainActor in
             do {
@@ -548,7 +566,7 @@ private struct ScanView: View {
                 // grant mint carries exactly it.
                 guard let grant = authRepository.liveFreshGrant() else {
                     proof.proofExpired()
-                    state = .confirm(bytes)
+                    state = .confirm(bytes, card: card)
                     return
                 }
                 let token = authRepository.identitySecrets?.sessionToken ?? sessionToken
@@ -571,7 +589,8 @@ private struct ScanView: View {
                 // Not awaited here: it waits for the device to land and
                 // publish its KeyPackage, which is minutes.
                 onDeviceAdded(scanned.newDeviceKey)
-                state = .done(keysSent: scanned.keysSent)
+                state = .done(
+                    keysSent: scanned.keysSent, name: DeviceCards.pairingName(scanned.newDeviceCard))
             } catch {
                 state = .error(UiText { PairingScanFailure.userFacing(error) })
             }
@@ -706,23 +725,17 @@ private struct DevicesListView: View {
     }
 
     /// ADR-0080 — the words a row needs, in the interface language.
-    private var rowWords: DeviceCards.Words {
-        let locale = l10n.locale
-        return DeviceCards.Words(
-            device: l10n.t("devices.row.device"),
-            online: l10n.t("devices.row.online"),
-            app: { version in
-                version.isEmpty ? l10n.t("devices.row.app_name") : l10n.t("devices.row.app", texts: ["version": version])
-            },
-            place: { city, country in l10n.t("devices.row.place", texts: ["city": city, "country": country]) },
-            countryName: { code in locale.localizedString(forRegionCode: code) ?? code })
-    }
+    private var rowWords: DeviceCards.Words { .interface(l10n) }
 
     private func rows(_ devices: [DeviceRemoval.DeviceListItem]) -> [DeviceCards.RowInput] {
-        devices.map { device in
+        // UX section 3 — this device's row is built from its own fields.
+        let ownCard = cards.ownRowCard()
+        return devices.map { device in
             let keyHex = hexEncode(device.signaturePublicKey)
             return DeviceCards.RowInput(
-                keyHex: keyHex, leafIndex: device.leafIndex, isSelf: device.isSelf, card: cards.cards[keyHex])
+                keyHex: keyHex, leafIndex: device.leafIndex, isSelf: device.isSelf,
+                card: DeviceCards.rowCard(
+                    keyHex: keyHex, isSelf: device.isSelf, cards: cards.cards, ownCard: ownCard))
         }
     }
 
@@ -1303,5 +1316,40 @@ private struct RemoveAllDevicesSheet: View {
             proof.closed()
             onConfirmed()
         }
+    }
+}
+
+// MARK: - Device card words and pairing copy (ADR-0080, UX sections 2.1 and 3)
+
+extension DeviceCards.Words {
+    /// The words a Devices row needs, in the interface language. The pairing
+    /// confirm step uses the same words, so it shows exactly what the row
+    /// will show.
+    @MainActor
+    static func interface(_ l10n: Localization) -> DeviceCards.Words {
+        let locale = l10n.locale
+        return DeviceCards.Words(
+            device: l10n.t("devices.row.device"),
+            online: l10n.t("devices.row.online"),
+            app: { version in
+                version.isEmpty ? l10n.t("devices.row.app_name") : l10n.t("devices.row.app", texts: ["version": version])
+            },
+            place: { city, country in l10n.t("devices.row.place", texts: ["city": city, "country": country]) },
+            countryName: { code in locale.localizedString(forRegionCode: code) ?? code })
+    }
+}
+
+/// UX section 2.1 — the signed-in device names the device being added by the
+/// card in its pairing payload; with no card, today's copy. The result line
+/// is ``DeviceLinkModalCopy/added(_:)``, shared with the code route.
+@MainActor
+enum DevicePairingCopy {
+    /// The confirm step after a scanned code: title and the card's lines.
+    static func confirm(_ card: StoredDeviceCard?, l10n: Localization = .shared) -> DeviceCards.PairingConfirm {
+        DeviceCards.pairingConfirm(
+            card,
+            words: .interface(l10n),
+            titleNamed: { l10n.t("devices.scan.confirm.title_named", texts: ["name": $0]) },
+            titleUnnamed: l10n.t("devices.scan.confirm.title"))
     }
 }

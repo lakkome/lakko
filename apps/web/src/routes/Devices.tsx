@@ -58,7 +58,8 @@ import { useKeyRotation, type RotateResult } from "../devices/key-rotation-runti
 import { rotationCommitted, rotationStepLine, type RotationStepLine,
   rotationSavesPhrase,
 } from "../devices/key-rotation";
-import { ownPairingHandle } from "../devices/pairing";
+import { ownPairingHandle, parsePairingQrPayload } from "../devices/pairing";
+import { pairingConfirmTitle, pairingScanDone } from "../devices/pairing-copy";
 import { recoveryHalfFor } from "../devices/recovery-sender";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
@@ -71,11 +72,15 @@ import { ProofBlock } from "../auth/ProofBlock";
 import { addedNotice, noteDeviceLetIn } from "../devices/added-notice";
 import { DeviceAddedBanner } from "../devices/DeviceAddedNotice";
 import { bytesToHex } from "../chat/folders/folder-model";
-import { deviceCards } from "../devices/device-card-runtime";
+import { currentOwnFields, deviceCards, ownDeviceCard } from "../devices/device-card-runtime";
 import {
   countryNameOf,
   deviceRowView,
   orderDeviceRows,
+  pairingCardName,
+  pairingCardView,
+  selfRowCard,
+  type StoredDeviceCard,
   type DeviceIconKind,
   type DeviceRowInput,
   type DeviceRowView,
@@ -302,10 +307,14 @@ function DevicesListView(props: {
     const s = state();
     if (s.kind !== "ready") return { self: null, others: [] };
     const cards = deviceCards();
+    // UX section 3: this device's row is built from what it knows about
+    // itself, never looked up among the cards the others sent.
+    const selfCard = selfRowCard(ownDeviceCard(), currentOwnFields(), nowMs());
     return orderDeviceRows(
       s.devices.map((d) => {
         const keyHex = bytesToHex(d.signaturePublicKey);
-        return { keyHex, leafIndex: d.leafIndex, isSelf: d.isSelf, card: cards[keyHex] ?? null };
+        const card = d.isSelf ? selfCard : (cards[keyHex] ?? null);
+        return { keyHex, leafIndex: d.leafIndex, isSelf: d.isSelf, card };
       }),
     );
   };
@@ -1239,11 +1248,13 @@ function ScanView(props: {
     // parks here until the user explicitly confirms: the scan now
     // transfers DeviceGroup membership AND the identity seed AND a
     // session grant, so it must not run on a bare camera glance.
-    | { kind: "confirm"; scannedBytes: Uint8Array }
+    // `card`: what the scanned device says about itself (UX section 2.1),
+    // `null` when its payload carried none.
+    | { kind: "confirm"; scannedBytes: Uint8Array; card: StoredDeviceCard | null }
     | { kind: "processing" }
     // `keysSent`: whether the new device was handed a session and the
     // recovery phrase (false when this device does not hold the phrase).
-    | { kind: "done"; keysSent: boolean }
+    | { kind: "done"; keysSent: boolean; name: string | null }
     | { kind: "error"; message: () => string };
   const [state, setState] = createSignal<State>({ kind: "idle" });
   // UX 17.4: `Link device` needs the password or a passkey proven now. The
@@ -1348,10 +1359,33 @@ function ScanView(props: {
       });
       // UX 17.5: this device let the new one in; no notice about it here.
       noteDeviceLetIn(props.accountIdB64, scanned.newDeviceKey);
-      setState({ kind: "done", keysSent: scanned.recoveryPublished });
+      setState({
+        kind: "done",
+        keysSent: scanned.recoveryPublished,
+        name: pairingCardName(scanned.newDeviceCard),
+      });
     } catch (err) {
       setState({ kind: "error", message: failureText(err, "settings.devices.error.scan") });
     }
+  }
+
+  /** The card a scanned payload carries, read against this account's own
+   *  handle; `null` on any failure (the hand-over reports a payload it
+   *  refuses, as before). */
+  async function scannedCard(bytes: Uint8Array): Promise<StoredDeviceCard | null> {
+    try {
+      return (await parsePairingQrPayload(bytes, await ownPairingHandle(props.username))).deviceCard;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Park a decoded code for confirmation, naming the device when its
+   *  payload says what it is (UX section 2.1). */
+  async function toConfirm(bytes: Uint8Array, mine: number): Promise<void> {
+    const card = await scannedCard(bytes);
+    if (mine !== attempt) return;
+    setState({ kind: "confirm", scannedBytes: bytes, card });
   }
 
   async function start(): Promise<void> {
@@ -1413,7 +1447,7 @@ function ScanView(props: {
           // Park for explicit confirmation (lakko-security #1)
           // rather than running the transfer on a bare decode.
           stopCamera();
-          setState({ kind: "confirm", scannedBytes: bytes });
+          void toConfirm(bytes, mine);
           return;
         }
         // Decoded text wasn't our base64url payload; keep
@@ -1463,11 +1497,19 @@ function ScanView(props: {
           {(_) => {
             const s = state();
             const scanned = s.kind === "confirm" ? s.scannedBytes : null;
+            const card = (): ReturnType<typeof pairingCardView> =>
+              pairingCardView(s.kind === "confirm" ? s.card : null, deviceRowWords());
             return (
               <div>
                 <p>
-                  <strong>{t("devices.scan.confirm.title")}</strong>
+                  <strong>{pairingConfirmTitle(card().name)}</strong>
                 </p>
+                <Show when={card().detail !== ""}>
+                  <p class="lk-muted">{card().detail}</p>
+                </Show>
+                <Show when={card().place !== ""}>
+                  <p class="lk-muted">{card().place}</p>
+                </Show>
                 <p>{t("devices.scan.confirm.body")}</p>
                 <ProofBlock gate={gate} />
                 <div class="lk-actions">
@@ -1493,7 +1535,9 @@ function ScanView(props: {
           <p class="lk-muted">{t("device_link.request.adding")}</p>
         </Match>
         <Match when={state().kind === "done"}>
-          <p class="form-info">{t("settings.devices.scan.done")}</p>
+          <p class="form-info">
+            {pairingScanDone((state() as { name?: string | null }).name ?? null)}
+          </p>
           <Show when={(state() as { keysSent?: boolean }).keysSent === false}>
             <p class="form-info" role="status">
               {t("device_link.keys_not_sent")}

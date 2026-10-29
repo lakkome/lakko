@@ -239,6 +239,8 @@ public enum PairingOrchestrator {
                 identity: identity,
                 accountIdB64: accountIdB64
             )
+            // UX section 3 — joined: this device's own card goes at once.
+            await MainActor.run { DeviceCardCenter.shared.noteJoined(accountIdB64: accountIdB64) }
             if let cursor = welcomeCursor {
                 await receiveBundles(joined: joined, accountIdB64: accountIdB64, welcomeCursor: cursor)
             }
@@ -331,6 +333,10 @@ public enum PairingOrchestrator {
                 deviceSeed: pendingDeviceSeed
             )
             pendingDeviceSeed = Data()
+            // UX section 3 — joined: this device's own card goes as soon as
+            // the account binds (after the restore landed it).
+            let joinedAccount = pending.accountIdB64
+            await MainActor.run { DeviceCardCenter.shared.noteJoined(accountIdB64: joinedAccount) }
             await fetchBundles(into: pending, welcomeCursor: welcomeCursor)
             return JoinRecoveryOutcome(
                 phraseEntropy: outcome.phraseEntropy,
@@ -600,12 +606,15 @@ public enum PairingOrchestrator {
     /// account (signed in, or parked on the identity prompt). Builds the
     /// DeviceIdentity from the cached seed, generates a fresh rendezvous
     /// slot, produces a KeyPackage, encodes the pairing QR naming the
-    /// account by `loginHandle` (ADR-0056). The view drives the rest via
-    /// the returned [`JoinSession`].
+    /// account by `loginHandle` (ADR-0056). `deviceCardEnvelope` is this
+    /// device's own card for the confirming device to name it by (UX section
+    /// 2.1); `nil` sends none. The view drives the rest via the returned
+    /// [`JoinSession`].
     public static func prepareJoinFlow(
         loginHandle: Data,
         accountIdBytes: Data,
         accountIdB64: String,
+        deviceCardEnvelope: Data? = nil,
         redeem: @escaping (String) async throws -> DeviceAuthorizeRedeemResult = {
             try await AuthClient().deviceAuthorizeRedeem(grantTokenB64: $0)
         }
@@ -620,7 +629,8 @@ public enum PairingOrchestrator {
         let qrPayload = try PairingCodec.buildPairingQrPayload(
             loginHandle: loginHandle,
             keyPackage: keyPackage,
-            rendezvousPseudonym: rendezvous
+            rendezvousPseudonym: rendezvous,
+            deviceCardEnvelope: deviceCardEnvelope
         )
         return JoinSession(
             qrPayload: qrPayload,
@@ -639,6 +649,7 @@ public enum PairingOrchestrator {
     /// learns the account from the grant redeem.
     public static func prepareRestoreByNameFlow(
         loginHandle: Data,
+        deviceCardEnvelope: Data? = nil,
         redeem: @escaping (String) async throws -> DeviceAuthorizeRedeemResult = {
             try await AuthClient().deviceAuthorizeRedeem(grantTokenB64: $0)
         }
@@ -657,7 +668,8 @@ public enum PairingOrchestrator {
         let qrPayload = try PairingCodec.buildPairingQrPayload(
             loginHandle: loginHandle,
             keyPackage: keyPackage,
-            rendezvousPseudonym: rendezvous
+            rendezvousPseudonym: rendezvous,
+            deviceCardEnvelope: deviceCardEnvelope
         )
         return JoinSession(
             qrPayload: qrPayload,
@@ -712,6 +724,10 @@ public enum PairingOrchestrator {
         /// linked but received no keys, and the person is told so
         /// (`device_link.keys_not_sent`).
         public let keysSent: Bool
+        /// UX section 2.1 — the card the new device put in its payload,
+        /// `nil` when it carried none: the result line names the device by
+        /// it. What the new device says about itself; nothing trusts it.
+        public var newDeviceCard: StoredDeviceCard? = nil
     }
 
     /// Inputs for the recovery payload the scanner publishes alongside the
@@ -810,7 +826,17 @@ public enum PairingOrchestrator {
                     welcomeRendezvous: decoded.rendezvousPseudonym)
             },
             after: { ensured in
-                await sendBundles(
+                // UX section 2.1 — the new device's row is named at once by
+                // the card it put in its payload, until its own card arrives.
+                // The commit landed, so the roster read here holds its leaf.
+                if let card = PairingCodec.deviceCard(of: decoded),
+                   let key = try? keyPackageSignatureKey(keyPackage: decoded.keyPackage),
+                   let roster = try? ensured.group.devices() {
+                    DeviceCardCenter.shared.seedFromPairing(
+                        accountIdB64: accountIdB64, keyHex: hexEncode(key), card: card,
+                        rosterKeysHex: roster.map { hexEncode($0.signaturePublicKey) })
+                }
+                return await sendBundles(
                     ensured: ensured, decoded: decoded, accountIdB64: accountIdB64, recovery: recovery)
             }
         )
@@ -822,7 +848,8 @@ public enum PairingOrchestrator {
         return ScanResult(
             memberCount: 0,
             newDeviceKey: try keyPackageSignatureKey(keyPackage: decoded.keyPackage),
-            keysSent: result.value ?? false
+            keysSent: result.value ?? false,
+            newDeviceCard: PairingCodec.deviceCard(of: decoded)
         )
     }
 

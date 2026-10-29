@@ -42,6 +42,7 @@ import { useChats } from "../chat/ChatContext";
 import { ChatClient } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
 import { loadKeyAliases, loadRenames, subscribeAcceptedChanged } from "../contacts/local-store";
+import { loadPendingContacts, pendingContacts, type PendingContact } from "../contacts/pending-contacts";
 import { loadWasm, type Wasm } from "../wasm";
 import {
   EMPTY_OWN_PROFILE,
@@ -60,7 +61,7 @@ import {
   type IncomingProfile,
 } from "./profile-store";
 import { ProfilePublishScheduler, type PublishReason } from "./publish-scheduler";
-import { resolveDisplay, type ResolvedName } from "./resolver";
+import { resolveDisplay, resolvePerson, type ResolvedName } from "./resolver";
 import type { ReceivedGrantWire } from "./profile-envelope";
 import { UsernameVerifier } from "./username-verification";
 import { isOwnKeyB64, ownKeysB64Of } from "./own-key";
@@ -510,6 +511,10 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
         store.close();
         return;
       }
+      // ADR-0079 — the pending contacts name the inviters a link added
+      // before any profile of theirs arrived (`resolve`). Loaded here too, so
+      // a group screen opened first still names them.
+      void loadPendingContacts(account);
       // ADR-0048 section 4a — the own name between this account's devices.
       bindOwnProfileSync(account, ownAccountIdBytes());
       void applyHeldServiceEnvelopes();
@@ -574,6 +579,30 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     bump();
     // ADR-0084 — a photo saved on another device is the own photo here too,
     // and the member cards follow; the groups already got it.
+  });
+
+  /** The pending contact (ADR-0079) whose account key is `keyB64` or the
+   *  canonical key it aliases, if any. Reactive on the pending list. */
+  function pendingContactOf(keyB64: string, canonical: string): PendingContact | undefined {
+    return pendingContacts().find(
+      (c) => c.signaturePubkeyB64 === keyB64 || c.signaturePubkeyB64 === canonical,
+    );
+  }
+
+  // ADR-0079 — a pending contact added, removed or handed over to a real
+  // contact changes what `resolve` returns for its key: re-resolve.
+  //
+  // A link-stated username is held to the same rule as a profile's claim:
+  // shown only once verified for the key (`verifier.state`). No lookup is
+  // started for it here: verification checks the discovery certificate the
+  // person's own PROFILE carries (ADR-0060 section 5), and a link carries
+  // none, so a lookup could only answer `mismatch` and would put a false
+  // "Username not verified" on the contact. The username is verified when
+  // their profile arrives (`ingest`), or when a lookup this device already
+  // made proved it (`learnUsername`).
+  createEffect(() => {
+    pendingContacts();
+    untrack(bump);
   });
 
   const unsubscribeRenames = subscribeAcceptedChanged(() => {
@@ -688,20 +717,34 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       // row key: its rename, and its profile when the alias key sent none.
       const canonical = aliases().get(keyB64) ?? keyB64;
       const profile = store.get(keyB64) ?? (canonical === keyB64 ? undefined : store.get(canonical));
-      const profileKeyB64 = store.get(keyB64) !== undefined ? keyB64 : canonical;
-      return resolveDisplay({
+      // ADR-0079 — with no received profile, a pending contact's invite
+      // link states the inviter's name and username (signed by their
+      // account key). `resolvePerson` decides the precedence; the username
+      // is verified under the key the claim is filed under.
+      const pending = profile === undefined ? pendingContactOf(keyB64, canonical) : undefined;
+      const claimKeyB64 =
+        profile !== undefined
+          ? store.get(keyB64) !== undefined
+            ? keyB64
+            : canonical
+          : (pending?.signaturePubkeyB64 ?? keyB64);
+      return resolvePerson({
         signatureKey: keyBytes,
         rename: renames().get(canonical),
-        profile,
-        verification:
-          profile?.username !== null && profile?.username !== undefined
-            ? verifier.state(profileKeyB64, profile.username)
-            : undefined,
+        received: profile,
+        linkStatement: pending,
+        verificationOf: (username) => verifier.state(claimKeyB64, username),
       });
     },
     claimedUsernameOf(keyB64) {
       version();
-      const username = store.get(keyB64)?.username ?? null;
+      // A pending contact's link-stated username is a claim like a
+      // profile's (ADR-0079), used only when no profile was received.
+      const received = store.get(keyB64);
+      const username =
+        received !== undefined
+          ? received.username
+          : (pendingContactOf(keyB64, aliases().get(keyB64) ?? keyB64)?.username ?? null);
       return username !== null && username.length > 0 ? username : null;
     },
     ingest(senderKeyB64, profile, context) {

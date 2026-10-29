@@ -334,6 +334,8 @@ public class DeviceLinkAnswerLimit(
  *   account's own login handle (`parsePairingQr`); throws when it names
  *   another account or is malformed.
  * @param pair runs the unchanged add-device pairing with the parsed payload.
+ * @param addedCopy the closing line once the device is added, naming it from
+ *   the card its payload carried (UX second-device.md section 2.1).
  */
 public class OldDeviceLink<P>(
     private val api: DeviceLinkApi,
@@ -342,6 +344,7 @@ public class OldDeviceLink<P>(
     private val openPayload: (ByteArray) -> P,
     private val pair: suspend (P) -> Unit,
     private val limit: DeviceLinkAnswerLimit,
+    private val addedCopy: (P) -> UiText = { DEVICE_LINK_ADDED_COPY },
 ) {
     private var answeredId: String? = null
     private var responder: DeviceLinkResponderPort? = null
@@ -496,7 +499,7 @@ public class OldDeviceLink<P>(
         state = try {
             pair(pending.payload)
             owed = null
-            OldDeviceLinkState.Notice(DEVICE_LINK_ADDED_COPY)
+            OldDeviceLinkState.Notice(addedCopy(pending.payload))
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: me.lakko.app.auth.FreshAuthRequired) {

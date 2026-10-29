@@ -25,7 +25,7 @@ final class DeviceCardCenter: ObservableObject {
     /// The Privacy switch (per device, on by default).
     @Published private(set) var showCity = true
     /// This device's own last card.
-    private(set) var own: StoredDeviceCard?
+    @Published private(set) var own: StoredDeviceCard?
 
     private struct Persisted: Codable {
         var cards: [String: StoredDeviceCard]
@@ -40,8 +40,14 @@ final class DeviceCardCenter: ObservableObject {
 
     private var accountIdB64: String?
     private var sender: ((Data) async -> Void)?
-    private var city: CityAnswer?
+    @Published private var city: CityAnswer?
     private var deciding = false
+    /// UX section 3 — this device has just joined the account's DeviceGroup
+    /// from a pairing Welcome and its own card is owed at once. `.some(nil)`:
+    /// owed to the next binding (the account was not known at the join);
+    /// `.some(id)`: owed to that account's binding. In memory only: a process
+    /// that ends first sends the card at its next first foreground anyway.
+    private var joinedOwed: String??
     private var growthTask: Task<Void, Never>?
     /// Whether this binding has already taken a foreground as the person's
     /// action (``noteForeground()``).
@@ -83,6 +89,9 @@ final class DeviceCardCenter: ObservableObject {
         }
         showCity = defaults.object(forKey: DeviceCards.showCityKey(accountIdB64: accountIdB64)) as? Bool ?? true
         resendOwed = defaults.bool(forKey: DeviceCards.resendOwedKey(accountIdB64: accountIdB64))
+        if let owed = joinedOwed, owed == nil || owed == accountIdB64 {
+            sendJoinedCard()
+        }
     }
 
     func unbind() {
@@ -186,6 +195,50 @@ final class DeviceCardCenter: ObservableObject {
         noteAction()
     }
 
+    /// UX section 2.1 — the card a joining device puts in its pairing payload
+    /// (QR and the code route): what it would send as its own card now, with
+    /// the city switch and the anti-censorship rule exactly as for the card
+    /// itself. `nil` when it cannot be composed: then the payload carries no
+    /// card, never a failed pairing.
+    func pairingCardEnvelope(nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> Data? {
+        do {
+            return try composeDeviceCardEnvelope(card: Self.ffi(currentFields(nowMs: nowMs)))
+        } catch {
+            NSLog("device card: no card in the pairing payload: %@", String(describing: error))
+            return nil
+        }
+    }
+
+    /// UX section 3 — what this device's own row on the Devices screen shows:
+    /// the fields it would put in its own card, never a received card.
+    func ownRowCard(nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> StoredDeviceCard {
+        currentFields(nowMs: nowMs)
+    }
+
+    /// UX section 3 — this device has just joined the account's DeviceGroup
+    /// from a pairing Welcome (QR or code route): its own card goes at once,
+    /// not after the growth delay (that delay is for the devices that were
+    /// already there) and without waiting for an action: the person is
+    /// looking at this device. `accountIdB64` is the account it joined, or
+    /// `nil` when not known yet; unbound, the card goes when that account
+    /// binds. The city is not waited for: a later action sends it.
+    func noteJoined(accountIdB64 joined: String?) {
+        if let bound = accountIdB64, joined == nil || joined == bound {
+            sendJoinedCard()
+        } else {
+            joinedOwed = .some(joined)
+        }
+    }
+
+    private func sendJoinedCard(nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) {
+        joinedOwed = nil
+        guard accountIdB64 != nil else { return }
+        own = currentFields(nowMs: nowMs)
+        persist()
+        NSLog("device card: this device just joined; its card goes now")
+        Task { @MainActor [weak self] in await self?.sendOwn() }
+    }
+
     /// The own card's envelope, stamps verbatim; `nil` before the first one.
     func ownEnvelope() -> Data? {
         guard let own else { return nil }
@@ -199,7 +252,7 @@ final class DeviceCardCenter: ObservableObject {
     }
 
     /// The DeviceGroup grew: re-send the stored own card, unchanged, after
-    /// up to 30 s (ADR-0058 discipline), so the new device learns this one.
+    /// up to 300 ms (ADR-0058 discipline), so the new device learns this one.
     func scheduleResend(random: Double = Double.random(in: 0..<1)) {
         guard accountIdB64 != nil, own != nil, growthTask == nil else { return }
         let bound = accountIdB64
@@ -234,6 +287,22 @@ final class DeviceCardCenter: ObservableObject {
         cards = next
         persist()
         NSLog("device card: received a %@ device's card and stored it", card.platform.rawValue)
+    }
+
+    /// UX section 2.1 — the card the new device put in its pairing payload,
+    /// kept as the card of its leaf (`keyHex`) once the add landed, so its
+    /// row is named at once. Lowest stamp: its own card replaces it.
+    /// Nothing when a card from that leaf is already stored, the leaf is not
+    /// in `rosterKeysHex`, or the center is bound to another account.
+    func seedFromPairing(
+        accountIdB64 account: String, keyHex: String, card: StoredDeviceCard, rosterKeysHex: [String]
+    ) {
+        guard accountIdB64 == account,
+              let next = DeviceCards.seedFromPairing(
+                  cards, keyHex: keyHex, card: card, rosterKeysHex: rosterKeysHex) else { return }
+        cards = next
+        persist()
+        NSLog("device card: the new %@ device's card from its pairing payload stored", card.platform.rawValue)
     }
 
     /// The roster changed: drop cards of leaves that left.

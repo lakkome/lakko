@@ -198,6 +198,9 @@ public object PairingOrchestrator {
                 identity = identity,
                 accountIdB64 = account.accountIdB64,
             )
+            // UX second-device.md section 3 - joined: this device's own card
+            // goes to the others at once.
+            DeviceCardCenter.noteJoined(account.accountIdB64)
             if (welcomeCursor != null) {
                 applyCatchUpBundles(joined, account.accountIdB64, welcomeCursor)
             }
@@ -309,6 +312,9 @@ public object PairingOrchestrator {
                                             identity = identity,
                                             accountIdB64 = accountIdB64,
                                         )
+                                        // Joined: this device's own card goes
+                                        // to the others at once.
+                                        DeviceCardCenter.noteJoined(accountIdB64)
                                     } catch (cause: kotlinx.coroutines.CancellationException) {
                                         throw cause
                                     } catch (cause: Throwable) {
@@ -637,10 +643,13 @@ public object PairingOrchestrator {
         if (known != null) seed.fill(0)
         val keyPackage = identity.createKeyPackage()
         val rendezvous = PairingCodec.generateRendezvousPseudonym()
+        // UX second-device.md section 2.1 - this device's own card, so the
+        // signed-in device can name it; none when it cannot be composed.
         val qrPayload = PairingCodec.buildPairingQrPayload(
             loginHandle = loginHandle,
             keyPackage = keyPackage,
             rendezvousPseudonym = rendezvous,
+            deviceCardEnvelope = DeviceCardCenter.pairingCardEnvelope(),
         )
         return JoinSession(
             qrPayload = qrPayload,
@@ -785,9 +794,23 @@ public object PairingOrchestrator {
         )
         val landed = result?.takeIf { it.outcome is DeviceGroupCommitOutcome.Landed }
             ?: throw DeviceGroupCommits.Lost()
+        val newDeviceKey = uniffi.lakko_ffi_uniffi.keyPackageSignatureKey(decoded.keyPackage)
+        // UX second-device.md section 2.1 - the new device's row shows the
+        // card its payload carried until its own card arrives.
+        try {
+            DeviceCardCenter.storePairingCard(
+                forAccountB64 = accountIdB64,
+                keyHex = newDeviceKey.joinToString("") { "%02x".format(it) },
+                card = decoded.deviceCard?.let(DeviceCardCenter::fromFfi),
+            )
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (_: Throwable) {
+            // display only: the device is added either way
+        }
         ScanResult(
             memberCount = 0,
-            newDeviceKey = uniffi.lakko_ffi_uniffi.keyPackageSignatureKey(decoded.keyPackage),
+            newDeviceKey = newDeviceKey,
             keysSent = landed.value ?: false,
         )
     } finally {

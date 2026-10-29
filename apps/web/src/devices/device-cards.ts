@@ -84,7 +84,7 @@ export function pruneDeviceCards(
 export const CARD_REFRESH_MS = 30 * 60 * 1000;
 
 /** The longest wait before the growth re-send of the own card. */
-export const CARD_GROWTH_MAX_DELAY_MS = 30_000;
+export const CARD_GROWTH_MAX_DELAY_MS = 300;
 
 /** `true` when two cards differ in a field other than the times. */
 export function cardFieldsDiffer(a: DeviceCardFields, b: DeviceCardFields): boolean {
@@ -115,7 +115,7 @@ export function shouldSendOwnCard(
   return age < 0 || age >= CARD_REFRESH_MS;
 }
 
-/** A random delay in `[0, 30 s)` for the growth re-send. */
+/** A random delay in `[0, 300 ms)` for the growth re-send. */
 export function cardGrowthDelayMs(random: () => number = Math.random): number {
   const r = random();
   const clamped = Number.isFinite(r) ? Math.min(Math.max(r, 0), 0.999_999) : 0;
@@ -294,4 +294,88 @@ export function countryNameOf(code: string, locale?: string): string {
   } catch {
     return code;
   }
+}
+
+/** A decoded card as the wasm `DeviceCard` class exposes it (structural, so
+ *  the rules stay free of wasm types). */
+export interface DeviceCardLike {
+  readonly platform: string;
+  readonly model: string;
+  readonly appVersion: string;
+  readonly os: string;
+  readonly city: string;
+  readonly country: string;
+  readonly updatedAtMs: bigint;
+  readonly lastActiveMs: bigint;
+}
+
+/** The card as this client keeps it, or `null` for a platform it does not
+ *  know (such a card is dropped, as a DeviceGroup card would be). */
+export function storedCardOf(card: DeviceCardLike): StoredDeviceCard | null {
+  const platform = card.platform;
+  if (!isDevicePlatform(platform)) return null;
+  return {
+    platform,
+    model: card.model,
+    appVersion: card.appVersion,
+    os: card.os,
+    city: card.city,
+    country: card.country,
+    updatedAtMs: Number(card.updatedAtMs),
+    lastActiveMs: Number(card.lastActiveMs),
+  };
+}
+
+/**
+ * docs/ux/second-device.md section 2.1: the card a new device put in its
+ * pairing payload, kept for its leaf on the device that let it in, so its
+ * row has a name at once. Kept only when no card is stored for that leaf,
+ * and stamped 0, the lowest stamp: any card the device itself sends over the
+ * DeviceGroup is strictly newer and replaces it (`receiveDeviceCard`).
+ * Returns the new map, or `null` when nothing changes.
+ */
+export function adoptPairingCard(
+  cards: DeviceCardMap,
+  keyHex: string,
+  card: StoredDeviceCard,
+): DeviceCardMap | null {
+  if (cards[keyHex] !== undefined) return null;
+  return { ...cards, [keyHex]: { ...card, updatedAtMs: 0 } };
+}
+
+/**
+ * docs/ux/second-device.md section 3, "This device never waits for a card":
+ * this device's own row is built from what it knows about itself now, never
+ * looked up among the cards the other devices sent.
+ */
+export function selfRowCard(
+  own: StoredDeviceCard | null,
+  current: DeviceCardFields,
+  nowMs: number,
+): StoredDeviceCard {
+  return { ...current, updatedAtMs: own?.updatedAtMs ?? 0, lastActiveMs: nowMs };
+}
+
+/** What the confirm step and the result line say about a device being
+ *  added: its name (the card's model or browser name), and the same two
+ *  lines its Devices row will show. All empty with no card. */
+export interface PairingCardView {
+  /** `null` with no card, or a card with no name. */
+  readonly name: string | null;
+  readonly detail: string;
+  readonly place: string;
+}
+
+export function pairingCardView(card: StoredDeviceCard | null, words: RowWords): PairingCardView {
+  if (card === null) return { name: null, detail: "", place: "" };
+  // The row formatter, so the confirm shows exactly what the row will.
+  const view = deviceRowView({ keyHex: "", leafIndex: 0, isSelf: false, card: { ...card, lastActiveMs: 0 } }, words, 0);
+  return { name: pairingCardName(card), detail: view.detail, place: view.place };
+}
+
+/** The name a device being added goes by: its card's model or browser name,
+ *  `null` with no card or an empty name (the unnamed copy is used then). */
+export function pairingCardName(card: StoredDeviceCard | null): string | null {
+  const name = card?.model.trim() ?? "";
+  return name === "" ? null : name;
 }

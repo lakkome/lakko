@@ -171,6 +171,36 @@ class DeviceLinkTest {
     }
 
     @Test
+    fun `the closing line names the added device from its payload`() = runTest {
+        // UX second-device.md section 2.1: the code route names the device
+        // the same way the scan does ([DeviceCards.addedCopy]).
+        val server = Server()
+        val new = newDevice(server)
+        val named = namedCopy("device_link.request.added_named", "Pixel 7a")
+        val old = OldDeviceLink(
+            api = server,
+            responderFor = { Responder("471903") },
+            formatCode = { "${it.substring(0, 2)} ${it.substring(2, 4)} ${it.substring(4, 6)}" },
+            openPayload = { it },
+            pair = { },
+            limit = Limit().limit,
+            addedCopy = { opened ->
+                assertArrayEquals(payload, opened)
+                named
+            },
+        )
+        new.start(handle)
+        old.poll()
+        old.confirm()
+        new.awaitAnswer()
+        val submit = async { new.submitCode("471903") }
+        yield()
+        while (server.pakeA == null) yield()
+        assertEquals(OldDeviceLinkState.Notice(named), old.poll())
+        assertEquals(NewDeviceLinkState.Confirmed, submit.await())
+    }
+
+    @Test
     fun `the code is never shown before the answer landed`() = runTest {
         val server = Server().apply { answeredElsewhere = true }
         val old = oldDevice(server)
@@ -581,4 +611,7 @@ class DeviceLinkTest {
         server.requestId = null
         assertEquals(OldDeviceLinkState.Idle, old.poll())
     }
+
+    private fun namedCopy(key: String, name: String) =
+        me.lakko.app.l10n.UiText(key, texts = mapOf("name" to name))
 }

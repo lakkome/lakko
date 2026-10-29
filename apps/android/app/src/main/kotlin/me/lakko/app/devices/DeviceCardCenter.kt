@@ -70,6 +70,12 @@ public object DeviceCardCenter {
     @Volatile private var prefs: SharedPreferences? = null
     @Volatile private var sender: (suspend (ByteArray) -> Unit)? = null
     @Volatile private var growthJob: Job? = null
+
+    /** The account this device has just joined the DeviceGroup of (from a
+     *  pairing Welcome) and not yet sent its own card to; sent at once when
+     *  the center is bound for it ([noteJoined]). In memory: a restart in
+     *  between leaves the card to the person's next action. */
+    @Volatile private var joinedOwed: String? = null
     private val deciding = AtomicBoolean(false)
     private val sending = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -148,6 +154,7 @@ public object DeviceCardCenter {
             ?.let { runCatching { json.decodeFromString(CityAnswer.serializer(), it) }.getOrNull() }
         mutableShowCity.value = p.getBoolean(DeviceCards.showCityKey(accountIdB64), true)
         owed = own != null && p.getBoolean(DeviceCards.owedKey(accountIdB64), false)
+        if (joinedOwed == accountIdB64) sendJoined(accountIdB64)
     }
 
     @Synchronized
@@ -162,6 +169,11 @@ public object DeviceCardCenter {
         growthJob = null
         mutableCards.value = emptyMap()
         mutableShowCity.value = true
+    }
+
+    /** Forget a just-joined card still waiting for the bind (tests). */
+    internal fun resetJoined() {
+        joinedOwed = null
     }
 
     /** This device's own last card. */
@@ -314,8 +326,63 @@ public object DeviceCardCenter {
         }
     }
 
+    /**
+     * The card this device puts into a pairing payload it shows as a code or
+     * seals for the code route (UX second-device.md section 2.1): its current
+     * fields, the city kept out exactly as for its own card (the switch, the
+     * anti-censorship connection). `null` when it cannot be composed: the
+     * payload then carries no card, and the pairing goes on.
+     */
+    public fun pairingCardEnvelope(nowMs: Long = System.currentTimeMillis()): ByteArray? = try {
+        composeEnvelope(currentFields(nowMs))
+    } catch (_: Throwable) {
+        null
+    }
+
+    /**
+     * This device let in the device whose leaf key is [keyHex] for
+     * [forAccountB64], and the scanned (or code-route) payload carried [card]:
+     * keep it as that device's card until its own arrives (the
+     * [DeviceCards.pairingCard] rule). A card already stored for that leaf
+     * stays.
+     */
+    @Synchronized
+    public fun storePairingCard(forAccountB64: String, keyHex: String, card: StoredDeviceCard?) {
+        val account = accountIdB64 ?: return
+        if (account != forAccountB64) return
+        val next = DeviceCards.pairingCard(mutableCards.value, keyHex, card) ?: return
+        mutableCards.value = next
+        persist(account)
+        log("device card stored from the pairing payload (${card?.platform?.name?.lowercase() ?: "none"})")
+    }
+
+    /**
+     * This device has just joined [joinedAccountB64]'s DeviceGroup from a
+     * pairing Welcome (code scanned or code route): it sends its own card at
+     * once, not after the person's next action or a growth wait (the person
+     * is looking at it). When the center is not yet bound for that account,
+     * the send happens when it is.
+     */
+    public fun noteJoined(joinedAccountB64: String) {
+        joinedOwed = joinedAccountB64
+        if (accountIdB64 == joinedAccountB64) sendJoined(joinedAccountB64)
+    }
+
+    /** Whether a just-joined card is still waiting for the bind (tests). */
+    public fun isJoinedOwed(): Boolean = joinedOwed != null
+
+    private fun sendJoined(account: String) {
+        joinedOwed = null
+        scope.launch {
+            if (accountIdB64 != account) return@launch
+            own = currentFields(System.currentTimeMillis())
+            persist(account)
+            sendOwn()
+        }
+    }
+
     /** The DeviceGroup grew: re-send the stored own card, unchanged, after up
-     *  to 30 s (the ADR-0058 discipline), so the new device learns this one.
+     *  to 300 ms (the ADR-0058 discipline), so the new device learns this one.
      *  When the wait ends while the app is not showing, the re-send stays
      *  owed and goes out at the next foreground. */
     @Synchronized

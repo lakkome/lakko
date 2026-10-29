@@ -14,6 +14,14 @@
  *   3. the person's VERIFIED `@username`;
  *   4. the key fingerprint, WITHOUT `@`.
  *
+ * The "profile" of steps 2 and 3 is the person's received profile envelope
+ * or, when none was received and the viewer gave no rename, what a pending
+ * contact's invite link states (ADR-0079: the inviter's own name and
+ * username, inside the capability their account key signed). A received
+ * profile wins over the link because it is the person's current statement;
+ * the link's username is verified exactly like a profile's claim
+ * ({@link resolvePerson}).
+ *
  * ## A username is shown only when verified
  *
  * An unverified claim is not rendered at all — not greyed out, not with a
@@ -146,3 +154,68 @@ export function resolveDisplay(inputs: DisplayInputs): ResolvedName {
   return { name, source, username, listLabel, theirName, fingerprint, usernameNotVerified };
 }
 
+
+/** What a pending contact's invite link states about the inviter
+ *  (ADR-0079). Empty strings mean "not stated". */
+export interface LinkStatement {
+  readonly displayName: string;
+  readonly username: string;
+}
+
+/** The profile fields the resolver works from. */
+export interface ProfileInput {
+  readonly displayName: string | null;
+  readonly username: string | null;
+}
+
+/** Everything {@link resolvePerson} needs about one person. */
+export interface PersonInputs {
+  readonly signatureKey: Uint8Array;
+  /** The viewer's local rename, if any. Blank means "no rename". */
+  readonly rename?: string | undefined;
+  /** The person's received profile, if any. */
+  readonly received?: ProfileInput | undefined;
+  /** What a pending contact's invite link states, when this key is the
+   *  pending contact's account key. */
+  readonly linkStatement?: LinkStatement | undefined;
+  /** The verification state of `username` claimed for this key. */
+  readonly verificationOf: (username: string) => VerificationState | undefined;
+}
+
+/**
+ * The profile the resolver uses for one person: the received profile when
+ * there is one; otherwise, when the viewer gave no rename, the pending
+ * contact's link statement; otherwise none. Pure.
+ */
+export function profileInputOf(
+  rename: string | undefined,
+  received: ProfileInput | undefined,
+  linkStatement: LinkStatement | undefined,
+): ProfileInput | undefined {
+  if (received !== undefined) return received;
+  if ((rename ?? "").trim().length > 0 || linkStatement === undefined) return undefined;
+  const displayName = linkStatement.displayName.trim();
+  const username = linkStatement.username.trim();
+  if (displayName.length === 0 && username.length === 0) return undefined;
+  return {
+    displayName: displayName.length > 0 ? displayName : null,
+    username: username.length > 0 ? username : null,
+  };
+}
+
+/**
+ * Resolve one person from everything the device holds about them: the
+ * rename, the received profile, a pending contact's link statement, and the
+ * verification state of whichever username claim is used. The ONE place the
+ * precedence among these sources is decided; `ProfileContext` calls it.
+ */
+export function resolvePerson(inputs: PersonInputs): ResolvedName {
+  const profile = profileInputOf(inputs.rename, inputs.received, inputs.linkStatement);
+  const claimed = profile?.username ?? null;
+  return resolveDisplay({
+    signatureKey: inputs.signatureKey,
+    rename: inputs.rename,
+    profile,
+    verification: claimed !== null && claimed.length > 0 ? inputs.verificationOf(claimed) : undefined,
+  });
+}

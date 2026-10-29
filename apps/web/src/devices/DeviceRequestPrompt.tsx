@@ -47,6 +47,7 @@ import {
 import { runScanFlow } from "./orchestrator";
 import { recoveryHalfFor } from "./recovery-sender";
 import { ownPairingHandle, parsePairingQrPayload } from "./pairing";
+import { pairingCardName } from "./device-cards";
 
 /** The toast for a failed payload check or pairing, held as the way to
  *  render it. ADR-0061: the detail goes to the log, never to the screen. */
@@ -154,8 +155,9 @@ export function DeviceRequestPrompt(): JSX.Element {
     return created;
   }
 
-  /** The unchanged add-device flow over the opened payload. */
-  async function pair(payload: Uint8Array): Promise<void> {
+  /** The unchanged add-device flow over the opened payload. Resolves with
+   *  the new device's name from its card, or `null`. */
+  async function pair(payload: Uint8Array): Promise<string | null> {
     const s = auth.state();
     const secrets = auth.identitySecrets();
     if (s.kind !== "session" || secrets === null) throw new Error("signed out");
@@ -194,6 +196,7 @@ export function DeviceRequestPrompt(): JSX.Element {
       // eslint-disable-next-line no-console
       console.warn("ADR-0050 admit device: fan-out failed", err);
     });
+    return pairingCardName(scanned.newDeviceCard);
   }
 
   async function poll(): Promise<void> {

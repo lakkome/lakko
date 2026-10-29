@@ -138,6 +138,12 @@ public fun DeviceLinkRequestHost(
                 // ADR-0050 section 2.8 — admit the new device to every chat.
                 chatRepository?.requestAdmitDevice(scanned.newDeviceKey)
             },
+            // UX second-device.md section 2.1 - "Pixel 7a" added.
+            addedCopy = { decoded ->
+                me.lakko.app.devices.DeviceCards.addedCopy(
+                    decoded.deviceCard?.let(me.lakko.app.devices.DeviceCardCenter::fromFfi),
+                )
+            },
             limit = deviceLinkAnswerLimit(context, account.accountIdB64),
         )
     }

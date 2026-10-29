@@ -70,8 +70,8 @@ class DeviceCardsTest {
         assertFalse(DeviceCards.shouldSend(card(updatedAtMs = now - DeviceCards.REFRESH_MS + 1), fields, now))
         assertTrue(DeviceCards.shouldSend(card(updatedAtMs = now - DeviceCards.REFRESH_MS), fields, now))
         assertTrue(DeviceCards.shouldSend(card(updatedAtMs = now + 5_000), fields, now))
-        assertEquals(15_000L, DeviceCards.growthDelayMs(0.5))
-        assertTrue(DeviceCards.growthDelayMs(1.0) < 30_000L)
+        assertEquals(150L, DeviceCards.growthDelayMs(0.5))
+        assertTrue(DeviceCards.growthDelayMs(1.0) < 300L)
         assertEquals(0L, DeviceCards.growthDelayMs(Double.NaN))
     }
 

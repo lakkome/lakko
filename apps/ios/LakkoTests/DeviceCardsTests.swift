@@ -3,6 +3,7 @@
 
 import XCTest
 @testable import Lakko
+import LakkoCore
 
 /// ADR-0080 device cards: the receiver's store rules, the send rule, the
 /// Devices screen's order and row text, and the center's persistence and
@@ -59,8 +60,8 @@ final class DeviceCardsTests: XCTestCase {
         XCTAssertFalse(DeviceCards.shouldSend(last: card(updatedAtMs: now - DeviceCards.refreshMs + 1), current: fields, nowMs: now))
         XCTAssertTrue(DeviceCards.shouldSend(last: card(updatedAtMs: now - DeviceCards.refreshMs), current: fields, nowMs: now))
         XCTAssertTrue(DeviceCards.shouldSend(last: card(updatedAtMs: now + 5_000), current: fields, nowMs: now))
-        XCTAssertEqual(DeviceCards.growthDelayMs(random: 0.5), 15_000)
-        XCTAssertLessThan(DeviceCards.growthDelayMs(random: 1), 30_000)
+        XCTAssertEqual(DeviceCards.growthDelayMs(random: 0.5), 150)
+        XCTAssertLessThan(DeviceCards.growthDelayMs(random: 1), 300)
     }
 
     func testOrdersThisDeviceFirstThenNewestActivityThenCardless() {
@@ -217,6 +218,165 @@ final class DeviceCardsTests: XCTestCase {
         for _ in 0..<100 where sent == 1 { try await Task.sleep(nanoseconds: 10_000_000) }
         XCTAssertEqual(sent, 2)
         XCTAssertFalse(center.resendOwed)
+        center.unbind()
+    }
+
+    // MARK: - Naming the device being added (UX sections 2.1 and 3)
+
+    /// The joining device puts in its payload the card it would send as its
+    /// own, with the city switch and the anti-censorship rule as for the card.
+    func testThePairingPayloadCarriesTheCardTheDeviceWouldSend() async throws {
+        let (center, defaults, suite) = try freshCenter()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        center.isForeground = { true }
+        center.bind(accountIdB64: "acct") { _ in }
+        center.noteAction(nowMs: now)
+        for _ in 0..<100 where center.own == nil { try await Task.sleep(nanoseconds: 10_000_000) }
+
+        let envelope = try XCTUnwrap(center.pairingCardEnvelope(nowMs: now))
+        let fields = center.currentFields(nowMs: now)
+        XCTAssertEqual(fields.city, "Almere")
+        XCTAssertEqual(DeviceCardCenter.stored(try decodeDeviceCardEnvelope(plaintext: envelope)), fields)
+
+        let identity = try Identity.fromSeed(seed: Data(repeating: 0x6D, count: 32))
+        let handle = Data(repeating: 0x5C, count: 32)
+        let wire = try PairingCodec.buildPairingQrPayload(
+            loginHandle: handle, keyPackage: identity.createKeyPackage(),
+            rendezvousPseudonym: Data(repeating: 0x7E, count: 32), deviceCardEnvelope: envelope)
+        let decoded = try PairingCodec.parsePairingQrPayload(wireBytes: wire, expectedLoginHandle: handle)
+        XCTAssertEqual(PairingCodec.deviceCard(of: decoded), fields, "the confirming device reads the same card")
+
+        let bare = try PairingCodec.buildPairingQrPayload(
+            loginHandle: handle, keyPackage: identity.createKeyPackage(),
+            rendezvousPseudonym: Data(repeating: 0x7E, count: 32))
+        XCTAssertNil(PairingCodec.deviceCard(of: try PairingCodec.parsePairingQrPayload(
+            wireBytes: bare, expectedLoginHandle: handle)), "no card: nothing named")
+
+        center.antiCensorshipArmed = { true }
+        let armed = try XCTUnwrap(center.pairingCardEnvelope(nowMs: now))
+        XCTAssertEqual(try decodeDeviceCardEnvelope(plaintext: armed).city, "", "no city under anti-censorship")
+        center.antiCensorshipArmed = { false }
+        center.setShowCity(false)
+        let hidden = try XCTUnwrap(center.pairingCardEnvelope(nowMs: now))
+        XCTAssertEqual(try decodeDeviceCardEnvelope(plaintext: hidden).city, "", "no city with the switch off")
+        center.unbind()
+    }
+
+    func testTheConfirmStepNamesTheDeviceByItsCardAndOtherwiseKeepsTodaysTitle() {
+        let named = { (name: String) in "Link \u{201C}\(name)\u{201D}?" }
+        let web = card(city: "Almere", country: "NL", model: "Chrome on macOS", appVersion: "web", os: "macOS 26", platform: .web)
+        XCTAssertEqual(
+            DeviceCards.pairingConfirm(web, words: words, titleNamed: named, titleUnnamed: "Link this device?"),
+            DeviceCards.PairingConfirm(
+                title: "Link \u{201C}Chrome on macOS\u{201D}?", detail: "Lakko web · macOS 26", place: "Almere, Netherlands"))
+        let row = view(DeviceCards.RowInput(keyHex: "aa", leafIndex: 0, isSelf: false, card: web))
+        let confirm = DeviceCards.pairingConfirm(web, words: words, titleNamed: named, titleUnnamed: "x")
+        XCTAssertEqual([confirm.detail, confirm.place], [row.detail, row.place], "the lines its row will show")
+        XCTAssertEqual(
+            DeviceCards.pairingConfirm(nil, words: words, titleNamed: named, titleUnnamed: "Link this device?"),
+            DeviceCards.PairingConfirm(title: "Link this device?", detail: "", place: ""))
+        XCTAssertEqual(
+            DeviceCards.pairingConfirm(card(model: " "), words: words, titleNamed: named, titleUnnamed: "Link this device?").title,
+            "Link this device?", "a card with no model names nothing")
+        XCTAssertEqual(DeviceCards.pairingName(web), "Chrome on macOS")
+        XCTAssertNil(DeviceCards.pairingName(nil))
+
+        // The catalog copy.
+        XCTAssertEqual(DevicePairingCopy.confirm(nil).title, Localization.shared.t("devices.scan.confirm.title"))
+        let titled = DevicePairingCopy.confirm(web).title
+        XCTAssertEqual(
+            titled, Localization.shared.t("devices.scan.confirm.title_named", texts: ["name": "Chrome on macOS"]))
+        XCTAssertTrue(titled.contains("Chrome on macOS"))
+        XCTAssertEqual(DeviceLinkModalCopy.added(nil), Localization.text("device_link.request.added"))
+        let added = DeviceLinkModalCopy.added("Chrome on macOS")
+        XCTAssertEqual(added, Localization.text("device_link.request.added_named", texts: ["name": "Chrome on macOS"]))
+        XCTAssertTrue(added.contains("Chrome on macOS"))
+    }
+
+    func testThePayloadCardNamesTheNewLeafUntilItsOwnCardArrives() async throws {
+        let payloadCard = card(updatedAtMs: now, model: "Chrome on macOS", platform: .web)
+        XCTAssertNil(DeviceCards.seedFromPairing([:], keyHex: "nn", card: payloadCard, rosterKeysHex: ["aa"]),
+                     "not in the roster")
+        let real = card(updatedAtMs: 5, model: "Pixel 7a", platform: .android)
+        XCTAssertNil(DeviceCards.seedFromPairing(["nn": real], keyHex: "nn", card: payloadCard, rosterKeysHex: ["nn"]),
+                     "a stored card is never overwritten by the payload's")
+        let seeded = try XCTUnwrap(
+            DeviceCards.seedFromPairing([:], keyHex: "nn", card: payloadCard, rosterKeysHex: ["nn"]))
+        XCTAssertEqual(seeded["nn"]?.model, "Chrome on macOS")
+        XCTAssertEqual(seeded["nn"]?.updatedAtMs, 0, "the lowest stamp")
+        let own = card(updatedAtMs: 1, city: "", model: "Chrome on macOS", platform: .web)
+        XCTAssertEqual(DeviceCards.receive(seeded, senderKeyHex: "nn", card: own, rosterKeysHex: ["nn"])?["nn"], own,
+                       "the device's own card replaces it")
+
+        let (center, defaults, suite) = try freshCenter()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        center.bind(accountIdB64: "acct") { _ in }
+        center.seedFromPairing(accountIdB64: "other", keyHex: "nn", card: payloadCard, rosterKeysHex: ["nn"])
+        XCTAssertNil(center.cards["nn"], "another account's add seeds nothing")
+        center.seedFromPairing(accountIdB64: "acct", keyHex: "nn", card: payloadCard, rosterKeysHex: ["mm", "nn"])
+        XCTAssertEqual(center.cards["nn"]?.model, "Chrome on macOS")
+        center.receive(senderKeyHex: "nn", card: own, rosterKeysHex: ["mm", "nn"])
+        XCTAssertEqual(center.cards["nn"], own)
+        center.seedFromPairing(accountIdB64: "acct", keyHex: "nn", card: payloadCard, rosterKeysHex: ["mm", "nn"])
+        XCTAssertEqual(center.cards["nn"], own, "a later payload card does not replace the real one")
+        center.unbind()
+    }
+
+    func testThisDevicesRowIsBuiltFromItsOwnFields() throws {
+        let received = ["self": card(model: "stale"), "other": card(model: "Pixel 7a", platform: .android)]
+        let ownCard = card(model: "iPhone 16 Pro")
+        XCTAssertEqual(
+            DeviceCards.rowCard(keyHex: "self", isSelf: true, cards: received, ownCard: ownCard), ownCard)
+        XCTAssertEqual(
+            DeviceCards.rowCard(keyHex: "self", isSelf: true, cards: [:], ownCard: ownCard)?.model, "iPhone 16 Pro",
+            "never the received-cards map, where the own card never is")
+        XCTAssertEqual(
+            DeviceCards.rowCard(keyHex: "other", isSelf: false, cards: received, ownCard: ownCard)?.model, "Pixel 7a")
+
+        let (center, defaults, suite) = try freshCenter()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        center.bind(accountIdB64: "acct") { _ in }
+        let row = center.ownRowCard(nowMs: now)
+        XCTAssertEqual(row, center.currentFields(nowMs: now))
+        let shown = view(DeviceCards.RowInput(keyHex: "self", leafIndex: 0, isSelf: true, card: row))
+        XCTAssertNotEqual(shown.title, "Device")
+        XCTAssertFalse(row.model.isEmpty)
+        center.unbind()
+    }
+
+    /// A device that has just joined sends its own card at once: no growth
+    /// delay, no foreground action, no city lookup first.
+    func testAJoinedDeviceSendsItsCardAtOnce() async throws {
+        let (center, defaults, suite) = try freshCenter()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        center.isForeground = { false }
+        center.locate = {
+            try? await Task.sleep(nanoseconds: 60_000_000_000)
+            return nil
+        }
+        var sent: [Data] = []
+        center.bind(accountIdB64: "acct") { sent.append($0) }
+        center.noteJoined(accountIdB64: "acct")
+        for _ in 0..<100 where sent.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(sent.count, 1)
+        let own = try XCTUnwrap(center.own)
+        XCTAssertEqual(DeviceCardCenter.stored(try decodeDeviceCardEnvelope(plaintext: sent[0])), own)
+        center.unbind()
+
+        // Unbound at the join (a fresh device): owed to that account's binding.
+        var later = 0
+        center.noteJoined(accountIdB64: "acct2")
+        center.bind(accountIdB64: "other") { _ in later += 1 }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(later, 0, "not to another account")
+        center.unbind()
+        center.bind(accountIdB64: "acct2") { _ in later += 1 }
+        for _ in 0..<100 where later == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(later, 1)
+        center.unbind()
+        center.bind(accountIdB64: "acct2") { _ in later += 1 }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(later, 1, "sent once")
         center.unbind()
     }
 }

@@ -410,6 +410,17 @@ describe("old device: the decision", () => {
     expect(h.flow.view()).toEqual({ kind: "closed", message: LINK_DEVICE_ADDED });
   });
 
+  it("names the added device when its payload carried a card (UX second-device 2.1)", async () => {
+    const h = responderHarness({ pair: vi.fn(async () => "Chrome on macOS") });
+    await h.flow.poll();
+    await h.flow.consent();
+    h.setListed(sealedRequest(GOOD_CONFIRM_A));
+    await h.flow.poll();
+    const view = h.flow.view();
+    expect(view.kind).toBe("closed");
+    expect(view.kind === "closed" ? view.message() : "").toBe("“Chrome on macOS” added.");
+  });
+
   it("a wrong code posts wrong_code and pairs nothing", async () => {
     const h = responderHarness();
     await h.flow.poll();

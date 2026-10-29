@@ -550,7 +550,7 @@ private sealed interface ScanUi {
     /** [keysSent] is `false` when this device had no recovery phrase to hand
      *  over (or the hand-over failed): the new device is linked but has to
      *  bring its keys another way, and the screen says so. */
-    data class Done(val keysSent: Boolean) : ScanUi
+    data class Done(val keysSent: Boolean, val added: UiText) : ScanUi
     data class Error(val message: UiText) : ScanUi
 }
 
@@ -702,11 +702,19 @@ private fun ScanSection(
             is ScanUi.ConfirmTransfer -> Column(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                // UX second-device.md section 2.1 - named from the card the
+                // payload carried, with the lines its Devices row will show;
+                // what the new device says about itself, so the warning stays.
+                val payloadCard = s.decoded.deviceCard?.let(me.lakko.app.devices.DeviceCardCenter::fromFfi)
+                val rowWords = deviceRowWords()
                 Text(
-                    t("devices.scan.confirm.title"),
+                    me.lakko.app.devices.DeviceCards.confirmTitle(payloadCard).text(),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
+                for (line in me.lakko.app.devices.DeviceCards.pairingLines(payloadCard, rowWords)) {
+                    Text(line, style = MaterialTheme.typography.bodyMedium)
+                }
                 Text(
                     t("devices.scan.confirm.body"),
                     style = MaterialTheme.typography.bodyMedium,
@@ -749,7 +757,10 @@ private fun ScanSection(
                             // waits for the device to land and publish
                             // its KeyPackage.
                             chatRepository?.requestAdmitDevice(scanned.newDeviceKey)
-                            state = ScanUi.Done(keysSent = scanned.keysSent)
+                            state = ScanUi.Done(
+                                keysSent = scanned.keysSent,
+                                added = me.lakko.app.devices.DeviceCards.addedCopy(payloadCard),
+                            )
                         } catch (cause: Throwable) {
                             if (cause is kotlinx.coroutines.CancellationException) throw cause
                             when (me.lakko.app.ui.auth.gatedFailureOf(cause)) {
@@ -797,7 +808,7 @@ private fun ScanSection(
 
             is ScanUi.Done -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    t("device_link.request.added"),
+                    s.added.text(),
                     color = MaterialTheme.colorScheme.primary,
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
@@ -892,6 +903,8 @@ private fun DevicesList(
     val notice by me.lakko.app.devices.NewDeviceNotices.state.collectAsStateWithLifecycle()
     // ADR-0080 - what each device said about itself.
     val cards by me.lakko.app.devices.DeviceCardCenter.cards.collectAsStateWithLifecycle()
+    // The own row follows the city switch.
+    val showCityOn by me.lakko.app.devices.DeviceCardCenter.showCity.collectAsStateWithLifecycle()
     val locale = remember { java.util.Locale.getDefault() }
     // UX section 3 - Remove all other devices: its sheet, the run, and each
     // row's own progress while it runs.
@@ -953,25 +966,21 @@ private fun DevicesList(
         }
 
         is DevicesListUi.Ready -> {
-            val strings = me.lakko.app.l10n.Localization.strings.value
-            val words = me.lakko.app.devices.DeviceCards.Words(
-                device = t("devices.row.device"),
-                online = t("devices.row.online"),
-                app = { version ->
-                    if (version.isEmpty()) strings["devices.row.app_name"]
-                    else strings.format("devices.row.app", mapOf("version" to version))
-                },
-                place = { city, country ->
-                    strings.format("devices.row.place", mapOf("city" to city, "country" to country))
-                },
-                countryName = { code ->
-                    java.util.Locale("", code).getDisplayCountry(locale).ifEmpty { code }
-                },
-            )
+            val words = deviceRowWords()
+            // UX section 3 - this device's row is built from what it would
+            // put in its own card, never looked up among the received cards.
+            val ownFields = remember(s, showCityOn) {
+                me.lakko.app.devices.DeviceCardCenter.currentFields(System.currentTimeMillis())
+            }
             val (current, others) = me.lakko.app.devices.DeviceCards.order(
                 s.devices.map { device ->
                     val keyHex = hexKey(device.signaturePublicKey)
-                    me.lakko.app.devices.DeviceCards.RowInput(keyHex, device.leafIndex, device.isSelf, cards[keyHex])
+                    me.lakko.app.devices.DeviceCards.RowInput(
+                        keyHex,
+                        device.leafIndex,
+                        device.isSelf,
+                        me.lakko.app.devices.DeviceCards.cardFor(device.isSelf, keyHex, cards, ownFields),
+                    )
                 },
             )
 
@@ -1521,6 +1530,28 @@ private enum class RowRun { Removing, Failed }
 
 /** Lower-case hex of a leaf key: the device-card store's key. */
 private fun hexKey(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
+
+/** The words a device row (and the pairing confirm's lines) is built with,
+ *  in the current language. */
+@Composable
+private fun deviceRowWords(): me.lakko.app.devices.DeviceCards.Words {
+    val strings = me.lakko.app.l10n.LocalStrings.current
+    val locale = remember { java.util.Locale.getDefault() }
+    return me.lakko.app.devices.DeviceCards.Words(
+        device = t("devices.row.device"),
+        online = t("devices.row.online"),
+        app = { version ->
+            if (version.isEmpty()) strings["devices.row.app_name"]
+            else strings.format("devices.row.app", mapOf("version" to version))
+        },
+        place = { city, country ->
+            strings.format("devices.row.place", mapOf("city" to city, "country" to country))
+        },
+        countryName = { code ->
+            java.util.Locale("", code).getDisplayCountry(locale).ifEmpty { code }
+        },
+    )
+}
 
 @Composable
 private fun SectionHeader(text: String) {
