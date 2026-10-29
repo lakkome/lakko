@@ -63,7 +63,8 @@ import { allowlist, mediaKey, type MediaHub } from "../media/media-hub";
 import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
-import { currentLanguage, joinList, t } from "../l10n";
+import { joinList, t } from "../l10n";
+import { displayLocale } from "../l10n/display-locale";
 
 /** The callbacks and reactive reads a bubble needs from the chat view. */
 export interface BubbleHost {
@@ -300,7 +301,7 @@ export function TimelineBubble(
         ack="sent"
         originalText={ev.text}
         attachments={ev.attachments}
-        time={shortTime(ev.createdAt, currentLanguage())}
+        time={shortTime(ev.createdAt, displayLocale())}
         senderName={props.isGroup && props.startsRun && !own ? senderName() : null}
         avatar={
           props.isGroup && !own
@@ -341,7 +342,7 @@ export function TimelineBubble(
           ? t("chat.message.sending")
           : live().ack === "failed"
             ? t("chat.message.not_sent")
-            : shortTime(live().createdAt, currentLanguage())
+            : shortTime(live().createdAt, displayLocale())
       }
       senderName={null}
       avatar={null}

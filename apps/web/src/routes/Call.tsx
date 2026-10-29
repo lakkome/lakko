@@ -165,7 +165,8 @@ const PhotoOrInitials: Component<{ name: string; personKey: string | undefined; 
     {(url) => <img class={props.class} src={url()} alt="" />}
   </Show>
 );
-import { currentLanguage, t } from "../l10n";
+import { t } from "../l10n";
+import { displayLocale } from "../l10n/display-locale";
 
 // ============================================================================
 // Small shared pieces
@@ -261,7 +262,7 @@ function qualityWord(tier: QualityTier): string {
 
 /** A number with a fixed count of decimals, in the interface language. */
 function formatNumber(value: number, decimals: number): string {
-  return new Intl.NumberFormat(currentLanguage(), {
+  return new Intl.NumberFormat(displayLocale(), {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
   }).format(value);

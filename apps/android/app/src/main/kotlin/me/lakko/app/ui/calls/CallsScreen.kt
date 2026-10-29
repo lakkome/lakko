@@ -3,7 +3,6 @@
 
 package me.lakko.app.ui.calls
 
-import android.text.format.DateFormat
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -120,7 +119,7 @@ public fun CallsScreen(
     val zone = remember { ZoneId.systemDefault() }
     val strings = me.lakko.app.l10n.LocalStrings.current
     val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
-    val use24h = remember(context) { DateFormat.is24HourFormat(context) }
+    val use24h = remember(context) { me.lakko.app.l10n.DeviceFormats.is24Hour(context) }
 
     // Calls placed before the index existed live only in their conversations.
     // Filled once per account, so this screen never opens empty while the

@@ -19,7 +19,6 @@ import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
 import { AuthHttpError, AuthNetworkError } from "../client";
 import { asksPhraseRecall, type RecallAttemptFailure } from "../recall";
-import { currentLanguage } from "../../l10n";
 import { isOffline, recoverErrorMessage, screenText } from "../auth-error-copy";
 import { t } from "../../l10n";
 import { newPasswordProblem } from "../password-rules";
@@ -29,6 +28,7 @@ import { PhraseInput } from "../../ui/PhraseInput";
 import { UsernameField } from "./UsernameField";
 import { WaitNotice } from "./FormNotices";
 import { attemptsRetryAfterSecs, createRetryCountdown } from "./retry-countdown";
+import { displayLocale } from "../../l10n/display-locale";
 
 export function PhraseRecover(props: {
   readonly username: () => string;
@@ -158,7 +158,7 @@ export function PhraseRecover(props: {
           <p>
             <strong>
               {t("recall.phrase.changed", {
-                date: new Date(current().changedAtMs).toLocaleDateString(currentLanguage(), {
+                date: new Date(current().changedAtMs).toLocaleDateString(displayLocale(), {
                   dateStyle: "medium",
                 }),
               })}

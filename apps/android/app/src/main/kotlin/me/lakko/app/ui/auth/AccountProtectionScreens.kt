@@ -866,8 +866,7 @@ public fun AccountProtectionSection(
 private fun noticeDate(atMs: Long): String {
     val language = LocalStrings.current.language
     return remember(atMs, language) {
-        java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM, java.util.Locale.forLanguageTag(language))
-            .format(java.util.Date(atMs))
+        me.lakko.app.l10n.DeviceFormats.mediumDate(atMs, language)
     }
 }
 

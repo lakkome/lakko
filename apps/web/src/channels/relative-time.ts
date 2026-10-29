@@ -8,7 +8,8 @@
  * are catalog messages (`common.time.*`, ADR-0061); dates are formatted for
  * the interface language unless a locale is given.
  */
-import { currentLanguage, t } from "../l10n";
+import { t } from "../l10n";
+import { displayLocale } from "../l10n/display-locale";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
@@ -41,7 +42,7 @@ export function postTimeLabel(atMs: number, now: Date = new Date(), locale?: str
     d.getMonth() === now.getMonth() &&
     d.getDate() === now.getDate();
   const time: Intl.DateTimeFormatOptions = { hour: "numeric", minute: "2-digit" };
-  const lang = locale ?? currentLanguage();
+  const lang = locale ?? displayLocale();
   if (sameDay) return new Intl.DateTimeFormat(lang, time).format(d);
   return new Intl.DateTimeFormat(lang, {
     day: "numeric",

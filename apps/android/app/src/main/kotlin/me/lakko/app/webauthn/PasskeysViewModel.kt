@@ -573,9 +573,7 @@ internal fun deleteAccountRefusalText(status: Int, body: String?, language: Stri
         blockedUntilMs != null -> UiText(
             "settings.account.delete.blocked",
             texts = mapOf(
-                "date" to java.text.DateFormat
-                    .getDateInstance(java.text.DateFormat.MEDIUM, java.util.Locale.forLanguageTag(language))
-                    .format(java.util.Date(blockedUntilMs)),
+                "date" to me.lakko.app.l10n.DeviceFormats.mediumDate(blockedUntilMs, language),
             ),
         )
         status == 429 -> UiText("common.error.too_many_attempts")

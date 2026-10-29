@@ -88,6 +88,10 @@ export interface L10nDeps {
   applyToDocument?(language: string, rtl: boolean): void;
   /** Logs a failure that does not reach the person. */
   warn?(message: string, err: unknown): void;
+  /** The locale the numbers inside a message are written with: the language's
+   *  words, the device's separators (`format-locale.ts`). Defaults to the
+   *  language itself. */
+  numberLocale?(language: string): string;
 }
 
 /** A `t()` argument: text is inserted as is, a number selects plural forms
@@ -282,7 +286,7 @@ export function createL10n(deps: L10nDeps): L10nRuntime {
     if (cat !== null) {
       const texts: Record<string, string> = {};
       const counts: Record<string, number> = {};
-      const numberFormat = new Intl.NumberFormat(language());
+      const numberFormat = new Intl.NumberFormat(deps.numberLocale?.(language()) ?? language());
       for (const [name, value] of Object.entries(args)) {
         if (typeof value === "number") {
           counts[name] = value;

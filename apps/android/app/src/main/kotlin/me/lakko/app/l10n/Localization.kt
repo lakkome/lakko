@@ -213,6 +213,8 @@ public object Localization {
         if (controller != null) return
         val ctx = context.applicationContext
         appContext = ctx
+        // The device's clock setting is read through the app context from now on.
+        DeviceFormats.init(ctx)
         sourceTexts = readSourceTexts(ctx)
         languages = try {
             l10nSupportedLanguages().map { LanguageEntry(it.code, it.ownName, it.direction == TextDirection.RTL) }

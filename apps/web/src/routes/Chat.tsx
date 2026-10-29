@@ -445,7 +445,7 @@ import { deleteChatConfirmation } from "../chat/delete-chat-confirm";
 import { deleteConversation } from "../chat/delete-chat";
 import { leaveGroupConfirmation } from "../chat/leave-group-confirm";
 import { namedActionKey, pendingConfirm, requestConfirm } from "../ui/confirm-dialog";
-import { currentLanguage, joinList, t } from "../l10n";
+import { joinList, t } from "../l10n";
 import { KeyedError, RenderedError, keyedErrorText } from "../l10n/keyed-error";
 import { createLiveText, type LiveTextInput } from "../l10n/live-text";
 import {
@@ -516,6 +516,7 @@ import {
 } from "../chat/membership-rows";
 import { MembersCanFindMeSwitch } from "../settings/MembersCanFindMeSwitch";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
+import { displayLocale } from "../l10n/display-locale";
 
 /**
  * `/chat/:id` (from the Chats list) and `/groups/:id` (from the Groups list)
@@ -817,7 +818,7 @@ function ChatView(props: {
         return { createdAt: rowCreatedAt(row), senderKey: undefined, side: "system" };
       }),
       new Date(),
-      currentLanguage(),
+      displayLocale(),
     );
   });
   // The journal cursor. The authority is the coordinator's per-group value,

@@ -31,7 +31,7 @@ import { createEffect, createSignal, For, onCleanup, Show, type JSX } from "soli
 import { useAuth } from "../AuthContext";
 import { NewPasswordForm } from "../NewPasswordForm";
 import { PasswordChangeGate } from "../PasswordChangeGate";
-import { currentLanguage, t } from "../../l10n";
+import { t } from "../../l10n";
 import { ModalLayer } from "../../ui/ModalLayer";
 import {
   consumeSelfMarks,
@@ -57,12 +57,13 @@ import { answerOf, RecoveryEmailClient } from "./recovery-email-client";
 import { RESEAL_SALT_LEN, resealAttemptKey, resealNeeded, runReseal } from "./reseal";
 import { RemoveRecoveryEmail } from "./RemoveRecoveryEmail";
 import { SavePhrasePanel } from "./SavePhrasePanel";
+import { displayLocale } from "../../l10n/display-locale";
 
 /** At most this many pages are read in one landing. */
 const MAX_PAGES = 5;
 
 function mediumDate(ms: number): string {
-  return new Date(ms).toLocaleDateString(currentLanguage(), { dateStyle: "medium" });
+  return new Date(ms).toLocaleDateString(displayLocale(), { dateStyle: "medium" });
 }
 
 export function AccountNotices(): JSX.Element {

@@ -16,9 +16,10 @@
  * reachable.
  */
 
-import { currentLanguage, t } from "../l10n";
+import { t } from "../l10n";
 import type { CallLogEntry } from "./call-log";
 import type { CallLogRows } from "./call-log-store";
+import { displayLocale } from "../l10n/display-locale";
 
 /** One row of the Calls screen: a call, and who it was with. */
 export interface CallHistoryRow {
@@ -107,7 +108,7 @@ export function callHistoryDayLabel(day: string, now: Date = new Date()): string
   const parsed = new Date(Number(year), Number(month) - 1, Number(dayOfMonth));
   if (Number.isNaN(parsed.getTime())) return day;
   const sameYear = parsed.getFullYear() === now.getFullYear();
-  return parsed.toLocaleDateString(currentLanguage(), {
+  return parsed.toLocaleDateString(displayLocale(), {
     day: "numeric",
     month: "long",
     ...(sameYear ? {} : { year: "numeric" }),

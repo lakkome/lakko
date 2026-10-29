@@ -15,7 +15,8 @@
  * Pure: the codec and every rule are here and tested; the sealed store is
  * `feed-marks-store.ts`. Nothing here leaves the device.
  */
-import { currentLanguage, t } from "../l10n";
+import { t } from "../l10n";
+import { displayLocale } from "../l10n/display-locale";
 
 export const FEED_MARKS_VERSION = 1;
 /** Most item keys remembered per feed (chosen): well past a screenful, and
@@ -194,5 +195,5 @@ export function channelUnreadCount(
 
 /** The badge text a count draws, as the chat list does. */
 export function badgeText(count: number): string {
-  return count >= 100 ? t("chats.row.unread_overflow") : count.toLocaleString(currentLanguage());
+  return count >= 100 ? t("chats.row.unread_overflow") : count.toLocaleString(displayLocale());
 }

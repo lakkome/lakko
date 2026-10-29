@@ -243,16 +243,18 @@ class RecallTest {
 
     @Test
     fun `the delete dialog says until when, and keeps its other lines`() {
-        val blocked = me.lakko.app.webauthn.deleteAccountRefusalText(
-            409, """{"error":"recall-window-open","until_ms":1790000000000}""", "en",
-        )
+        // The medium date: words from the interface language, order from
+        // the device's region (localization.md 5), here a US device.
+        me.lakko.app.l10n.DeviceFormats.overrideForTests(java.util.Locale.US, null)
+        val blocked = try {
+            me.lakko.app.webauthn.deleteAccountRefusalText(
+                409, """{"error":"recall-window-open","until_ms":1790000000000}""", "en",
+            )
+        } finally {
+            me.lakko.app.l10n.DeviceFormats.overrideForTests(null, null)
+        }
         assertEquals("settings.account.delete.blocked", blocked.key)
-        // The platform's medium date in the interface language.
-        assertEquals(
-            java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM, java.util.Locale.ENGLISH)
-                .format(java.util.Date(1_790_000_000_000L)),
-            blocked.texts["date"],
-        )
+        assertEquals("Sep 21, 2026", blocked.texts["date"])
         assertEquals(
             "common.error.too_many_attempts",
             me.lakko.app.webauthn.deleteAccountRefusalText(429, "", "en").key,

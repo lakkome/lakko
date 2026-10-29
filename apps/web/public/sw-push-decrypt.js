@@ -902,6 +902,7 @@ const COMMITTER_BEACON_FIRST_BYTE = 0x6c;
  *   field 14 (group_start) → 0x72
  *   field 15 (group_join)  → 0x7A
  *   field 16 (group_leave) → 0x82 0x01 (tag 130, a two-byte varint)
+ *   field 17 (screen_share) → 0x8A 0x01 (tag 138, ADR-0083)
  *
  * Without the three group-control arms a group-call start / join /
  * leave fell through to `parseBodyEnvelope`'s lossy-UTF-8 fallback and
@@ -925,7 +926,7 @@ function looksLikeCallSignaling(bytes) {
   ) {
     return true;
   }
-  return first === 0x82 && bytes.length > 1 && bytes[1] === 0x01;
+  return (first === 0x82 || first === 0x8a) && bytes.length > 1 && bytes[1] === 0x01;
 }
 
 /**

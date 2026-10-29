@@ -90,8 +90,9 @@ class TimelinePresentationTest {
     @Test
     fun `another year shows the locale short numeric date`() {
         val lastYear = at("2025-09-16T10:00:00Z")
-        assertEquals("16/09/2025", formatListTime(lastYear, now, zone, use24h = true, locale = en))
-        assertEquals("16.09.25", formatListTime(lastYear, now, zone, use24h = true, locale = Locale.GERMANY))
+        // The order and separators of the DEVICE's region (localization.md 5).
+        assertEquals("16/09/2025", formatListTime(lastYear, now, zone, use24h = true, locale = en, region = Locale.UK))
+        assertEquals("16.09.25", formatListTime(lastYear, now, zone, use24h = true, locale = en, region = Locale.GERMANY))
     }
 
     @Test

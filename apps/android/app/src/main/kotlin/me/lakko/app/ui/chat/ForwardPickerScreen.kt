@@ -3,7 +3,6 @@
 
 package me.lakko.app.ui.chat
 
-import android.text.format.DateFormat
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -175,7 +174,7 @@ internal fun ConversationPicker(
     val zone = remember { ZoneId.systemDefault() }
     val strings = LocalStrings.current
     val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
-    val use24h = remember(context) { DateFormat.is24HourFormat(context) }
+    val use24h = remember(context) { me.lakko.app.l10n.DeviceFormats.is24Hour(context) }
 
     val rows = remember(state, nameVersion, groupNameVersion, flagsMap, readCursorMap, strings) {
         orderConversationRows(

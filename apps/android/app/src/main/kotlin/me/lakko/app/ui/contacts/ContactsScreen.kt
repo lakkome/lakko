@@ -82,8 +82,6 @@ import me.lakko.app.profile.ResolvedName
 import me.lakko.app.profile.requestSenderLabel
 import me.lakko.app.ui.chat.PeopleSearchSection
 import me.lakko.app.ui.components.LakkoAvatar
-import java.text.DateFormat
-import java.util.Date
 
 /**
  * The Contacts tab — docs/ux/client-redesign.md section 5.3.
@@ -698,10 +696,8 @@ private fun InviteLinksSheet(
     }
     val now = remember(rows) { System.currentTimeMillis() }
     val language = me.lakko.app.l10n.LocalStrings.current.language
-    // The created fact carries the time too, in the interface language.
-    val dateFormat = remember(language) {
-        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, java.util.Locale.forLanguageTag(language))
-    }
+    // The created fact carries the time too: words in the interface
+    // language, order and clock from the device (localization.md 5).
     // The link whose terms are open (UX section 9), and the form's state.
     var editingSlug by remember { mutableStateOf<String?>(null) }
     var form by remember { mutableStateOf(InviteCreateForm()) }
@@ -793,7 +789,7 @@ private fun InviteLinksSheet(
                     val meta = joinFacts(
                         buildList {
                             row.createdAtMs?.let {
-                                add(t("invite.links.created", mapOf("date" to dateFormat.format(Date(it)))))
+                                add(t("invite.links.created", mapOf("date" to me.lakko.app.l10n.DeviceFormats.mediumDateTime(it, language))))
                             }
                             add(describeInviteExpiry(row.expiryMs, now).text())
                             add(describeInviteLimit(row.maxUses).text())

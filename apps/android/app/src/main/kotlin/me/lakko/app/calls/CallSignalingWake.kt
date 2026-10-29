@@ -141,6 +141,8 @@ internal enum class CallSignalingBodyKind {
     GROUP_START,
     GROUP_JOIN,
     GROUP_LEAVE,
+    /** ADR-0083: a one-to-one call's screen-share state (field 17). */
+    SCREEN_SHARE,
 }
 
 /**
@@ -156,6 +158,9 @@ internal enum class CallSignalingBodyKind {
  *   field 16 (group_leave) -> 0x82 0x01 (tag 130, a TWO-byte varint — a field
  *                            number above 15 no longer fits one byte, which is
  *                            exactly how a first-byte sniff silently misses it)
+ *   field 17 (screen_share) -> 0x8A 0x01 (tag 138, ADR-0083; missing here until
+ *                            2026-10-29, so a one-to-one call's share state
+ *                            rendered as a garbage chat bubble)
  *
  * A chat envelope is JSON and starts with `{` (0x7B); every `lakko/...` service
  * envelope starts with `l` (0x6C). Neither overlaps this set.
@@ -200,7 +205,28 @@ internal fun callSignalingBodyKind(bytes: ByteArray): CallSignalingBodyKind? {
     if (first == 0x82 && bytes.size > 1 && (bytes[1].toInt() and 0xFF) == 0x01) {
         return if (opensWithCallId(bytes, 2)) CallSignalingBodyKind.GROUP_LEAVE else null
     }
+    if (first == 0x8A && bytes.size > 1 && (bytes[1].toInt() and 0xFF) == 0x01) {
+        // The share state carries a signature, so this body can pass 127 bytes
+        // and its length is then a two-byte varint.
+        return if (opensWithCallIdAfterVarint(bytes, 2)) CallSignalingBodyKind.SCREEN_SHARE else null
+    }
     return null
+}
+
+/** [opensWithCallId] for a body whose length varint may take one or two
+ *  bytes. */
+private fun opensWithCallIdAfterVarint(bytes: ByteArray, lengthAt: Int): Boolean {
+    if (bytes.size <= lengthAt) return false
+    val firstLengthByte = bytes[lengthAt].toInt() and 0xFF
+    val headerAt = if (firstLengthByte < 0x80) {
+        lengthAt + 1
+    } else {
+        if (bytes.size <= lengthAt + 1 || (bytes[lengthAt + 1].toInt() and 0xFF) >= 0x80) return false
+        lengthAt + 2
+    }
+    if (bytes.size < headerAt + 2) return false
+    return (bytes[headerAt].toInt() and 0xFF) == 0x0A &&
+        (bytes[headerAt + 1].toInt() and 0xFF) == 0x10
 }
 
 /** `bytes[lengthAt]` is a one-byte body length, followed by the `call_id`

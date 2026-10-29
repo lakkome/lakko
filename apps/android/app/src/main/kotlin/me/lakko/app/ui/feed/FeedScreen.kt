@@ -667,7 +667,7 @@ public fun FeedScreen(
 
     val zone = remember { ZoneId.systemDefault() }
     val locale = remember { Locale.getDefault() }
-    val use24h = remember(context) { android.text.format.DateFormat.is24HourFormat(context) }
+    val use24h = remember(context) { me.lakko.app.l10n.DeviceFormats.is24Hour(context) }
 
     fun authorOf(ref: FeedCandidateRef): String {
         if (ref.source.kind == FeedSourceKind.CHANNEL) return ref.source.title

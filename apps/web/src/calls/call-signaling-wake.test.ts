@@ -49,6 +49,9 @@ describe("callSignalingBodyKind", () => {
     expect(callSignalingBodyKind(new Uint8Array([0x72, 0x00]))).toBe("groupStart");
     expect(callSignalingBodyKind(new Uint8Array([0x7a, 0x00]))).toBe("groupJoin");
     expect(callSignalingBodyKind(new Uint8Array([0x82, 0x01, 0x00]))).toBe("groupLeave");
+    // ADR-0083 one-to-one screen-share state (field 17): seen live as a garbage
+    // bubble on 2026-10-29 while this table did not know it.
+    expect(callSignalingBodyKind(new Uint8Array([0x8a, 0x01, 0x00]))).toBe("screenShare");
   });
 
   it("is null for anything that is not call signaling", () => {
@@ -60,6 +63,7 @@ describe("callSignalingBodyKind", () => {
     // A lone 0x82 without its continuation byte is not a group-leave tag.
     expect(callSignalingBodyKind(new Uint8Array([0x82]))).toBeNull();
     expect(callSignalingBodyKind(new Uint8Array([0x82, 0x02]))).toBeNull();
+    expect(callSignalingBodyKind(new Uint8Array([0x8a]))).toBeNull();
   });
 
   it("agrees with looksLikeCallSignaling", () => {
@@ -92,6 +96,7 @@ describe("shouldWakeForCallSignaling", () => {
     expect(shouldWakeForCallSignaling(new Uint8Array([0x72, 0x00]), "call")).toBe(false);
     expect(shouldWakeForCallSignaling(new Uint8Array([0x7a, 0x00]), "call")).toBe(false);
     expect(shouldWakeForCallSignaling(new Uint8Array([0x82, 0x01, 0x00]), "call")).toBe(false);
+    expect(shouldWakeForCallSignaling(new Uint8Array([0x8a, 0x01, 0x00]), "call")).toBe(false);
   });
 
   it("never wakes for a frame the session did not ask a wake for", () => {

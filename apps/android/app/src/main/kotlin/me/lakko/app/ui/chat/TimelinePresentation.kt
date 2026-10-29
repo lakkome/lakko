@@ -6,6 +6,7 @@ package me.lakko.app.ui.chat
 import me.lakko.app.chat.Ack
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.Direction
+import me.lakko.app.l10n.DeviceFormats
 import me.lakko.app.l10n.Localization
 import me.lakko.app.l10n.Strings
 import me.lakko.app.media.KIND_GIF
@@ -15,9 +16,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneId
-import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
-import java.time.format.FormatStyle
 import java.time.format.TextStyle
 import java.util.Locale
 
@@ -54,11 +53,16 @@ private fun dateOf(atMs: Long, zone: ZoneId): LocalDate =
 public fun sameCalendarDay(aMs: Long, bMs: Long, zone: ZoneId): Boolean =
     dateOf(aMs, zone) == dateOf(bMs, zone)
 
-/** "14:05" or "2:05 PM", per the device's 12/24-hour setting. */
-public fun formatClockTime(atMs: Long, zone: ZoneId, use24h: Boolean, locale: Locale): String {
-    val pattern = if (use24h) "HH:mm" else "h:mm a"
-    return DateTimeFormatter.ofPattern(pattern, locale).format(Instant.ofEpochMilli(atMs).atZone(zone))
-}
+/** "14:05" or "2:05 PM", per the DEVICE's 12/24-hour setting
+ *  ([DeviceFormats.is24Hour]); [locale] supplies only the AM/PM word. */
+public fun formatClockTime(
+    atMs: Long,
+    zone: ZoneId,
+    use24h: Boolean,
+    locale: Locale,
+    /** The device's region (the clock is laid out for the language there). */
+    region: Locale = DeviceFormats.region(),
+): String = DeviceFormats.clockTime(Instant.ofEpochMilli(atMs).atZone(zone), use24h, locale, region)
 
 /**
  * The time slot of a conversation row (UX 5.1): today -> the clock time; the
@@ -71,19 +75,21 @@ public fun formatListTime(
     zone: ZoneId,
     use24h: Boolean,
     locale: Locale,
+    /** The device's region: the order of the date's fields. */
+    region: Locale = DeviceFormats.region(),
 ): String {
     val at = Instant.ofEpochMilli(atMs).atZone(zone)
     val today = dateOf(nowMs, zone)
     val day = at.toLocalDate()
-    if (day == today) return formatClockTime(atMs, zone, use24h, locale)
+    if (day == today) return formatClockTime(atMs, zone, use24h, locale, region)
     val daysAgo = today.toEpochDay() - day.toEpochDay()
     if (daysAgo in 1..6) {
         return day.dayOfWeek.getDisplayName(TextStyle.SHORT, locale)
     }
     if (day.year == today.year) {
-        return DateTimeFormatter.ofPattern("d MMM", locale).format(at)
+        return DeviceFormats.dayMonth(at, locale, region)
     }
-    return DateTimeFormatter.ofLocalizedDate(FormatStyle.SHORT).withLocale(locale).format(at)
+    return DeviceFormats.numericDate(at, locale, region)
 }
 
 /**
@@ -97,6 +103,8 @@ public fun dateSeparatorLabel(
     zone: ZoneId,
     locale: Locale,
     strings: Strings = Localization.strings.value,
+    /** The device's region: the order of the date's fields. */
+    region: Locale = DeviceFormats.region(),
 ): String {
     val at = Instant.ofEpochMilli(atMs).atZone(zone)
     val today = dateOf(nowMs, zone)
@@ -106,8 +114,8 @@ public fun dateSeparatorLabel(
         daysAgo == 0L -> strings["chat.day.today"]
         daysAgo == 1L -> strings["chat.day.yesterday"]
         daysAgo in 2..6 -> day.dayOfWeek.getDisplayName(TextStyle.FULL, locale)
-        day.year == today.year -> DateTimeFormatter.ofPattern("d MMMM", locale).format(at)
-        else -> DateTimeFormatter.ofPattern("d MMMM yyyy", locale).format(at)
+        day.year == today.year -> DeviceFormats.dayMonth(at, locale, region, long = true)
+        else -> DeviceFormats.dayMonthYear(at, locale, region, long = true)
     }
 }
 

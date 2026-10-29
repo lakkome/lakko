@@ -4,7 +4,6 @@
 package me.lakko.app.ui.chat
 
 import androidx.compose.material.icons.filled.Bookmark
-import android.text.format.DateFormat
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -524,7 +523,7 @@ internal fun rememberConversationRows(
     // ADR-0061: dates, times and every row line in the interface language.
     val strings = LocalStrings.current
     val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
-    val use24h = remember(context) { DateFormat.is24HourFormat(context) }
+    val use24h = remember(context) { me.lakko.app.l10n.DeviceFormats.is24Hour(context) }
 
     // Chats and groups. They were already one store split by a filter, so they
     // merge by dropping it.

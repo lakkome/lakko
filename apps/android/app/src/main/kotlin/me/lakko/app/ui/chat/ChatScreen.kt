@@ -129,7 +129,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
-import android.text.format.DateFormat
 import java.time.ZoneId
 import java.util.Locale
 import androidx.compose.ui.window.Dialog
@@ -332,7 +331,7 @@ public fun ChatScreen(
     // ADR-0061: dates and times in the interface language.
     val strings = LocalStrings.current
     val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
-    val use24h = remember(context) { DateFormat.is24HourFormat(context) }
+    val use24h = remember(context) { me.lakko.app.l10n.DeviceFormats.is24Hour(context) }
     val timeline = remember(state.messages, zone, use24h, strings, isGroupChat) {
         // UX second-device.md section 4 — a group draws its membership rows.
         buildTimeline(state.messages, System.currentTimeMillis(), zone, use24h, locale, strings, isGroup = isGroupChat)

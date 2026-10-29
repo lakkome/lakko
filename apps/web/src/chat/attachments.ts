@@ -57,9 +57,10 @@
  */
 
 import { loadWasm } from "../wasm";
-import { currentLanguage, t } from "../l10n";
+import { t } from "../l10n";
 import { StorageClient } from "../storage/client";
 import type { AttachmentRef as WasmAttachmentRef } from "../../wasm/lakko_ffi_wasm";
+import { displayLocale } from "../l10n/display-locale";
 
 /** Per-attachment ceiling — must match the
  *  `MAX_ATTACHMENT_BYTES` constant in `crates/lakko-attachments`
@@ -916,12 +917,12 @@ export function formatAttachmentSize(bytes: number): string {
   // ADR-0061: the number in the interface language's format, the unit
   // abbreviation from the catalog.
   const oneDecimal = (n: number): string =>
-    new Intl.NumberFormat(currentLanguage(), {
+    new Intl.NumberFormat(displayLocale(), {
       minimumFractionDigits: 1,
       maximumFractionDigits: 1,
     }).format(n);
   if (bytes < 1000) {
-    return t("common.size.bytes", { size: new Intl.NumberFormat(currentLanguage()).format(bytes) });
+    return t("common.size.bytes", { size: new Intl.NumberFormat(displayLocale()).format(bytes) });
   }
   if (bytes < 1_000_000) return t("common.size.kb", { size: oneDecimal(bytes / 1000) });
   if (bytes < 1_000_000_000) return t("common.size.mb", { size: oneDecimal(bytes / 1_000_000) });

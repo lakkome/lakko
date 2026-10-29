@@ -39,7 +39,7 @@ import { Icon } from "../ui/icons";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { LakkoPicker } from "../ui/LakkoPicker";
 import { loadWasm } from "../wasm";
-import { currentLanguage, joinFacts, t } from "../l10n";
+import { joinFacts, t } from "../l10n";
 import { KeyedError } from "../l10n/keyed-error";
 import { createLiveText } from "../l10n/live-text";
 import { contactsErrorText } from "./errors";
@@ -81,6 +81,7 @@ import { describeInviteCreated, describeInviteExpiry, describeInviteUsage } from
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { listedContactLinks, type LinkRecordModel } from "../devices/sync/link-records";
 import { useProfiles } from "../profile/ProfileContext";
+import { displayLocale } from "../l10n/display-locale";
 
 /** A link this panel can show: one in the account's link-record register. */
 interface LinkRow {
@@ -561,7 +562,7 @@ export function InviteLinksPanel(): JSX.Element {
             <Show when={customUses().trim() !== "" && customMaxUses(customUses()) === null}>
               <div class="form-error">
                 {t("invite.links.error.custom_uses", {
-                  max: CUSTOM_MAX_USES.toLocaleString(currentLanguage()),
+                  max: CUSTOM_MAX_USES.toLocaleString(displayLocale()),
                 })}
               </div>
             </Show>

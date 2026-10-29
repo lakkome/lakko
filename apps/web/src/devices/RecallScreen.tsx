@@ -42,12 +42,13 @@ import {
 } from "../auth/recall";
 import { MIN_PASSWORD_LENGTH } from "../auth/password-rules";
 import { WaitNotice } from "../auth/recover/FormNotices";
-import { currentLanguage, t } from "../l10n";
+import { t } from "../l10n";
 import { tRich } from "../l10n/rich";
 import { AuthLayout } from "../ui/AuthLayout";
 import { PasswordField } from "../ui/PasswordField";
 import { PhraseInput } from "../ui/PhraseInput";
 import { SIGNED_OUT_COPY } from "./sync/removed-device";
+import { displayLocale } from "../l10n/display-locale";
 
 /** How often an unanswered check is repeated, and the record's own end is
  *  looked at. Chosen. */
@@ -55,7 +56,7 @@ const RECHECK_MS = 30_000;
 
 /** The platform's medium date in the interface language (UX 18.8). */
 function mediumDate(ms: number): string {
-  return new Date(ms).toLocaleDateString(currentLanguage(), { dateStyle: "medium" });
+  return new Date(ms).toLocaleDateString(displayLocale(), { dateStyle: "medium" });
 }
 
 export function RecallScreen(props: {

@@ -46,6 +46,7 @@ class CallSignalingWakeTest {
         CallSignalingBodyKind.GROUP_START to 14,
         CallSignalingBodyKind.GROUP_JOIN to 15,
         CallSignalingBodyKind.GROUP_LEAVE to 16,
+        CallSignalingBodyKind.SCREEN_SHARE to 17,
     )
 
     private val callId: ByteArray = ByteArray(16) { (0xA0 + it).toByte() }
@@ -127,6 +128,20 @@ class CallSignalingWakeTest {
         // A lone 0x82 without its continuation byte is not a group-leave tag.
         assertNull(callSignalingBodyKind(byteArrayOf(0x82.toByte())))
         assertNull(callSignalingBodyKind(byteArrayOf(0x82.toByte(), 0x02)))
+        assertNull(callSignalingBodyKind(byteArrayOf(0x8A.toByte())))
+    }
+
+    /** ADR-0083: a one-to-one call's screen-share state, seen live as a
+     *  garbage chat bubble on 2026-10-29 while the table did not know field 17.
+     *  Its body is signed, so its length is often a two-byte varint. */
+    @Test
+    fun screen_share_state_is_call_signaling_and_never_wakes() {
+        val short = frame(CallSignalingBodyKind.SCREEN_SHARE)
+        val long = frame(CallSignalingBodyKind.SCREEN_SHARE, ByteArray(200) { 0x42 })
+        assertEquals(0x8A, long[0].toInt() and 0xFF)
+        assertEquals(CallSignalingBodyKind.SCREEN_SHARE, callSignalingBodyKind(short))
+        assertEquals(CallSignalingBodyKind.SCREEN_SHARE, callSignalingBodyKind(long))
+        assertFalse(shouldWakeForCallSignaling(long, CallSignalingWake.CALL))
     }
 
     // -----------------------------------------------------------------

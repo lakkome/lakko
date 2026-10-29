@@ -431,7 +431,7 @@ struct FeedScreen: View {
     private func timeText(_ message: FeedMessage) -> String {
         guard let ms = message.timeMs else { return "" }
         return ChatListFormatting.lastMessageTime(
-            ms: ms, nowMs: model.nowMs, calendar: .current, locale: .current)
+            ms: ms, nowMs: model.nowMs, calendar: .current, locale: l10n.locale)
     }
 
     private func itemView(_ item: RankedFeedItem, viewportHeight: CGFloat) -> some View {
