@@ -259,6 +259,16 @@ export interface DeviceGroupSyncApi {
    *  them, or `null` while the handle is not loaded. Feeds the "A device
    *  was added to your account" notice (`devices/added-notice.ts`). */
   readonly deviceRoster: Accessor<DeviceRoster | null>;
+  /** Reactive: the account's devices whose "a device was added" warning
+   *  was seen on some device of the account (the synced `lakko-sync`
+   *  device-acknowledgement register, identity-recovery 17.5 / 17.6), as
+   *  lower-case hex signature keys. */
+  readonly acknowledgedDevices: Accessor<readonly string[]>;
+  /** Write the acknowledgement for each device (hex signature keys), fold it
+   *  here at once and send it to the account's other devices. Write-once per
+   *  key; a send that does not go out is owed and re-sent at the next start.
+   *  Never throws. */
+  acknowledgeDevices(keysHex: readonly string[]): Promise<void>;
 
   /** Convenience helper — return the draft for `groupId` or
    *  `undefined` if none. `groupId` is the raw bytes. */
@@ -431,6 +441,7 @@ export function DeviceGroupSyncProvider(props: {
   const [ready, setReady] = createSignal(false);
   const [deviceRemoved, setDeviceRemoved] = createSignal(false);
   const [deviceRoster, setDeviceRoster] = createSignal<DeviceRoster | null>(null);
+  const [acknowledgedDevices, setAcknowledgedDevices] = createSignal<readonly string[]>([]);
   /** Publish the roster of the held handle. `localChange`: the handle was
    *  just reloaded after a change made on this device, so what is new in it
    *  was let in here. A read that fails publishes nothing. */
@@ -642,6 +653,7 @@ export function DeviceGroupSyncProvider(props: {
     setLineageEntries(p.lineage);
     setSaved(p.saved);
     setSavedBlobIdsHex(p.savedBlobIdsHex);
+    setAcknowledgedDevices(readAcknowledgedDevices(synced, untrack(acknowledgedDevices)));
     if (wasmSync !== null) setLinkRecords(readLinkRecords(synced, wasmSync.LinkRecordKind.Contact));
     // ADR-0075 (amended 2026-10-13): the recovery address the account's
     // devices keep, for the screens above this provider.
@@ -877,6 +889,7 @@ export function DeviceGroupSyncProvider(props: {
     uninstallAddressRegister?.();
     uninstallAddressRegister = installAddressRegister({ accountIdB64, set: setRecoveryEmailImpl });
     void flushUnsentOwnUsername();
+    void flushUnsentDeviceAcks();
     void flushUnsentLinkRecords();
     uninstallUsernameRegister?.();
     uninstallUsernameRegister = installUsernameRegister({ accountIdB64, set: setOwnUsernameImpl });
@@ -1292,6 +1305,71 @@ export function DeviceGroupSyncProvider(props: {
       /* storage unavailable: the send below is the only attempt */
     }
     await sendOwnUsernameRegister(account);
+  }
+
+  // ----- Identity-recovery 17.5: the device-acknowledgement register -----
+
+  /** `localStorage` marker: an acknowledgement written here has not been
+   *  confirmed sent. Re-sending every held acknowledgement is idempotent
+   *  (write-once per device key). */
+  const deviceAckUnsentKey = (account: string): string => `lakko.device-ack.unsent.v1.${account}`;
+
+  async function sendDeviceAckEnvelopes(account: string, envelopes: readonly Uint8Array[]): Promise<void> {
+    try {
+      await sendLineageEnvelopes(envelopes);
+      localStorage.removeItem(deviceAckUnsentKey(account));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "device acknowledgement send failed; retried at the next start",
+        err instanceof Error ? err.name : "unknown",
+      );
+    }
+  }
+
+  async function flushUnsentDeviceAcks(): Promise<void> {
+    const account = activeAccountIdB64;
+    if (account === null || synced === null) return;
+    try {
+      if (localStorage.getItem(deviceAckUnsentKey(account)) === null) return;
+    } catch {
+      return;
+    }
+    let envelopes: Uint8Array[];
+    try {
+      envelopes = synced.deviceAckEnvelopes();
+    } catch {
+      return;
+    }
+    await sendDeviceAckEnvelopes(account, envelopes);
+  }
+
+  async function acknowledgeDevicesImpl(keysHex: readonly string[]): Promise<void> {
+    if (synced === null || keysHex.length === 0) return;
+    const flat = new Uint8Array(keysHex.length * 32);
+    let n = 0;
+    for (const hex of keysHex) {
+      if (!/^[0-9a-f]{64}$/.test(hex)) continue;
+      for (let i = 0; i < 32; i++) flat[n * 32 + i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+      n += 1;
+    }
+    if (n === 0) return;
+    let envelopes: Uint8Array[];
+    try {
+      envelopes = synced.acknowledgeDevices(mintHlc(), flat.subarray(0, n * 32), BigInt(Date.now()));
+    } catch {
+      return;
+    }
+    if (envelopes.length === 0) return;
+    refresh();
+    const account = activeAccountIdB64;
+    if (account === null) return;
+    try {
+      localStorage.setItem(deviceAckUnsentKey(account), "1");
+    } catch {
+      /* storage unavailable: the send below is the only attempt */
+    }
+    await sendDeviceAckEnvelopes(account, envelopes);
   }
 
   // ----- ADR-0079: the link-record register -----------------------
@@ -2423,6 +2501,19 @@ export function DeviceGroupSyncProvider(props: {
         }
         return;
       }
+      // Identity-recovery 17.5 - the device-acknowledgement register, the
+      // same way.
+      if (wasmSync !== null && wasmSync.isDeviceAckEnvelope(parsed.serviceEnvelope)) {
+        try {
+          if (synced?.applyDeviceAckEnvelope(parsed.serviceEnvelope) === true) {
+            observeHlc(synced.maxHlc());
+            refresh();
+          }
+        } catch {
+          // A malformed register is dropped, never folded.
+        }
+        return;
+      }
       // ADR-0076 - the own-username register, the same way.
       if (wasmSync !== null && wasmSync.isOwnUsernameEnvelope(parsed.serviceEnvelope)) {
         try {
@@ -2748,6 +2839,8 @@ export function DeviceGroupSyncProvider(props: {
     linkClaimsVersion,
     deviceRemoved,
     deviceRoster,
+    acknowledgedDevices,
+    acknowledgeDevices: acknowledgeDevicesImpl,
     getDraft(groupId) {
       return drafts()[groupIdHex(groupId)];
     },
@@ -2785,6 +2878,24 @@ export function useDeviceGroupSync(): DeviceGroupSyncApi {
 }
 
 // ----- Helpers -----------------------------------------------------
+
+/** The acknowledged set as hex keys; `held` when it did not change (so the
+ *  signal does not re-run every reader on each refresh) or cannot be read. */
+function readAcknowledgedDevices(
+  s: { acknowledgedDevices(): Uint8Array },
+  held: readonly string[],
+): readonly string[] {
+  let flat: Uint8Array;
+  try {
+    flat = s.acknowledgedDevices();
+  } catch {
+    return held;
+  }
+  const keys: string[] = [];
+  for (let off = 0; off + 32 <= flat.length; off += 32) keys.push(bytesToHex(flat.subarray(off, off + 32)));
+  if (keys.length === held.length && keys.every((k, i) => k === held[i])) return held;
+  return keys;
+}
 
 /** The DeviceGroup's current epoch, or `null` when it cannot be read. The
  *  wasm DeviceGroup exposes no `epoch()` accessor; the DS access signer is

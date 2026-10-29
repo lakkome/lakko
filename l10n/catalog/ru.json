@@ -4390,10 +4390,6 @@
       "text": "Откройте Lakko, чтобы посмотреть свои устройства.",
       "status": "machine"
     },
-    "devices.added_notice.open_devices": {
-      "text": "Открыть «Устройства»",
-      "status": "machine"
-    },
     "devices.added_notice.title": {
       "text": "В ваш аккаунт добавлено устройство",
       "status": "machine"
@@ -6470,6 +6466,10 @@
       "text": "Настройки",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "Настройки. В ваш аккаунт добавлено устройство",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "Группы",
       "status": "machine"
@@ -7874,6 +7874,10 @@
       "text": "Нет камеры ни на одном из устройств? Войдите на новом и выберите «{method}»: здесь появится запрос «{prompt}» с кодом для сверки.",
       "status": "machine"
     },
+    "settings.devices.attention_a11y": {
+      "text": "Устройства. В ваш аккаунт добавлено устройство",
+      "status": "machine"
+    },
     "settings.devices.device_n": {
       "text": "Устройство {number}",
       "status": "machine"
@@ -8404,6 +8408,10 @@
     },
     "settings.section.security": {
       "text": "Безопасность",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "Безопасность. В ваш аккаунт добавлено устройство",
       "status": "machine"
     },
     "settings.security.devices.sub": {

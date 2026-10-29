@@ -4242,10 +4242,6 @@
       "text": "Cihazlarınızı görmek için Lakko'yu açın.",
       "status": "machine"
     },
-    "devices.added_notice.open_devices": {
-      "text": "Cihazlar'ı aç",
-      "status": "machine"
-    },
     "devices.added_notice.title": {
       "text": "Hesabınıza bir cihaz eklendi",
       "status": "machine"
@@ -6178,6 +6174,10 @@
       "text": "Ayarlar",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "Ayarlar. Hesabınıza bir cihaz eklendi",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "Gruplar",
       "status": "machine"
@@ -7430,6 +7430,10 @@
       "text": "İki cihazda da kamera yok mu? Yenisinde giriş yapın ve \"{method}\" seçeneğini seçin: burada karşılaştırılacak bir kodla \"{prompt}\" istemi görünür.",
       "status": "machine"
     },
+    "settings.devices.attention_a11y": {
+      "text": "Cihazlar. Hesabınıza bir cihaz eklendi",
+      "status": "machine"
+    },
     "settings.devices.device_n": {
       "text": "Cihaz {number}",
       "status": "machine"
@@ -7960,6 +7964,10 @@
     },
     "settings.section.security": {
       "text": "Güvenlik",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "Güvenlik. Hesabınıza bir cihaz eklendi",
       "status": "machine"
     },
     "settings.security.devices.sub": {

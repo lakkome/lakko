@@ -4242,10 +4242,6 @@
       "text": "برای دیدن دستگاه‌های خود Lakko را باز کنید.",
       "status": "machine"
     },
-    "devices.added_notice.open_devices": {
-      "text": "باز کردن دستگاه‌ها",
-      "status": "machine"
-    },
     "devices.added_notice.title": {
       "text": "دستگاهی به حساب شما افزوده شد",
       "status": "machine"
@@ -6178,6 +6174,10 @@
       "text": "تنظیمات",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "تنظیمات. یک دستگاه به حساب شما اضافه شد",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "گروه‌ها",
       "status": "machine"
@@ -7430,6 +7430,10 @@
       "text": "هیچ‌کدام از دستگاه‌ها دوربین ندارد؟ روی دستگاه جدید وارد شوید و «{method}» را انتخاب کنید: پیام «{prompt}» با یک کد برای مقایسه اینجا ظاهر می‌شود.",
       "status": "machine"
     },
+    "settings.devices.attention_a11y": {
+      "text": "دستگاه‌ها. یک دستگاه به حساب شما اضافه شد",
+      "status": "machine"
+    },
     "settings.devices.device_n": {
       "text": "دستگاه {number}",
       "status": "machine"
@@ -7960,6 +7964,10 @@
     },
     "settings.section.security": {
       "text": "امنیت",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "امنیت. یک دستگاه به حساب شما اضافه شد",
       "status": "machine"
     },
     "settings.security.devices.sub": {

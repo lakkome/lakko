@@ -7630,3 +7630,33 @@ button.lk-folder-new {
 .lk-word-suggest > .active {
   background: var(--surface-hover);
 }
+/* Identity-recovery UX 17.5: the exclamation-mark badge on the Settings
+   destination and on the Devices row, and the highlighted pending row. */
+.lk-rail-icon {
+  position: relative;
+  display: inline-flex;
+}
+.lk-rail-icon .lk-attention-badge {
+  position: absolute;
+  top: -6px;
+  inset-inline-end: -8px;
+}
+.lk-attention-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--radius-pill);
+  background: var(--danger);
+  color: var(--danger-fg);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+}
+.lk-card-row.lk-device-new {
+  background: var(--accent-soft);
+  border-radius: var(--radius-sm);
+}

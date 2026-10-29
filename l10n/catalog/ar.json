@@ -4242,10 +4242,6 @@
       "text": "افتح Lakko لرؤية أجهزتك.",
       "status": "machine"
     },
-    "devices.added_notice.open_devices": {
-      "text": "فتح الأجهزة",
-      "status": "machine"
-    },
     "devices.added_notice.title": {
       "text": "أُضيف جهاز إلى حسابك",
       "status": "machine"
@@ -6178,6 +6174,10 @@
       "text": "الإعدادات",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "الإعدادات. تمت إضافة جهاز إلى حسابك",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "المجموعات",
       "status": "machine"
@@ -7430,6 +7430,10 @@
       "text": "لا توجد كاميرا على أيّ من الجهازين؟ سجّل الدخول على الجهاز الجديد واختر «{method}»: ستظهر هنا رسالة «{prompt}» مع رمز للمقارنة.",
       "status": "machine"
     },
+    "settings.devices.attention_a11y": {
+      "text": "الأجهزة. تمت إضافة جهاز إلى حسابك",
+      "status": "machine"
+    },
     "settings.devices.device_n": {
       "text": "الجهاز {number}",
       "status": "machine"
@@ -7960,6 +7964,10 @@
     },
     "settings.section.security": {
       "text": "الأمان",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "الأمان. تمت إضافة جهاز إلى حسابك",
       "status": "machine"
     },
     "settings.security.devices.sub": {

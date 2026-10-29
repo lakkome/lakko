@@ -4242,10 +4242,6 @@
       "text": "פתחו את Lakko כדי לראות את המכשירים שלכם.",
       "status": "machine"
     },
-    "devices.added_notice.open_devices": {
-      "text": "פתיחת המכשירים",
-      "status": "machine"
-    },
     "devices.added_notice.title": {
       "text": "מכשיר נוסף לחשבון שלכם",
       "status": "machine"
@@ -6178,6 +6174,10 @@
       "text": "הגדרות",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "הגדרות. מכשיר נוסף לחשבון שלך",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "קבוצות",
       "status": "machine"
@@ -7430,6 +7430,10 @@
       "text": "אין מצלמה באף אחד מהמכשירים? התחברו במכשיר החדש ובחרו „{method}”: כאן תופיע בקשת „{prompt}” עם קוד להשוואה.",
       "status": "machine"
     },
+    "settings.devices.attention_a11y": {
+      "text": "מכשירים. מכשיר נוסף לחשבון שלך",
+      "status": "machine"
+    },
     "settings.devices.device_n": {
       "text": "מכשיר {number}",
       "status": "machine"
@@ -7960,6 +7964,10 @@
     },
     "settings.section.security": {
       "text": "אבטחה",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "אבטחה. מכשיר נוסף לחשבון שלך",
       "status": "machine"
     },
     "settings.security.devices.sub": {

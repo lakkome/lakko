@@ -107,6 +107,9 @@ pub mod fuzz_api {
     ///   (ADR-0079), reached the same way. Whatever decodes must re-encode to
     ///   the identical bytes, hold records within their bounds, and fold so
     ///   that every revoked record it carries is held revoked.
+    /// * `decode_device_ack_envelope` — the device-acknowledgement registers
+    ///   (identity-recovery 17.5), reached the same way: canonical, folding
+    ///   to exactly its keys, not applying twice.
     /// * [`SyncedState::from_bytes`] — reached from local persistence and
     ///   from the backup payload a storage tier serves. Whatever decodes
     ///   must persist to bytes that read back as the same state, and its
@@ -120,7 +123,24 @@ pub mod fuzz_api {
             && recovery_email_envelope_holds(bytes)
             && own_username_envelope_holds(bytes)
             && link_record_envelope_holds(bytes)
+            && device_ack_envelope_holds(bytes)
             && persisted_state_holds(bytes)
+    }
+
+    /// The device-acknowledgement envelope (identity-recovery 17.5):
+    /// canonical, folds to exactly its keys, carried back by
+    /// `device_ack_envelopes`, and does not apply twice.
+    fn device_ack_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(entries) = crate::synced::decode_device_ack_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        let keys: Vec<[u8; 32]> = entries.iter().map(|e| e.value.device_key).collect();
+        crate::synced::compose_device_ack_envelope(&entries).as_deref() == Ok(bytes)
+            && state.apply_device_ack_envelope(bytes) == Ok(true)
+            && state.acknowledged_devices() == keys
+            && state.device_ack_envelopes() == vec![bytes.to_vec()]
+            && state.apply_device_ack_envelope(bytes) == Ok(false)
     }
 
     /// The link-record envelope (ADR-0079): canonical, within bounds, and a

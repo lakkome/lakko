@@ -4242,10 +4242,6 @@
       "text": "अपने डिवाइस देखने के लिए Lakko खोलें।",
       "status": "machine"
     },
-    "devices.added_notice.open_devices": {
-      "text": "डिवाइस खोलें",
-      "status": "machine"
-    },
     "devices.added_notice.title": {
       "text": "आपके खाते में एक डिवाइस जोड़ा गया",
       "status": "machine"
@@ -6178,6 +6174,10 @@
       "text": "सेटिंग्स",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "सेटिंग्स. आपके खाते में एक डिवाइस जोड़ा गया",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "ग्रुप",
       "status": "machine"
@@ -7430,6 +7430,10 @@
       "text": "किसी भी डिवाइस में कैमरा नहीं है? नए डिवाइस पर साइन इन करें और \"{method}\" चुनें: यहाँ मिलान के लिए एक कोड के साथ \"{prompt}\" संदेश दिखेगा।",
       "status": "machine"
     },
+    "settings.devices.attention_a11y": {
+      "text": "डिवाइस. आपके खाते में एक डिवाइस जोड़ा गया",
+      "status": "machine"
+    },
     "settings.devices.device_n": {
       "text": "डिवाइस {number}",
       "status": "machine"
@@ -7960,6 +7964,10 @@
     },
     "settings.section.security": {
       "text": "सुरक्षा",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "सुरक्षा. आपके खाते में एक डिवाइस जोड़ा गया",
       "status": "machine"
     },
     "settings.security.devices.sub": {

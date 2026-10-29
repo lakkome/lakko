@@ -3,25 +3,93 @@
 
 /**
  * "A device was added to your account" (docs/ux/identity-recovery.md
- * section 17.5): the watcher that folds the DeviceGroup roster into the
- * per-device notice state, and the banner drawn at the top of the Chats
- * list and of Settings > Devices. Every rule is in `added-notice.ts`.
+ * section 17.5, amended 2026-10-29): the watcher that folds the DeviceGroup
+ * roster and the account's synced acknowledgements into the per-device
+ * notice state and keeps the system notification in step with it, and the
+ * explanation drawn above the list in Settings > Devices. Every rule is in
+ * `added-notice.ts`. The banner at the top of the Chats list is gone.
  */
-import { createEffect, Show, type JSX } from "solid-js";
+import { createEffect, onCleanup, Show, untrack, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
-import { currentLanguage, t } from "../l10n";
+import { t } from "../l10n";
 import { paths } from "../routes/paths";
 import { Icon } from "../ui/icons";
 import {
   addedNotice,
   bindAddedNotice,
-  dismissAddedNotice,
+  noticeTag,
+  notificationAction,
+  recordAcknowledged,
   recordRoster,
-  shouldNotify,
+  badgeVisible,
+  type AddedNoticeView,
 } from "./added-notice";
 import { useDeviceGroupSync } from "./sync/DeviceGroupSyncContext";
+import { displayLocale } from "../l10n/display-locale";
+
+/** The message the service worker posts when its copy of the notification
+ *  is tapped (`public/sw.js`, `data.lakkoDevicesNotice`). */
+const OPEN_DEVICES_MESSAGE = "LAKKO_OPEN_DEVICES";
+
+function notificationPermission(): "granted" | "denied" | "default" | "unsupported" {
+  return typeof Notification === "undefined" ? "unsupported" : Notification.permission;
+}
+
+/** The page's own handle on the notification it posted, by tag. */
+const shownHere = new Map<string, Notification>();
+
+async function swRegistration(): Promise<ServiceWorkerRegistration | undefined> {
+  try {
+    if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return undefined;
+    return await navigator.serviceWorker.getRegistration();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Post (or replace) the account's notification. It names no device and no
+ *  place; tapping it opens Settings > Devices. */
+async function postNotice(tag: string, view: AddedNoticeView, openDevices: () => void): Promise<void> {
+  const title = t(view.titleKey);
+  const body = t("devices.added_notice.notification_body");
+  try {
+    const n = new Notification(title, { body, tag });
+    n.onclick = () => {
+      window.focus();
+      openDevices();
+      n.close();
+    };
+    shownHere.get(tag)?.close();
+    shownHere.set(tag, n);
+    return;
+  } catch {
+    // Some browsers (Chrome on Android) only allow notifications from a
+    // service worker: show it there, with the same tag.
+  }
+  const reg = await swRegistration();
+  if (reg === undefined) return;
+  try {
+    await reg.showNotification(title, { body, tag, data: { lakkoDevicesNotice: true } });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("device-added notification not shown", err instanceof Error ? err.name : "");
+  }
+}
+
+/** Withdraw the account's notification wherever it was shown from. */
+async function withdrawNotice(tag: string): Promise<void> {
+  shownHere.get(tag)?.close();
+  shownHere.delete(tag);
+  const reg = await swRegistration();
+  if (reg === undefined) return;
+  try {
+    for (const n of await reg.getNotifications({ tag })) n.close();
+  } catch {
+    // best-effort
+  }
+}
 
 /** Mounted once in the app shell. Draws nothing. */
 export function DeviceAddedWatcher(): JSX.Element {
@@ -32,87 +100,111 @@ export function DeviceAddedWatcher(): JSX.Element {
     const s = auth.state();
     return s.kind === "session" ? s.account.accountId : null;
   };
+  const openDevices = (): void => navigate(paths.devices);
 
   createEffect(() => bindAddedNotice(accountId()));
 
+  /** Act on one fold: post when devices became pending, withdraw when
+   *  nothing is pending any more. */
+  function afterFold(account: string, added: number, pendingBefore: number): void {
+    const view = untrack(addedNotice);
+    const action = notificationAction({
+      added,
+      pendingBefore,
+      pendingAfter: view.newKeys.length,
+      permission: notificationPermission(),
+    });
+    if (action === "post") void postNotice(noticeTag(account), view, openDevices);
+    else if (action === "withdraw") void withdrawNotice(noticeTag(account));
+  }
+
+  // The account's acknowledgements (from this device or another one).
+  createEffect(() => {
+    const account = accountId();
+    const acked = sync.acknowledgedDevices();
+    if (account === null) return;
+    const before = untrack(addedNotice).newKeys.length;
+    recordAcknowledged(account, acked);
+    afterFold(account, 0, before);
+  });
+
+  // The roster: a device this device has not seen yet becomes pending.
   createEffect(() => {
     const account = accountId();
     const roster = sync.deviceRoster();
     if (account === null || roster === null) return;
+    const before = untrack(addedNotice).newKeys.length;
     const added = recordRoster(account, roster, Date.now());
-    const permission =
-      typeof Notification === "undefined" ? "unsupported" : Notification.permission;
-    if (
-      !shouldNotify({
-        added,
-        hidden: typeof document !== "undefined" && document.visibilityState === "hidden",
-        permission,
-      })
-    ) {
-      return;
-    }
-    // The app is running but not in front: a local notification. It names
-    // no device and no place.
-    try {
-      const n = new Notification(t(addedNotice().titleKey), {
-        body: t("devices.added_notice.notification_body"),
-        tag: "lakko-device-added",
-      });
-      n.onclick = () => {
-        window.focus();
-        navigate(paths.devices);
-        n.close();
-      };
-    } catch (err) {
-      // Some browsers only allow notifications from a service worker; the
-      // banner is there at the next look either way.
-      // eslint-disable-next-line no-console
-      console.warn("device-added notification not shown", err instanceof Error ? err.name : "");
-    }
+    afterFold(account, added, before);
   });
+
+  // The service worker's copy of the notification was tapped.
+  if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+    const onMessage = (ev: MessageEvent): void => {
+      const data = ev.data as { type?: unknown } | null;
+      if (data !== null && typeof data === "object" && data.type === OPEN_DEVICES_MESSAGE) openDevices();
+    };
+    navigator.serviceWorker.addEventListener("message", onMessage);
+    onCleanup(() => navigator.serviceWorker.removeEventListener("message", onMessage));
+  }
 
   return <></>;
 }
 
-/** The banner. `onDevices`: this is the Devices screen itself, so `Open
- *  Devices` is not offered. */
-export function DeviceAddedBanner(props: { readonly onDevices?: boolean }): JSX.Element {
-  const auth = useAuth();
+/**
+ * The explanation above the list in Settings > Devices (17.5 surface 3):
+ * title, when, and what to do if it was not you. No button: this screen is
+ * where the `Remove` button is, and opening it is the acknowledgement. Read
+ * as the first element of the screen; never a live region, never focused.
+ */
+export function DeviceAddedExplanation(props: { readonly view: AddedNoticeView | null }): JSX.Element {
   const when = (): string => {
-    const at = addedNotice().latestAtMs;
+    const at = props.view?.latestAtMs ?? null;
     if (at === null) return "";
-    return new Date(at).toLocaleString(currentLanguage(), {
+    return new Date(at).toLocaleString(displayLocale(), {
       dateStyle: "medium",
       timeStyle: "short",
     });
   };
-  function dismiss(): void {
-    const s = auth.state();
-    if (s.kind === "session") dismissAddedNotice(s.account.accountId);
-  }
   return (
-    <Show when={addedNotice().visible}>
-      {/* Polite: announced once when it appears, never takes focus. */}
-      <div class="lk-alert accent lk-device-added" role="status" aria-live="polite">
+    <Show when={props.view !== null && props.view.visible}>
+      <div class="lk-alert accent lk-device-added">
         <span aria-hidden="true">
           <Icon name="devices" size={18} />
         </span>
         <div class="lk-fill">
-          <strong>{t(addedNotice().titleKey)}</strong>
+          <strong>{t(props.view?.titleKey ?? "devices.added_notice.title")}</strong>
           <div>{t("devices.added_notice.when", { date: when() })}</div>
           <div>{t("devices.added_notice.not_you")}</div>
         </div>
-        <Show when={props.onDevices !== true}>
-          {/* A plain link (the router handles it): the banner is drawn
-              inside lists that tests mount without a router. */}
-          <a class="lk-button-link" href={paths.devices}>
-            {t("devices.added_notice.open_devices")}
-          </a>
-        </Show>
-        <button type="button" class="small ghost" onClick={dismiss}>
-          {t("common.dismiss")}
-        </button>
       </div>
+    </Show>
+  );
+}
+
+/** The exclamation-mark badge (17.5 surface 2): danger colour, never colour
+ *  alone (the host element carries the accessible name). */
+export function AttentionBadge(): JSX.Element {
+  return (
+    <span class="lk-attention-badge" aria-hidden="true">
+      !
+    </span>
+  );
+}
+
+/** Whether a device added to the account is waiting to be seen: the
+ *  condition for every "!" badge. */
+export function devicesNeedAttention(): boolean {
+  return badgeVisible(addedNotice());
+}
+
+/** The badge on the `Devices` row inside Settings, while something is
+ *  pending. The row's link carries `settings.devices.attention_a11y`. */
+export function DevicesAttention(): JSX.Element {
+  return (
+    <Show when={devicesNeedAttention()}>
+      {" "}
+      <AttentionBadge />
     </Show>
   );
 }

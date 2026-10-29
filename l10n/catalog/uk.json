@@ -4242,10 +4242,6 @@
       "text": "Відкрийте Lakko, щоб переглянути свої пристрої.",
       "status": "machine"
     },
-    "devices.added_notice.open_devices": {
-      "text": "Відкрити «Пристрої»",
-      "status": "machine"
-    },
     "devices.added_notice.title": {
       "text": "До вашого облікового запису додано пристрій",
       "status": "machine"
@@ -6178,6 +6174,10 @@
       "text": "Налаштування",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "Налаштування. До вашого облікового запису додано пристрій",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "Групи",
       "status": "machine"
@@ -7430,6 +7430,10 @@
       "text": "Немає камери на жодному з пристроїв? Увійдіть на новому й виберіть «{method}»: тут з’явиться запит «{prompt}» з кодом для звірки.",
       "status": "machine"
     },
+    "settings.devices.attention_a11y": {
+      "text": "Пристрої. До вашого облікового запису додано пристрій",
+      "status": "machine"
+    },
     "settings.devices.device_n": {
       "text": "Пристрій {number}",
       "status": "machine"
@@ -7960,6 +7964,10 @@
     },
     "settings.section.security": {
       "text": "Безпека",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "Безпека. До вашого облікового запису додано пристрій",
       "status": "machine"
     },
     "settings.security.devices.sub": {

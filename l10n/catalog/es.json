@@ -4242,10 +4242,6 @@
       "text": "Abre Lakko para ver tus dispositivos.",
       "status": "machine"
     },
-    "devices.added_notice.open_devices": {
-      "text": "Abrir Dispositivos",
-      "status": "machine"
-    },
     "devices.added_notice.title": {
       "text": "Se añadió un dispositivo a tu cuenta",
       "status": "machine"
@@ -6178,6 +6174,10 @@
       "text": "Ajustes",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "Ajustes. Se añadió un dispositivo a tu cuenta",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "Grupos",
       "status": "machine"
@@ -7430,6 +7430,10 @@
       "text": "¿Ninguno de los dos dispositivos tiene cámara? Inicia sesión en el nuevo y elige «{method}»: aquí aparecerá un aviso «{prompt}» con un código para comparar.",
       "status": "machine"
     },
+    "settings.devices.attention_a11y": {
+      "text": "Dispositivos. Se añadió un dispositivo a tu cuenta",
+      "status": "machine"
+    },
     "settings.devices.device_n": {
       "text": "Dispositivo {number}",
       "status": "machine"
@@ -7960,6 +7964,10 @@
     },
     "settings.section.security": {
       "text": "Seguridad",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "Seguridad. Se añadió un dispositivo a tu cuenta",
       "status": "machine"
     },
     "settings.security.devices.sub": {

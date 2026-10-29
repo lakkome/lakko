@@ -4242,10 +4242,6 @@
       "text": "打开 Lakko 查看你的设备。",
       "status": "machine"
     },
-    "devices.added_notice.open_devices": {
-      "text": "打开“设备”",
-      "status": "machine"
-    },
     "devices.added_notice.title": {
       "text": "你的账号添加了一台设备",
       "status": "machine"
@@ -6178,6 +6174,10 @@
       "text": "设置",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "设置。有设备添加到了你的账号",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "群组",
       "status": "machine"
@@ -7430,6 +7430,10 @@
       "text": "两台设备都没有摄像头？在新设备上登录并选择“{method}”：这里会出现带有核对代码的“{prompt}”提示。",
       "status": "machine"
     },
+    "settings.devices.attention_a11y": {
+      "text": "设备。有设备添加到了你的账号",
+      "status": "machine"
+    },
     "settings.devices.device_n": {
       "text": "设备 {number}",
       "status": "machine"
@@ -7960,6 +7964,10 @@
     },
     "settings.section.security": {
       "text": "安全",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "安全。有设备添加到了你的账号",
       "status": "machine"
     },
     "settings.security.devices.sub": {

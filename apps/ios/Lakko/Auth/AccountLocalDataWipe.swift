@@ -4,6 +4,7 @@
 import Foundation
 import LakkoCore
 import Security
+import UserNotifications
 
 /// Forget device and Delete account: remove every piece of ONE account's
 /// local data from this device (maintainer rule, 2026-09-30).
@@ -413,6 +414,11 @@ enum AccountLocalDataWipe {
         }
         step("new-device-notice") {
             NewDeviceNoticeStore(defaults: standard).clear(accountIdB64: accountIdB64)
+            standard.removeObject(
+                forKey: DeviceGroupSyncRepository.deviceAcksUnsentKey(accountIdB64: accountIdB64))
+            let ids = [NewDeviceNoticeCenter.notificationIdentifier(accountIdB64: accountIdB64)]
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ids)
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
         }
         // ADR-0080 — the cards of the account's devices, this device's own
         // card, its city answer and its "Show my city" switch.

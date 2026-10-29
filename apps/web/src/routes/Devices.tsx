@@ -70,8 +70,16 @@ import { screenText } from "../auth/auth-error-copy";
 import { FreshAuthRequiredError, PROOF_COPY } from "../auth/fresh-auth";
 import { createProofGate } from "../auth/proof-gate";
 import { ProofBlock } from "../auth/ProofBlock";
-import { addedNotice, noteDeviceLetIn } from "../devices/added-notice";
-import { DeviceAddedBanner } from "../devices/DeviceAddedNotice";
+import {
+  addedNotice,
+  devicesVisit,
+  enterDevicesVisit,
+  highlightedDeviceKeys,
+  leaveDevicesVisit,
+  noteDeviceLetIn,
+} from "../devices/added-notice";
+import { DeviceAddedExplanation } from "../devices/DeviceAddedNotice";
+import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { bytesToHex } from "../chat/folders/folder-model";
 import {
   currentOwnFields,
@@ -93,6 +101,7 @@ import {
   type RowWords,
 } from "../devices/device-cards";
 import type { IconName } from "../ui/icons";
+import { displayLocale } from "../l10n/display-locale";
 
 /**
  * The text a failure shows (ADR-0061 section 6): a sentence written for a
@@ -124,6 +133,30 @@ type AddMode = "closed" | "pick" | "show" | "scan";
 
 export default function Devices(): JSX.Element {
   const auth = useAuth();
+  const deviceSync = useDeviceGroupSync();
+  // UX 17.5 "What counts as seen": opening this screen while a device is
+  // pending acknowledges every pending device for the account; a device
+  // that becomes pending while the screen is open and in front is seen too.
+  // The highlight and the explanation stay for this visit (`devicesVisit`)
+  // and go when the screen is left.
+  const [pageVisible, setPageVisible] = createSignal(
+    typeof document === "undefined" || document.visibilityState !== "hidden",
+  );
+  if (typeof document !== "undefined") {
+    const onVisibility = (): void => {
+      setPageVisible(document.visibilityState !== "hidden");
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    onCleanup(() => document.removeEventListener("visibilitychange", onVisibility));
+  }
+  createEffect(() => {
+    // `ready`: an acknowledgement is written into the synced state, so a
+    // visit opened before it loaded acknowledges once it has.
+    if (!deviceSync.ready() || !pageVisible() || !addedNotice().visible) return;
+    const keys = enterDevicesVisit();
+    if (keys.length > 0) void deviceSync.acknowledgeDevices(keys);
+  });
+  onCleanup(leaveDevicesVisit);
   const [add, setAdd] = createSignal<AddMode>("closed");
   // UX 17.5: a device carrying the `New` label was just removed here.
   const [removedNew, setRemovedNew] = createSignal(false);
@@ -169,10 +202,10 @@ export default function Devices(): JSX.Element {
           <h1>{t("settings.devices.title")}</h1>
           <p>{t("settings.devices.lede")}</p>
         </div>
-        {/* UX 17.5: a device joined the account; the same banner as on the
-            Chats list. After a `New` device is removed, the line below it
+        {/* UX 17.5: a device joined the account. The explanation stays for
+            this visit; after a `New` device is removed, the line below it
             takes its place. */}
-        <DeviceAddedBanner onDevices />
+        <DeviceAddedExplanation view={devicesVisit()} />
         <Show when={removedNew()}>
           <div class="lk-alert accent lk-device-added" role="status">
             <div class="lk-fill">{t("settings.devices.removed_change_password")}</div>
@@ -319,9 +352,12 @@ function DevicesListView(props: {
   /** Read the list again when this changes (a device was linked here). */
   readonly reloadKey: () => number;
 }): JSX.Element {
-  /** UX 17.5: the row is a device the notice is about. */
+  /** UX 17.5: the row is a device the notice is about (pending, or seen on
+   *  this visit). */
   const isNew = (device: DeviceListItem): boolean =>
-    !device.isSelf && addedNotice().newKeys.includes(bytesToHex(device.signaturePublicKey));
+    !device.isSelf && highlightedDeviceKeys().has(bytesToHex(device.signaturePublicKey));
+  /** Only the first highlighted row is scrolled into view. */
+  let scrolledToNew = false;
   const auth = useAuth();
   // ADR-0074 section 2.3: removing a device is one operation with an owed
   // record (`devices/removal.ts`); the sheet below starts it.
@@ -357,7 +393,7 @@ function DevicesListView(props: {
   const tick = setInterval(() => setNowMs(Date.now()), 60_000);
   onCleanup(() => clearInterval(tick));
   const viewOf = (row: DeviceRowInput): DeviceRowView =>
-    deviceRowView(row, deviceRowWords(), nowMs(), currentLanguage());
+    deviceRowView(row, deviceRowWords(), nowMs(), displayLocale());
   // "Remove all other devices" (UX section 3): its sheet, and each row's own
   // progress while it runs; a row that failed keeps "Could not remove".
   const [removeAllOpen, setRemoveAllOpen] = createSignal(false);
@@ -816,9 +852,11 @@ function DevicesListView(props: {
               return (
                 <li
                   class="lk-card-row"
+                  classList={{ "lk-device-new": device !== null && isNew(device) }}
                   ref={(el) => {
-                    // The new device's row is scrolled into view.
-                    if (device !== null && isNew(device)) {
+                    // The first new device's row is scrolled into view.
+                    if (!scrolledToNew && device !== null && isNew(device)) {
+                      scrolledToNew = true;
                       queueMicrotask(() => el.scrollIntoView({ block: "nearest" }));
                     }
                   }}
