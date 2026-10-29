@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -222,14 +223,7 @@ public object DeviceCardCenter {
             try {
                 if (due) {
                     val answer = locate()
-                    if (answer != null && accountIdB64 == bound) {
-                        val fresh = CityAnswer(answer.first, answer.second, nowMs)
-                        city = fresh
-                        prefs?.let { p ->
-                            val row = json.encodeToString(CityAnswer.serializer(), fresh)
-                            AccountStoreGate.write(bound) { p.edit().putString(DeviceCards.cityKey(bound), row).apply() }
-                        }
-                    }
+                    if (answer != null && accountIdB64 == bound) storeCity(bound, answer, nowMs)
                 }
                 if (accountIdB64 != bound) return@launch
                 val fields = currentFields(nowMs)
@@ -329,14 +323,112 @@ public object DeviceCardCenter {
     /**
      * The card this device puts into a pairing payload it shows as a code or
      * seals for the code route (UX second-device.md section 2.1): its current
-     * fields, the city kept out exactly as for its own card (the switch, the
+     * fields with [place] as the city ([PairingPlace.settled]; `null` = no
+     * place), kept out exactly as for its own card (the switch, the
      * anti-censorship connection). `null` when it cannot be composed: the
      * payload then carries no card, and the pairing goes on.
      */
-    public fun pairingCardEnvelope(nowMs: Long = System.currentTimeMillis()): ByteArray? = try {
-        composeEnvelope(currentFields(nowMs))
+    public fun pairingCardEnvelope(
+        place: Pair<String, String>?,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ByteArray? = try {
+        val allowed = place != null && mutableShowCity.value && !antiCensorshipArmed()
+        val fields = currentFields(nowMs).copy(
+            city = if (allowed) place?.first.orEmpty() else "",
+            country = if (allowed) place?.second.orEmpty() else "",
+        )
+        composeEnvelope(fields)
     } catch (_: Throwable) {
         null
+    }
+
+    /** How long a code waits for the city before it is shown (UX
+     *  second-device.md section 2.1). Chosen, not measured. */
+    public const val PAIRING_PLACE_WAIT_MS: Long = 1_500L
+
+    /**
+     * The city for ONE pairing (UX second-device.md section 2.1, "The place
+     * in the payload card"). Started when the screen that shows a code or
+     * takes the six-digit code opens; [settled] waits for the answer until
+     * [PAIRING_PLACE_WAIT_MS] after that moment at most, then returns what
+     * has arrived, else a bound account's cached city, else `null` (no
+     * place). With no account bound the answer is held here only, for this
+     * pairing.
+     */
+    public class PairingPlace internal constructor(
+        private val deadlineMs: Long,
+        private val clock: () -> Long,
+        initial: Pair<String, String>?,
+    ) {
+        @Volatile internal var answer: Pair<String, String>? = initial
+        @Volatile internal var job: Job? = null
+
+        /** Whether this pairing asked the locate route. */
+        public val requested: Boolean get() = job != null
+
+        /** The answer, waiting no later than the bound from the start. The
+         *  QR route calls it before building the code (and never again);
+         *  the code route when it seals, long after the bound in practice. */
+        public suspend fun settled(): Pair<String, String>? {
+            val running = job
+            if (running != null && !running.isCompleted) {
+                val remaining = deadlineMs - clock()
+                if (remaining > 0) withTimeoutOrNull(remaining) { running.join() }
+            }
+            return answer
+        }
+
+        /** The screen closed: stop asking. */
+        public fun cancel() {
+            job?.cancel()
+        }
+    }
+
+    /**
+     * Start the city for one pairing (see [PairingPlace]). Asks nothing with
+     * the anti-censorship connection armed or the switch off (a device with
+     * no account bound has the default, on); a bound account whose cached
+     * city is fresh uses it and asks nothing; otherwise one locate request,
+     * whose answer a bound account keeps with its city cache.
+     */
+    public fun startPairingPlace(
+        scope: CoroutineScope = this.scope,
+        clock: () -> Long = System::currentTimeMillis,
+    ): PairingPlace {
+        val startedAtMs = clock()
+        val deadline = startedAtMs + PAIRING_PLACE_WAIT_MS
+        if (!mutableShowCity.value || antiCensorshipArmed()) return PairingPlace(deadline, clock, null)
+        val bound = accountIdB64
+        if (bound != null && !cityDue(startedAtMs)) {
+            return PairingPlace(deadline, clock, city?.let { it.city to it.country })
+        }
+        // A bound account's stale cached city is what its own card already
+        // states: it stands until a fresh answer replaces it, so no answer
+        // by the bound still gives that place. With nothing cached, no
+        // answer by the bound gives no place.
+        val cached = if (bound != null) city?.let { it.city to it.country } else null
+        val place = PairingPlace(deadline, clock, cached)
+        place.job = scope.launch {
+            val answer = try {
+                locate()
+            } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                null
+            } ?: return@launch
+            place.answer = answer
+            if (bound != null && accountIdB64 == bound) storeCity(bound, answer, startedAtMs)
+        }
+        return place
+    }
+
+    private fun storeCity(bound: String, answer: Pair<String, String>, nowMs: Long) {
+        val fresh = CityAnswer(answer.first, answer.second, nowMs)
+        city = fresh
+        prefs?.let { p ->
+            val row = json.encodeToString(CityAnswer.serializer(), fresh)
+            AccountStoreGate.write(bound) { p.edit().putString(DeviceCards.cityKey(bound), row).apply() }
+        }
     }
 
     /**

@@ -4170,6 +4170,10 @@
       "text": "Dispositivo añadido.",
       "status": "machine"
     },
+    "device_link.request.added_named": {
+      "text": "«{name}» añadido.",
+      "status": "machine"
+    },
     "device_link.request.adding": {
       "text": "Añadiendo el dispositivo...",
       "status": "machine"
@@ -4536,6 +4540,10 @@
     },
     "devices.scan.confirm.title": {
       "text": "¿Vincular este dispositivo?",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title_named": {
+      "text": "¿Vincular «{name}»?",
       "status": "machine"
     },
     "devices.scan.error.camera_denied": {
@@ -7544,6 +7552,10 @@
     },
     "settings.devices.scan.done": {
       "text": "Dispositivo añadido. Aparecerá en la lista cuando termine de unirse.",
+      "status": "machine"
+    },
+    "settings.devices.scan.done_named": {
+      "text": "«{name}» añadido. Aparecerá en la lista cuando termine de unirse.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {

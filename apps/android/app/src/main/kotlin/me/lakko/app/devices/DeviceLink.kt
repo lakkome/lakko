@@ -147,10 +147,22 @@ public const val DEVICE_LINK_REQUEST_TTL_MS: Long = 600_000L
 public class NewDeviceLink(
     private val api: DeviceLinkApi,
     private val initiatorFor: (requestId: ByteArray) -> DeviceLinkInitiatorPort,
-    private val pairingPayload: ByteArray,
+    /** The pairing payload, built when the code is sealed (after it is
+     *  typed), so the card's place has had time to arrive (UX
+     *  second-device.md section 2.1). */
+    private val payloadForSeal: suspend () -> ByteArray,
     private val nowMs: () -> Long = System::currentTimeMillis,
     private val pollIntervalMs: Long = DEFAULT_POLL_MS,
 ) {
+    /** A payload fixed in advance. */
+    public constructor(
+        api: DeviceLinkApi,
+        initiatorFor: (requestId: ByteArray) -> DeviceLinkInitiatorPort,
+        pairingPayload: ByteArray,
+        nowMs: () -> Long = System::currentTimeMillis,
+        pollIntervalMs: Long = DEFAULT_POLL_MS,
+    ) : this(api, initiatorFor, { pairingPayload }, nowMs, pollIntervalMs)
+
     private var requestId: ByteArray? = null
     private var initiator: DeviceLinkInitiatorPort? = null
     private var pakeB: ByteArray? = null
@@ -195,7 +207,7 @@ public class NewDeviceLink(
         val id = requireNotNull(requestId) { "start first" }
         val b = requireNotNull(pakeB) { "await the answer first" }
         val init = requireNotNull(initiator)
-        val sealed = init.finish(b, typedCode, pairingPayload)
+        val sealed = init.finish(b, typedCode, payloadForSeal())
         api.postPayload(id, sealed.pakeA, sealed.sealedPayload, sealed.confirmA)
         while (true) {
             if (expired()) return NewDeviceLinkState.Expired

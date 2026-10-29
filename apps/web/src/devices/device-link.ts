@@ -772,11 +772,18 @@ export interface DeviceLinkInitiatorFlow {
 /**
  * The new device's side. `pairingPayload` is exactly what the QR code would
  * carry (`encodePairingQr(handle, keyPackage, rendezvous)`); it leaves this
- * device only sealed.
+ * device only sealed. `pairingPayloadAtSeal`, when given, is asked for the
+ * payload at the moment the typed code seals it (docs/ux/second-device.md
+ * section 2.1: the city is used if its answer has arrived by then); a
+ * failure falls back to `pairingPayload`.
  */
 export function createDeviceLinkInitiator(
   ports: InitiatorPorts,
-  args: { readonly loginHandle: Uint8Array; readonly pairingPayload: Uint8Array },
+  args: {
+    readonly loginHandle: Uint8Array;
+    readonly pairingPayload: Uint8Array;
+    readonly pairingPayloadAtSeal?: () => Promise<Uint8Array>;
+  },
 ): DeviceLinkInitiatorFlow {
   let current: InitiatorView = { kind: "requesting" };
   let requestId: string | null = null;
@@ -787,6 +794,8 @@ export function createDeviceLinkInitiator(
   let posted = false;
   let confirmed = false;
   let busy = false;
+  /** A submit is reading the payload to seal; a second one waits out. */
+  let sealing = false;
 
   const show = (v: InitiatorView): void => {
     current = v;
@@ -892,7 +901,7 @@ export function createDeviceLinkInitiator(
       }
     },
     async submit(typed: string): Promise<void> {
-      if (current.kind !== "ready" || initiator === null || pakeB === null) return;
+      if (sealing || current.kind !== "ready" || initiator === null || pakeB === null) return;
       let code: string;
       try {
         code = ports.core.normalizeCode(typed);
@@ -900,8 +909,21 @@ export function createDeviceLinkInitiator(
         show({ kind: "ready", error: LINK_ENTER_SIX_DIGITS });
         return;
       }
+      let payload = args.pairingPayload;
+      if (args.pairingPayloadAtSeal !== undefined) {
+        sealing = true;
+        try {
+          payload = await args.pairingPayloadAtSeal();
+        } catch {
+          payload = args.pairingPayload;
+        } finally {
+          sealing = false;
+        }
+        // The request may have ended while the payload was read.
+        if (current.kind !== "ready" || initiator === null || pakeB === null) return;
+      }
       try {
-        sealed = initiator.finish(pakeB, code, args.pairingPayload);
+        sealed = initiator.finish(pakeB, code, payload);
       } catch (err) {
         if (errorText(err).startsWith("invalid-code")) {
           show({ kind: "ready", error: LINK_ENTER_SIX_DIGITS });

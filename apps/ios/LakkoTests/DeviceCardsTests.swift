@@ -262,6 +262,148 @@ final class DeviceCardsTests: XCTestCase {
         center.unbind()
     }
 
+    // MARK: - The place in the payload card (UX section 2.1, 2026-10-29)
+
+    /// A locate the test answers when it chooses, counting requests.
+    @MainActor
+    private final class GatedLocate {
+        var requests = 0
+        private var waiting: [CheckedContinuation<(city: String, country: String)?, Never>] = []
+        func ask() async -> (city: String, country: String)? {
+            requests += 1
+            return await withCheckedContinuation { waiting.append($0) }
+        }
+        var pending: Bool { !waiting.isEmpty }
+        func answer(_ value: (city: String, country: String)?) {
+            let all = waiting
+            waiting = []
+            for continuation in all { continuation.resume(returning: value) }
+        }
+    }
+
+    private func city(of envelope: Data?) throws -> String {
+        try decodeDeviceCardEnvelope(plaintext: try XCTUnwrap(envelope)).city
+    }
+
+    /// A device not signed in asks once when the screen opens; an answer
+    /// inside the bound is in the card, and is held for this pairing only.
+    func testAPlaceThatArrivesWithinTheBoundIsInTheCardOfADeviceNotSignedIn() async throws {
+        let (center, defaults, suite) = try freshCenter()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var requests = 0
+        center.locate = { @MainActor in requests += 1; return ("Almere", "NL") }
+        // The bound never passes in this test.
+        center.pairingSleep = { _ in try? await Task.sleep(nanoseconds: 60_000_000_000) }
+
+        let place = center.beginPairingPlace(nowMs: now)
+        let envelope = await center.pairingCardEnvelope(waitingFor: place, nowMs: { self.now })
+        XCTAssertEqual(try city(of: envelope), "Almere")
+        XCTAssertEqual(try decodeDeviceCardEnvelope(plaintext: try XCTUnwrap(envelope)).country, "NL")
+        XCTAssertEqual(requests, 1, "one request, and nothing else")
+        XCTAssertEqual(center.currentFields(nowMs: now).city, "", "held in memory for this pairing only")
+        XCTAssertEqual(try city(of: center.pairingCardEnvelope(nowMs: now)), "", "not without the pairing's place")
+    }
+
+    /// No answer by the bound: the QR's card has no place. The code route,
+    /// sealed later, takes the answer that has arrived by then.
+    func testNoPlaceAfterTheBoundAndTheCodeRouteTakesALaterAnswer() async throws {
+        let (center, defaults, suite) = try freshCenter()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let gate = GatedLocate()
+        center.locate = { @MainActor in await gate.ask() }
+        var slept: [Double] = []
+        center.pairingSleep = { @MainActor in slept.append($0) }   // the bound passes at once
+        center.monotonicNow = { 100 }
+
+        let place = center.beginPairingPlace(nowMs: now)
+        for _ in 0..<100 where !gate.pending { await Task.yield() }
+        let qr = await center.pairingCardEnvelope(waitingFor: place, nowMs: { self.now })
+        XCTAssertEqual(try city(of: qr), "", "no answer by the bound: no place")
+        XCTAssertEqual(slept, [DeviceCards.pairingPlaceWaitSeconds])
+
+        gate.answer(("Almere", "NL"))
+        for _ in 0..<100 where !place.settled { await Task.yield() }
+        let sealedLater = await center.pairingCardEnvelope(waitingFor: place, nowMs: { self.now })
+        XCTAssertEqual(try city(of: sealedLater), "Almere", "the code is typed after the answer arrived")
+        XCTAssertEqual(gate.requests, 1)
+        XCTAssertEqual(slept.count, 1, "no second wait")
+    }
+
+    /// The bound runs from the screen opening: a wait that starts after it
+    /// has passed does not wait at all.
+    func testTheBoundCountsFromTheScreenOpening() async throws {
+        let (center, defaults, suite) = try freshCenter()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let gate = GatedLocate()
+        center.locate = { @MainActor in await gate.ask() }
+        var clock: TimeInterval = 100
+        center.monotonicNow = { clock }
+        var slept = 0
+        center.pairingSleep = { @MainActor seconds in _ = seconds; slept += 1 }
+
+        let place = center.beginPairingPlace(nowMs: now)
+        clock += DeviceCards.pairingPlaceWaitSeconds
+        let placeEnvelope = await center.pairingCardEnvelope(waitingFor: place, nowMs: { self.now })
+        XCTAssertEqual(try city(of: placeEnvelope), "")
+        XCTAssertEqual(slept, 0)
+        for _ in 0..<100 where !gate.pending { await Task.yield() }
+        gate.answer(nil)
+    }
+
+    /// No request with the anti-censorship connection armed or the switch
+    /// off; the card then has no place.
+    func testNoPlaceIsAskedWithAntiCensorshipArmedOrTheSwitchOff() async throws {
+        let (center, defaults, suite) = try freshCenter()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var requests = 0
+        center.locate = { @MainActor in requests += 1; return ("Almere", "NL") }
+        center.pairingSleep = { _ in }
+
+        center.antiCensorshipArmed = { true }
+        let armed = center.beginPairingPlace(nowMs: now)
+        XCTAssertTrue(armed.settled)
+        let armedEnvelope = await center.pairingCardEnvelope(waitingFor: armed, nowMs: { self.now })
+        XCTAssertEqual(try city(of: armedEnvelope), "")
+        XCTAssertEqual(requests, 0, "nothing asked under anti-censorship")
+
+        center.antiCensorshipArmed = { false }
+        center.isForeground = { false }   // the switch sends no card here
+        center.bind(accountIdB64: "acct") { _ in }
+        center.setShowCity(false)
+        let hidden = center.beginPairingPlace(nowMs: now)
+        XCTAssertTrue(hidden.settled)
+        let hiddenEnvelope = await center.pairingCardEnvelope(waitingFor: hidden, nowMs: { self.now })
+        XCTAssertEqual(try city(of: hiddenEnvelope), "")
+        XCTAssertEqual(requests, 0, "nothing asked with the switch off")
+        center.unbind()
+    }
+
+    /// A signed-in device with a fresh cached city asks nothing; one without
+    /// asks once and keeps the answer as its city.
+    func testASignedInDeviceUsesAFreshCityOrKeepsTheAnswer() async throws {
+        let (center, defaults, suite) = try freshCenter()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var requests = 0
+        center.locate = { @MainActor in requests += 1; return ("Almere", "NL") }
+        center.isForeground = { false }
+        center.pairingSleep = { _ in try? await Task.sleep(nanoseconds: 60_000_000_000) }
+        center.bind(accountIdB64: "acct") { _ in }
+
+        let asked = center.beginPairingPlace(nowMs: now)
+        let askedEnvelope = await center.pairingCardEnvelope(waitingFor: asked, nowMs: { self.now })
+        XCTAssertEqual(try city(of: askedEnvelope), "Almere")
+        XCTAssertEqual(requests, 1)
+        XCTAssertNotNil(defaults.data(forKey: DeviceCards.cityKey(accountIdB64: "acct")), "kept as the account's city")
+        XCTAssertEqual(center.currentFields(nowMs: now).city, "Almere")
+
+        let cached = center.beginPairingPlace(nowMs: now + 60_000)
+        XCTAssertTrue(cached.settled)
+        let cachedEnvelope = await center.pairingCardEnvelope(waitingFor: cached, nowMs: { self.now })
+        XCTAssertEqual(try city(of: cachedEnvelope), "Almere")
+        XCTAssertEqual(requests, 1, "a fresh cached city: nothing asked")
+        center.unbind()
+    }
+
     func testTheConfirmStepNamesTheDeviceByItsCardAndOtherwiseKeepsTodaysTitle() {
         let named = { (name: String) in "Link \u{201C}\(name)\u{201D}?" }
         let web = card(city: "Almere", country: "NL", model: "Chrome on macOS", appVersion: "web", os: "macOS 26", platform: .web)

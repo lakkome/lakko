@@ -85,6 +85,12 @@ export default defineConfig({
           // plugin adds.
           server: { deps: { inline: [/solid-js/] } },
           testTimeout: 20000,
+          // A screen test imports its component in `beforeAll`, after the wasm
+          // core, and that import transforms most of the app: measured
+          // 2026-10-29 at 9.6-12 s for `ChatList` alone plus about 3 s for the
+          // wasm, over the 10 s default, so `ChatList.test.tsx` failed in its
+          // hook even when run by itself.
+          hookTimeout: 30000,
         },
       },
     ],

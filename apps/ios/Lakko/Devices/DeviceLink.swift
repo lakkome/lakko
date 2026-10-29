@@ -331,17 +331,27 @@ public final class DeviceLinkJoin: ObservableObject {
 
     private let ports: Ports
     private let handle: Data
-    /// The pairing payload the QR would carry (`buildPairingQr`).
-    private let pairingPayload: Data
+    /// The pairing payload the QR would carry (`buildPairingQr`), asked for
+    /// when the code is typed: the payload is sealed then, so a card built
+    /// at that moment carries a city that has arrived since the screen
+    /// opened (UX section 2.1).
+    private let pairingPayload: () async -> Data
     private var requestIdB64: String?
     private var initiator: DeviceLinkInitiatorProtocol?
     private var pakeB: Data?
     private var startedAt: Date?
+    /// Continue was pressed and the payload is being built: a second press
+    /// does nothing.
+    private var sealing = false
 
-    public init(ports: Ports, handle: Data, pairingPayload: Data) {
+    public convenience init(ports: Ports, handle: Data, pairingPayload: Data) {
+        self.init(ports: ports, handle: handle, pairingPayloadAtSeal: { pairingPayload })
+    }
+
+    public init(ports: Ports, handle: Data, pairingPayloadAtSeal: @escaping () async -> Data) {
         self.ports = ports
         self.handle = handle
-        self.pairingPayload = pairingPayload
+        self.pairingPayload = pairingPayloadAtSeal
     }
 
     /// Post a request and wait for the other device's answer.
@@ -385,7 +395,12 @@ public final class DeviceLinkJoin: ObservableObject {
     /// the one condition under which the caller may trust the Welcome.
     @discardableResult
     public func submit(code typed: String) async -> Bool {
-        guard phase == .enterCode, let initiator, let pakeB, let requestIdB64 else { return false }
+        guard phase == .enterCode, !sealing, let initiator, let pakeB, let requestIdB64 else { return false }
+        sealing = true
+        let pairingPayload = await pairingPayload()
+        sealing = false
+        // A decline or the expiry may have landed while the payload was built.
+        guard phase == .enterCode else { return false }
         let sealed: DeviceLinkSealed
         do {
             sealed = try initiator.finish(pakeB: pakeB, typedCode: typed, pairingPayload: pairingPayload)

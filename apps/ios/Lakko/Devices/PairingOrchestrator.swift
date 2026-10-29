@@ -137,6 +137,10 @@ public enum PairingOrchestrator {
 
         fileprivate let identity: Identity
         fileprivate let target: JoinTarget
+        /// What `qrPayload` was built from, kept so the code route can build
+        /// the same payload with a later card (UX section 2.1).
+        fileprivate let loginHandle: Data
+        fileprivate let keyPackage: Data
         /// ADR-0056 — the device-identity seed of a join by name, held in
         /// memory until the redeem names the account it is persisted under.
         /// Empty for ``JoinTarget/account(accountIdBytes:accountIdB64:)``,
@@ -149,6 +153,8 @@ public enum PairingOrchestrator {
             rendezvous: Data,
             identity: Identity,
             target: JoinTarget,
+            loginHandle: Data,
+            keyPackage: Data,
             pendingDeviceSeed: Data,
             redeem: @escaping (String) async throws -> DeviceAuthorizeRedeemResult
         ) {
@@ -156,12 +162,33 @@ public enum PairingOrchestrator {
             self.rendezvous = rendezvous
             self.identity = identity
             self.target = target
+            self.loginHandle = loginHandle
+            self.keyPackage = keyPackage
             self.pendingDeviceSeed = pendingDeviceSeed
             self.redeem = redeem
         }
 
         deinit {
             pendingDeviceSeed.resetBytes(in: 0..<pendingDeviceSeed.count)
+        }
+
+        /// UX section 2.1 — the same payload as `qrPayload` (handle,
+        /// KeyPackage, rendezvous) with `deviceCardEnvelope` as its card.
+        /// The code route seals this when the code is typed, so a city that
+        /// arrived after the screen opened is in it. Falls back to
+        /// `qrPayload` when it cannot be built.
+        public func payload(deviceCardEnvelope: Data?) -> Data {
+            do {
+                return try PairingCodec.buildPairingQrPayload(
+                    loginHandle: loginHandle,
+                    keyPackage: keyPackage,
+                    rendezvousPseudonym: rendezvous,
+                    deviceCardEnvelope: deviceCardEnvelope
+                )
+            } catch {
+                NSLog("[pairing] WARN payload not rebuilt with the card: \(error)")
+                return qrPayload
+            }
         }
 
         /// Long-poll the rendezvous mailbox.
@@ -637,6 +664,8 @@ public enum PairingOrchestrator {
             rendezvous: rendezvous,
             identity: identity,
             target: .account(accountIdBytes: accountIdBytes, accountIdB64: accountIdB64),
+            loginHandle: loginHandle,
+            keyPackage: keyPackage,
             pendingDeviceSeed: Data(),
             redeem: redeem
         )
@@ -676,6 +705,8 @@ public enum PairingOrchestrator {
             rendezvous: rendezvous,
             identity: identity,
             target: .byName,
+            loginHandle: loginHandle,
+            keyPackage: keyPackage,
             pendingDeviceSeed: seed,
             redeem: redeem
         )

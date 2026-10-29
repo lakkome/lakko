@@ -63,6 +63,17 @@ it and the warning stays.
   card from the payload at once, until the device's own card arrives over
   the DeviceGroup and replaces it.
 
+**The place in the payload card (decided 2026-10-29).** The new device asks
+for its city when the screen that will show a code (or take a code) opens,
+signed in or not, and waits at most 1.5 s for the answer before it shows the
+code; with no answer by then the card has no place and the code is not
+replaced later. On the code route the payload is sealed after the code is
+typed, so the answer is there in practice. No city is asked with the
+anti-censorship connection armed or with "Show my city to my other devices"
+off (a device not signed in uses the default, on). The request names no
+account and the server keeps nothing; it sees the address the device's next
+request shows anyway.
+
 A place in the card that is not where the person is (another city, another
 country) is the one thing on this screen that can tell them the code is not
 theirs; the warning line stays because the card may also lie.

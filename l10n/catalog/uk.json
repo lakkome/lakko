@@ -4170,6 +4170,10 @@
       "text": "Пристрій додано.",
       "status": "machine"
     },
+    "device_link.request.added_named": {
+      "text": "«{name}» додано.",
+      "status": "machine"
+    },
     "device_link.request.adding": {
       "text": "Додаємо пристрій...",
       "status": "machine"
@@ -4536,6 +4540,10 @@
     },
     "devices.scan.confirm.title": {
       "text": "Прив’язати цей пристрій?",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title_named": {
+      "text": "Під’єднати «{name}»?",
       "status": "machine"
     },
     "devices.scan.error.camera_denied": {
@@ -7544,6 +7552,10 @@
     },
     "settings.devices.scan.done": {
       "text": "Пристрій додано. Він з’явиться у списку, коли завершить підключення.",
+      "status": "machine"
+    },
+    "settings.devices.scan.done_named": {
+      "text": "«{name}» додано. Пристрій з’явиться у списку, коли завершить під’єднання.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {

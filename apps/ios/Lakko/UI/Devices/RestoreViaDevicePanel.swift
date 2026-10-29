@@ -50,6 +50,9 @@ public struct RestoreViaDevicePanel: View {
     @State private var link: DeviceLinkJoin?
     @State private var typedCode = ""
     @State private var linkTask: Task<Void, Never>?
+    /// UX section 2.1 — the city asked for when this panel opened, for this
+    /// pairing only; shared by the code route and the QR.
+    @State private var place: PairingPlace?
 
     private enum Mode {
         case code
@@ -80,7 +83,16 @@ public struct RestoreViaDevicePanel: View {
             case .qr: qrBody
             }
         }
+        .onAppear { _ = pairingPlace() }
         .onDisappear { cancel() }
+    }
+
+    /// The panel's one city request, started the first time it is needed.
+    private func pairingPlace() -> PairingPlace {
+        if let place { return place }
+        let started = DeviceCardCenter.shared.beginPairingPlace()
+        place = started
+        return started
     }
 
     // MARK: - Confirm on another device (code)
@@ -138,13 +150,21 @@ public struct RestoreViaDevicePanel: View {
         cancel()
         typedCode = ""
         ui = .preparing
+        let place = pairingPlace()
         do {
-            let s = try prepareSession()
+            let s = try prepareSession(
+                deviceCardEnvelope: DeviceCardCenter.shared.pairingCardEnvelope(place: place))
             session = s
+            // UX section 2.1 — the payload is sealed when the code is typed,
+            // with the city if it has arrived by then (no wait past the bound
+            // from the panel opening).
             let flow = DeviceLinkJoin(
                 ports: .init(relay: DeviceLinkClient()),
                 handle: loginHandle,
-                pairingPayload: s.qrPayload)
+                pairingPayloadAtSeal: { @MainActor in
+                    s.payload(deviceCardEnvelope:
+                        await DeviceCardCenter.shared.pairingCardEnvelope(waitingFor: place))
+                })
             link = flow
             ui = .idle
             linkTask = Task { @MainActor in await flow.start() }
@@ -220,7 +240,7 @@ public struct RestoreViaDevicePanel: View {
         }
     }
 
-    private func prepareSession() throws -> PairingOrchestrator.JoinSession {
+    private func prepareSession(deviceCardEnvelope: Data?) throws -> PairingOrchestrator.JoinSession {
         switch target {
         case .account(let accountIdBytes, let accountIdB64, let loginHandle):
             return try PairingOrchestrator.prepareJoinFlow(
@@ -228,12 +248,12 @@ public struct RestoreViaDevicePanel: View {
                 accountIdBytes: accountIdBytes,
                 accountIdB64: accountIdB64,
                 // UX section 2.1 — the other device names this one by it.
-                deviceCardEnvelope: DeviceCardCenter.shared.pairingCardEnvelope()
+                deviceCardEnvelope: deviceCardEnvelope
             )
         case .byName(let loginHandle):
             return try PairingOrchestrator.prepareRestoreByNameFlow(
                 loginHandle: loginHandle,
-                deviceCardEnvelope: DeviceCardCenter.shared.pairingCardEnvelope())
+                deviceCardEnvelope: deviceCardEnvelope)
         }
     }
 
@@ -271,8 +291,20 @@ public struct RestoreViaDevicePanel: View {
 
     private func start() {
         ui = .preparing
+        let place = pairingPlace()
+        pollTask?.cancel()
+        pollTask = Task { @MainActor in
+            // UX section 2.1 — wait for the city at most the bound from the
+            // panel opening; a QR once shown is never rebuilt.
+            let card = await DeviceCardCenter.shared.pairingCardEnvelope(waitingFor: place)
+            guard !Task.isCancelled, ui == .preparing else { return }
+            showQr(deviceCardEnvelope: card)
+        }
+    }
+
+    private func showQr(deviceCardEnvelope: Data?) {
         do {
-            let s = try prepareSession()
+            let s = try prepareSession(deviceCardEnvelope: deviceCardEnvelope)
             session = s
             ui = .waiting(qrPayload: s.qrPayload)
             pollTask = Task { @MainActor in

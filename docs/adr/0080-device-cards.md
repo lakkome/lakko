@@ -237,8 +237,12 @@ iPhone after 22 s. UX `docs/ux/second-device.md` section 2.1.
   `lakko-mls` bounds the length and does not decode it; both FFI surfaces
   decode it for display (`DecodedPairingQr.deviceCard`, an undecodable card
   is absent, never an error). Built on web, iOS and Android; host-tested only.
-  A device not yet signed in puts no place in it (it asks no server before a
-  session); Android puts none in either case.
+  The new device asks for its city when the code screen opens, signed in or
+  not, and waits at most 1.5 s before showing the code (maintainer,
+  2026-10-29; the ADR-0056 rule that preparing a payload makes no request is
+  narrowed by this one anonymous `GET /discovery/locate`, which names no
+  account and reaches a server that already sees the device's address at its
+  next request). No city with anti-censorship armed or the city switch off.
 - **This device's own row** is built from the device's own current fields,
   never from the received cards (where its own card never is). All three
   clients looked it up there and read "Device".

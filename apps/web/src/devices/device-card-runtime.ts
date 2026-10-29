@@ -52,9 +52,15 @@ export const CITY_REFRESH_MS = 6 * 60 * 60 * 1000;
 /** What the web client puts in `app_version`: the row reads "Lakko web". */
 export const WEB_APP_VERSION = "web";
 
-/** How long building a pairing payload, or the first card after a join,
- *  waits for the city before going without it (chosen, not measured). */
-export const PAIRING_CITY_WAIT_MS = 2_000;
+/** docs/ux/second-device.md section 2.1 (2026-10-29): how long a pairing
+ *  payload waits for the device's city, counted from the moment the screen
+ *  that shows or takes a code opened, before it goes without one (chosen,
+ *  not measured). */
+export const PAIRING_CITY_WAIT_MS = 1_500;
+
+/** How long the first card after a join waits for the city before going
+ *  without it (chosen, not measured). */
+export const JOIN_CARD_CITY_WAIT_MS = 2_000;
 
 
 interface PersistedCards {
@@ -230,28 +236,47 @@ export function currentOwnFields(): DeviceCardFields {
   };
 }
 
+/** A place as the card carries it. */
+export interface Place {
+  readonly city: string;
+  readonly country: string;
+}
+
+/** One `GET /discovery/locate`: no session, no token, no account (ADR-0080
+ *  section 4). `null` on any failure. */
+async function fetchLocate(): Promise<Place | null> {
+  try {
+    const res = await fetch(`${DEFAULT_BASE_URL}/discovery/locate`, {
+      method: "GET",
+      credentials: "omit",
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { city?: unknown; country?: unknown };
+    return {
+      city: typeof body.city === "string" ? body.city : "",
+      country: typeof body.country === "string" ? body.country : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function cityIsFresh(nowMs: number): boolean {
+  return city !== null && nowMs - city.fetchedAtMs >= 0 && nowMs - city.fetchedAtMs < CITY_REFRESH_MS;
+}
+
 async function refreshCity(bound: string, nowMs: number): Promise<void> {
   if (!showCity()) return;
-  if (city !== null && nowMs - city.fetchedAtMs >= 0 && nowMs - city.fetchedAtMs < CITY_REFRESH_MS) return;
+  if (cityIsFresh(nowMs)) return;
   if (locating !== null) return locating;
   locating = (async () => {
     try {
-      const res = await fetch(`${DEFAULT_BASE_URL}/discovery/locate`, {
-        method: "GET",
-        credentials: "omit",
-        cache: "no-store",
-      });
-      if (!res.ok) return;
-      const body = (await res.json()) as { city?: unknown; country?: unknown };
-      if (account !== bound) return;
-      city = {
-        city: typeof body.city === "string" ? body.city : "",
-        country: typeof body.country === "string" ? body.country : "",
-        fetchedAtMs: nowMs,
-      };
-      writeJson(cityStorageKey(bound), city);
-    } catch {
+      const answer = await fetchLocate();
       // No city this time; the card goes out without one.
+      if (answer === null || account !== bound) return;
+      city = { ...answer, fetchedAtMs: nowMs };
+      writeJson(cityStorageKey(bound), city);
     } finally {
       locating = null;
     }
@@ -368,35 +393,114 @@ async function within<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
 }
 
 /**
- * docs/ux/second-device.md section 2.1: the fields of the card this device
- * puts in its pairing payload, the same fields it puts in its own card. A
- * device bound to its account asks for its city as its card does (the city
- * switch holds), waiting at most `waitMs`, past which the card goes without
- * one. A device that is not signed in yet (the restore routes) asks for
- * nothing: no request leaves a fresh device before its session (ADR-0056),
- * so its payload card carries no place.
+ * docs/ux/second-device.md section 2.1, "The place in the payload card"
+ * (2026-10-29): the city of one pairing. Started when the screen that shows a
+ * pairing code or takes the six-digit code opens (`startPairingLocate`).
  */
-export async function pairingCardFields(
-  waitMs: number = PAIRING_CITY_WAIT_MS,
-  nowMs: number = Date.now(),
-): Promise<DeviceCardFields> {
+export interface PairingPlace {
+  /** The place the card carries if built now: the answer when it has
+   *  arrived, else none. */
+  current(): Place | null;
+  /** Resolves once the answer arrived or the wait bound, counted from the
+   *  screen opening, passed, whichever comes first. Never rejects. */
+  settled(): Promise<void>;
+}
+
+const NO_PLACE: PairingPlace = {
+  current: () => null,
+  settled: () => Promise.resolve(),
+};
+
+/** `p` settles or `ms` passes; the timer is cleared either way. */
+function settleWithin(p: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, Math.max(0, ms));
+    void p.then(
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+    );
+  });
+}
+
+/**
+ * Start the one locate request of a pairing (docs/ux/second-device.md
+ * section 2.1). A device bound to its account follows its card's rules: the
+ * city switch holds, a fresh cached city is used with no request, and an
+ * answer is stored with the usual city cache; while a stale cached city is
+ * being asked again, the card carries the cached one (what the device's own
+ * card states), so "no answer by the bound: no place" applies only when no
+ * city is cached. A device not signed in has no
+ * per-account switch and uses the default (on); the answer is held in this
+ * object only, for this pairing, and nothing else is requested. The web has
+ * no anti-censorship connection (ADR-0026 is native only).
+ */
+export function startPairingLocate(
+  opts: { readonly waitMs?: number; readonly nowMs?: number } = {},
+): PairingPlace {
+  const waitMs = opts.waitMs ?? PAIRING_CITY_WAIT_MS;
+  const nowMs = opts.nowMs ?? Date.now();
   const bound = account;
-  if (bound !== null) await within(refreshCity(bound, nowMs), waitMs);
-  return currentOwnFields();
+  if (bound !== null) {
+    if (!showCity()) return NO_PLACE;
+    const settled = cityIsFresh(nowMs) ? Promise.resolve() : settleWithin(refreshCity(bound, nowMs), waitMs);
+    return {
+      current: () =>
+        account === bound && showCity() && city !== null ? { city: city.city, country: city.country } : null,
+      settled: () => settled,
+    };
+  }
+  let answer: Place | null = null;
+  const request = fetchLocate().then((a) => {
+    answer = a;
+  });
+  const settled = settleWithin(request, waitMs);
+  return {
+    current: () => answer,
+    settled: () => settled,
+  };
+}
+
+function pairingFields(place: PairingPlace): DeviceCardFields {
+  const at = place.current();
+  return { ...currentOwnFields(), city: at?.city ?? "", country: at?.country ?? "" };
 }
 
 /**
  * The device-card envelope for this device's pairing payload, or `null` when
  * it cannot be composed: a payload without a card is a pairing like any
- * other, so this never throws.
+ * other, so this never throws. Waits for `place` to settle (at most the
+ * bound from the screen opening); with no answer by then the card carries no
+ * place. Without a `place`, one is started here.
  */
 export async function composePairingCardEnvelope(
-  waitMs: number = PAIRING_CITY_WAIT_MS,
+  place: PairingPlace = startPairingLocate(),
+  nowMs?: number,
+): Promise<Uint8Array | null> {
+  try {
+    await place.settled();
+    return await pairingCardEnvelopeNow(place, nowMs);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The same envelope as it stands now, with no wait: the code route seals the
+ * payload after the code is typed and takes the answer if it has arrived by
+ * then (docs/ux/second-device.md section 2.1). Never throws.
+ */
+export async function pairingCardEnvelopeNow(
+  place: PairingPlace,
   nowMs: number = Date.now(),
 ): Promise<Uint8Array | null> {
   try {
-    const fields = await pairingCardFields(waitMs, nowMs);
-    return await composeCardEnvelope({ ...fields, updatedAtMs: nowMs, lastActiveMs: nowMs });
+    return await composeCardEnvelope({ ...pairingFields(place), updatedAtMs: nowMs, lastActiveMs: nowMs });
   } catch {
     return null;
   }
@@ -418,7 +522,7 @@ export function adoptPairedDeviceCard(keyHex: string, card: StoredDeviceCard): b
 
 /** A fresh own card, sent now (the city wait is bounded). */
 async function sendOwnCardNow(bound: string, nowMs: number): Promise<void> {
-  await within(refreshCity(bound, nowMs), PAIRING_CITY_WAIT_MS);
+  await within(refreshCity(bound, nowMs), JOIN_CARD_CITY_WAIT_MS);
   if (account !== bound) return;
   const last = ownCard();
   // Strictly newer than any card this device sent before, whatever the clock.

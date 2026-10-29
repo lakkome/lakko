@@ -83,6 +83,7 @@ import me.lakko.app.devices.removalGate
 import me.lakko.app.devices.removalGateLine
 import me.lakko.app.devices.removalSheetOutcome
 import me.lakko.app.auth.UniffiLoginHandleSource
+import me.lakko.app.devices.DeviceCardCenter
 import me.lakko.app.devices.PAIRING_FAILED_COPY
 import me.lakko.app.devices.PAIRING_NO_USERNAME_COPY
 import me.lakko.app.devices.PairingCodec
@@ -385,9 +386,13 @@ private fun PairSection(
     var state: PairUi by remember { mutableStateOf(PairUi.Idle) }
     var session: PairingOrchestrator.JoinSession? by remember { mutableStateOf(null) }
     var pollJob: Job? by remember { mutableStateOf(null) }
+    // UX second-device.md section 2.1 - the city for this code, asked when
+    // the panel opens.
+    val place = remember { DeviceCardCenter.startPairingPlace() }
 
     DisposableEffect(Unit) {
         onDispose {
+            place.cancel()
             pollJob?.cancel()
             pollJob = null
             session?.dispose()
@@ -409,51 +414,58 @@ private fun PairSection(
             PairUi.Idle -> Button(
                 onClick = {
                     state = PairUi.Preparing
-                    try {
-                        val js = PairingOrchestrator.prepareJoinFlow(
-                            context = context,
-                            loginHandle = loginHandle,
-                            known = known,
-                        )
-                        session = js
-                        state = PairUi.Waiting(js.qrPayload)
-                        pollJob = scope.launch {
-                            try {
-                                when (val outcome = js.awaitWelcome()) {
-                                    is WelcomeCourier.WelcomeOutcome.Received -> {
-                                        state = PairUi.Joining
-                                        try {
-                                            // Phase 2a3d8-ui — pass the
-                                            // Welcome cursor so `accept`
-                                            // polls past it for the
-                                            // scanner-side history bundle.
-                                            js.accept(
-                                                welcomeBytes = outcome.welcomeBytes,
-                                                welcomeCursor = outcome.welcomeCursor,
-                                            )
-                                            state = PairUi.Done
-                                        } catch (cause: Throwable) {
-                                            me.lakko.app.rethrowIfCancelled(cause)
-                                            Log.w(TAG, "WARN accept failed: ${cause.javaClass.simpleName}")
-                                            state = PairUi.Error(LINK_FAILED)
+                    scope.launch {
+                        // UX second-device.md section 2.1 - the card takes the place that
+                        // has arrived within the bound; the code is never rebuilt for it.
+                        val envelope = DeviceCardCenter.pairingCardEnvelope(place.settled())
+                        try {
+                            val js = PairingOrchestrator.prepareJoinFlow(
+                                context = context,
+                                loginHandle = loginHandle,
+                                known = known,
+                                deviceCardEnvelope = envelope,
+                            )
+                            session = js
+                            state = PairUi.Waiting(js.qrPayload)
+                            pollJob = scope.launch {
+                                try {
+                                    when (val outcome = js.awaitWelcome()) {
+                                        is WelcomeCourier.WelcomeOutcome.Received -> {
+                                            state = PairUi.Joining
+                                            try {
+                                                // Phase 2a3d8-ui — pass the
+                                                // Welcome cursor so `accept`
+                                                // polls past it for the
+                                                // scanner-side history bundle.
+                                                js.accept(
+                                                    welcomeBytes = outcome.welcomeBytes,
+                                                    welcomeCursor = outcome.welcomeCursor,
+                                                )
+                                                state = PairUi.Done
+                                            } catch (cause: Throwable) {
+                                                me.lakko.app.rethrowIfCancelled(cause)
+                                                Log.w(TAG, "WARN accept failed: ${cause.javaClass.simpleName}")
+                                                state = PairUi.Error(LINK_FAILED)
+                                            }
+                                        }
+                                        WelcomeCourier.WelcomeOutcome.Timeout -> {
+                                            state = PairUi.Error(UiText("settings.devices.show.error.timeout"))
+                                        }
+                                        WelcomeCourier.WelcomeOutcome.Cancelled -> {
+                                            state = PairUi.Idle
                                         }
                                     }
-                                    WelcomeCourier.WelcomeOutcome.Timeout -> {
-                                        state = PairUi.Error(UiText("settings.devices.show.error.timeout"))
-                                    }
-                                    WelcomeCourier.WelcomeOutcome.Cancelled -> {
-                                        state = PairUi.Idle
-                                    }
+                                } catch (cause: Throwable) {
+                                    me.lakko.app.rethrowIfCancelled(cause)
+                                    Log.w(TAG, "WARN pairing failed: ${cause.javaClass.simpleName}")
+                                    state = PairUi.Error(LINK_FAILED)
                                 }
-                            } catch (cause: Throwable) {
-                                me.lakko.app.rethrowIfCancelled(cause)
-                                Log.w(TAG, "WARN pairing failed: ${cause.javaClass.simpleName}")
-                                state = PairUi.Error(LINK_FAILED)
                             }
+                        } catch (cause: Throwable) {
+                            me.lakko.app.rethrowIfCancelled(cause)
+                            Log.w(TAG, "WARN prepare failed: ${cause.javaClass.simpleName}")
+                            state = PairUi.Error(LINK_FAILED)
                         }
-                    } catch (cause: Throwable) {
-                        Log.w(TAG, "WARN prepare failed: ${cause.javaClass.simpleName}")
-                        state = PairUi.Error(LINK_FAILED)
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),

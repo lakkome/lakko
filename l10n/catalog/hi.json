@@ -4170,6 +4170,10 @@
       "text": "डिवाइस जोड़ दिया गया।",
       "status": "machine"
     },
+    "device_link.request.added_named": {
+      "text": "“{name}” जोड़ा गया।",
+      "status": "machine"
+    },
     "device_link.request.adding": {
       "text": "डिवाइस जोड़ा जा रहा है...",
       "status": "machine"
@@ -4536,6 +4540,10 @@
     },
     "devices.scan.confirm.title": {
       "text": "इस डिवाइस को लिंक करें?",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title_named": {
+      "text": "“{name}” को लिंक करें?",
       "status": "machine"
     },
     "devices.scan.error.camera_denied": {
@@ -7544,6 +7552,10 @@
     },
     "settings.devices.scan.done": {
       "text": "डिवाइस जुड़ गया। शामिल होने की प्रक्रिया पूरी होते ही यह सूची में दिखेगा।",
+      "status": "machine"
+    },
+    "settings.devices.scan.done_named": {
+      "text": "“{name}” जोड़ा गया। जुड़ना पूरा होने पर यह सूची में दिखेगा।",
       "status": "machine"
     },
     "settings.devices.scan.opening": {

@@ -40,6 +40,10 @@ public enum DeviceCards {
     public static let growthMaxDelayMs: Int64 = 300
     /// The city is asked for again at most this often (chosen, not measured).
     public static let cityRefreshMs: Int64 = 6 * 60 * 60 * 1000
+    /// UX section 2.1 — the longest wait, from the moment the pairing screen
+    /// opens, for the city answer before the payload is built without a place
+    /// (chosen, not measured).
+    public static let pairingPlaceWaitSeconds: Double = 1.5
 
     /// Keep a received card, keyed by the sender's DeviceGroup leaf key (hex)
     /// resolved at receipt. `nil` when nothing changes: the sender is not in

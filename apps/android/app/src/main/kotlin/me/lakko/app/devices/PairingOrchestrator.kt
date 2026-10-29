@@ -128,6 +128,8 @@ public object PairingOrchestrator {
         /** Wire-format pairing QR bytes for the rendering
          *  layer. */
         public val qrPayload: ByteArray,
+        private val loginHandle: ByteArray,
+        private val keyPackage: ByteArray,
         /** 32-byte rendezvous pseudonym surfaced for debug. */
         public val rendezvous: ByteArray,
         private val identity: Identity,
@@ -142,6 +144,20 @@ public object PairingOrchestrator {
     ) {
         private var group: DeviceGroup? = null
         private var disposed = false
+
+        /**
+         * The same payload as [qrPayload] (same KeyPackage, same rendezvous
+         * slot) with [deviceCardEnvelope] as its card: the code route seals
+         * it after the code is typed, when the place has had time to arrive
+         * (UX second-device.md section 2.1).
+         */
+        public fun payloadWithCard(deviceCardEnvelope: ByteArray?): ByteArray =
+            PairingCodec.buildPairingQrPayload(
+                loginHandle = loginHandle,
+                keyPackage = keyPackage,
+                rendezvousPseudonym = rendezvous,
+                deviceCardEnvelope = deviceCardEnvelope,
+            )
 
         /** Long-poll the rendezvous mailbox. */
         public suspend fun awaitWelcome(
@@ -618,6 +634,7 @@ public object PairingOrchestrator {
         context: Context,
         loginHandle: ByteArray,
         known: KnownAccount?,
+        deviceCardEnvelope: ByteArray?,
     ): JoinSession {
         // The flow's key writes (the device seed by name, the restore that
         // follows) are measured from here.
@@ -644,15 +661,18 @@ public object PairingOrchestrator {
         val keyPackage = identity.createKeyPackage()
         val rendezvous = PairingCodec.generateRendezvousPseudonym()
         // UX second-device.md section 2.1 - this device's own card, so the
-        // signed-in device can name it; none when it cannot be composed.
+        // signed-in device can name it; none when it cannot be composed. The
+        // caller settles the place first ([DeviceCardCenter.PairingPlace]).
         val qrPayload = PairingCodec.buildPairingQrPayload(
             loginHandle = loginHandle,
             keyPackage = keyPackage,
             rendezvousPseudonym = rendezvous,
-            deviceCardEnvelope = DeviceCardCenter.pairingCardEnvelope(),
+            deviceCardEnvelope = deviceCardEnvelope,
         )
         return JoinSession(
             qrPayload = qrPayload,
+            loginHandle = loginHandle.copyOf(),
+            keyPackage = keyPackage,
             rendezvous = rendezvous,
             identity = identity,
             known = known,

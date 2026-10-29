@@ -4170,6 +4170,10 @@
       "text": "已添加设备。",
       "status": "machine"
     },
+    "device_link.request.added_named": {
+      "text": "已添加“{name}”。",
+      "status": "machine"
+    },
     "device_link.request.adding": {
       "text": "正在添加设备…",
       "status": "machine"
@@ -4536,6 +4540,10 @@
     },
     "devices.scan.confirm.title": {
       "text": "关联此设备？",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title_named": {
+      "text": "关联“{name}”？",
       "status": "machine"
     },
     "devices.scan.error.camera_denied": {
@@ -7544,6 +7552,10 @@
     },
     "settings.devices.scan.done": {
       "text": "设备已添加。完成加入后会出现在列表中。",
+      "status": "machine"
+    },
+    "settings.devices.scan.done_named": {
+      "text": "已添加“{name}”。完成加入后会出现在列表中。",
       "status": "machine"
     },
     "settings.devices.scan.opening": {

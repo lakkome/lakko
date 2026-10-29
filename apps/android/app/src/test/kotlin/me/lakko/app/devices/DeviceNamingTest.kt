@@ -79,15 +79,23 @@ class DeviceNamingTest {
         assertEquals("Almere", DeviceCardCenter.ownCard()?.city)
 
         composed.clear()
-        assertTrue(DeviceCardCenter.pairingCardEnvelope(now)?.contentEquals(byteArrayOf(7)) == true)
+        val place = "Almere" to "NL"
+        assertTrue(DeviceCardCenter.pairingCardEnvelope(place, now)?.contentEquals(byteArrayOf(7)) == true)
         assertEquals(DeviceCardCenter.currentFields(now), composed.single())
         assertEquals("Almere", composed.single().city)
         assertEquals("Pixel 7a", composed.single().model)
 
+        // A null place is no place: the bound account's cached-city
+        // fallback is decided by DeviceCardCenter.PairingPlace, not here.
+        composed.clear()
+        DeviceCardCenter.pairingCardEnvelope(null, now)
+        assertEquals("", composed.single().city)
+        assertEquals("", composed.single().country)
+
         // Armed anti-censorship: no place, as in the card itself.
         DeviceCardCenter.antiCensorshipArmed = { true }
         composed.clear()
-        DeviceCardCenter.pairingCardEnvelope(now)
+        DeviceCardCenter.pairingCardEnvelope(place, now)
         assertEquals("", composed.single().city)
         assertEquals("", composed.single().country)
         DeviceCardCenter.antiCensorshipArmed = { false }
@@ -96,23 +104,23 @@ class DeviceNamingTest {
         DeviceCardCenter.setShowCity(false)
         until { sent == 2 }
         composed.clear()
-        DeviceCardCenter.pairingCardEnvelope(now)
+        DeviceCardCenter.pairingCardEnvelope(place, now)
         assertEquals("", composed.single().city)
     }
 
     @Test
     fun a_card_that_cannot_be_composed_gives_no_card_never_a_failure() {
         DeviceCardCenter.composeEnvelope = { null }
-        assertNull(DeviceCardCenter.pairingCardEnvelope(now))
+        assertNull(DeviceCardCenter.pairingCardEnvelope("Almere" to "NL", now))
         DeviceCardCenter.composeEnvelope = { error("no native core") }
-        assertNull(DeviceCardCenter.pairingCardEnvelope(now))
+        assertNull(DeviceCardCenter.pairingCardEnvelope("Almere" to "NL", now))
         DeviceCardCenter.platformFacts = { error("no build facts") }
-        assertNull(DeviceCardCenter.pairingCardEnvelope(now))
+        assertNull(DeviceCardCenter.pairingCardEnvelope("Almere" to "NL", now))
     }
 
     @Test
-    fun an_unbound_joining_device_puts_no_place_in_its_payload_card() {
-        DeviceCardCenter.pairingCardEnvelope(now)
+    fun an_unbound_joining_device_puts_no_place_in_its_payload_card_without_an_answer() {
+        DeviceCardCenter.pairingCardEnvelope(null, now)
         assertEquals("", composed.single().city)
         assertEquals("Pixel 7a", composed.single().model)
     }

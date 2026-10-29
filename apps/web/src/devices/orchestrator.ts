@@ -85,9 +85,53 @@ import { loadMlsSnapshot } from "../chat/mls-store";
 import {
   adoptPairedDeviceCard,
   composePairingCardEnvelope,
+  pairingCardEnvelopeNow,
   sendOwnCardAfterJoin,
+  startPairingLocate,
+  type PairingPlace,
 } from "./device-card-runtime";
 import type { StoredDeviceCard } from "./device-cards";
+
+/**
+ * docs/ux/second-device.md section 2.1, "The place in the payload card": the
+ * QR payload waits for the city at most the bound from the screen opening
+ * and is never rebuilt once shown. The code route seals the payload after the
+ * code is typed, so `atSeal` rebuilds it with the same key package and
+ * rendezvous when the answer arrived after the QR payload was built, and
+ * otherwise returns the QR payload itself.
+ */
+async function buildPairingPayloads(
+  loginHandle: Uint8Array,
+  keyPackage: Uint8Array,
+  rendezvous: Uint8Array,
+  place: PairingPlace,
+): Promise<{ qrPayload: Uint8Array; atSeal: () => Promise<Uint8Array> }> {
+  // This device's own card rides the payload so the signed-in device can
+  // name it; none is no failure.
+  const qrPayload = await buildPairingQrPayload(
+    loginHandle,
+    keyPackage,
+    rendezvous,
+    await composePairingCardEnvelope(place),
+  );
+  const builtWithPlace = place.current() !== null;
+  return {
+    qrPayload,
+    atSeal: async () => {
+      if (builtWithPlace || place.current() === null) return qrPayload;
+      try {
+        return await buildPairingQrPayload(
+          loginHandle,
+          keyPackage,
+          rendezvous,
+          await pairingCardEnvelopeNow(place),
+        );
+      } catch {
+        return qrPayload;
+      }
+    },
+  };
+}
 
 // ---- Joining side ------------------------------------------------
 
@@ -148,6 +192,10 @@ export interface JoinSession {
   /** Wire-format pairing QR bytes ready to encode as a visual
    *  QR via the `qrcode` library. */
   readonly qrPayload: Uint8Array;
+  /** The payload the code route seals after the code is typed: the QR
+   *  payload, or the same payload carrying the city when its answer
+   *  arrived only after the QR payload was built. Never throws. */
+  pairingPayloadAtSeal(): Promise<Uint8Array>;
   /** 32-byte rendezvous pseudonym the scanner PUTs the
    *  Welcome to. Surface in the UI as a "rendezvous code" if
    *  the user wants to debug. */
@@ -207,6 +255,9 @@ export async function prepareJoinFlow(args: {
    *  applied. The session re-mints its conversation binding there
    *  (`AuthApi.rebindAfterStateBundle`). Must not throw. */
   readonly onOwnPredecessorsStored?: () => Promise<unknown>;
+  /** The city of this pairing, started when the screen opened
+   *  (`startPairingLocate`); one is started here when absent. */
+  readonly place?: PairingPlace;
 }): Promise<JoinSession> {
   const wasm = await loadWasm();
   const seed = await ensureDeviceIdentitySeed(args.accountIdB64, args.deviceKey);
@@ -216,19 +267,18 @@ export async function prepareJoinFlow(args: {
 
   const keyPackage = identity.createKeyPackage();
   const rendezvous = generateRendezvousPseudonym();
-  // docs/ux/second-device.md section 2.1: this device's own card rides the
-  // payload so the signed-in device can name it; none is no failure.
-  const qrPayload = await buildPairingQrPayload(
+  const { qrPayload, atSeal } = await buildPairingPayloads(
     args.loginHandle,
     keyPackage,
     rendezvous,
-    await composePairingCardEnvelope(),
+    args.place ?? startPairingLocate(),
   );
 
   let group: WasmDeviceGroup | null = null;
 
   return {
     qrPayload,
+    pairingPayloadAtSeal: atSeal,
     rendezvous,
     async awaitWelcome(signal): Promise<WelcomeOutcome> {
       // `exactOptionalPropertyTypes` rejects `signal:
@@ -542,6 +592,8 @@ export async function runJoinerRecovery(args: {
 export interface AnonymousJoinSession {
   /** Wire-format pairing QR bytes. */
   readonly qrPayload: Uint8Array;
+  /** See [`JoinSession.pairingPayloadAtSeal`]. */
+  pairingPayloadAtSeal(): Promise<Uint8Array>;
   /** 32-byte rendezvous pseudonym for this pairing session. */
   readonly rendezvous: Uint8Array;
   /** Long-poll the rendezvous mailbox for the Welcome bytes. */
@@ -597,6 +649,9 @@ export async function prepareAnonymousJoinFlow(args: {
   /** The account, when this device already knows it (a signed-in device
    *  parked without its identity). Absent on the no-password entry. */
   readonly known?: { readonly accountIdBytes: Uint8Array; readonly accountIdB64: string };
+  /** The city of this pairing, started when the screen opened
+   *  (`startPairingLocate`); one is started here when absent. */
+  readonly place?: PairingPlace;
 }): Promise<AnonymousJoinSession> {
   const wasm = await loadWasm();
   // Fresh random per-device seed, held in memory until `persistTo`.
@@ -609,13 +664,11 @@ export async function prepareAnonymousJoinFlow(args: {
 
   const keyPackage = identity.createKeyPackage();
   const rendezvous = generateRendezvousPseudonym();
-  // docs/ux/second-device.md section 2.1: this device's own card rides the
-  // payload so the signed-in device can name it; none is no failure.
-  const qrPayload = await buildPairingQrPayload(
+  const { qrPayload, atSeal } = await buildPairingPayloads(
     args.loginHandle,
     keyPackage,
     rendezvous,
-    await composePairingCardEnvelope(),
+    args.place ?? startPairingLocate(),
   );
 
   let group: WasmDeviceGroup | null = null;
@@ -631,6 +684,7 @@ export async function prepareAnonymousJoinFlow(args: {
 
   return {
     qrPayload,
+    pairingPayloadAtSeal: atSeal,
     rendezvous,
     async awaitWelcome(signal): Promise<WelcomeOutcome> {
       return pollForWelcome(

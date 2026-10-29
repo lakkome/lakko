@@ -72,7 +72,13 @@ import { ProofBlock } from "../auth/ProofBlock";
 import { addedNotice, noteDeviceLetIn } from "../devices/added-notice";
 import { DeviceAddedBanner } from "../devices/DeviceAddedNotice";
 import { bytesToHex } from "../chat/folders/folder-model";
-import { currentOwnFields, deviceCards, ownDeviceCard } from "../devices/device-card-runtime";
+import {
+  currentOwnFields,
+  deviceCards,
+  ownDeviceCard,
+  startPairingLocate,
+  type PairingPlace,
+} from "../devices/device-card-runtime";
 import {
   countryNameOf,
   deviceRowView,
@@ -1075,9 +1081,15 @@ function PairView(props: {
    *  session for the cleanup to abort; it checks this after each, so leaving
    *  the panel meanwhile creates no session and starts no long poll. */
   let disposed = false;
+  /** docs/ux/second-device.md section 2.1: the one locate request of this
+   *  screen, started when the code screen first opens and kept for every
+   *  attempt on it. */
+  let place: PairingPlace | null = null;
 
   async function start(): Promise<void> {
     setState({ kind: "preparing" });
+    place ??= startPairingLocate();
+    const pairingPlace = place;
     try {
       const deviceKey = await getDeviceKey(props.accountIdB64);
       if (disposed) return;
@@ -1093,6 +1105,7 @@ function PairView(props: {
         deviceKey,
         loginHandle,
         onOwnPredecessorsStored: () => auth.rebindAfterStateBundle(props.accountIdB64),
+        place: pairingPlace,
       });
       if (disposed) {
         sess.dispose();

@@ -6,6 +6,12 @@
  * device being added is named on the signed-in device.
  *
  *   - the new device's pairing payload carries the card it would send;
+ *   - its place (2026-10-29): one locate request when the code screen
+ *     opens, signed in or not; the payload waits for it at most
+ *     `PAIRING_CITY_WAIT_MS` and goes without a place after that; the code
+ *     route takes an answer that arrived by the time the code is typed; the
+ *     city switch holds for a signed-in device, and a fresh cached city is
+ *     used with no request;
  *   - the confirm title and the result lines name it, or keep the unnamed
  *     copy when the payload carried no card;
  *   - the signed-in device keeps the payload's card for the new leaf until
@@ -26,10 +32,13 @@ import {
 } from "../reach/service-envelope-outbox";
 import { MemoryStorage } from "../test/fake-storage";
 import {
+  PAIRING_CITY_WAIT_MS,
   adoptPairedDeviceCard,
   bindDeviceCards,
   composePairingCardEnvelope,
   currentOwnFields,
+  pairingCardEnvelopeNow,
+  startPairingLocate,
   deviceCards,
   ownDeviceCard,
   receiveOwnDeviceCard,
@@ -40,6 +49,7 @@ import {
 import {
   CARD_GROWTH_MAX_DELAY_MS,
   adoptPairingCard,
+  cityStorageKey,
   deviceRowView,
   pairingCardName,
   pairingCardView,
@@ -120,26 +130,12 @@ describe("the new device's pairing payload", () => {
   it("carries the card the device would send", async () => {
     bindDeviceCards(ACCOUNT);
     setShowCityToOwnDevices(false);
-    const envelope = await composePairingCardEnvelope(0, 5_000);
+    const envelope = await composePairingCardEnvelope(startPairingLocate(), 5_000);
     expect(envelope).not.toBeNull();
     const payload = buildPairingQrPayloadWith(wasm, HANDLE, keyPackage(), RENDEZVOUS, envelope);
     const decoded = parsePairingQrPayloadWith(wasm, payload, HANDLE);
     const fields = currentOwnFields();
     expect(decoded.deviceCard).toEqual({ ...fields, updatedAtMs: 5_000, lastActiveMs: 5_000 });
-  });
-
-  it("composes a card on a device not signed in yet, with no request and no place", async () => {
-    const fetchMock = vi.fn(async () => {
-      throw new Error("no request expected");
-    });
-    (globalThis as unknown as Record<string, unknown>)["fetch"] = fetchMock;
-    const envelope = await composePairingCardEnvelope();
-    expect(envelope).not.toBeNull();
-    const payload = buildPairingQrPayloadWith(wasm, HANDLE, keyPackage(), RENDEZVOUS, envelope);
-    const card = parsePairingQrPayloadWith(wasm, payload, HANDLE).deviceCard;
-    expect(card?.platform).toBe("web");
-    expect(card?.city).toBe("");
-    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("decodes with no card when the payload carried none", () => {
@@ -161,6 +157,128 @@ describe("the new device's pairing payload", () => {
     buildPairingQrPayloadWith(core, HANDLE, new Uint8Array(1), RENDEZVOUS);
     buildPairingQrPayloadWith(core, HANDLE, new Uint8Array(1), RENDEZVOUS, new Uint8Array([7]));
     expect(calls).toEqual([3, 4]);
+  });
+});
+
+
+/** A locate route that answers only when told to. */
+function delayedLocate(): {
+  readonly urls: string[];
+  answer(city: string, country: string): void;
+} {
+  const urls: string[] = [];
+  const waiting: Array<(r: Response) => void> = [];
+  (globalThis as unknown as Record<string, unknown>)["fetch"] = vi.fn(async (input: RequestInfo | URL) => {
+    urls.push(String(input));
+    return new Promise<Response>((resolve) => waiting.push(resolve));
+  });
+  return {
+    urls,
+    answer(city, country) {
+      for (const resolve of waiting.splice(0)) {
+        resolve(new Response(JSON.stringify({ city, country }), { status: 200 }));
+      }
+    },
+  };
+}
+
+function cardOf(envelope: Uint8Array | null): StoredDeviceCard | null {
+  const payload = buildPairingQrPayloadWith(wasm, HANDLE, keyPackage(), RENDEZVOUS, envelope);
+  return parsePairingQrPayloadWith(wasm, payload, HANDLE).deviceCard;
+}
+
+const LOCATE_URL = "/api/discovery/discovery/locate";
+
+describe("the place in the new device's payload card", () => {
+  it("waits at most 1.5 s", () => {
+    expect(PAIRING_CITY_WAIT_MS).toBe(1_500);
+  });
+
+  it("a device not signed in asks once and carries an answer that arrives within the bound", async () => {
+    const locate = delayedLocate();
+    const place = startPairingLocate({ waitMs: 60_000 });
+    const composed = composePairingCardEnvelope(place, 5_000);
+    locate.answer("Almere", "NL");
+    const card = cardOf(await composed);
+    expect(card?.city).toBe("Almere");
+    expect(card?.country).toBe("NL");
+    expect(locate.urls).toEqual([LOCATE_URL]);
+    // Held for this pairing only: nothing of it is stored.
+    expect((globalThis as unknown as { localStorage: MemoryStorage }).localStorage.length).toBe(0);
+  });
+
+  it("an answer after the bound leaves the payload card without a place; the code route takes it", async () => {
+    const locate = delayedLocate();
+    const place = startPairingLocate({ waitMs: 20 });
+    const card = cardOf(await composePairingCardEnvelope(place, 5_000));
+    expect(card?.city).toBe("");
+    expect(card?.country).toBe("");
+    locate.answer("Almere", "NL");
+    await vi.waitFor(() => expect(place.current()).not.toBeNull());
+    // The code is typed after this: the payload sealed then carries it.
+    const sealed = cardOf(await pairingCardEnvelopeNow(place, 6_000));
+    expect(sealed?.city).toBe("Almere");
+    expect(locate.urls).toEqual([LOCATE_URL]);
+  });
+
+  it("a failed request leaves the card without a place", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new Error("offline");
+    });
+    (globalThis as unknown as Record<string, unknown>)["fetch"] = fetchMock;
+    const card = cardOf(await composePairingCardEnvelope(startPairingLocate({ waitMs: 60_000 }), 5_000));
+    expect(card?.platform).toBe("web");
+    expect(card?.city).toBe("");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("the city switch off on a signed-in device: no request and no place", async () => {
+    bindDeviceCards(ACCOUNT);
+    setShowCityToOwnDevices(false);
+    const locate = delayedLocate();
+    const card = cardOf(await composePairingCardEnvelope(startPairingLocate({ waitMs: 60_000 }), 5_000));
+    expect(card?.city).toBe("");
+    expect(locate.urls).toEqual([]);
+  });
+
+  it("a signed-in device with a fresh cached city uses it and asks nothing", async () => {
+    localStorage.setItem(
+      cityStorageKey(ACCOUNT),
+      JSON.stringify({ city: "Utrecht", country: "NL", fetchedAtMs: Date.now() }),
+    );
+    bindDeviceCards(ACCOUNT);
+    const locate = delayedLocate();
+    const card = cardOf(await composePairingCardEnvelope(startPairingLocate({ waitMs: 60_000 }), 5_000));
+    expect(card?.city).toBe("Utrecht");
+    expect(locate.urls).toEqual([]);
+  });
+
+  it("a signed-in device whose cached city is stale and gets no answer in time carries the cached city", async () => {
+    localStorage.setItem(
+      cityStorageKey(ACCOUNT),
+      JSON.stringify({ city: "Utrecht", country: "NL", fetchedAtMs: Date.now() - 7 * 60 * 60 * 1000 }),
+    );
+    bindDeviceCards(ACCOUNT);
+    const locate = delayedLocate();
+    const card = cardOf(await composePairingCardEnvelope(startPairingLocate({ waitMs: 20 }), 5_000));
+    // What this device's own card already states, not no place.
+    expect(card?.city).toBe("Utrecht");
+    expect(card?.country).toBe("NL");
+    expect(locate.urls).toEqual([LOCATE_URL]);
+  });
+
+  it("a signed-in device with no fresh city asks once and keeps the answer in its city cache", async () => {
+    bindDeviceCards(ACCOUNT);
+    const locate = delayedLocate();
+    const place = startPairingLocate({ waitMs: 60_000 });
+    const composed = composePairingCardEnvelope(place, 5_000);
+    locate.answer("Almere", "NL");
+    expect(cardOf(await composed)?.city).toBe("Almere");
+    expect(locate.urls).toEqual([LOCATE_URL]);
+    const cached = JSON.parse(localStorage.getItem(cityStorageKey(ACCOUNT)) ?? "null") as {
+      city: string;
+    } | null;
+    expect(cached?.city).toBe("Almere");
   });
 });
 

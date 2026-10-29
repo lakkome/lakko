@@ -264,6 +264,8 @@ private struct PairView: View {
     @State private var state: PairState = .idle
     @State private var session: PairingOrchestrator.JoinSession?
     @State private var pollTask: Task<Void, Never>?
+    /// UX section 2.1 — the city asked for when this screen opened.
+    @State private var place: PairingPlace?
     @ObservedObject private var l10n = Localization.shared
 
     private enum PairState: Equatable {
@@ -321,18 +323,34 @@ private struct PairView: View {
                 }
             }
         }
+        .onAppear {
+            if place == nil { place = DeviceCardCenter.shared.beginPairingPlace() }
+        }
         .onDisappear { cancel() }
     }
 
     private func start() {
         state = .preparing
+        let place = self.place ?? DeviceCardCenter.shared.beginPairingPlace()
+        self.place = place
+        pollTask?.cancel()
+        pollTask = Task { @MainActor in
+            // UX section 2.1 — the other device names this one by its card;
+            // the city is waited for at most the bound from the opening, and
+            // a QR once shown is never rebuilt.
+            let card = await DeviceCardCenter.shared.pairingCardEnvelope(waitingFor: place)
+            guard !Task.isCancelled, state == .preparing else { return }
+            show(deviceCardEnvelope: card)
+        }
+    }
+
+    private func show(deviceCardEnvelope: Data?) {
         do {
             let s = try PairingOrchestrator.prepareJoinFlow(
                 loginHandle: loginHandle,
                 accountIdBytes: accountIdBytes,
                 accountIdB64: accountIdB64,
-                // UX section 2.1 — the other device names this one by it.
-                deviceCardEnvelope: DeviceCardCenter.shared.pairingCardEnvelope()
+                deviceCardEnvelope: deviceCardEnvelope
             )
             session = s
             state = .waiting(qrPayload: s.qrPayload)
@@ -376,8 +394,9 @@ private struct PairView: View {
         pollTask?.cancel()
         pollTask = nil
         session = nil
-        if case .waiting = state {
-            state = .idle
+        switch state {
+        case .waiting, .preparing: state = .idle
+        default: break
         }
     }
 }

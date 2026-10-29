@@ -64,6 +64,15 @@ final class DeviceCardCenter: ObservableObject {
     var antiCensorshipArmed: () -> Bool = { AntiCensorshipConfig.current.armed }
     /// The locate route; replaceable in a test.
     var locate: () async -> (city: String, country: String)? = { await DeviceCardCenter.fetchLocation() }
+    /// The clock and the sleep a pairing screen's bounded wait for the city
+    /// runs on (UX section 2.1); replaceable in a test.
+    var monotonicNow: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    var pairingSleep: (Double) async -> Void = { seconds in
+        try? await Task.sleep(nanoseconds: UInt64(max(seconds, 0) * 1_000_000_000))
+    }
+    /// The one locate request in flight, shared by the own card and a
+    /// pairing screen, so opening the screen with a tap never asks twice.
+    private var locateInFlight: Task<(city: String, country: String)?, Never>?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -161,6 +170,24 @@ final class DeviceCardCenter: ObservableObject {
         return age < 0 || age >= DeviceCards.cityRefreshMs
     }
 
+    /// One locate request at a time; a second asker awaits the same answer.
+    private func sharedLocate() async -> (city: String, country: String)? {
+        if let inFlight = locateInFlight { return await inFlight.value }
+        let task = Task { @MainActor [locate] in await locate() }
+        locateInFlight = task
+        let answer = await task.value
+        if locateInFlight == task { locateInFlight = nil }
+        return answer
+    }
+
+    /// Keep a city answer as the bound account's cached city.
+    private func storeCity(_ answer: (city: String, country: String), account: String, nowMs: Int64) {
+        city = CityAnswer(city: answer.city, country: answer.country, fetchedAtMs: nowMs)
+        if let data = try? JSONEncoder().encode(city) {
+            defaults.set(data, forKey: DeviceCards.cityKey(accountIdB64: account))
+        }
+    }
+
     /// The person did something on this device. Sends a fresh own card when
     /// the rules say so; never on a timer, never in the background.
     func noteAction(nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) {
@@ -171,11 +198,8 @@ final class DeviceCardCenter: ObservableObject {
         deciding = true
         Task { @MainActor in
             defer { deciding = false }
-            if due, let answer = await locate(), accountIdB64 == bound {
-                city = CityAnswer(city: answer.city, country: answer.country, fetchedAtMs: nowMs)
-                if let data = try? JSONEncoder().encode(city) {
-                    defaults.set(data, forKey: DeviceCards.cityKey(accountIdB64: bound))
-                }
+            if due, let answer = await sharedLocate(), accountIdB64 == bound {
+                storeCity(answer, account: bound, nowMs: nowMs)
             }
             guard accountIdB64 == bound else { return }
             let fields = currentFields(nowMs: nowMs)
@@ -195,14 +219,70 @@ final class DeviceCardCenter: ObservableObject {
         noteAction()
     }
 
+    /// UX section 2.1 — the screen that shows a pairing code or takes the
+    /// six-digit code opened: start the one city request this pairing makes,
+    /// signed in or not. Nothing is asked with the anti-censorship
+    /// connection armed or the city switch off (a device not signed in has
+    /// no switch of its own: the default, on). A signed-in device with a
+    /// fresh cached city uses it and asks nothing. The answer is kept as the
+    /// bound account's city; with no account bound it lives only in the
+    /// returned ``PairingPlace``.
+    func beginPairingPlace(nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> PairingPlace {
+        let place = PairingPlace(
+            deadline: monotonicNow() + DeviceCards.pairingPlaceWaitSeconds,
+            now: monotonicNow, sleep: pairingSleep)
+        guard showCity, !antiCensorshipArmed() else {
+            place.resolve(nil)
+            return place
+        }
+        let bound = accountIdB64
+        if bound != nil, !cityDue(nowMs: nowMs), let city {
+            place.resolve(PairingPlace.Answer(city: city.city, country: city.country))
+            return place
+        }
+        NSLog("device card: asking the city for the pairing payload")
+        Task { @MainActor [weak self] in
+            guard let self else {
+                place.resolve(nil)
+                return
+            }
+            let answer = await self.sharedLocate()
+            if let answer, let bound, self.accountIdB64 == bound {
+                self.storeCity(answer, account: bound, nowMs: nowMs)
+            }
+            place.resolve(answer.map { PairingPlace.Answer(city: $0.city, country: $0.country) })
+        }
+        return place
+    }
+
+    /// UX section 2.1 — the payload card once `place` has answered or its
+    /// bound from the screen opening has passed, whichever comes first. A
+    /// city that arrives later is not waited for.
+    func pairingCardEnvelope(
+        waitingFor place: PairingPlace,
+        nowMs: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
+    ) async -> Data? {
+        _ = await place.waitForAnswer()
+        return pairingCardEnvelope(place: place, nowMs: nowMs())
+    }
+
     /// UX section 2.1 — the card a joining device puts in its pairing payload
     /// (QR and the code route): what it would send as its own card now, with
-    /// the city switch and the anti-censorship rule exactly as for the card
-    /// itself. `nil` when it cannot be composed: then the payload carries no
-    /// card, never a failed pairing.
-    func pairingCardEnvelope(nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> Data? {
+    /// the city `place` received if it has, and the city switch and the
+    /// anti-censorship rule exactly as for the card itself. `nil` when it
+    /// cannot be composed: then the payload carries no card, never a failed
+    /// pairing.
+    func pairingCardEnvelope(
+        place: PairingPlace? = nil,
+        nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
+    ) -> Data? {
+        var fields = currentFields(nowMs: nowMs)
+        if let answer = place?.answer, showCity, !antiCensorshipArmed() {
+            fields.city = answer.city
+            fields.country = answer.country
+        }
         do {
-            return try composeDeviceCardEnvelope(card: Self.ffi(currentFields(nowMs: nowMs)))
+            return try composeDeviceCardEnvelope(card: Self.ffi(fields))
         } catch {
             NSLog("device card: no card in the pairing payload: %@", String(describing: error))
             return nil
@@ -396,5 +476,72 @@ final class DeviceCardCenter: ObservableObject {
               let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
         return (body["city"] as? String ?? "", body["country"] as? String ?? "")
+    }
+}
+
+/// UX section 2.1 — the city one pairing screen asked for when it opened,
+/// held for that pairing only. The QR waits for it at most
+/// ``DeviceCards/pairingPlaceWaitSeconds`` from the opening; the code route
+/// takes it if it has arrived by the time the code is typed.
+@MainActor
+final class PairingPlace {
+
+    struct Answer: Equatable {
+        var city: String
+        var country: String
+    }
+
+    /// The answer, once it arrived; `nil` before and when none came.
+    private(set) var answer: Answer?
+    /// The request ended (with or without an answer), or none was made.
+    private(set) var settled = false
+    private var timedOut = false
+    private let deadline: TimeInterval
+    private let now: () -> TimeInterval
+    private let sleep: (Double) async -> Void
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var timer: Task<Void, Never>?
+
+    init(deadline: TimeInterval, now: @escaping () -> TimeInterval, sleep: @escaping (Double) async -> Void) {
+        self.deadline = deadline
+        self.now = now
+        self.sleep = sleep
+    }
+
+    func resolve(_ answer: Answer?) {
+        guard !settled else { return }
+        self.answer = answer
+        settled = true
+        timer?.cancel()
+        timer = nil
+        release()
+    }
+
+    /// Wait until the answer arrives or the bound passes, then return what
+    /// is there.
+    func waitForAnswer() async -> Answer? {
+        if settled || timedOut { return answer }
+        let remaining = deadline - now()
+        guard remaining > 0 else {
+            timedOut = true
+            return answer
+        }
+        if timer == nil {
+            timer = Task { @MainActor [weak self, sleep] in
+                await sleep(remaining)
+                guard !Task.isCancelled, let self else { return }
+                self.timedOut = true
+                self.timer = nil
+                self.release()
+            }
+        }
+        await withCheckedContinuation { waiters.append($0) }
+        return answer
+    }
+
+    private func release() {
+        let pending = waiters
+        waiters = []
+        for waiter in pending { waiter.resume() }
     }
 }
