@@ -43,6 +43,7 @@
 
 import { accountStoresWritable } from "../auth/account-store-gate";
 import { publishMessageLogChanged } from "./message-log-events";
+import type { PersistedMembership } from "./membership-rows";
 
 const DB_NAME = "lakko-message-log";
 const DB_VERSION = 1;
@@ -198,6 +199,14 @@ export interface PersistedMessage {
    * draw `chat.message.unsupported`, in the language current when drawn.
    */
   readonly unsupportedVersion?: number;
+  /**
+   * `docs/ux/second-device.md` section 4 — on a system (commit) row only: the
+   * person keys a received batch added to and removed from a group, recorded
+   * on the batch's last commit row. Names are never stored; the row resolves
+   * them when drawn. Optional without a version bump: a row without it (every
+   * row written before this field) is a commit row that is not drawn.
+   */
+  readonly membership?: PersistedMembership;
 }
 
 /** ADR-0052 decision 2 — a persisted forward attribution. */

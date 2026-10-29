@@ -2402,10 +2402,6 @@
       "text": "Додати учасника",
       "status": "machine"
     },
-    "chat.members.add.done": {
-      "text": "Додано: {name}.",
-      "status": "machine"
-    },
     "chat.members.add.error.no_bundle": {
       "text": "Ця людина ще не завершила налаштування Lakko. Спробуйте пізніше.",
       "status": "machine"
@@ -2422,16 +2418,8 @@
       "text": "@username",
       "status": "machine"
     },
-    "chat.members.add.requested": {
-      "text": "Запитано додавання: {name}. Людина приєднається, коли власник або адміністратор застосує зміну.",
-      "status": "machine"
-    },
     "chat.members.add.submit": {
       "text": "Додати",
-      "status": "machine"
-    },
-    "chat.members.admin.demoted": {
-      "text": "Роль адміністратора знято.",
       "status": "machine"
     },
     "chat.members.admin.make": {
@@ -2442,16 +2430,8 @@
       "text": "Адмін",
       "status": "machine"
     },
-    "chat.members.admin.promoted": {
-      "text": "Призначено адміністратора.",
-      "status": "machine"
-    },
     "chat.members.admin.remove": {
       "text": "Зняти роль адміністратора",
-      "status": "machine"
-    },
-    "chat.members.admin.requested": {
-      "text": "Зміну запитано. Вона набуде чинності, коли власник або адміністратор застосує її.",
       "status": "machine"
     },
     "chat.members.count": {
@@ -2472,14 +2452,6 @@
     },
     "chat.members.join.approve": {
       "text": "Схвалити",
-      "status": "machine"
-    },
-    "chat.members.join.approved_added": {
-      "text": "Приєднання схвалено. Людину додано до групи.",
-      "status": "machine"
-    },
-    "chat.members.join.approved_requested": {
-      "text": "Приєднання схвалено. Людина приєднається, коли власник або адміністратор застосує зміну.",
       "status": "machine"
     },
     "chat.members.join.heading": {
@@ -2518,10 +2490,6 @@
       "text": "Зміни складу застосовує власник групи або адміністратор. Вони застосуються автоматично, щойно хтось із них це зробить.",
       "status": "machine"
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, one {Тепер # зміна очікує застосування.} few {Тепер # зміни очікують застосування.} many {Тепер # змін очікують застосування.} other {Тепер # зміни очікують застосування.}}",
-      "status": "machine"
-    },
     "chat.members.pending.waiting_added": {
       "text": "Очікує додавання.",
       "status": "machine"
@@ -2540,18 +2508,6 @@
     },
     "chat.members.remove.confirm_named": {
       "text": "Видалити: {name}",
-      "status": "machine"
-    },
-    "chat.members.remove.done": {
-      "text": "Учасника видалено.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested": {
-      "text": "Видалення запитано. Воно набуде чинності, коли власник або адміністратор застосує зміну.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested_short": {
-      "text": "Видалення запитано.",
       "status": "machine"
     },
     "chat.members.remove.title": {
@@ -3118,8 +3074,12 @@
       "text": "Запит на приєднання",
       "status": "machine"
     },
-    "chat.system.members_changed": {
-      "text": "Склад змінено",
+    "chat.system.member_joined": {
+      "text": "{name} приєднується",
+      "status": "machine"
+    },
+    "chat.system.member_left": {
+      "text": "{name} залишає групу",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -3148,14 +3108,6 @@
     },
     "chat.transfer.candidate_admin": {
       "text": "{name}, адміністратор",
-      "status": "machine"
-    },
-    "chat.transfer.done_admin": {
-      "text": "Тепер власник групи — {name}. Ви залишаєтеся адміністратором.",
-      "status": "machine"
-    },
-    "chat.transfer.done_member": {
-      "text": "Тепер власник групи — {name}. Ви тепер звичайний учасник.",
       "status": "machine"
     },
     "chat.transfer.irreversible_body": {
@@ -3196,10 +3148,6 @@
     },
     "chat.transfer.pending_named": {
       "text": "Очікує передачі прав власника: {name}.",
-      "status": "machine"
-    },
-    "chat.transfer.requested": {
-      "text": "Передачу прав власника запитано. Вона набуде чинності, коли власник або адміністратор застосує зміну.",
       "status": "machine"
     },
     "chat.transfer.role_change_pending": {
@@ -4164,14 +4112,6 @@
     },
     "device_link.qr.waiting": {
       "text": "Чекаємо, поки інший пристрій відсканує цей код...",
-      "status": "machine"
-    },
-    "device_link.request.added": {
-      "text": "Пристрій додано.",
-      "status": "machine"
-    },
-    "device_link.request.added_named": {
-      "text": "«{name}» додано.",
       "status": "machine"
     },
     "device_link.request.adding": {
@@ -7548,14 +7488,6 @@
     },
     "settings.devices.reset_note": {
       "text": "Сьогодні на цьому пристрої було скинуто ключі облікового запису. Інші пристрої вийшли з облікового запису, і їх видалено. Додайте їх знову в розділі «Налаштування» > «Пристрої» > «Додати пристрій».",
-      "status": "machine"
-    },
-    "settings.devices.scan.done": {
-      "text": "Пристрій додано. Він з’явиться у списку, коли завершить підключення.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done_named": {
-      "text": "«{name}» додано. Пристрій з’явиться у списку, коли завершить під’єднання.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {

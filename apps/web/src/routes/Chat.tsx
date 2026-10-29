@@ -115,7 +115,7 @@ import {
 } from "../chat/person-key";
 import { groupTitle, isUnnamedGroupLabel } from "../chat/group-title";
 import { UNNAMED_MEMBER, memberListLabelOf, memberNameOf } from "../profile/member-label";
-import { pendingJoinLabel, pendingJoinPersonKey } from "../chat/pending-join-label";
+import { pendingJoinLabel, pendingJoinName, pendingJoinPersonKey } from "../chat/pending-join-label";
 import { JoinAttributionGate } from "../chat/join-attribution-gate";
 import { groupCallsFor } from "../calls/group-call-store";
 import { chatCallAffordance, type ChatCallAffordance } from "../calls/group-call-host";
@@ -206,7 +206,6 @@ import {
 } from "../chat/lineage";
 import { dropsFromSupersededSender, type InertSender } from "../chat/background-events";
 import {
-  deviceSwapAcrossCommits,
   dropsSupersededSender,
   supersededSenderInert,
   repairPlan,
@@ -336,7 +335,6 @@ import {
   recordObservation,
   rowAnnotation,
   visibleRequests,
-  waitingQueueLine,
   waitingToBeAdded,
   type PendingRequest,
   type ProposalRecordView,
@@ -400,7 +398,6 @@ import {
   rememberObservedOwner,
   transferActionLabel,
   transferCandidates,
-  transferOutcomeNotice,
   type ExitBlock,
   type NewOwnerNotice,
   type OutgoingOwnerChoice,
@@ -450,7 +447,7 @@ import { leaveGroupConfirmation } from "../chat/leave-group-confirm";
 import { namedActionKey, pendingConfirm, requestConfirm } from "../ui/confirm-dialog";
 import { currentLanguage, joinList, t } from "../l10n";
 import { KeyedError, RenderedError, keyedErrorText } from "../l10n/keyed-error";
-import { createLiveText } from "../l10n/live-text";
+import { createLiveText, type LiveTextInput } from "../l10n/live-text";
 import {
   applyOp,
   editDeleteAuthorized,
@@ -502,6 +499,21 @@ import {
   type TimelineLayout,
 } from "../chat/timeline-layout";
 import { conversationKindOf, type ConversationKind } from "../chat/conversation-kind";
+import {
+  membershipNoticeAfterAttempt,
+  membershipNoticeLanded,
+  type MembershipAction,
+} from "../chat/membership-notice";
+import {
+  isCommitEvent,
+  membershipChangeOfBatch,
+  sweepBatchWithOwnCommit,
+  membershipFromPersisted,
+  persistedFromMembership,
+  withDrawnMembershipRows,
+  withMembershipChange,
+  type MembershipChange,
+} from "../chat/membership-rows";
 import { MembersCanFindMeSwitch } from "../settings/MembersCanFindMeSwitch";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 
@@ -764,7 +776,12 @@ function ChatView(props: {
   // load-bearing and what it cost before.
   // One DS id, one bubble (`dedupByMessageId`): a row can reach this list by
   // more than one route, and the list is where every route meets.
-  const uniqueRows = createMemo(() => dedupByMessageId([...historyRows(), ...rows()]));
+  const uniqueRows = createMemo(() =>
+    withDrawnMembershipRows(
+      dedupByMessageId([...historyRows(), ...rows()]),
+      conversationKindOf(props.entry.group),
+    ),
+  );
   const timelineEntries = createMemo(() =>
     mergeConversationEntries(uniqueRows, callRows(), rowCreatedAt, rowIdentity),
   );
@@ -1240,7 +1257,15 @@ function ChatView(props: {
   // ADR-0061 — held as how to render them, so a line already on screen
   // follows a language switch.
   const [error, setError] = createLiveText();
-  const [notice, setNotice] = createLiveText();
+  const [notice, setNoticeText] = createLiveText();
+  /** docs/ux/proposal-based-membership.md section 2 — the membership action
+   *  whose notice is on screen and clears by itself when the change lands
+   *  (only a leave has one). Any other notice replaces it. */
+  const [noticeAwaits, setNoticeAwaits] = createSignal<MembershipAction | null>(null);
+  const showNotice = (next: LiveTextInput): void => {
+    setNoticeAwaits(null);
+    setNoticeText(next);
+  };
 
   // Phase 3a8 — the 1x1 call surface moved to the app-level call host
   // (`calls/CallHostContext.tsx`): it rang only while this view was mounted
@@ -1345,7 +1370,7 @@ function ChatView(props: {
       return;
     }
     setInfoOpen(true);
-    setNotice(null);
+    showNotice(null);
     setError(null);
     // Bump version so the layer reads fresh data when it opens (covers the
     // case where new commits arrived between the last poll and this click).
@@ -1429,7 +1454,7 @@ function ChatView(props: {
         setError(outcome.message);
         return;
       case "ended":
-        setNotice(() => t("chat.call.group_ended"));
+        showNotice(() => t("chat.call.group_ended"));
         return;
       case "failed":
         setError(outcome.message);
@@ -1509,7 +1534,7 @@ function ChatView(props: {
     // released above either way.
     if (viewIsClosed) return;
     const plan = planCallStart("video", stream !== null);
-    if (plan.notice !== null) setNotice(plan.notice);
+    if (plan.notice !== null) showNotice(plan.notice);
     placeCall(plan.media.video);
   }
 
@@ -1756,7 +1781,7 @@ function ChatView(props: {
         return;
       }
       await groupNames.rename(props.entry, groupNameInput());
-      setNotice(null);
+      showNotice(null);
     } catch (err) {
       const code = groupNameErrorCode(err);
       setGroupNameError(code !== undefined ? () => groupNameErrorText(code) : errorText(err, "chat.group_name.error.save"));
@@ -2093,6 +2118,38 @@ function ChatView(props: {
    */
   const evictedNow = (): boolean => readIsActive(props.entry.group) === false;
 
+  /** docs/ux/proposal-based-membership.md section 2 — whether `action` is in
+   *  effect, read from the group as it is now. Only a leave is ever asked: this
+   *  device is out (evicted, or its person gone from a readable roster). */
+  const membershipInEffect = (action: MembershipAction): boolean => {
+    if (action !== "leave") return false;
+    if (evictedNow()) return true;
+    const own = ownPersonKeyB64(chats.identity());
+    const people = personKeysOrNull(props.entry.group);
+    return own !== null && people !== null && !people.includes(own);
+  };
+
+  /** The notice an attempted membership action leaves, decided from the group
+   *  after the attempt (`chat/membership-notice.ts`). */
+  const showMembershipNotice = (action: MembershipAction): void => {
+    const key = membershipNoticeAfterAttempt(action, membershipInEffect(action));
+    if (key === null) {
+      showNotice(null);
+      return;
+    }
+    setNoticeText(() => t(key));
+    setNoticeAwaits(action);
+  };
+
+  // The notice clears by itself once its change lands: every poll that moves
+  // the group bumps `membersVersion`.
+  createEffect(() => {
+    membersVersion();
+    const awaits = noticeAwaits();
+    if (awaits === null) return;
+    if (membershipNoticeLanded(awaits, membershipInEffect(awaits))) showNotice(null);
+  });
+
   // The current admin set as hex sig-pubkey strings (re-read per
   // `membersVersion`) — drives the per-member "Make/Remove admin" label.
   const adminPubkeys = createMemo<Set<string>>(() => {
@@ -2395,7 +2452,7 @@ function ChatView(props: {
       // commit won the order says nothing about the rows below it: they were
       // applied, the ratchet moved and the cursor advanced past them either
       // way, so the only question left is whether the user gets to read them.
-      if (swept.length > 0) consumeEvents(swept);
+      consumeSweptBatch(swept, outcome, personsBefore);
     }
     if (outcome === null) return null;
     if (outcome.kind !== "committed") return outcome;
@@ -2409,13 +2466,6 @@ function ChatView(props: {
       // ADR-0050 — a leaf this sweep removed is never re-admitted by this
       // client's scheduled check.
       recordRemovedDevices(s.account.accountId, props.entry.groupIdB64, before, after);
-      // ADR-0073 R.7 case 2 — this sweep only swapped the devices of people
-      // who stay: no `Members changed` row for it.
-      suppressDeviceSwapRow(
-        personsBefore,
-        personKeysOrNull(props.entry.group),
-        outcome.commitMessageId === undefined ? "latest" : [outcome.commitMessageId],
-      );
       // ADR-0045 UX §6.2.8 item 3 — captured synchronously alongside the
       // post-sweep roster, so the eviction and the shrink it caused are judged
       // on the same commit. A sweep can carry our own removal: an admin can
@@ -2513,7 +2563,7 @@ function ChatView(props: {
       return;
     }
     setError(null);
-    setNotice(null);
+    showNotice(null);
     setBusy(true);
     // ADR-0045 UX §7 — keyed on our own SIGNATURE key, never on the leaf:
     // OpenMLS hands a vacated leaf to the next member added, so a retry armed
@@ -2556,7 +2606,10 @@ function ChatView(props: {
       // role table takes the direct path and evicts us in the same call.
       // Fail-safe when absent — the fallback string is true either way.
       noteOwnLeaveRequested();
-      setNotice(() => t("chat.leave.requested"));
+      // UX section 2 — read from the group, never from which path committed:
+      // no notice once this device is out, else the request notice, which
+      // clears by itself when the departure lands.
+      showMembershipNotice("leave");
       void refresh();
     } catch (err) {
       setError(errorText(err, "chat.error.leave"));
@@ -3357,54 +3410,66 @@ function ChatView(props: {
   });
 
   /**
-   * R.7 case 2 / UX 16.5 — a commit that only swapped the devices of people
-   * who stay leaves no `Members changed` row. Called at both membership-diff
-   * sites (the poll and this device's own sweep) with the PERSON keys either
-   * side; people are compared by the account this device knows each key
-   * under, so a superseded key and its successor are one person. A commit
-   * that changes no person (a device admitted or retired, ADR-0050) leaves
-   * no row either. A torn read suppresses nothing.
-   *
-   * `commitMessageIds` names the commit rows of the batch being judged; an
-   * empty list judges nothing, so a poll with no commit can never hide a
-   * row an earlier batch rightly kept. `"latest"` (the sweep, when the
-   * commit's id is unknown) keeps the earlier behaviour: the newest row.
+   * `docs/ux/second-device.md` section 4 — what a sweep applied, as one batch:
+   * the rows below this device's own commit and, when it merged, the own
+   * commit row at the id the commit route answered (`sweepBatchWithOwnCommit`),
+   * so the committer shows the same named row as every other member. The
+   * change is judged from the roster before the sweep's reads to the roster
+   * after the merge and lands on the own commit, the batch's last.
    */
-  function suppressDeviceSwapRow(
+  function consumeSweptBatch(
+    swept: readonly IncomingChatEvent[],
+    outcome: SweepOutcome | null,
+    personsBefore: readonly string[] | null,
+  ): void {
+    const batch = sweepBatchWithOwnCommit(swept, outcome, new Date().toISOString());
+    if (batch.length === 0) return;
+    const change = judgeMembershipChange(
+      personsBefore,
+      personKeysOrNull(props.entry.group),
+      batch.some(isCommitEvent),
+    );
+    consumeEvents(withMembershipChange(batch, change, conversationKindOf(props.entry.group)));
+  }
+
+  /**
+   * `docs/ux/second-device.md` section 4 — the people a batch of commits
+   * added to and removed from this group, or `null` when there is nothing to
+   * record. Called at both membership-diff sites (the poll and this device's
+   * own sweep) with the PERSON keys either side; people are compared by the
+   * account this device knows each key under, so a superseded key and its
+   * successor are one person (R.7 case 2 / UX 16.5, across one batch or two,
+   * through the device-swap memory this keeps). A batch that changes no person
+   * (a device admitted or retired, ADR-0050), a torn read, a one-to-one and
+   * this device's own removal record nothing; this device's own person is
+   * never named.
+   *
+   * `sawCommit` false judges nothing and leaves the memory as it is, so a
+   * poll with no commit can never move it.
+   */
+  function judgeMembershipChange(
     personsBefore: readonly string[] | null,
     personsAfter: readonly string[] | null,
-    commitMessageIds: readonly number[] | "latest",
-  ): void {
-    if (commitMessageIds !== "latest" && commitMessageIds.length === 0) return;
+    sawCommit: boolean,
+  ): MembershipChange | null {
+    if (!sawCommit) return null;
     const s = auth.state();
-    if (s.kind !== "session") return;
+    if (s.kind !== "session") return null;
     const superseded = supersededKeys();
-    const swap = deviceSwapAcrossCommits({
+    const judged = membershipChangeOfBatch({
       personKeysBefore: personsBefore,
       personKeysAfter: personsAfter,
       accountOfKey: (k) => superseded.get(k) ?? accountIdB64OfKey(k),
       isSuperseded: (k) => superseded.has(k),
       awaited: awaitedSwaps(s.account.accountId, props.entry.groupIdB64),
       nowMs: Date.now(),
+      ownPersonKeyB64: ownPersonKeyB64(chats.identity()) ?? null,
     });
-    setAwaitedSwaps(s.account.accountId, props.entry.groupIdB64, swap.awaited);
-    if (!swap.suppress) return;
-    const ids = new Set(
-      commitMessageIds === "latest"
-        ? [rows().reduce((max, r) => (r.kind === "incoming" ? Math.max(max, r.event.messageId) : max), 0)]
-        : commitMessageIds,
-    );
-    setRows(
-      rows().filter(
-        (r) =>
-          !(
-            r.kind === "incoming" &&
-            r.event.kind === "system" &&
-            r.event.systemKind === "commit" &&
-            ids.has(r.event.messageId)
-          ),
-      ),
-    );
+    setAwaitedSwaps(s.account.accountId, props.entry.groupIdB64, judged.awaited);
+    if (conversationKindOf(props.entry.group) !== "group") return null;
+    // This device's own removal has its own surface (UX 6.2.8).
+    if (evictedNow()) return null;
+    return judged.change;
   }
 
   /** This device's own signature key, base64 — resolved through the roster
@@ -3509,7 +3574,7 @@ function ChatView(props: {
 
   function openTransferStep(): void {
     setError(null);
-    setNotice(null);
+    showNotice(null);
     setTransferPick(null);
     setTransferOutgoing(PRESELECTED_OUTGOING_OWNER);
     setTransferOpen(true);
@@ -3537,7 +3602,7 @@ function ChatView(props: {
     if (successor === undefined) return;
     const outgoing = transferOutgoing();
     setError(null);
-    setNotice(null);
+    showNotice(null);
     setBusy(true);
     try {
       const result = await withMembershipRetry(
@@ -3564,17 +3629,10 @@ function ChatView(props: {
         noteOwnRequest("role-change", successor.signatureKeyB64);
       }
       setTransferOpen(false);
-      const swept = await sweepNow();
+      await sweepNow();
       setMembersVersion(membersVersion() + 1);
-      const landed =
-        result.kind === "committed" || swept?.kind === "committed";
-      setNotice(() =>
-        transferOutcomeNotice(
-          landed ? "committed" : "proposed",
-          successor.label,
-          outgoing,
-        ),
-      );
+      // UX section 2 (amended 2026-10-29) — no notice, landed or not: the
+      // panel changes in place, or shows the pending transfer.
       void refresh();
     } catch (err) {
       setError(errorText(err, "chat.error.transfer"));
@@ -4172,9 +4230,21 @@ function ChatView(props: {
           return deviceKey === null ? null : loadMessageLog(account, deviceKey);
         },
       });
+      // docs/ux/second-device.md section 4 — the people this batch added and
+      // removed go on its last commit row, judged on the roster right after
+      // the apply, before anything else can move it.
+      const membershipChange = judgeMembershipChange(
+        personsBeforePoll,
+        personKeysOrNull(props.entry.group),
+        result.events.some(isCommitEvent),
+      );
       // ADR-0045 — the shared consumer; see `consumeEvents`.
       consumeEvents(
-        result.events.filter((e) => !(e.kind === "application" && resendHeld(e))),
+        withMembershipChange(
+          result.events.filter((e) => !(e.kind === "application" && resendHeld(e))),
+          membershipChange,
+          conversationKindOf(props.entry.group),
+        ),
       );
       // The component was torn down while this batch was being applied (a
       // route change during a long poll). The rows are decrypted and the
@@ -4251,14 +4321,6 @@ function ChatView(props: {
             membersBeforePoll,
             currentMemberKeys,
           );
-          // ADR-0073 R.7 case 2 — a batch that only swapped the devices of
-          // people who stay leaves no `Members changed` row.
-          {
-            const commits = result.events
-              .filter((e) => e.kind === "system" && e.systemKind === "commit")
-              .map((e) => e.messageId);
-            suppressDeviceSwapRow(personsBeforePoll, personKeysOrNull(props.entry.group), commits);
-          }
           // ADR-0045 UX §6.2.8 item 3 — and this is the site the finding was
           // about. Snapshotted here, in the same synchronous region as the
           // roster, because `membershipRotationDecision` would otherwise see a
@@ -5746,7 +5808,7 @@ function ChatView(props: {
     if (username.length === 0) return;
     if (!mayLookUp(addMemberCheck())) return;
     setError(null);
-    setNotice(null);
+    showNotice(null);
     setBusy(true);
     // ADR-0045 UX §7 — the add descriptor is only knowable once the typed
     // handle has resolved, which happens inside the call, so it is captured
@@ -5775,13 +5837,9 @@ function ChatView(props: {
         },
       );
       afterMemberAdded(result.outcome, base64Encode(result.recipientSignaturePubkey));
-      const addedKeyB64 = base64Encode(result.recipientSignaturePubkey);
-      const addCommitted = result.outcome.kind === "committed";
-      setNotice(() =>
-        addCommitted
-          ? t("chat.members.add.done", { name: memberName(addedKeyB64) })
-          : t("chat.members.add.requested", { name: memberName(addedKeyB64) }),
-      );
+      // UX section 2 (amended 2026-10-29) — no notice: the member row's
+      // annotation shows a waiting add, and once it lands the row and the
+      // timeline's named row say so.
       setAddMemberInput("");
       setAddMemberOpen(false);
       // ADR-0045 — if this device is the committer (the owner, rank 0) sweep
@@ -5844,7 +5902,7 @@ function ChatView(props: {
       return;
     }
     setError(null);
-    setNotice(null);
+    showNotice(null);
     setBusy(true);
     try {
       // ADR-0045 — the removal does NOT happen here: this publishes a request,
@@ -5882,13 +5940,12 @@ function ChatView(props: {
           : proposed.proposalMessageId,
       );
       if (proposed.kind === "proposed") noteOwnRequest(`remove:${leafIndex}`);
-      const swept = await sweepNow();
+      await sweepNow();
       setMemberCount(peopleCountOf(props.entry.group));
       setMembersVersion(membersVersion() + 1);
-      const removeLanded = swept?.kind === "committed";
-      setNotice(() =>
-        removeLanded ? t("chat.members.remove.done") : t("chat.members.remove.requested"),
-      );
+      // UX section 2 (amended 2026-10-29) — no notice, landed or not: the
+      // member row's annotation shows a waiting removal, and once it lands
+      // the row goes and the timeline gets its named row.
       void refresh();
     } catch (err) {
       setError(errorText(err, "chat.error.remove_member"));
@@ -5904,7 +5961,7 @@ function ChatView(props: {
     makeAdmin: boolean,
   ): Promise<void> {
     setError(null);
-    setNotice(null);
+    showNotice(null);
     setBusy(true);
     try {
       const result = await withMembershipRetry(
@@ -5931,15 +5988,10 @@ function ChatView(props: {
       // ADR-0045 — a role change is owner-only and the owner is rank 0, so the
       // sweep that follows is the same device: in practice this is still
       // immediate.
-      const swept = await sweepNow();
+      await sweepNow();
       setMembersVersion(membersVersion() + 1);
-      if (result.kind === "committed" || swept?.kind === "committed") {
-        setNotice(() =>
-          makeAdmin ? t("chat.members.admin.promoted") : t("chat.members.admin.demoted"),
-        );
-      } else {
-        setNotice(() => t("chat.members.admin.requested"));
-      }
+      // UX section 2 (amended 2026-10-29) — no notice, landed or not: the
+      // member row shows the role, or its waiting annotation.
       void refresh();
     } catch (err) {
       setError(errorText(err, "chat.error.change_admin"));
@@ -5956,7 +6008,7 @@ function ChatView(props: {
   // proposal, which may be another admin and has no deadline.
   async function onApproveJoin(proposalRef: Uint8Array): Promise<void> {
     setError(null);
-    setNotice(null);
+    showNotice(null);
     setBusy(true);
     try {
       // ADR-0045 UX §7 — an approve refused by a full pending set now carries
@@ -5984,32 +6036,11 @@ function ChatView(props: {
       noteOwnRequest(`add:${base64Encode(proposalRef)}`);
       // If this device is the acting committer the sweep runs now, so the
       // common single-admin case still reads as "tap, done".
-      const swept = await sweepNow();
+      await sweepNow();
       setMemberCount(peopleCountOf(props.entry.group));
       setMembersVersion(membersVersion() + 1);
-      if (swept?.kind === "committed") {
-        setNotice(() => t("chat.members.join.approved_added"));
-      } else {
-        // ADR-0045 S7 residual 2 — an approve that did not apply has grown a
-        // queue only a sweep drains, and the core's own feedback (its cap
-        // refusal) lands on whoever proposes NEXT. Naming the depth here is
-        // what puts it in front of the person who caused it. Read from the
-        // core rather than from the memo, which has not re-run yet.
-        let depth: number | null = null;
-        try {
-          depth = (props.entry.group.pendingProposals() as unknown[]).length;
-        } catch {
-          depth = null;
-        }
-        const queueDepth = depth;
-        setNotice(() => {
-          const approved = t("chat.members.join.approved_requested");
-          const queueLine = queueDepth === null ? null : waitingQueueLine(queueDepth);
-          return queueLine === null
-            ? approved
-            : t("common.sentence_pair", { first: approved, second: queueLine });
-        });
-      }
+      // UX section 2 (amended 2026-10-29) — no notice, landed or not: the
+      // request row goes, and the person appears in the roster when it lands.
       // Same reason as in `onRejectJoin`: the queue moved, so the notice
       // about a request it turned away is no longer current.
       setUnkeptJoinRequest(false);
@@ -6026,7 +6057,7 @@ function ChatView(props: {
   // list. No commit, no journal post — the joiner never receives a Welcome.
   async function onRejectJoin(proposalRef: Uint8Array): Promise<void> {
     setError(null);
-    setNotice(null);
+    showNotice(null);
     setBusy(true);
     try {
       // ADR-0045 UX §7 — a reject is the user saying no, so any armed re-send
@@ -6047,7 +6078,7 @@ function ChatView(props: {
       // Acting on the queue is what may have made room for the request the
       // quarantine turned away, so the notice about it stops being current.
       setUnkeptJoinRequest(false);
-      setNotice(() => t("chat.members.join.rejected"));
+      showNotice(() => t("chat.members.join.rejected"));
     } catch (err) {
       setError(errorText(err, "chat.error.reject_join"));
     } finally {
@@ -6061,7 +6092,7 @@ function ChatView(props: {
   // requests to join, and an admin approves (ADR-0027). `0n` = never expires.
   async function onCreateInviteLink(): Promise<void> {
     setError(null);
-    setNotice(null);
+    showNotice(null);
     setBusy(true);
     try {
       // ADR-0028 v2 — the preview the link carries: the shared group name
@@ -6097,12 +6128,12 @@ function ChatView(props: {
     const link = inviteLink();
     if (!link) return;
     setError(null);
-    setNotice(null);
+    showNotice(null);
     setBusy(true);
     try {
       const revoked = await contacts.revokeGroupInviteLink(props.requireIdentity(), link);
       setInviteLink(null);
-      setNotice(() =>
+      showNotice(() =>
         revoked ? t("chat.invite_link.revoked") : t("chat.invite_link.cleared"),
       );
     } catch (err) {
@@ -6224,8 +6255,10 @@ function ChatView(props: {
         // the timeline is ready to receive them, and `refresh()` below starts
         // from the cursor this leaves behind.
         const sweptOnRestart: IncomingChatEvent[] = [];
+        const personsBeforeRestart = personKeysOrNull(props.entry.group);
+        let owedOutcome: SweepOutcome | null = null;
         try {
-          await contacts.sweepPendingCommits(
+          owedOutcome = await contacts.sweepPendingCommits(
             props.entry.group,
             (id) => chat.markOwnPublishedCommit(props.entry.groupIdB64, id),
             props.requireIdentity(),
@@ -6233,7 +6266,7 @@ function ChatView(props: {
             (event) => sweptOnRestart.push(event),
           );
         } finally {
-          if (sweptOnRestart.length > 0) consumeEvents(sweptOnRestart);
+          consumeSweptBatch(sweptOnRestart, owedOutcome, personsBeforeRestart);
         }
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -7733,7 +7766,7 @@ function ChatView(props: {
                         }}
                       >
                         <Avatar
-                          label={pendingJoinLabel(props.entry.group, ref, base64Encode, (k) => profiles.resolve(k))}
+                          label={pendingJoinName(props.entry.group, ref, base64Encode, (k) => profiles.resolve(k))}
                           id={pendingJoinPersonKey(props.entry.group, ref, base64Encode)}
                           size="sm"
                           personKey={pendingJoinPersonKey(props.entry.group, ref, base64Encode)}
@@ -8051,7 +8084,7 @@ function ChatView(props: {
                       class="lk-row"
                       style={{ padding: "8px 10px", gap: "10px" }}
                     >
-                      <Avatar label={label()} id={memberKeyB64} size="sm" personKey={memberKeyB64} />
+                      <Avatar label={memberName(memberKeyB64)} id={memberKeyB64} size="sm" personKey={memberKeyB64} />
                       <span
                         style={{
                           display: "flex",
@@ -8390,7 +8423,7 @@ function ChatView(props: {
                           checked={transferPick() === row.signatureKeyB64}
                           onChange={() => setTransferPick(row.signatureKeyB64)}
                         />
-                        <Avatar label={row.label} id={row.signatureKeyB64} size="sm" personKey={row.signatureKeyB64} />
+                        <Avatar label={memberName(row.signatureKeyB64)} id={row.signatureKeyB64} size="sm" personKey={row.signatureKeyB64} />
                         <span aria-hidden="true">{row.label}</span>
                         {/* MARK, do not filter and do not sort. Who is already an
                             admin is information the owner assigned and is worth
@@ -9516,12 +9549,15 @@ function timelineRowToPersisted(
     return null;
   }
   // system
+  const membership = persistedFromMembership(row.event.membership);
   return {
     messageId: String(row.event.messageId),
     direction: "system",
     text: systemRowText(row.event.systemKind),
     attachments: [],
     createdAt: row.event.createdAt,
+    // docs/ux/second-device.md section 4 — the people the batch changed.
+    ...(membership === undefined ? {} : { membership }),
   };
 }
 
@@ -9601,6 +9637,7 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
     };
   }
   // system
+  const membership = membershipFromPersisted(m.membership);
   return {
     kind: "incoming",
     event: {
@@ -9608,6 +9645,7 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
       messageId: Number(m.messageId),
       systemKind: "commit" as const,
       createdAt: m.createdAt,
+      ...(membership === undefined ? {} : { membership }),
     },
   };
 }

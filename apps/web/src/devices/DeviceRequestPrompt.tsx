@@ -47,7 +47,6 @@ import {
 import { runScanFlow } from "./orchestrator";
 import { recoveryHalfFor } from "./recovery-sender";
 import { ownPairingHandle, parsePairingQrPayload } from "./pairing";
-import { pairingCardName } from "./device-cards";
 
 /** The toast for a failed payload check or pairing, held as the way to
  *  render it. ADR-0061: the detail goes to the log, never to the screen. */
@@ -155,9 +154,10 @@ export function DeviceRequestPrompt(): JSX.Element {
     return created;
   }
 
-  /** The unchanged add-device flow over the opened payload. Resolves with
-   *  the new device's name from its card, or `null`. */
-  async function pair(payload: Uint8Array): Promise<string | null> {
+  /** The unchanged add-device flow over the opened payload. On success the
+   *  prompt closes with no result line (docs/ux/second-device.md section
+   *  2.1); the device's row names it from its card, stored by the flow. */
+  async function pair(payload: Uint8Array): Promise<void> {
     const s = auth.state();
     const secrets = auth.identitySecrets();
     if (s.kind !== "session" || secrets === null) throw new Error("signed out");
@@ -196,7 +196,6 @@ export function DeviceRequestPrompt(): JSX.Element {
       // eslint-disable-next-line no-console
       console.warn("ADR-0050 admit device: fan-out failed", err);
     });
-    return pairingCardName(scanned.newDeviceCard);
   }
 
   async function poll(): Promise<void> {
@@ -314,7 +313,8 @@ export function DeviceRequestPrompt(): JSX.Element {
           </div>
         )}
       </Show>
-      {/* After the outcome toast is dismissed, so the two never overlap. */}
+      {/* Once the prompt closed (no "added" line, docs/ux/second-device.md
+          2.1), or after a failure toast is dismissed: the two never overlap. */}
       <Show when={keysNotSent() && toast() === null && modal() === null}>
         <div class="lk-toast" role="status">
           <span>{t("device_link.keys_not_sent")}</span>

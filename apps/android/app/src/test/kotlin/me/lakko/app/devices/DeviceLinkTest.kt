@@ -163,7 +163,7 @@ class DeviceLinkTest {
         yield()
         while (server.pakeA == null) yield()
         val after = old.poll()
-        assertEquals(OldDeviceLinkState.Notice(DEVICE_LINK_ADDED_COPY), after)
+        assertEquals(OldDeviceLinkState.Idle, after)
         assertEquals(NewDeviceLinkState.Confirmed, submit.await())
         assertTrue(initiator.verified)
         assertArrayEquals(payload, paired.single())
@@ -203,33 +203,32 @@ class DeviceLinkTest {
     }
 
     @Test
-    fun `the closing line names the added device from its payload`() = runTest {
-        // UX second-device.md section 2.1: the code route names the device
-        // the same way the scan does ([DeviceCards.addedCopy]).
+    fun `a device added closes the prompt with no closing line`() = runTest {
+        // UX second-device.md section 2.1 (decided 2026-10-29): on the code
+        // route the "Is this you?" prompt simply closes once the device is
+        // added; no "added" notice is ever shown, and later polls keep it shut.
         val server = Server()
         val new = newDevice(server)
-        val named = namedCopy("device_link.request.added_named", "Pixel 7a")
-        val old = OldDeviceLink(
-            api = server,
-            responderFor = { Responder("471903") },
-            formatCode = { "${it.substring(0, 2)} ${it.substring(2, 4)} ${it.substring(4, 6)}" },
-            openPayload = { it },
-            pair = { },
-            limit = Limit().limit,
-            addedCopy = { opened ->
-                assertArrayEquals(payload, opened)
-                named
-            },
-        )
+        val paired = mutableListOf<ByteArray>()
+        val old = oldDevice(server, paired = paired)
+        val seen = mutableListOf<OldDeviceLinkState>()
         new.start(handle)
-        old.poll()
-        old.confirm()
+        seen += old.poll()
+        seen += old.confirm()
         new.awaitAnswer()
         val submit = async { new.submitCode("471903") }
         yield()
         while (server.pakeA == null) yield()
-        assertEquals(OldDeviceLinkState.Notice(named), old.poll())
+        seen += old.poll()
+        assertEquals(OldDeviceLinkState.Idle, old.state)
+        assertEquals(OldDeviceLinkState.Idle, old.states.value)
         assertEquals(NewDeviceLinkState.Confirmed, submit.await())
+        assertArrayEquals(payload, paired.single())
+        assertEquals(OldDeviceLinkState.Idle, old.poll())
+        assertTrue(seen.none { it is OldDeviceLinkState.Notice })
+        // Dismissing a closed prompt changes nothing.
+        old.dismiss()
+        assertEquals(OldDeviceLinkState.Idle, old.state)
     }
 
     @Test
@@ -561,7 +560,7 @@ class DeviceLinkTest {
         assertEquals(OldDeviceLinkState.NeedsProof, old.resume())
         // The person proved it again: the result is posted and the pairing runs.
         server.proofLive = true
-        assertEquals(OldDeviceLinkState.Notice(DEVICE_LINK_ADDED_COPY), old.resume())
+        assertEquals(OldDeviceLinkState.Idle, old.resume())
         assertEquals(OUTCOME_ACCEPTED, server.outcome)
         assertArrayEquals(payload, paired.single())
         assertEquals(NewDeviceLinkState.Confirmed, submit.await())
@@ -595,7 +594,7 @@ class DeviceLinkTest {
         assertEquals(OUTCOME_ACCEPTED, server.outcome)
         assertEquals(1, pairCalls)
         grantLive = true
-        assertEquals(OldDeviceLinkState.Notice(DEVICE_LINK_ADDED_COPY), old.resume())
+        assertEquals(OldDeviceLinkState.Idle, old.resume())
         assertEquals(2, pairCalls)
         // The result was posted exactly once.
         assertEquals(1, server.log.count { it.startsWith("result:") })
@@ -643,7 +642,4 @@ class DeviceLinkTest {
         server.requestId = null
         assertEquals(OldDeviceLinkState.Idle, old.poll())
     }
-
-    private fun namedCopy(key: String, name: String) =
-        me.lakko.app.l10n.UiText(key, texts = mapOf("name" to name))
 }

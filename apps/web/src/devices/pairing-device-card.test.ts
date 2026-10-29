@@ -58,9 +58,8 @@ import {
   type RowWords,
   type StoredDeviceCard,
 } from "./device-cards";
-import { LINK_DEVICE_ADDED, linkDeviceAdded } from "./device-link";
 import { buildPairingQrPayloadWith, parsePairingQrPayloadWith } from "./pairing";
-import { pairingConfirmTitle, pairingScanDone } from "./pairing-copy";
+import { pairingConfirmTitle } from "./pairing-copy";
 
 const ACCOUNT = "YWNjb3VudC0wMDAwMDAwMDA=";
 const HANDLE = new Uint8Array(32).fill(0x31);
@@ -282,7 +281,7 @@ describe("the place in the new device's payload card", () => {
   });
 });
 
-describe("the confirm and result lines", () => {
+describe("the confirm title", () => {
   it("name the device from its card, with the row's other lines", () => {
     const view = pairingCardView(CHROME, WORDS);
     expect(view).toEqual({
@@ -291,21 +290,12 @@ describe("the confirm and result lines", () => {
       place: "Almere, Netherlands",
     });
     expect(pairingConfirmTitle(view.name)).toBe("Link “Chrome on macOS”?");
-    expect(pairingScanDone(view.name)).toBe(
-      "“Chrome on macOS” added. It will appear in the list once it has finished joining.",
-    );
-    expect(linkDeviceAdded(view.name)()).toBe("“Chrome on macOS” added.");
   });
 
   it("keep the unnamed copy with no card or a card with no name", () => {
     expect(pairingCardView(null, WORDS)).toEqual({ name: null, detail: "", place: "" });
     expect(pairingCardName({ ...CHROME, model: "  " })).toBeNull();
     expect(pairingConfirmTitle(null)).toBe("Link this device?");
-    expect(pairingScanDone(null)).toBe(
-      "Device added. It will appear in the list once it has finished joining.",
-    );
-    expect(linkDeviceAdded(null)).toBe(LINK_DEVICE_ADDED);
-    expect(linkDeviceAdded(null)()).toBe("Device added.");
   });
 
   it("reads a decoded card only for a platform this client knows", () => {

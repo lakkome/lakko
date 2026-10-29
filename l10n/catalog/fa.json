@@ -2402,10 +2402,6 @@
       "text": "افزودن عضو",
       "status": "machine"
     },
-    "chat.members.add.done": {
-      "text": "{name} اضافه شد.",
-      "status": "machine"
-    },
     "chat.members.add.error.no_bundle": {
       "text": "این شخص هنوز راه‌اندازی Lakko را تمام نکرده است. بعداً دوباره تلاش کنید.",
       "status": "machine"
@@ -2422,16 +2418,8 @@
       "text": "@username",
       "status": "machine"
     },
-    "chat.members.add.requested": {
-      "text": "افزودن {name} درخواست شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، به گروه می‌پیوندد.",
-      "status": "machine"
-    },
     "chat.members.add.submit": {
       "text": "افزودن",
-      "status": "machine"
-    },
-    "chat.members.admin.demoted": {
-      "text": "از مدیریت برداشته شد.",
       "status": "machine"
     },
     "chat.members.admin.make": {
@@ -2442,16 +2430,8 @@
       "text": "مدیر",
       "status": "machine"
     },
-    "chat.members.admin.promoted": {
-      "text": "به مدیر ارتقا یافت.",
-      "status": "machine"
-    },
     "chat.members.admin.remove": {
       "text": "برداشتن از مدیریت",
-      "status": "machine"
-    },
-    "chat.members.admin.requested": {
-      "text": "تغییر درخواست شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، انجام می‌شود.",
       "status": "machine"
     },
     "chat.members.count": {
@@ -2472,14 +2452,6 @@
     },
     "chat.members.join.approve": {
       "text": "تأیید",
-      "status": "machine"
-    },
-    "chat.members.join.approved_added": {
-      "text": "عضویت تأیید شد. به گروه اضافه شد.",
-      "status": "machine"
-    },
-    "chat.members.join.approved_requested": {
-      "text": "عضویت تأیید شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، به گروه می‌پیوندد.",
       "status": "machine"
     },
     "chat.members.join.heading": {
@@ -2518,10 +2490,6 @@
       "text": "تغییرات عضویت را مالک گروه یا یکی از مدیران اعمال می‌کند. هر وقت یکی از آن‌ها این کار را بکند، به‌طور خودکار اعمال می‌شوند.",
       "status": "machine"
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, one {اکنون # تغییر در انتظار اعمال است.} other {اکنون # تغییر در انتظار اعمال است.}}",
-      "status": "machine"
-    },
     "chat.members.pending.waiting_added": {
       "text": "در انتظار افزوده شدن.",
       "status": "machine"
@@ -2540,18 +2508,6 @@
     },
     "chat.members.remove.confirm_named": {
       "text": "حذف {name}",
-      "status": "machine"
-    },
-    "chat.members.remove.done": {
-      "text": "عضو حذف شد.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested": {
-      "text": "حذف درخواست شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، انجام می‌شود.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested_short": {
-      "text": "حذف درخواست شد.",
       "status": "machine"
     },
     "chat.members.remove.title": {
@@ -3118,8 +3074,12 @@
       "text": "درخواست عضویت",
       "status": "machine"
     },
-    "chat.system.members_changed": {
-      "text": "اعضا تغییر کردند",
+    "chat.system.member_joined": {
+      "text": "{name} پیوست",
+      "status": "machine"
+    },
+    "chat.system.member_left": {
+      "text": "{name} رفت",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -3148,14 +3108,6 @@
     },
     "chat.transfer.candidate_admin": {
       "text": "{name}، مدیر",
-      "status": "machine"
-    },
-    "chat.transfer.done_admin": {
-      "text": "اکنون {name} مالک گروه است. شما همچنان مدیر هستید.",
-      "status": "machine"
-    },
-    "chat.transfer.done_member": {
-      "text": "اکنون {name} مالک گروه است. شما اکنون عضو عادی هستید.",
       "status": "machine"
     },
     "chat.transfer.irreversible_body": {
@@ -3196,10 +3148,6 @@
     },
     "chat.transfer.pending_named": {
       "text": "در انتظار مالک شدن {name}.",
-      "status": "machine"
-    },
-    "chat.transfer.requested": {
-      "text": "انتقال مالکیت درخواست شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، انجام می‌شود.",
       "status": "machine"
     },
     "chat.transfer.role_change_pending": {
@@ -4164,14 +4112,6 @@
     },
     "device_link.qr.waiting": {
       "text": "در انتظار اسکن این کد با دستگاه دیگرتان...",
-      "status": "machine"
-    },
-    "device_link.request.added": {
-      "text": "دستگاه اضافه شد.",
-      "status": "machine"
-    },
-    "device_link.request.added_named": {
-      "text": "«{name}» افزوده شد.",
       "status": "machine"
     },
     "device_link.request.adding": {
@@ -7548,14 +7488,6 @@
     },
     "settings.devices.reset_note": {
       "text": "کلیدهای حساب شما امروز روی این دستگاه بازنشانی شد. دستگاه‌های دیگر از حساب خارج و حذف شدند. آن‌ها را دوباره از تنظیمات > دستگاه‌ها > افزودن دستگاه اضافه کنید.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done": {
-      "text": "دستگاه افزوده شد. پس از پایان پیوستن در فهرست نمایش داده می‌شود.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done_named": {
-      "text": "«{name}» افزوده شد. پس از پایان پیوستن در فهرست نمایش داده می‌شود.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {

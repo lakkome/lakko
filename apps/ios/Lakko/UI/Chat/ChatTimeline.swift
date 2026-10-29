@@ -154,9 +154,17 @@ public enum ChatTimeline {
     /// The two bookkeeping rows the receive loop files as system rows carry
     /// protocol names and nothing a reader acts on; the timeline does not draw
     /// them (UX spec section 6).
-    public static func isHiddenSystemRow(_ message: ChatMessage) -> Bool {
+    ///
+    /// A commit row that names people (``MembershipRow``) is drawn only in a
+    /// group's timeline (`isGroup`, `docs/ux/second-device.md` section 4): a
+    /// one-to-one never shows one, and neither does the chat-list preview,
+    /// which asks with the default.
+    public static func isHiddenSystemRow(_ message: ChatMessage, isGroup: Bool = false) -> Bool {
         guard message.direction == .system else { return false }
-        if message.text == "[mls commit]" || message.text == "[mls external join]" { return true }
+        if message.text == MembershipRow.plainCommitText || message.text == "[mls external join]" { return true }
+        if message.text.hasPrefix("[mls ") {
+            return !(isGroup && MembershipRow.parse(message.text) != nil)
+        }
         // `docs/ux/calls.md` section 6 — a call row IS drawn; the sentence is
         // rendered from its parsed marker. One this build cannot read is
         // hidden rather than shown as the raw marker.
@@ -164,6 +172,12 @@ public enum ChatTimeline {
             return CallTranscriptRow.parse(message.text) == nil
         }
         return false
+    }
+
+    /// The people a membership row names, or `nil` when it is not one.
+    public static func membershipRow(_ message: ChatMessage) -> MembershipRow? {
+        guard message.direction == .system else { return nil }
+        return MembershipRow.parse(message.text)
     }
 
     /// The finished call this row records, or `nil` when it is not a call row.

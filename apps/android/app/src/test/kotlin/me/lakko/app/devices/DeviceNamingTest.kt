@@ -143,10 +143,31 @@ class DeviceNamingTest {
     }
 
     @Test
-    fun the_result_names_the_device_and_falls_back_without_a_card() {
-        assertEquals("“Pixel 7a” added.", DeviceCards.addedCopy(card()).en)
-        assertEquals("Device added.", DeviceCards.addedCopy(null).en)
-        assertEquals(DEVICE_LINK_ADDED_COPY, DeviceCards.addedCopy(null))
+    fun the_scan_route_returns_to_the_list_with_no_result_line() {
+        // UX second-device.md section 2.1 (decided 2026-10-29): a device
+        // added by a scan goes straight back to the Devices list; only a
+        // hand-over without keys keeps its own text on screen.
+        val notice = ScanLinkedNotice()
+        notice.linked("acct-a", keysSent = true)
+        assertNull(notice.keysNotSentFor.value)
+        assertFalse(notice.showsKeysNotSent("acct-a"))
+    }
+
+    @Test
+    fun a_scan_without_keys_leaves_the_warning_under_the_list_until_add_is_pressed() {
+        // UX second-device.md section 2.1: only the added line goes; the
+        // keys-not-sent warning stays under the Devices list, for that
+        // account only, and Add a device clears it.
+        val notice = ScanLinkedNotice()
+        notice.linked("acct-a", keysSent = false)
+        assertTrue(notice.showsKeysNotSent("acct-a"))
+        assertFalse(notice.showsKeysNotSent("acct-b"))
+        notice.clear()
+        assertFalse(notice.showsKeysNotSent("acct-a"))
+        // A later scan that sent the keys replaces an earlier warning.
+        notice.linked("acct-a", keysSent = false)
+        notice.linked("acct-a", keysSent = true)
+        assertFalse(notice.showsKeysNotSent("acct-a"))
     }
 
     // ------------------------------------------------------------ item 3

@@ -203,9 +203,26 @@ public fun DevicesScreen(
                 chatRepository = chatRepository,
             )
 
+            // UX second-device.md section 2.1 - the last scan added a device
+            // but handed over no keys: the existing warning stays here until
+            // Add a device is pressed again.
+            val keysNotSentFor by me.lakko.app.devices.ScanLinkedNotice.shared.keysNotSentFor
+                .collectAsStateWithLifecycle()
+            if (keysNotSentFor == account.accountIdB64) {
+                Text(
+                    t("device_link.keys_not_sent"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
+
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
             Button(
-                onClick = onAddDevice,
+                onClick = {
+                    me.lakko.app.devices.ScanLinkedNotice.shared.clear()
+                    onAddDevice()
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp),
@@ -326,6 +343,9 @@ public fun AddDeviceScreen(
                     ),
                 )
                 AddDeviceMode.Scan -> ScanSection(
+                    // UX second-device.md section 2.1 - a device added goes
+                    // straight back to the Devices list, no result line.
+                    onLinked = onBack,
                     authRepository = authRepository,
                     ownUsername = account.username,
                     accountIdBytes = secrets.accountId,
@@ -559,15 +579,12 @@ private sealed interface ScanUi {
     class ConfirmTransfer(val decoded: DecodedPairingQr) : ScanUi
 
     data object Processing : ScanUi
-    /** [keysSent] is `false` when this device had no recovery phrase to hand
-     *  over (or the hand-over failed): the new device is linked but has to
-     *  bring its keys another way, and the screen says so. */
-    data class Done(val keysSent: Boolean, val added: UiText) : ScanUi
     data class Error(val message: UiText) : ScanUi
 }
 
 @Composable
 private fun ScanSection(
+    onLinked: () -> Unit,
     authRepository: AuthRepository,
     ownUsername: String,
     accountIdBytes: ByteArray,
@@ -769,10 +786,13 @@ private fun ScanSection(
                             // waits for the device to land and publish
                             // its KeyPackage.
                             chatRepository?.requestAdmitDevice(scanned.newDeviceKey)
-                            state = ScanUi.Done(
-                                keysSent = scanned.keysSent,
-                                added = me.lakko.app.devices.DeviceCards.addedCopy(payloadCard),
-                            )
+                            // UX second-device.md section 2.1 - no result
+                            // line: straight back to the Devices list. A
+                            // hand-over without keys leaves its warning
+                            // under that list.
+                            me.lakko.app.devices.ScanLinkedNotice.shared.linked(accountIdB64, scanned.keysSent)
+                            proof.clear()
+                            onLinked()
                         } catch (cause: Throwable) {
                             if (cause is kotlinx.coroutines.CancellationException) throw cause
                             when (me.lakko.app.ui.auth.gatedFailureOf(cause)) {
@@ -818,21 +838,6 @@ private fun ScanSection(
                 Text(t("device_link.request.adding"))
             }
 
-            is ScanUi.Done -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    s.added.text(),
-                    color = MaterialTheme.colorScheme.primary,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                if (!s.keysSent) {
-                    Text(
-                        t("device_link.keys_not_sent"),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
 
             is ScanUi.Error -> Column(
                 verticalArrangement = Arrangement.spacedBy(8.dp),

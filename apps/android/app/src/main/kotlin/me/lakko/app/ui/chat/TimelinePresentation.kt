@@ -278,10 +278,20 @@ public fun statusLabel(ack: Ack, time: String?, strings: Strings = Localization.
  * (`ChatListScreen.kt`); the timeline kept drawing them in a pill, found live
  * 2026-09-26. iOS has the same rule in `ChatTimeline.isHiddenSystemRow`. A call
  * row is a system row too and IS drawn; it is told apart by what it holds.
+ *
+ * `docs/ux/second-device.md` section 4 (2026-10-29): there is no generic
+ * "Members changed" row. A commit row is drawn only in a GROUP and only when
+ * it names the people its batch added or removed
+ * ([me.lakko.app.chat.isMembershipRow]); every stored commit row from before
+ * that (and every device-only change) carries none and stays hidden, and in a
+ * one-to-one (ADR-0062), whose people cannot change, no commit row is ever
+ * drawn. Filtered at display time: the rows stay in the log.
  */
-public fun isHiddenSystemRow(message: ChatMessage): Boolean {
+public fun isHiddenSystemRow(message: ChatMessage, isGroup: Boolean = false): Boolean {
     if (message.direction != Direction.System || message.call != null) return false
-    return message.text == "[mls commit]" || message.text == "[mls external join]"
+    if (isGroup && me.lakko.app.chat.isMembershipRow(message)) return false
+    return message.text == me.lakko.app.chat.COMMIT_ROW_TEXT ||
+        message.text == me.lakko.app.chat.EXTERNAL_JOIN_ROW_TEXT
 }
 
 /**
@@ -296,10 +306,13 @@ public fun buildTimeline(
     use24h: Boolean,
     locale: Locale,
     strings: Strings = Localization.strings.value,
+    /** ADR-0062 — whether the conversation is a group: only a group draws a
+     *  membership row. */
+    isGroup: Boolean = false,
 ): List<TimelineItem> {
     // Dropped before the fold, so a hidden row neither opens a date separator
     // nor breaks a run between two messages that read as one.
-    val messages = allMessages.filterNot(::isHiddenSystemRow)
+    val messages = allMessages.filterNot { isHiddenSystemRow(it, isGroup) }
     val out = ArrayList<TimelineItem>(messages.size + 8)
     val times = messages.map { parseMessageTimeMs(it.createdAt) }
     var lastSeparatorDayMs: Long? = null

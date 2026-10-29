@@ -2069,7 +2069,9 @@ private struct SessionRoot: View, Equatable {
                             NSLog("ADR-0050 admit device: fan-out failed: \(error)")
                         }
                     }
-                }
+                },
+                // UX section 2.1 — linked: back to the Devices list.
+                onLinked: { pop(.addDevice, from: tab) }
             )
         case .recoveryFactors:
             RecoverySettingsScreen(

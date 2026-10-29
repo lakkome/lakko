@@ -56,9 +56,10 @@ it and the warning stays.
   access ... Continue only if the code is on your own new device."). Buttons
   unchanged. A payload with no card, or a card that does not decode, keeps
   today's title **Link this device?** and no detail lines.
-- **When it is done**, on both routes (code scanned, or the six-digit code
-  typed on the new device): **"Chrome on macOS" added.** With no card:
-  **Device added.**
+- **When it is done** there is no result line (decided 2026-10-29, after a
+  live walk): the scan route goes straight back to the Devices list, where
+  the new device's row already carries its name; on the six-digit code route
+  the "Is this you?" prompt simply closes. A failure keeps its error copy.
 - **The new device's row** on the signed-in device's Devices screen uses the
   card from the payload at once, until the device's own card arrives over
   the DeviceGroup and replaces it.
@@ -180,8 +181,21 @@ gives the same answer). Unbuilt.
 - Members panel lists people, one row each. Admin actions act on the person.
 - Read receipts, typing, reactions, edits and deletes are the person's, not
   the device's.
-- System rows say "Alice added a device" / "Alice removed a device" only if the
-  chat shows membership rows at all; never a commit number.
+- A device added or removed never leaves a row anywhere.
+- **Membership rows (decided 2026-10-29).** There is no generic "Members
+  changed" row on any client, in any conversation, stored or new (web was
+  the only client that drew one; seen live with nine of them in a day, all
+  device changes). In a **group**, when a batch of commits changes the
+  people (person keys before and after differ, ADR-0050), the device writes
+  one row at the batch's last commit naming each person: "VG3 joined",
+  "VG2 left" (several people: one sentence each, in one row). The row stores
+  the person keys, never names; the name is resolved when drawn, through the
+  one display resolver ("Member" when unknown). It does not say who
+  committed: under ADR-0045 the committer only sweeps what someone else
+  asked. In a **one-to-one** the people cannot change (ADR-0062), so there
+  is never such a row. This device's own joining or removal has its own
+  surfaces and writes no row here. A chat-list preview never shows a
+  membership row.
 
 ## 5. Failures
 

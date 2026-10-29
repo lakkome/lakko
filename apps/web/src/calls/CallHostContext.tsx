@@ -2930,6 +2930,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       queue = newQueue();
       endedCallIds.clear();
       clearGroupCallStore();
+      // The shared call screen follows the session's state, and a session
+      // ended here may never report `done` (its End cannot be published
+      // without a session), so the screen would stay on `Calling...` and keep
+      // looping the outgoing tone on the sign-in page (seen live 2026-10-29,
+      // stopped only by a reload). Nothing of a call survives a sign-out.
+      callActions.reset();
     });
   });
 

@@ -192,6 +192,22 @@ The control the user touched still gives immediate feedback (§4), because the p
 normal network operation. What is deferred is the *persistent, group-visible* pending
 state.
 
+**What "tap, done" shows (2026-10-29, seen live).** When the change is in effect by the
+time the attempt returns (this device swept it, or another committer already did), there is
+**no notice at all**: the member row changes in place and the group timeline gets its named
+row (`VG3 left`, `docs/ux/second-device.md` section 4). Whether it is in effect is read
+from the group after the attempt (the person is gone, added, promoted, the owner moved),
+never from which code path committed it: an owner on the web saw `Removal requested. It
+applies when an owner or an admin applies the change.` after removing a member, because a
+background sweep had committed the request before the screen's own sweep looked. For the
+actions only an owner or an admin can take (add, approve a join request, remove, make or
+remove admin, transfer ownership) there is **no notice at all**, neither `... requested` nor
+a `done` line: the person tapping is an owner or an
+admin, so "it applies when an owner or an admin applies the change" says nothing to them
+(maintainer, 2026-10-29). Until such a change lands, the only sign is the member row's own
+annotation (section 5.2), which goes away when it lands. The leave notice stays for a plain
+member, who does wait for someone else.
+
 ---
 
 ## 3. Should a membership change show a pending affordance at all?

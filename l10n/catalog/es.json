@@ -2402,10 +2402,6 @@
       "text": "Añadir miembro",
       "status": "machine"
     },
-    "chat.members.add.done": {
-      "text": "{name} se añadió.",
-      "status": "machine"
-    },
     "chat.members.add.error.no_bundle": {
       "text": "Esta persona aún no ha terminado de configurar Lakko. Inténtalo más tarde.",
       "status": "machine"
@@ -2422,16 +2418,8 @@
       "text": "@usuario",
       "status": "machine"
     },
-    "chat.members.add.requested": {
-      "text": "Se solicitó añadir a {name}. Se unirá cuando el propietario o un administrador aplique el cambio.",
-      "status": "machine"
-    },
     "chat.members.add.submit": {
       "text": "Añadir",
-      "status": "machine"
-    },
-    "chat.members.admin.demoted": {
-      "text": "Ya no es administrador.",
       "status": "machine"
     },
     "chat.members.admin.make": {
@@ -2442,16 +2430,8 @@
       "text": "Administrador",
       "status": "machine"
     },
-    "chat.members.admin.promoted": {
-      "text": "Ahora es administrador.",
-      "status": "machine"
-    },
     "chat.members.admin.remove": {
       "text": "Quitar administrador",
-      "status": "machine"
-    },
-    "chat.members.admin.requested": {
-      "text": "Cambio solicitado. Se aplicará cuando el propietario o un administrador aplique el cambio.",
       "status": "machine"
     },
     "chat.members.count": {
@@ -2472,14 +2452,6 @@
     },
     "chat.members.join.approve": {
       "text": "Aprobar",
-      "status": "machine"
-    },
-    "chat.members.join.approved_added": {
-      "text": "Solicitud aprobada. Se añadió al grupo.",
-      "status": "machine"
-    },
-    "chat.members.join.approved_requested": {
-      "text": "Solicitud aprobada. Se unirá cuando el propietario o un administrador aplique el cambio.",
       "status": "machine"
     },
     "chat.members.join.heading": {
@@ -2518,10 +2490,6 @@
       "text": "Los cambios de miembros los aplica el propietario del grupo o un administrador. Se aplicarán automáticamente cuando uno de ellos lo haga.",
       "status": "machine"
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, one {Ahora # cambio está pendiente de aplicarse.} other {Ahora # cambios están pendientes de aplicarse.}}",
-      "status": "machine"
-    },
     "chat.members.pending.waiting_added": {
       "text": "Pendiente de añadir.",
       "status": "machine"
@@ -2540,18 +2508,6 @@
     },
     "chat.members.remove.confirm_named": {
       "text": "Quitar a {name}",
-      "status": "machine"
-    },
-    "chat.members.remove.done": {
-      "text": "Miembro quitado.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested": {
-      "text": "Eliminación solicitada. Se aplicará cuando el propietario o un administrador aplique el cambio.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested_short": {
-      "text": "Eliminación solicitada.",
       "status": "machine"
     },
     "chat.members.remove.title": {
@@ -3118,8 +3074,12 @@
       "text": "Solicitud para unirse",
       "status": "machine"
     },
-    "chat.system.members_changed": {
-      "text": "Cambiaron los miembros",
+    "chat.system.member_joined": {
+      "text": "{name} se unió",
+      "status": "machine"
+    },
+    "chat.system.member_left": {
+      "text": "{name} salió",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -3148,14 +3108,6 @@
     },
     "chat.transfer.candidate_admin": {
       "text": "{name}, administrador",
-      "status": "machine"
-    },
-    "chat.transfer.done_admin": {
-      "text": "{name} es ahora el propietario del grupo. Sigues siendo administrador.",
-      "status": "machine"
-    },
-    "chat.transfer.done_member": {
-      "text": "{name} es ahora el propietario del grupo. Ahora eres un miembro normal.",
       "status": "machine"
     },
     "chat.transfer.irreversible_body": {
@@ -3196,10 +3148,6 @@
     },
     "chat.transfer.pending_named": {
       "text": "Pendiente de hacer propietario a {name}.",
-      "status": "machine"
-    },
-    "chat.transfer.requested": {
-      "text": "Transferencia de propiedad solicitada. Se aplicará cuando el propietario o un administrador aplique el cambio.",
       "status": "machine"
     },
     "chat.transfer.role_change_pending": {
@@ -4164,14 +4112,6 @@
     },
     "device_link.qr.waiting": {
       "text": "Esperando a que tu otro dispositivo escanee este código...",
-      "status": "machine"
-    },
-    "device_link.request.added": {
-      "text": "Dispositivo añadido.",
-      "status": "machine"
-    },
-    "device_link.request.added_named": {
-      "text": "«{name}» añadido.",
       "status": "machine"
     },
     "device_link.request.adding": {
@@ -7548,14 +7488,6 @@
     },
     "settings.devices.reset_note": {
       "text": "Las claves de tu cuenta se restablecieron hoy en este dispositivo. Se cerró la sesión en los demás dispositivos y se quitaron. Vuelve a añadirlos desde Ajustes > Dispositivos > Añadir un dispositivo.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done": {
-      "text": "Dispositivo añadido. Aparecerá en la lista cuando termine de unirse.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done_named": {
-      "text": "«{name}» añadido. Aparecerá en la lista cuando termine de unirse.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {

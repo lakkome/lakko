@@ -256,7 +256,6 @@ public val DEVICE_LINK_OLD_WRONG_CODE_COPY: UiText = UiText("device_link.request
 public val DEVICE_LINK_OLD_DECLINED_COPY: UiText = UiText("device_link.request.declined")
 public val DEVICE_LINK_HANDLED_ELSEWHERE_COPY: UiText = UiText("device_link.request.handled_elsewhere")
 public val DEVICE_LINK_LIMIT_COPY: UiText = UiText("device_link.request.too_many")
-public val DEVICE_LINK_ADDED_COPY: UiText = UiText("device_link.request.added")
 public val DEVICE_LINK_ADD_FAILED_COPY: UiText = UiText("device_link.request.error.generic")
 public val DEVICE_LINK_REQUEST_EXPIRED_COPY: UiText = UiText("device_link.request.expired")
 
@@ -275,7 +274,8 @@ public sealed interface OldDeviceLinkState {
     /** The new device entered the right code; pairing runs. */
     public data object Adding : OldDeviceLinkState
 
-    /** A closing notice with one sentence (and Close). */
+    /** A closing notice with one sentence (and Close): a failure, a decline,
+     *  an expired or elsewhere-handled request. A device added shows none. */
     public data class Notice(val message: UiText) : OldDeviceLinkState
 
     /** The fresh-auth proof ran out between two steps of an answered request
@@ -346,8 +346,10 @@ public class DeviceLinkAnswerLimit(
  *   account's own login handle (`parsePairingQr`); throws when it names
  *   another account or is malformed.
  * @param pair runs the unchanged add-device pairing with the parsed payload.
- * @param addedCopy the closing line once the device is added, naming it from
- *   the card its payload carried (UX second-device.md section 2.1).
+ *
+ * A device added closes the prompt ([OldDeviceLinkState.Idle]) with no
+ * closing line (UX second-device.md section 2.1, decided 2026-10-29); only a
+ * failure keeps its notice.
  */
 public class OldDeviceLink<P>(
     private val api: DeviceLinkApi,
@@ -356,7 +358,6 @@ public class OldDeviceLink<P>(
     private val openPayload: (ByteArray) -> P,
     private val pair: suspend (P) -> Unit,
     private val limit: DeviceLinkAnswerLimit,
-    private val addedCopy: (P) -> UiText = { DEVICE_LINK_ADDED_COPY },
 ) {
     private var answeredId: String? = null
     private var responder: DeviceLinkResponderPort? = null
@@ -511,7 +512,8 @@ public class OldDeviceLink<P>(
         state = try {
             pair(pending.payload)
             owed = null
-            OldDeviceLinkState.Notice(addedCopy(pending.payload))
+            // Added: the prompt simply closes (UX second-device.md 2.1).
+            OldDeviceLinkState.Idle
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: me.lakko.app.auth.FreshAuthRequired) {

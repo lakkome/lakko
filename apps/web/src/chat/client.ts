@@ -88,6 +88,7 @@ import {
   type Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
 import type { IdentitySecrets } from "../auth/AuthContext";
+import type { MembershipChange } from "./membership-rows";
 import {
   parseBodyEnvelope,
   type AttachmentRefBytes,
@@ -253,6 +254,11 @@ export type IncomingChatEvent =
        *  that happened to the group. */
       systemKind: "commit" | "external-join-proposal";
       createdAt: string;
+      /** `docs/ux/second-device.md` section 4 — on the LAST commit row of a
+       *  received batch that changed the people of a group, the person keys
+       *  that joined and left (`chat/membership-rows.ts`). Absent on every
+       *  other row; the receive paths add it after the batch is applied. */
+      membership?: MembershipChange;
     }
   | {
       /** ADR-0045 — a membership PROPOSAL: a member asked for an add, a

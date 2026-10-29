@@ -848,15 +848,7 @@ internal fun threadConversationRows(
     strings: Strings = Localization.strings.value,
 ): List<ConversationListRow> = threads.map { thread ->
     val kind = conversationKind(repository, thread.groupIdHex)
-    // A call row IS the conversation's last event and belongs in the
-    // preview; the receive loop's bookkeeping rows are not and never
-    // did. Found live: a group whose only rows were commits showed the
-    // literal "[mls commit]" as its preview, which is a protocol name
-    // in a person's face and the one thing the copy rules forbid
-    // outright. A call row is a system row carrying its parts, so the
-    // two are told apart by what the row HOLDS, not by its text.
-    val last = thread.messages.lastOrNull { it.direction != Direction.System || it.call != null }
-        ?: thread.messages.lastOrNull { it.call != null }
+    val last = previewSourceRow(thread.messages)
     val lastMs = last?.let { parseMessageTimeMs(it.createdAt) }
     val senderName = last?.takeIf { it.direction == Direction.Incoming }
         ?.authorKey?.let { directory.resolve(it).primary }
@@ -902,6 +894,21 @@ internal fun threadConversationRows(
         },
     )
 }
+
+/**
+ * The row a conversation's preview is taken from: the last message or call
+ * row. A call row IS the conversation's last event and belongs in the
+ * preview; the receive loop's bookkeeping rows (a commit, an external-join
+ * request) are not and never did, in a group or a one-to-one alike. Found
+ * live: a group whose only rows were commits showed the literal
+ * "[mls commit]" as its preview, which is a protocol name in a person's face
+ * and the one thing the copy rules forbid outright; and in a one-to-one,
+ * whose people cannot change (ADR-0062), a commit row is never a "Members
+ * changed" line either (2026-10-29). A call row is a system row carrying its
+ * parts, so the two are told apart by what the row HOLDS, not by its text.
+ */
+internal fun previewSourceRow(messages: List<ChatMessage>): ChatMessage? =
+    messages.lastOrNull { it.direction != Direction.System || it.call != null }
 
 /**
  * The second line of a row: the membership-ended line when this device's

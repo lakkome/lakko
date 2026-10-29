@@ -333,8 +333,9 @@ public fun ChatScreen(
     val strings = LocalStrings.current
     val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
     val use24h = remember(context) { DateFormat.is24HourFormat(context) }
-    val timeline = remember(state.messages, zone, use24h, strings) {
-        buildTimeline(state.messages, System.currentTimeMillis(), zone, use24h, locale, strings)
+    val timeline = remember(state.messages, zone, use24h, strings, isGroupChat) {
+        // UX second-device.md section 4 — a group draws its membership rows.
+        buildTimeline(state.messages, System.currentTimeMillis(), zone, use24h, locale, strings, isGroup = isGroupChat)
     }
     // ADR-0052 decision 3 / UX 4.1 — the pins. The bar is DERIVED from the two
     // stores and the held messages, never stored: a pin whose message this
@@ -972,6 +973,16 @@ public fun ChatScreen(
                             } else {
                                 null
                             },
+                            // UX second-device.md section 4 — "VG3 joined",
+                            // names resolved now; `nameVersion` is read so the
+                            // row updates in place.
+                            systemLine = if (isGroupChat) {
+                                nameVersion.let {
+                                    me.lakko.app.chat.membershipRowText(msg, viewModel::nameOf, strings)
+                                }
+                            } else {
+                                null
+                            },
                             // ADR-0045 UX §6.2.5 — the same predicate the
                             // composer is gated on, two `when`s below.
                             // UX section 8 — and never while selecting: the
@@ -1405,6 +1416,9 @@ private fun MessageRow(
     /** ADR-0048 — the resolved author name for an incoming group bubble, else
      *  `null` (no label). */
     authorName: String?,
+    /** UX second-device.md section 4 — the drawn line of a membership row
+     *  (`VG3 joined`), else `null` and a system row shows its own text. */
+    systemLine: String? = null,
     /** ADR-0045 UX §6.2.5 — whether Edit / Delete / React are offered at all.
      *  `false` once this device's membership has ended: all three compose an
      *  application message, so all three are refused by the same core gate
@@ -1596,7 +1610,7 @@ private fun MessageRow(
                         contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     ) {
                         Text(
-                            text = msg.text,
+                            text = systemLine ?: msg.text,
                             style = MaterialTheme.typography.labelMedium,
                             textAlign = TextAlign.Center,
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
@@ -3847,7 +3861,9 @@ private fun MembersSheet(
                             // ADR-0084 — the person's photo beside their name.
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 LakkoAvatar(
-                                    name = addName,
+                                    // Initials from the name alone, never
+                                    // the ` · @username` label.
+                                    name = viewModel.avatarNameOfKeyB64(request.addSignatureKeyB64),
                                     seed = request.addSignatureKeyB64 ?: addName,
                                     size = 24.dp,
                                     personKey = me.lakko.app.ui.components.personKeyBytes(request.addSignatureKeyB64),
@@ -3951,7 +3967,7 @@ private fun MembersSheet(
                             // ADR-0084 — the joiner's photo, through the same
                             // key their name resolves by.
                             LakkoAvatar(
-                                name = viewModel.pendingJoinLabel(ref),
+                                name = viewModel.pendingJoinAvatarName(ref),
                                 seed = java.util.Base64.getEncoder().encodeToString(ref),
                                 size = 28.dp,
                                 personKey = viewModel.pendingJoinPersonKey(ref),
@@ -4082,7 +4098,9 @@ private fun MembersSheet(
                                 val memberName = viewModel.memberLabel(member)
                                 val isOwnRow = ownLeaf == member.leafIndex
                                 LakkoAvatar(
-                                    name = memberName,
+                                    // Initials from the name alone, never
+                                    // the ` · @username` label.
+                                    name = viewModel.memberAvatarName(member),
                                     seed = java.util.Base64.getEncoder().encodeToString(member.signaturePublicKey),
                                     size = 32.dp,
                                     personKey = if (isOwnRow) null else member.signaturePublicKey,

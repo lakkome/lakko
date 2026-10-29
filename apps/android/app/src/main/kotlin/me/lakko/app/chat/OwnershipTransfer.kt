@@ -512,32 +512,10 @@ internal fun transferPendingLabel(successorLabel: String?): UiText =
     }
 
 /** Which of §6.1.7's two shapes the outcome notice takes. */
-internal enum class TransferOutcome { COMMITTED, PROPOSED }
-
-/**
- * The outcome notice (§6.1.7).
- *
- * The two swept forms name the transferor's **own new role**, because half the
- * panel changes under them in one tap: an owner who chose `Become a regular
- * member` loses the add form, the invite block, every `Remove` and every admin
- * toggle at once. §5.3's reasoning about a vanishing control applies with more
- * force to a vanishing section.
- *
- * The published-but-unswept form names **no** role, because nothing has changed
- * yet; appending "you are now an admin" to a request that has not landed would
- * be the optimistic-update lie in its purest form.
- */
-internal fun transferOutcomeNotice(
-    outcome: TransferOutcome,
-    successorLabel: String,
-    outgoing: OutgoingOwner,
-): UiText = when (outcome) {
-    TransferOutcome.PROPOSED -> UiText("chat.transfer.requested")
-    TransferOutcome.COMMITTED -> when (outgoing) {
-        OutgoingOwner.ADMIN -> UiText("chat.transfer.done_admin", texts = mapOf("name" to successorLabel))
-        OutgoingOwner.MEMBER -> UiText("chat.transfer.done_member", texts = mapOf("name" to successorLabel))
-    }
-}
+// §6.1.7 (amended 2026-10-29, `docs/ux/proposal-based-membership.md` section
+// 2): a transfer shows no outcome notice, swept or not. The member rows and
+// the panel change in place when it lands; until then the pending label
+// (§6.1.6) is the only sign.
 
 // ---------------------------------------------------------------------------
 // §6.1.8 — the C-65 pre-check

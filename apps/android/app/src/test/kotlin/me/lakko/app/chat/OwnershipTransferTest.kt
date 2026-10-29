@@ -441,37 +441,8 @@ class OwnershipTransferTest {
     // §6.1.7 — what the transferor sees afterwards
     // -----------------------------------------------------------------------
 
-    @Test
-    fun `a swept transfer names the transferor's OWN new role`() {
-        // Half the panel changes under them in one tap: an owner who chose
-        // `Become a regular member` loses the add form, the invite block, every
-        // `Remove` and every admin toggle at once.
-        assertEquals(
-            "Alice is now the group owner. You are still an admin.",
-            transferOutcomeNotice(TransferOutcome.COMMITTED, "Alice", OutgoingOwner.ADMIN).en,
-        )
-        assertEquals(
-            "Alice is now the group owner. You are now a regular member.",
-            transferOutcomeNotice(TransferOutcome.COMMITTED, "Alice", OutgoingOwner.MEMBER).en,
-        )
-    }
-
-    @Test
-    fun `a published-but-unswept transfer names NO role`() {
-        // Nothing has changed yet; appending "you are now an admin" to a request
-        // that has not landed would be the optimistic-update lie in its purest
-        // form.
-        val notice = transferOutcomeNotice(TransferOutcome.PROPOSED, "Alice", OutgoingOwner.ADMIN)
-        assertEquals(
-            "Ownership transfer requested. It applies when an owner or an admin applies the change.",
-            notice.en,
-        )
-        assertFalse("an unswept request must claim no role at all", notice.en.contains("admin."))
-        assertEquals(
-            notice,
-            transferOutcomeNotice(TransferOutcome.PROPOSED, "Alice", OutgoingOwner.MEMBER),
-        )
-    }
+    // §6.1.7 — amended 2026-10-29: a transfer shows no outcome notice at all
+    // (the panel and the member rows change in place when it lands).
 
     // -----------------------------------------------------------------------
     // §6.1.6 — the pending label resolves through the live roster

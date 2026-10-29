@@ -657,7 +657,9 @@ public struct ChatScreen: View {
     /// system rows, laid out into days and runs (UX spec section 5.2).
     private var timelineEntries: [ChatTimeline.Entry] {
         ChatTimeline.layout(
-            messages: viewModel.messages.filter { !ChatTimeline.isHiddenSystemRow($0) },
+            messages: viewModel.messages.filter {
+                !ChatTimeline.isHiddenSystemRow($0, isGroup: viewModel.presentsAsGroup)
+            },
             nowMs: ChatRepository.nowMs(),
             calendar: .current,
             locale: l10n.locale,
@@ -666,7 +668,9 @@ public struct ChatScreen: View {
 
     /// The last row the timeline draws, for the scroll-to-bottom.
     private var lastDrawnMessageId: Int64? {
-        viewModel.messages.last(where: { !ChatTimeline.isHiddenSystemRow($0) })?.messageId
+        viewModel.messages.last(where: {
+            !ChatTimeline.isHiddenSystemRow($0, isGroup: viewModel.presentsAsGroup)
+        })?.messageId
     }
 
     /// See `messagesList`.
@@ -2042,6 +2046,20 @@ struct MessageRow: View {
         case .system:
             if let call = ChatTimeline.callRow(message) {
                 callRow(call)
+            } else if let membership = ChatTimeline.membershipRow(message) {
+                // `docs/ux/second-device.md` section 4 — one sentence per
+                // person, the name resolved now, never stored.
+                Text(membership.sentences(name: {
+                    guard let key = Data(base64Encoded: $0) else {
+                        return ResolvedDisplayName.placeholderMember
+                    }
+                    return ProfileDirectory.shared.resolve(signatureKey: key).name
+                }).joined(separator: "\n"))
+                    .font(.caption)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 4)
             } else {
                 // Small and centred (UX spec section 5.2).
                 Text(message.text)

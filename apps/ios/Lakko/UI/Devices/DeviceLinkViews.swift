@@ -135,12 +135,7 @@ struct DeviceLinkRequestModal: View {
                 }
             case .adding:
                 ProgressView(DeviceLinkModalCopy.adding)
-            case .added:
-                // UX section 2.1 — named by the card in the new device's payload.
-                info(DeviceLinkModalCopy.added(flow.addedName))
             case .keysNotSent:
-                Text(DeviceLinkModalCopy.added(flow.addedName))
-                    .multilineTextAlignment(.center)
                 info(DeviceLinkModalCopy.keysNotSent)
             case .wrongCode:
                 info(DeviceLinkModalCopy.wrongCode)

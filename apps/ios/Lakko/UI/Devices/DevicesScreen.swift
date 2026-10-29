@@ -33,6 +33,8 @@ public struct DevicesScreen: View {
     private let rotation: KeyRotationRunner?
 
     @ObservedObject private var l10n = Localization.shared
+    /// UX section 2.1 — the keys-not-sent line after a scan link.
+    @ObservedObject private var scanNotice = DeviceScanNotice.shared
 
     public init(
         authRepository: AuthRepository,
@@ -89,8 +91,21 @@ public struct DevicesScreen: View {
                     sessionToken: session.sessionToken,
                     onDeviceRemoved: onDeviceRemoved
                 )
+                if scanNotice.showsKeysNotSent(accountIdB64: session.accountIdB64) {
+                    // UX section 2.1 — the scan link added the device but
+                    // could not hand over the keys: said under the list until
+                    // `Add a device` is pressed again.
+                    Section {
+                        Label(l10n.t("device_link.keys_not_sent"), systemImage: "exclamationmark.circle")
+                            .foregroundStyle(Color.lakkoWarning)
+                            .font(.footnote)
+                    }
+                }
                 Section {
-                    Button(action: onAddDevice) {
+                    Button(action: {
+                        scanNotice.addDevicePressed()
+                        onAddDevice()
+                    }) {
                         Label(l10n.t("devices.add.title"), systemImage: "plus")
                     }
                 } footer: {
@@ -177,6 +192,11 @@ struct AddDeviceScreen: View {
     /// scan flow added it to the DeviceGroup; the composition root admits it
     /// to every chat.
     var onDeviceAdded: (Data) -> Void = { _ in }
+    /// UX section 2.1 (decided 2026-10-29) — the scan route linked the
+    /// device: back to the Devices list, where the new device's row already
+    /// carries its name. No result line (``DeviceScanNotice`` keeps the
+    /// keys-not-sent line for the list).
+    var onLinked: () -> Void = {}
 
     private enum Side: String, CaseIterable, Identifiable {
         case show
@@ -237,7 +257,8 @@ struct AddDeviceScreen: View {
                             accountIdBytes: session.accountIdBytes,
                             accountIdB64: session.accountIdB64,
                             sessionToken: session.sessionToken,
-                            onDeviceAdded: onDeviceAdded
+                            onDeviceAdded: onDeviceAdded,
+                            onLinked: onLinked
                         )
                     }
                 } else {
@@ -414,6 +435,9 @@ private struct ScanView: View {
     let sessionToken: String
     /// ADR-0050 section 2.8 — the admission fan-out over every chat.
     let onDeviceAdded: (Data) -> Void
+    /// UX section 2.1 — the device was linked: leave the pairing flow for
+    /// the Devices list.
+    let onLinked: () -> Void
 
     private let authRepository: AuthRepository
     /// UX 17.4 — the proof block of `Link this device?` (absent while a
@@ -428,7 +452,8 @@ private struct ScanView: View {
         accountIdBytes: Data,
         accountIdB64: String,
         sessionToken: String,
-        onDeviceAdded: @escaping (Data) -> Void
+        onDeviceAdded: @escaping (Data) -> Void,
+        onLinked: @escaping () -> Void
     ) {
         self.authRepository = authRepository
         self.ownLoginHandle = ownLoginHandle
@@ -436,6 +461,7 @@ private struct ScanView: View {
         self.accountIdB64 = accountIdB64
         self.sessionToken = sessionToken
         self.onDeviceAdded = onDeviceAdded
+        self.onLinked = onLinked
         self._proof = StateObject(
             wrappedValue: FreshAuthProofModel(surface: .addDeviceScan, repository: authRepository))
     }
@@ -450,9 +476,6 @@ private struct ScanView: View {
         /// device is (UX section 2.1), `nil` when it carries none.
         case confirm(Data, card: StoredDeviceCard?)
         case processing
-        /// The device was added; `keysSent` says whether this device could
-        /// hand over the keys with it; `name` is what its card names it.
-        case done(keysSent: Bool, name: String?)
         case error(UiText)
     }
 
@@ -522,15 +545,6 @@ private struct ScanView: View {
             case .processing:
                 ProgressView(l10n.t("device_link.request.adding"))
 
-            case .done(let keysSent, let name):
-                Label(DeviceLinkModalCopy.added(name), systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-                .font(.footnote)
-                if !keysSent {
-                    Label(l10n.t("device_link.keys_not_sent"), systemImage: "exclamationmark.circle")
-                        .foregroundStyle(Color.lakkoWarning)
-                        .font(.footnote)
-                }
 
             case .error(let message):
                 VStack(alignment: .leading, spacing: 8) {
@@ -608,8 +622,11 @@ private struct ScanView: View {
                 // Not awaited here: it waits for the device to land and
                 // publish its KeyPackage, which is minutes.
                 onDeviceAdded(scanned.newDeviceKey)
-                state = .done(
-                    keysSent: scanned.keysSent, name: DeviceCards.pairingName(scanned.newDeviceCard))
+                // UX section 2.1 — no result line: back to the Devices list,
+                // which says so when the keys could not be handed over.
+                DeviceScanNotice.shared.linked(accountIdB64: accountIdB64, keysSent: scanned.keysSent)
+                state = .idle
+                onLinked()
             } catch {
                 state = .error(UiText { PairingScanFailure.userFacing(error) })
             }
@@ -1358,9 +1375,40 @@ extension DeviceCards.Words {
     }
 }
 
+/// UX section 2.1 (decided 2026-10-29) — the scan route has no result line:
+/// once the device was linked it goes straight back to the Devices list,
+/// where the new device's row already carries its name from the payload card.
+/// When the keys could not be handed over, the existing keys-not-sent line is
+/// shown under the Devices list (the person must use a passkey or the phrase
+/// on the new device) until `Add a device` is pressed again.
+@MainActor
+final class DeviceScanNotice: ObservableObject {
+    static let shared = DeviceScanNotice()
+
+    /// The account whose last scan link sent no keys; `nil` when there is
+    /// nothing to say.
+    @Published private(set) var keysNotSentAccountB64: String?
+
+    init() {}
+
+    /// The scan route linked a device for `accountIdB64`.
+    func linked(accountIdB64: String, keysSent: Bool) {
+        keysNotSentAccountB64 = keysSent ? nil : accountIdB64
+    }
+
+    /// `Add a device` was pressed: the line goes.
+    func addDevicePressed() {
+        keysNotSentAccountB64 = nil
+    }
+
+    /// Whether the Devices list of `accountIdB64` shows the keys-not-sent line.
+    func showsKeysNotSent(accountIdB64: String) -> Bool {
+        keysNotSentAccountB64 == accountIdB64
+    }
+}
+
 /// UX section 2.1 — the signed-in device names the device being added by the
-/// card in its pairing payload; with no card, today's copy. The result line
-/// is ``DeviceLinkModalCopy/added(_:)``, shared with the code route.
+/// card in its pairing payload; with no card, today's copy.
 @MainActor
 enum DevicePairingCopy {
     /// The confirm step after a scanned code: title and the card's lines.

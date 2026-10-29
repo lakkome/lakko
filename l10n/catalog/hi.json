@@ -2402,10 +2402,6 @@
       "text": "सदस्य जोड़ें",
       "status": "machine"
     },
-    "chat.members.add.done": {
-      "text": "{name} को जोड़ दिया गया।",
-      "status": "machine"
-    },
     "chat.members.add.error.no_bundle": {
       "text": "इस व्यक्ति ने अभी तक Lakko सेट अप करना पूरा नहीं किया है। बाद में फिर से कोशिश करें।",
       "status": "machine"
@@ -2422,16 +2418,8 @@
       "text": "@username",
       "status": "machine"
     },
-    "chat.members.add.requested": {
-      "text": "{name} को जोड़ने का अनुरोध भेजा गया। वे तब शामिल होंगे जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
-      "status": "machine"
-    },
     "chat.members.add.submit": {
       "text": "जोड़ें",
-      "status": "machine"
-    },
-    "chat.members.admin.demoted": {
-      "text": "एडमिन की भूमिका हटा दी गई।",
       "status": "machine"
     },
     "chat.members.admin.make": {
@@ -2442,16 +2430,8 @@
       "text": "एडमिन",
       "status": "machine"
     },
-    "chat.members.admin.promoted": {
-      "text": "एडमिन बना दिया गया।",
-      "status": "machine"
-    },
     "chat.members.admin.remove": {
       "text": "एडमिन की भूमिका हटाएँ",
-      "status": "machine"
-    },
-    "chat.members.admin.requested": {
-      "text": "बदलाव का अनुरोध भेजा गया। यह तब लागू होगा जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
       "status": "machine"
     },
     "chat.members.count": {
@@ -2472,14 +2452,6 @@
     },
     "chat.members.join.approve": {
       "text": "स्वीकार करें",
-      "status": "machine"
-    },
-    "chat.members.join.approved_added": {
-      "text": "शामिल होना स्वीकार किया गया। उन्हें ग्रुप में जोड़ दिया गया है।",
-      "status": "machine"
-    },
-    "chat.members.join.approved_requested": {
-      "text": "शामिल होना स्वीकार किया गया। वे तब शामिल होंगे जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
       "status": "machine"
     },
     "chat.members.join.heading": {
@@ -2518,10 +2490,6 @@
       "text": "सदस्यता के बदलाव ग्रुप के मालिक या कोई एडमिन लागू करते हैं। जब उनमें से कोई ऐसा करेगा, तो ये अपने-आप लागू हो जाएँगे।",
       "status": "machine"
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, one {अब # बदलाव लागू होने का इंतज़ार कर रहा है।} other {अब # बदलाव लागू होने का इंतज़ार कर रहे हैं।}}",
-      "status": "machine"
-    },
     "chat.members.pending.waiting_added": {
       "text": "जोड़े जाने का इंतज़ार।",
       "status": "machine"
@@ -2540,18 +2508,6 @@
     },
     "chat.members.remove.confirm_named": {
       "text": "{name} को हटाएँ",
-      "status": "machine"
-    },
-    "chat.members.remove.done": {
-      "text": "सदस्य को हटा दिया गया।",
-      "status": "machine"
-    },
-    "chat.members.remove.requested": {
-      "text": "हटाने का अनुरोध भेजा गया। यह तब लागू होगा जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
-      "status": "machine"
-    },
-    "chat.members.remove.requested_short": {
-      "text": "हटाने का अनुरोध भेजा गया।",
       "status": "machine"
     },
     "chat.members.remove.title": {
@@ -3118,8 +3074,12 @@
       "text": "शामिल होने का अनुरोध",
       "status": "machine"
     },
-    "chat.system.members_changed": {
-      "text": "सदस्य बदले",
+    "chat.system.member_joined": {
+      "text": "{name} जुड़े",
+      "status": "machine"
+    },
+    "chat.system.member_left": {
+      "text": "{name} चले गए",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -3148,14 +3108,6 @@
     },
     "chat.transfer.candidate_admin": {
       "text": "{name}, एडमिन",
-      "status": "machine"
-    },
-    "chat.transfer.done_admin": {
-      "text": "{name} अब ग्रुप के मालिक हैं। आप अब भी एडमिन हैं।",
-      "status": "machine"
-    },
-    "chat.transfer.done_member": {
-      "text": "{name} अब ग्रुप के मालिक हैं। अब आप एक सामान्य सदस्य हैं।",
       "status": "machine"
     },
     "chat.transfer.irreversible_body": {
@@ -3196,10 +3148,6 @@
     },
     "chat.transfer.pending_named": {
       "text": "{name} को मालिक बनाए जाने का इंतज़ार है।",
-      "status": "machine"
-    },
-    "chat.transfer.requested": {
-      "text": "मालिकाना हक सौंपने का अनुरोध भेजा गया। यह तब लागू होगा जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
       "status": "machine"
     },
     "chat.transfer.role_change_pending": {
@@ -4164,14 +4112,6 @@
     },
     "device_link.qr.waiting": {
       "text": "आपके दूसरे डिवाइस के यह कोड स्कैन करने का इंतज़ार है...",
-      "status": "machine"
-    },
-    "device_link.request.added": {
-      "text": "डिवाइस जोड़ दिया गया।",
-      "status": "machine"
-    },
-    "device_link.request.added_named": {
-      "text": "“{name}” जोड़ा गया।",
       "status": "machine"
     },
     "device_link.request.adding": {
@@ -7548,14 +7488,6 @@
     },
     "settings.devices.reset_note": {
       "text": "आज इस डिवाइस पर आपके अकाउंट की कुंजियाँ रीसेट की गईं। दूसरे डिवाइस लॉग आउट करके हटा दिए गए। उन्हें सेटिंग्स > डिवाइस > डिवाइस जोड़ें से फिर से जोड़ें।",
-      "status": "machine"
-    },
-    "settings.devices.scan.done": {
-      "text": "डिवाइस जुड़ गया। शामिल होने की प्रक्रिया पूरी होते ही यह सूची में दिखेगा।",
-      "status": "machine"
-    },
-    "settings.devices.scan.done_named": {
-      "text": "“{name}” जोड़ा गया। जुड़ना पूरा होने पर यह सूची में दिखेगा।",
       "status": "machine"
     },
     "settings.devices.scan.opening": {

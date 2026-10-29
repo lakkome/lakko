@@ -3906,6 +3906,13 @@ a.ghost.small:hover {
   text-align: center;
 }
 
+/* docs/ux/second-device.md section 4 — one sentence per person, stacked. */
+.lk-system-row--membership {
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
 /* docs/ux/calls.md section 6 — a finished call in the conversation. Centred
    like the other system rows (nobody said it), but a real button: tapping it
    calls back. The missed variant is tinted AND says `Missed call` AND carries

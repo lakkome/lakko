@@ -656,3 +656,45 @@ public final class LeaveRequestStore {
         }
     }
 }
+
+// MARK: - The notice after a membership action
+
+/// `docs/ux/proposal-based-membership.md` section 2, "What 'tap, done'
+/// shows" (2026-10-29, with the maintainer's amendment of the same day).
+///
+/// Decided from the GROUP after the attempt, never from which path committed
+/// the change (a background sweep may have committed it first):
+/// - add, approving a join request, remove, make/remove admin and ownership
+///   transfer (owner or admin actions) show no notice at all, in effect or not; until such a change
+///   lands the member row's own annotation is the only sign;
+/// - leave shows `chat.leave.requested` only while this device is still a
+///   member, and that notice clears itself the moment the leave lands.
+public enum MembershipActionNotice {
+    public enum Action: Equatable {
+        case add
+        /// Approving a join request: an add (ADR-0027 on the ADR-0045 path).
+        case approveJoin
+        case remove
+        case setAdmin
+        case transferOwnership
+        case leave
+    }
+
+    /// The catalog key of the notice to show after `action`, or `nil` for
+    /// none. `inEffect`: the group, read after the attempt, already shows the
+    /// change (for a leave: this device's membership has ended).
+    public static func after(_ action: Action, inEffect: Bool) -> String? {
+        switch action {
+        case .add, .approveJoin, .remove, .setAdmin, .transferOwnership:
+            return nil
+        case .leave:
+            return inEffect ? nil : "chat.leave.requested"
+        }
+    }
+
+    /// Whether a shown leave notice goes: the leave landed (this device's
+    /// membership ended).
+    public static func leaveNoticeClears(shown: Bool, membershipEnded: Bool) -> Bool {
+        shown && membershipEnded
+    }
+}
