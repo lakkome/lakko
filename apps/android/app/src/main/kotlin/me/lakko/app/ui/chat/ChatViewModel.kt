@@ -316,6 +316,11 @@ public class ChatViewModel(
      */
     private var leaveRequestedAtMs: Long? = repo.leaveRequestedAt(groupIdHex)
 
+    /** UX proposal-based-membership section 2 — the leave notice owed until the
+     *  leave lands ([me.lakko.app.chat.RequestedNotice]). Declared before the
+     *  membership state, which an initialiser below may already apply. */
+    private val leaveNotice = me.lakko.app.chat.RequestedNotice()
+
     private val mutableMembership: MutableStateFlow<me.lakko.app.chat.MembershipState> =
         MutableStateFlow(
             me.lakko.app.chat.membershipState(
@@ -1461,6 +1466,10 @@ public class ChatViewModel(
             isActive = isActive,
             leaveRequestedAtMs = leaveRequestedAtMs,
         )
+        // The leave landed: its `requested` notice goes, and only it.
+        leaveNotice.onRefresh()?.let { gone ->
+            if (mutableMembershipNotice.value == gone) mutableMembershipNotice.value = null
+        }
     }
 
     /** Re-read the live MLS roster from the repository. */
@@ -1702,7 +1711,7 @@ public class ChatViewModel(
         mutableMembershipNotice.value = null
         viewModelScope.launch {
             try {
-                val result = withMembershipRetry(
+                withMembershipRetry(
                     me.lakko.app.chat.RetryableRequest.TransferOwnership(
                         subjectKeyB64 = successor.signatureKeyB64,
                         outgoing = outgoing,
@@ -1718,18 +1727,10 @@ public class ChatViewModel(
                 // nothing left to reconsider. A throw above leaves the step open
                 // with the pick and the role choice intact.
                 mutableTransferStepOpen.value = false
-                val swept = repo.sweepIfCommitter(groupIdHex)
-                val landed = result is me.lakko.app.chat.MembershipOutcome.Committed ||
-                    swept is me.lakko.app.chat.SweepOutcome.Committed
-                mutableMembershipNotice.value = me.lakko.app.chat.transferOutcomeNotice(
-                    outcome = if (landed) {
-                        me.lakko.app.chat.TransferOutcome.COMMITTED
-                    } else {
-                        me.lakko.app.chat.TransferOutcome.PROPOSED
-                    },
-                    successorLabel = successor.label,
-                    outgoing = outgoing,
-                )
+                repo.sweepIfCommitter(groupIdHex)
+                // UX proposal-based-membership section 2 (amended 2026-10-29):
+                // no notice, landed or not; the rows change in place, and the
+                // pending label shows until it lands.
                 refreshMembers()
             } catch (e: Throwable) {
                 reportMembershipFailure(e, "onTransferOwnership", "chat.error.transfer")
@@ -1833,6 +1834,13 @@ public class ChatViewModel(
      * appended for the local leaf. Mirrors the ADR-0021 call-roster resolution,
      * keyed on the member's signature public key.
      */
+    /** The name [memberLabel]'s avatar takes its initials from: the display
+     *  name without the ` · @username` the label adds. */
+    public fun memberAvatarName(member: GroupMember): String {
+        if (ownLeafIndex() == member.leafIndex) return Localization.strings.value["chat.author.you"]
+        return me.lakko.app.profile.avatarName(profileNames.resolve(member.signaturePublicKey))
+    }
+
     public fun memberLabel(member: GroupMember): String {
         // The local leaf is not in the contact directory, so the resolver
         // would fall back to "Member"; the row is simply "You".
@@ -1924,6 +1932,27 @@ public class ChatViewModel(
      *  [pendingJoinLabel] names them by). */
     public fun pendingJoinPersonKey(joinerSignatureKey: ByteArray): ByteArray =
         repo.pendingExternalJoinAccountKey(groupIdHex, joinerSignatureKey) ?: joinerSignatureKey
+
+    /** [nameOfKeyB64] for an avatar: the display name alone. */
+    public fun avatarNameOfKeyB64(keyB64: String?): String {
+        val key = try {
+            keyB64?.let { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }
+        } catch (_: Throwable) {
+            null
+        } ?: return Localization.strings.value["chat.members.unnamed"]
+        return me.lakko.app.profile.avatarName(profileNames.resolve(key))
+    }
+
+    /** [pendingJoinLabel] for an avatar: the display name alone. */
+    public fun pendingJoinAvatarName(joinerSignatureKey: ByteArray): String =
+        me.lakko.app.chat.pendingJoinLabel(
+            accountKey = repo.pendingExternalJoinAccountKey(groupIdHex, joinerSignatureKey),
+            leafKey = joinerSignatureKey,
+            knownName = { key ->
+                profileNames.resolve(key).takeIf { !it.isPlaceholder }?.let { me.lakko.app.profile.avatarName(it) }
+            },
+            fallbackLabel = { key -> avatarNameOfKeyB64(me.lakko.app.chat.outboxB64(key)) },
+        )
 
     public fun nameOfKeyB64(keyB64: String?): String {
         val key = try {
@@ -2110,7 +2139,13 @@ public class ChatViewModel(
                 // true either way.
                 repo.noteOwnLeaveRequested(groupIdHex)
                 leaveRequestedAtMs = repo.leaveRequestedAt(groupIdHex)
-                mutableMembershipNotice.value = UiText("chat.leave.requested")
+                // UX proposal-based-membership section 2 — the notice only
+                // when the leave is not in effect after the attempt (an
+                // admin's own sweep, or another committer, may already have
+                // applied it); it goes by itself when the leave lands.
+                mutableMembershipNotice.value = leaveNotice.afterAttempt(UiText("chat.leave.requested")) {
+                    me.lakko.app.chat.leaveApplied(repo.isGroupActive(groupIdHex))
+                }
                 refreshMembers()
             } catch (e: Throwable) {
                 reportMembershipFailure(e, "onLeaveGroup", "chat.error.leave")
@@ -2196,26 +2231,10 @@ public class ChatViewModel(
                 withApproveJoinRetry(proposalRef) {
                     repo.approveExternalJoin(groupIdHex, proposalRef)
                 }
-                val swept = repo.sweepIfCommitter(groupIdHex)
-                mutableMembershipNotice.value = if (swept is me.lakko.app.chat.SweepOutcome.Committed) {
-                    UiText("chat.members.join.approved_added")
-                } else {
-                    // ADR-0045 S7 residual 2 — an approve that did not apply has
-                    // grown a queue only a sweep drains, and the core's own
-                    // feedback (its cap refusal) lands on whoever proposes NEXT.
-                    // Naming the depth here puts it in front of the person who
-                    // caused it. Read from the core, not from `pendingRequests`,
-                    // which has not been refreshed yet.
-                    val queue = me.lakko.app.chat.waitingQueueLine(
-                        repo.pendingProposalCount(groupIdHex),
-                    )
-                    val approved = UiText("chat.members.join.approved_requested")
-                    if (queue == null) {
-                        approved
-                    } else {
-                        UiText("common.sentence_pair", parts = mapOf("first" to approved, "second" to queue))
-                    }
-                }
+                repo.sweepIfCommitter(groupIdHex)
+                // UX proposal-based-membership section 2 (amended 2026-10-29):
+                // no notice, landed or not. The request row goes away and the
+                // person appears in the roster when the change lands.
                 // Acting on the queue is what may have made room for the
                 // request the quarantine turned away, so the notice about it
                 // stops being current.

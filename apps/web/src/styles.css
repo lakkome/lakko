@@ -3906,6 +3906,13 @@ a.ghost.small:hover {
   text-align: center;
 }
 
+/* docs/ux/second-device.md section 4 — one sentence per person, stacked. */
+.lk-system-row--membership {
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
 /* docs/ux/calls.md section 6 — a finished call in the conversation. Centred
    like the other system rows (nobody said it), but a real button: tapping it
    calls back. The missed variant is tinted AND says `Missed call` AND carries
@@ -7622,4 +7629,34 @@ button.lk-folder-new {
 .lk-word-suggest > [role="option"]:hover,
 .lk-word-suggest > .active {
   background: var(--surface-hover);
+}
+/* Identity-recovery UX 17.5: the exclamation-mark badge on the Settings
+   destination and on the Devices row, and the highlighted pending row. */
+.lk-rail-icon {
+  position: relative;
+  display: inline-flex;
+}
+.lk-rail-icon .lk-attention-badge {
+  position: absolute;
+  top: -6px;
+  inset-inline-end: -8px;
+}
+.lk-attention-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--radius-pill);
+  background: var(--danger);
+  color: var(--danger-fg);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+}
+.lk-card-row.lk-device-new {
+  background: var(--accent-soft);
+  border-radius: var(--radius-sm);
 }

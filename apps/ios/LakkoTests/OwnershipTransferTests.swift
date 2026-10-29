@@ -413,32 +413,11 @@ final class OwnershipTransferTests: XCTestCase {
 
     // MARK: - §6.1.7 what the transferor sees afterwards
 
-    /// The swept forms name the transferor's OWN new role, because half the
-    /// panel changes under them in one tap: an owner who chose `Become a regular
-    /// member` loses the add form, the invite block, every `Remove` and every
-    /// admin toggle at once.
-    func testASweptTransferNamesTheTransferorsOwnNewRole() {
-        XCTAssertEqual(
-            transferOutcomeNotice(outcome: .committed, successorLabel: "Alice", outgoing: .admin).withoutIsolates,
-            "Alice is now the group owner. You are still an admin.")
-        XCTAssertEqual(
-            transferOutcomeNotice(outcome: .committed, successorLabel: "Alice", outgoing: .member).withoutIsolates,
-            "Alice is now the group owner. You are now a regular member.")
-    }
-
-    /// Nothing has changed yet; appending "you are now an admin" to a request
-    /// that has not landed would be the optimistic-update lie in its purest form.
-    func testAPublishedButUnsweptTransferNamesNoRole() {
-        let notice = transferOutcomeNotice(
-            outcome: .proposed, successorLabel: "Alice", outgoing: .admin)
-        XCTAssertEqual(
-            notice,
-            "Ownership transfer requested. It applies when an owner or an admin applies the change.")
-        XCTAssertFalse(notice.contains("admin."))
-        XCTAssertEqual(
-            transferOutcomeNotice(outcome: .proposed, successorLabel: "Alice", outgoing: .member),
-            notice,
-            "the unswept form names no role in EITHER direction")
+    /// UX §2 amendment (2026-10-29) — no notice after a transfer, landed or
+    /// not: the panel changes in place, or the control shows it pending.
+    func testATransferShowsNoNoticeInEitherCase() {
+        XCTAssertNil(MembershipActionNotice.after(.transferOwnership, inEffect: true))
+        XCTAssertNil(MembershipActionNotice.after(.transferOwnership, inEffect: false))
     }
 
     // MARK: - §6.1.6 the pending label resolves through the live roster

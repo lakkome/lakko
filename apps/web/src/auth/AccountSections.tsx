@@ -32,8 +32,9 @@ import {
 import { DiscoveryClient } from "../discovery/client";
 import { paths } from "../routes/paths";
 import { Icon } from "../ui/icons";
-import { currentLanguage, t, type L10nArgs } from "../l10n";
+import { t, type L10nArgs } from "../l10n";
 import { deleteBlockedUntilMs } from "./recall";
+import { displayLocale } from "../l10n/display-locale";
 
 /** A catalog key, rendered at display time so it follows a language switch. */
 type Message = { readonly kind: "ok" | "error"; readonly key: string; readonly args?: L10nArgs } | null;
@@ -309,7 +310,7 @@ function DeleteAccountDialog(props: { readonly onClose: () => void }): JSX.Eleme
       if (blockedUntilMs !== null) {
         setError(
           t("settings.account.delete.blocked", {
-            date: new Date(blockedUntilMs).toLocaleDateString(currentLanguage(), {
+            date: new Date(blockedUntilMs).toLocaleDateString(displayLocale(), {
               dateStyle: "medium",
             }),
           }),

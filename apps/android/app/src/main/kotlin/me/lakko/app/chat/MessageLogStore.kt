@@ -384,6 +384,14 @@ public data class PersistedMessage(
      * catalog sentence. Nullable with a default like [reply].
      */
     val unsupportedVersion: Long? = null,
+    /**
+     * `docs/ux/second-device.md` section 4 — the person keys a group's commit
+     * row records as joined / left. Empty with a default: every row written
+     * before this existed (and every commit that changed no people) reads
+     * back with none, and such a commit row is not drawn.
+     */
+    val membershipJoined: List<String> = emptyList(),
+    val membershipLeft: List<String> = emptyList(),
 ) {
     /** Explicit companion so the conversion helpers below can
      *  attach as `PersistedMessage.Companion.from(msg)`. */
@@ -551,6 +559,8 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
             }
         },
         unsupportedVersion = if (msg.deleted) null else msg.unsupportedVersion,
+        membershipJoined = msg.membershipJoined,
+        membershipLeft = msg.membershipLeft,
     )
 
 /** Inverse — reconstruct a runtime [ChatMessage] from the JSON
@@ -593,6 +603,8 @@ public fun PersistedMessage.toChatMessage(): ChatMessage? {
             )
         },
         unsupportedVersion = unsupportedVersion,
+        membershipJoined = membershipJoined,
+        membershipLeft = membershipLeft,
     )
 }
 

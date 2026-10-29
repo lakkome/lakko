@@ -191,7 +191,13 @@ public final class ChatViewModel: ObservableObject {
     /// and published. Distinct from ``membershipError`` because a request is not
     /// an outcome: the change has NOT happened yet, and the copy must not
     /// suggest it has.
-    @Published public private(set) var membershipNotice: UiText?
+    @Published public private(set) var membershipNotice: UiText? {
+        // Any new notice (or none) is not the leave notice until the leave
+        // path says so, right after setting it.
+        didSet { leaveNoticeShown = false }
+    }
+    /// The notice on screen is the leave request's (``MembershipActionNotice``).
+    private var leaveNoticeShown = false
     /// The group's current role table (owner + admins), or `nil` for an open
     /// group — drives the per-member admin labelling.
     @Published public private(set) var roleTable: RoleTable?
@@ -994,6 +1000,12 @@ public final class ChatViewModel: ObservableObject {
         // pending set, so a transfer that has just been swept is judged on the
         // state it produced rather than the state it replaced.
         refreshNewOwnerNotice()
+        // UX §2 — the leave notice goes the moment the leave lands.
+        if MembershipActionNotice.leaveNoticeClears(
+            shown: leaveNoticeShown, membershipEnded: membershipHasEnded) {
+            membershipNotice = nil
+            leaveNoticeShown = false
+        }
     }
 
     // MARK: - ADR-0045 UX §7 — the automatic re-send of a queue-full refusal
@@ -1733,8 +1745,15 @@ public final class ChatViewModel: ObservableObject {
                 // in the same call. Fail-safe when absent — the fallback string
                 // is true either way.
                 repository.noteLeaveRequested(groupIdHex: groupIdHex)
-                membershipNotice = .key("chat.leave.requested")
+                // UX §2 — decided from the group read after the attempt: a
+                // leave that already landed (a sweep committed it) says
+                // nothing; one still waiting says so until it lands
+                // (``refreshMembers()`` clears it then).
                 refreshMembers()
+                if let key = MembershipActionNotice.after(.leave, inEffect: membershipHasEnded) {
+                    membershipNotice = .key(key)
+                    leaveNoticeShown = true
+                }
             } catch {
                 reportMembershipFailure(error, op: "onLeaveGroup", key: "chat.error.leave")
             }
@@ -1901,16 +1920,10 @@ public final class ChatViewModel: ObservableObject {
                 }
                 transferStepOpen = false
                 transferPick = nil
-                let swept = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
-                let landed: Bool
-                if case .committed = swept { landed = true } else { landed = false }
-                let successorLabel = successor.label
-                membershipNotice = UiText {
-                    transferOutcomeNotice(
-                        outcome: landed ? .committed : .proposed,
-                        successorLabel: successorLabel,
-                        outgoing: outgoing)
-                }
+                // Applied at once when this device is the committer; whether
+                // it landed or not, no notice (UX §2 amendment): the panel
+                // changes in place, or the transfer control shows it pending.
+                _ = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
                 refreshMembers()
             } catch {
                 reportMembershipFailure(error, op: "onTransferOwnership", key: "chat.error.transfer")
@@ -2012,24 +2025,10 @@ public final class ChatViewModel: ObservableObject {
                         proposalRef: proposalRef
                     )
                 }
-                let swept = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
-                if case .committed = swept {
-                    membershipNotice = .key("chat.members.join.approved_added")
-                } else {
-                    // ADR-0045 S7 residual 2 — an approve that did not apply has
-                    // grown a queue only a sweep drains, and the core's own
-                    // feedback (its cap refusal) lands on whoever proposes NEXT.
-                    // Naming the depth here puts it in front of the person who
-                    // caused it. Read from the core, not from `pendingRequests`,
-                    // which has not been refreshed yet.
-                    let depth = repository.pendingProposals(groupIdHex: groupIdHex).count
-                    membershipNotice = UiText {
-                        let approved = Localization.text("chat.members.join.approved_requested")
-                        guard let queue = waitingQueueLine(depth) else { return approved }
-                        return Localization.text(
-                            "common.sentence_pair", texts: ["first": approved, "second": queue])
-                    }
-                }
+                // Applied at once when this device is the committer. No
+                // notice either way (UX §2 amendment, 2026-10-29): the request
+                // row goes and the person appears in the roster when it lands.
+                _ = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
                 // Acting on the queue is what may have made room for the
                 // request the quarantine turned away, so the notice about it
                 // stops being current.

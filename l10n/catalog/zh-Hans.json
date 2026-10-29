@@ -2410,10 +2410,6 @@
       "text": "添加成员",
       "status": "machine"
     },
-    "chat.members.add.done": {
-      "text": "已添加{name}。",
-      "status": "machine"
-    },
     "chat.members.add.error.no_bundle": {
       "text": "此人尚未完成 Lakko 的设置。请稍后再试。",
       "status": "machine"
@@ -2430,16 +2426,8 @@
       "text": "@用户名",
       "status": "machine"
     },
-    "chat.members.add.requested": {
-      "text": "已请求添加{name}。群主或管理员应用此变更后对方即会加入。",
-      "status": "machine"
-    },
     "chat.members.add.submit": {
       "text": "添加",
-      "status": "machine"
-    },
-    "chat.members.admin.demoted": {
-      "text": "已取消管理员身份。",
       "status": "machine"
     },
     "chat.members.admin.make": {
@@ -2450,16 +2438,8 @@
       "text": "管理员",
       "status": "machine"
     },
-    "chat.members.admin.promoted": {
-      "text": "已设为管理员。",
-      "status": "machine"
-    },
     "chat.members.admin.remove": {
       "text": "取消管理员",
-      "status": "machine"
-    },
-    "chat.members.admin.requested": {
-      "text": "已请求变更。群主或管理员应用此变更后生效。",
       "status": "machine"
     },
     "chat.members.count": {
@@ -2480,14 +2460,6 @@
     },
     "chat.members.join.approve": {
       "text": "批准",
-      "status": "machine"
-    },
-    "chat.members.join.approved_added": {
-      "text": "已批准加入。对方已被添加到群组。",
-      "status": "machine"
-    },
-    "chat.members.join.approved_requested": {
-      "text": "已批准加入。群主或管理员应用此变更后对方即会加入。",
       "status": "machine"
     },
     "chat.members.join.heading": {
@@ -2526,10 +2498,6 @@
       "text": "成员变更由群主或管理员应用。他们中有人应用时，变更会自动生效。",
       "status": "machine"
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, other {现在有 # 项变更正在等待应用。}}",
-      "status": "machine"
-    },
     "chat.members.pending.waiting_added": {
       "text": "等待添加。",
       "status": "machine"
@@ -2548,18 +2516,6 @@
     },
     "chat.members.remove.confirm_named": {
       "text": "移除{name}",
-      "status": "machine"
-    },
-    "chat.members.remove.done": {
-      "text": "已移除成员。",
-      "status": "machine"
-    },
-    "chat.members.remove.requested": {
-      "text": "已请求移除。群主或管理员应用此变更后生效。",
-      "status": "machine"
-    },
-    "chat.members.remove.requested_short": {
-      "text": "已请求移除。",
       "status": "machine"
     },
     "chat.members.remove.title": {
@@ -3126,8 +3082,12 @@
       "text": "加入请求",
       "status": "machine"
     },
-    "chat.system.members_changed": {
-      "text": "成员已变更",
+    "chat.system.member_joined": {
+      "text": "{name} 已加入",
+      "status": "machine"
+    },
+    "chat.system.member_left": {
+      "text": "{name} 已离开",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -3156,14 +3116,6 @@
     },
     "chat.transfer.candidate_admin": {
       "text": "{name}，管理员",
-      "status": "machine"
-    },
-    "chat.transfer.done_admin": {
-      "text": "{name}现在是群主。你仍是管理员。",
-      "status": "machine"
-    },
-    "chat.transfer.done_member": {
-      "text": "{name}现在是群主。你现在是普通成员。",
       "status": "machine"
     },
     "chat.transfer.irreversible_body": {
@@ -3204,10 +3156,6 @@
     },
     "chat.transfer.pending_named": {
       "text": "正在等待将{name}设为群主。",
-      "status": "machine"
-    },
-    "chat.transfer.requested": {
-      "text": "已请求转让群主。群主或管理员应用此变更后生效。",
       "status": "machine"
     },
     "chat.transfer.role_change_pending": {
@@ -4174,14 +4122,6 @@
       "text": "正在等待你的另一台设备扫描此二维码…",
       "status": "machine"
     },
-    "device_link.request.added": {
-      "text": "已添加设备。",
-      "status": "machine"
-    },
-    "device_link.request.added_named": {
-      "text": "已添加“{name}”。",
-      "status": "machine"
-    },
     "device_link.request.adding": {
       "text": "正在添加设备…",
       "status": "machine"
@@ -4308,10 +4248,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "打开 Lakko 查看你的设备。",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "打开“设备”",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -6246,6 +6182,10 @@
       "text": "设置",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "设置。有设备添加到了你的账号",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "群组",
       "status": "machine"
@@ -7498,6 +7438,10 @@
       "text": "两台设备都没有摄像头？在新设备上登录并选择“{method}”：这里会出现带有核对代码的“{prompt}”提示。",
       "status": "machine"
     },
+    "settings.devices.attention_a11y": {
+      "text": "设备。有设备添加到了你的账号",
+      "status": "machine"
+    },
     "settings.devices.device_n": {
       "text": "设备 {number}",
       "status": "machine"
@@ -7556,14 +7500,6 @@
     },
     "settings.devices.reset_note": {
       "text": "今天在此设备上重置了你的账号密钥。其他设备已退出登录并被移除。请在“设置”>“设备”>“添加设备”中重新添加。",
-      "status": "machine"
-    },
-    "settings.devices.scan.done": {
-      "text": "设备已添加。完成加入后会出现在列表中。",
-      "status": "machine"
-    },
-    "settings.devices.scan.done_named": {
-      "text": "已添加“{name}”。完成加入后会出现在列表中。",
       "status": "machine"
     },
     "settings.devices.scan.opening": {
@@ -8036,6 +7972,10 @@
     },
     "settings.section.security": {
       "text": "安全",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "安全。有设备添加到了你的账号",
       "status": "machine"
     },
     "settings.security.devices.sub": {

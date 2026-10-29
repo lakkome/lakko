@@ -286,13 +286,16 @@ public object AttachmentBridge {
         strings: me.lakko.app.l10n.Strings = me.lakko.app.l10n.Localization.strings.value,
     ): String {
         // ADR-0061: the number in the interface language's digits, the unit
-        // from the catalog (`common.size.*`).
+        // from the catalog (`common.size.*`); the decimal and grouping
+        // separators from the device's region (localization.md section 5).
         val locale = java.util.Locale.forLanguageTag(strings.language)
+        val region = me.lakko.app.l10n.DeviceFormats.region()
+        fun dec(v: Double) = me.lakko.app.l10n.DeviceFormats.decimal(v, 1, locale, region)
         val (key, value) = when {
-            bytes < 1_000UL -> "common.size.bytes" to String.format(locale, "%d", bytes.toLong())
-            bytes < 1_000_000UL -> "common.size.kb" to String.format(locale, "%.1f", bytes.toDouble() / 1_000)
-            bytes < 1_000_000_000UL -> "common.size.mb" to String.format(locale, "%.1f", bytes.toDouble() / 1_000_000)
-            else -> "common.size.gb" to String.format(locale, "%.1f", bytes.toDouble() / 1_000_000_000)
+            bytes < 1_000UL -> "common.size.bytes" to me.lakko.app.l10n.DeviceFormats.integer(bytes.toLong(), locale, region)
+            bytes < 1_000_000UL -> "common.size.kb" to dec(bytes.toDouble() / 1_000)
+            bytes < 1_000_000_000UL -> "common.size.mb" to dec(bytes.toDouble() / 1_000_000)
+            else -> "common.size.gb" to dec(bytes.toDouble() / 1_000_000_000)
         }
         return strings.format(key, mapOf("size" to value))
     }

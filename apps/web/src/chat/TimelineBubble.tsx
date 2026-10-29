@@ -44,6 +44,7 @@ import {
   type MenuAnchor,
 } from "./MessageMenu";
 import { forwardLineLabel } from "./forward";
+import { membershipSentences } from "./membership-rows";
 import { ownPersonKeyB64 } from "./person-key";
 import { replyQuoteLabel, replyQuoteLines } from "./reply-snapshot";
 import { canSelectRow, selectionMarkName } from "./selection";
@@ -62,7 +63,8 @@ import { allowlist, mediaKey, type MediaHub } from "../media/media-hub";
 import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
-import { currentLanguage, joinList, t } from "../l10n";
+import { joinList, t } from "../l10n";
+import { displayLocale } from "../l10n/display-locale";
 import { publicOrigin } from "../platform";
 
 /** The callbacks and reactive reads a bubble needs from the chat view. */
@@ -184,13 +186,29 @@ export function TimelineBubble(
   if (props.row.kind === "incoming") {
     const ev = props.row.event;
     if (ev.kind === "system") {
-      const text = (): string =>
-        ev.systemKind === "commit"
-          ? t("chat.system.members_changed")
-          : t("chat.system.join_request");
+      if (ev.systemKind === "commit") {
+        // docs/ux/second-device.md section 4 — a commit row is drawn only when
+        // it names the people a batch added or removed (the timeline already
+        // left out every other one, and every one in a one-to-one); one
+        // sentence per person, joined first, each name resolved now from the
+        // stored person key.
+        const change = ev.membership;
+        if (change === undefined) return null;
+        const sentences = (): string[] =>
+          membershipSentences(
+            change,
+            (key, name) => t(key, { name }),
+            (k) => profiles.resolve(k).name,
+          );
+        return (
+          <li class="lk-system-row lk-system-row--membership">
+            <For each={sentences()}>{(line) => <span>{line}</span>}</For>
+          </li>
+        );
+      }
       return (
         <li class="lk-system-row">
-          <span>{text()}</span>
+          <span>{t("chat.system.join_request")}</span>
         </li>
       );
     }
@@ -287,7 +305,7 @@ export function TimelineBubble(
         ack="sent"
         originalText={ev.text}
         attachments={ev.attachments}
-        time={shortTime(ev.createdAt, currentLanguage())}
+        time={shortTime(ev.createdAt, displayLocale())}
         senderName={props.isGroup && props.startsRun && !own ? senderName() : null}
         avatar={
           props.isGroup && !own
@@ -328,7 +346,7 @@ export function TimelineBubble(
           ? t("chat.message.sending")
           : live().ack === "failed"
             ? t("chat.message.not_sent")
-            : shortTime(live().createdAt, currentLanguage())
+            : shortTime(live().createdAt, displayLocale())
       }
       senderName={null}
       avatar={null}

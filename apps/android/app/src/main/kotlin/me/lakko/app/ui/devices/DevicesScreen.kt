@@ -10,6 +10,7 @@ import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -130,6 +131,25 @@ public fun DevicesScreen(
     val account = (authState as? AuthState.Session)?.account
     val secrets = identitySecrets
 
+    // UX 17.5 - opening this screen while a new device is pending is what
+    // counts as seen: every pending device is acknowledged for the account,
+    // and its row stays highlighted until the screen is left.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_START -> me.lakko.app.devices.NewDeviceNotices.enterDevices()
+                androidx.lifecycle.Lifecycle.Event.ON_STOP -> me.lakko.app.devices.NewDeviceNotices.leaveDevices()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            me.lakko.app.devices.NewDeviceNotices.leaveDevices()
+        }
+    }
+
     Scaffold(
         modifier = modifier,
         topBar = {
@@ -174,10 +194,11 @@ public fun DevicesScreen(
                     }
                 }
             }
-            // UX 17.5 - a device was added to the account (the same banner
-            // as on the Chats list; no `Open Devices` here, this is it), or
-            // the line that replaces it after a `New` device was removed.
-            NewDeviceNoticeBanner(onOpenDevices = null)
+            // UX 17.5 - a device was added to the account: the explanation
+            // above the list while a row carries `New` (opening this screen is
+            // the acknowledgement), or the line shown after a `New` device
+            // was removed.
+            NewDeviceExplanationBlock()
             RemovedNewDeviceLine(onChangePassword = onChangePassword)
             Text(
                 t("settings.devices.lede"),
@@ -203,9 +224,26 @@ public fun DevicesScreen(
                 chatRepository = chatRepository,
             )
 
+            // UX second-device.md section 2.1 - the last scan added a device
+            // but handed over no keys: the existing warning stays here until
+            // Add a device is pressed again.
+            val keysNotSentFor by me.lakko.app.devices.ScanLinkedNotice.shared.keysNotSentFor
+                .collectAsStateWithLifecycle()
+            if (keysNotSentFor == account.accountIdB64) {
+                Text(
+                    t("device_link.keys_not_sent"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
+
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
             Button(
-                onClick = onAddDevice,
+                onClick = {
+                    me.lakko.app.devices.ScanLinkedNotice.shared.clear()
+                    onAddDevice()
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp),
@@ -326,6 +364,9 @@ public fun AddDeviceScreen(
                     ),
                 )
                 AddDeviceMode.Scan -> ScanSection(
+                    // UX second-device.md section 2.1 - a device added goes
+                    // straight back to the Devices list, no result line.
+                    onLinked = onBack,
                     authRepository = authRepository,
                     ownUsername = account.username,
                     accountIdBytes = secrets.accountId,
@@ -559,15 +600,12 @@ private sealed interface ScanUi {
     class ConfirmTransfer(val decoded: DecodedPairingQr) : ScanUi
 
     data object Processing : ScanUi
-    /** [keysSent] is `false` when this device had no recovery phrase to hand
-     *  over (or the hand-over failed): the new device is linked but has to
-     *  bring its keys another way, and the screen says so. */
-    data class Done(val keysSent: Boolean, val added: UiText) : ScanUi
     data class Error(val message: UiText) : ScanUi
 }
 
 @Composable
 private fun ScanSection(
+    onLinked: () -> Unit,
     authRepository: AuthRepository,
     ownUsername: String,
     accountIdBytes: ByteArray,
@@ -769,10 +807,13 @@ private fun ScanSection(
                             // waits for the device to land and publish
                             // its KeyPackage.
                             chatRepository?.requestAdmitDevice(scanned.newDeviceKey)
-                            state = ScanUi.Done(
-                                keysSent = scanned.keysSent,
-                                added = me.lakko.app.devices.DeviceCards.addedCopy(payloadCard),
-                            )
+                            // UX second-device.md section 2.1 - no result
+                            // line: straight back to the Devices list. A
+                            // hand-over without keys leaves its warning
+                            // under that list.
+                            me.lakko.app.devices.ScanLinkedNotice.shared.linked(accountIdB64, scanned.keysSent)
+                            proof.clear()
+                            onLinked()
                         } catch (cause: Throwable) {
                             if (cause is kotlinx.coroutines.CancellationException) throw cause
                             when (me.lakko.app.ui.auth.gatedFailureOf(cause)) {
@@ -818,21 +859,6 @@ private fun ScanSection(
                 Text(t("device_link.request.adding"))
             }
 
-            is ScanUi.Done -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    s.added.text(),
-                    color = MaterialTheme.colorScheme.primary,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                if (!s.keysSent) {
-                    Text(
-                        t("device_link.keys_not_sent"),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
 
             is ScanUi.Error -> Column(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -886,6 +912,8 @@ internal fun deviceRowLabel(isSelf: Boolean, index: Int): UiText =
         UiText("settings.devices.device_n", texts = mapOf("number" to (index + 1).toString()))
     }
 
+// BringIntoViewRequester is experimental in the pinned Compose foundation.
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun DevicesList(
     authRepository: AuthRepository,
@@ -911,8 +939,8 @@ private fun DevicesList(
     // Non-null while the new phrase screen is up; the value says whether
     // the words are withheld (the publish is still owed).
     var rotatedPhrase: Boolean? by remember { mutableStateOf(null) }
-    // UX 17.5 - which rows carry `New`.
-    val notice by me.lakko.app.devices.NewDeviceNotices.state.collectAsStateWithLifecycle()
+    // UX 17.5 - which rows carry `New` and the highlight.
+    val notice by me.lakko.app.devices.NewDeviceNotices.view.collectAsStateWithLifecycle()
     // ADR-0080 - what each device said about itself.
     val cards by me.lakko.app.devices.DeviceCardCenter.cards.collectAsStateWithLifecycle()
     // The own row follows the city switch.
@@ -995,6 +1023,9 @@ private fun DevicesList(
                     )
                 },
             )
+            // UX 17.5 - the first highlighted row in display order.
+            val firstHighlighted = (listOfNotNull(current) + others)
+                .firstOrNull { !it.isSelf && it.keyHex in notice.highlighted }?.keyHex
 
             @Composable
             fun DeviceRow(input: me.lakko.app.devices.DeviceCards.RowInput) {
@@ -1004,13 +1035,16 @@ private fun DevicesList(
                     words,
                     System.currentTimeMillis(),
                     java.time.ZoneId.systemDefault(),
-                    android.text.format.DateFormat.is24HourFormat(context),
+                    me.lakko.app.l10n.DeviceFormats.is24Hour(context),
                     locale,
                 )
-                val isNew = !device.isSelf && me.lakko.app.devices.isNewDevice(
-                    notice,
-                    me.lakko.app.devices.newDeviceKey(device.signaturePublicKey),
-                )
+                val isNew = !device.isSelf &&
+                    me.lakko.app.devices.newDeviceKey(device.signaturePublicKey) in notice.highlighted
+                // UX 17.5 - the first highlighted row is scrolled into view.
+                val bringIntoView = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
+                if (isNew && input.keyHex == firstHighlighted) {
+                    LaunchedEffect(input.keyHex) { bringIntoView.bringIntoView() }
+                }
                 val deviceIdB64Url = me.lakko.app.auth.base64UrlEncodeNoPad(device.signaturePublicKey)
                 val isPending = !device.isSelf && deviceIdB64Url in pending
                 val needsFinish = isPending && deviceIdB64Url in waitingOnPerson
@@ -1101,7 +1135,16 @@ private fun DevicesList(
                             }
                         }
                     },
-                    colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
+                    colors = ListItemDefaults.colors(
+                        // UX 17.5 - an accent-tinted background on a new row,
+                        // with the `New` text label (never colour alone).
+                        containerColor = if (isNew) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.background
+                        },
+                    ),
+                    modifier = Modifier.bringIntoViewRequester(bringIntoView),
                 )
             }
 
@@ -1234,10 +1277,7 @@ private fun DevicesList(
             device = device,
             label = label,
             runner = ::runner,
-            wasNew = me.lakko.app.devices.isNewDevice(
-                notice,
-                me.lakko.app.devices.newDeviceKey(device.signaturePublicKey),
-            ),
+            wasNew = me.lakko.app.devices.newDeviceKey(device.signaturePublicKey) in notice.highlighted,
             onClosed = { removedOrPending, done ->
                 confirming = null
                 if (done) removedDone = true

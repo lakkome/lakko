@@ -18,14 +18,13 @@
  * Pure: the group, the base64 encoder and the name resolver are handed in.
  */
 import type { ResolvedName } from "../profile/resolver";
-import { memberListLabelOf } from "../profile/member-label";
+import { memberListLabelOf, memberNameOf } from "../profile/member-label";
 
 /** The part of the wasm `Group` this reads. */
 export interface PendingJoinGroup {
   pendingExternalJoinAccountKey(joinerSignatureKey: Uint8Array): Uint8Array | undefined;
 }
 
-/** The list label for the pending request whose leaf key is `leafKey`. */
 /**
  * ADR-0084 - the key a pending joiner's photo is looked up under: the
  * ACCOUNT key the request's device binding names, else the leaf key. The
@@ -45,12 +44,15 @@ export function pendingJoinPersonKey(
   return encodeB64(accountKey !== undefined && accountKey.length === 32 ? accountKey : leafKey);
 }
 
-export function pendingJoinLabel(
+/** The resolved name of the pending request whose leaf key is `leafKey`:
+ *  through the account key the device binding names when it names somebody
+ *  this device knows, else through the leaf key. */
+function resolvePendingJoin(
   group: PendingJoinGroup,
   leafKey: Uint8Array,
   encodeB64: (bytes: Uint8Array) => string,
   resolve: (keyB64: string) => ResolvedName,
-): string {
+): ResolvedName {
   let accountKey: Uint8Array | undefined;
   try {
     accountKey = group.pendingExternalJoinAccountKey(leafKey);
@@ -59,7 +61,29 @@ export function pendingJoinLabel(
   }
   if (accountKey !== undefined && accountKey.length === 32) {
     const byAccount = resolve(encodeB64(accountKey));
-    if (byAccount.source !== "fingerprint") return memberListLabelOf(byAccount);
+    if (byAccount.source !== "fingerprint") return byAccount;
   }
-  return memberListLabelOf(resolve(encodeB64(leafKey)));
+  return resolve(encodeB64(leafKey));
+}
+
+/** The list label for the pending request whose leaf key is `leafKey`
+ *  (`Name · @username` when there is one). */
+export function pendingJoinLabel(
+  group: PendingJoinGroup,
+  leafKey: Uint8Array,
+  encodeB64: (bytes: Uint8Array) => string,
+  resolve: (keyB64: string) => ResolvedName,
+): string {
+  return memberListLabelOf(resolvePendingJoin(group, leafKey, encodeB64, resolve));
+}
+
+/** The name alone, for the request's avatar initials: never the list label,
+ *  whose ` · @username` would become an initial (seen live 2026-10-29). */
+export function pendingJoinName(
+  group: PendingJoinGroup,
+  leafKey: Uint8Array,
+  encodeB64: (bytes: Uint8Array) => string,
+  resolve: (keyB64: string) => ResolvedName,
+): string {
+  return memberNameOf(resolvePendingJoin(group, leafKey, encodeB64, resolve));
 }

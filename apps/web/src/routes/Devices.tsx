@@ -59,7 +59,8 @@ import { rotationCommitted, rotationStepLine, type RotationStepLine,
   rotationSavesPhrase,
 } from "../devices/key-rotation";
 import { ownPairingHandle, parsePairingQrPayload } from "../devices/pairing";
-import { pairingConfirmTitle, pairingScanDone } from "../devices/pairing-copy";
+import { pairingConfirmTitle } from "../devices/pairing-copy";
+import { afterScanLinked } from "../devices/scan-linked";
 import { recoveryHalfFor } from "../devices/recovery-sender";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
@@ -69,8 +70,16 @@ import { screenText } from "../auth/auth-error-copy";
 import { FreshAuthRequiredError, PROOF_COPY } from "../auth/fresh-auth";
 import { createProofGate } from "../auth/proof-gate";
 import { ProofBlock } from "../auth/ProofBlock";
-import { addedNotice, noteDeviceLetIn } from "../devices/added-notice";
-import { DeviceAddedBanner } from "../devices/DeviceAddedNotice";
+import {
+  addedNotice,
+  devicesVisit,
+  enterDevicesVisit,
+  highlightedDeviceKeys,
+  leaveDevicesVisit,
+  noteDeviceLetIn,
+} from "../devices/added-notice";
+import { DeviceAddedExplanation } from "../devices/DeviceAddedNotice";
+import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { bytesToHex } from "../chat/folders/folder-model";
 import {
   currentOwnFields,
@@ -83,7 +92,6 @@ import {
   countryNameOf,
   deviceRowView,
   orderDeviceRows,
-  pairingCardName,
   pairingCardView,
   selfRowCard,
   type StoredDeviceCard,
@@ -93,6 +101,7 @@ import {
   type RowWords,
 } from "../devices/device-cards";
 import type { IconName } from "../ui/icons";
+import { displayLocale } from "../l10n/display-locale";
 
 /**
  * The text a failure shows (ADR-0061 section 6): a sentence written for a
@@ -124,9 +133,44 @@ type AddMode = "closed" | "pick" | "show" | "scan";
 
 export default function Devices(): JSX.Element {
   const auth = useAuth();
+  const deviceSync = useDeviceGroupSync();
+  // UX 17.5 "What counts as seen": opening this screen while a device is
+  // pending acknowledges every pending device for the account; a device
+  // that becomes pending while the screen is open and in front is seen too.
+  // The highlight and the explanation stay for this visit (`devicesVisit`)
+  // and go when the screen is left.
+  const [pageVisible, setPageVisible] = createSignal(
+    typeof document === "undefined" || document.visibilityState !== "hidden",
+  );
+  if (typeof document !== "undefined") {
+    const onVisibility = (): void => {
+      setPageVisible(document.visibilityState !== "hidden");
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    onCleanup(() => document.removeEventListener("visibilitychange", onVisibility));
+  }
+  createEffect(() => {
+    // `ready`: an acknowledgement is written into the synced state, so a
+    // visit opened before it loaded acknowledges once it has.
+    if (!deviceSync.ready() || !pageVisible() || !addedNotice().visible) return;
+    const keys = enterDevicesVisit();
+    if (keys.length > 0) void deviceSync.acknowledgeDevices(keys);
+  });
+  onCleanup(leaveDevicesVisit);
   const [add, setAdd] = createSignal<AddMode>("closed");
   // UX 17.5: a device carrying the `New` label was just removed here.
   const [removedNew, setRemovedNew] = createSignal(false);
+  // UX second-device 2.1: a scanned device was linked; the list is read
+  // again (bumped) and, when the new device got no keys, the existing
+  // keys-not-sent line shows under it. No "added" line.
+  const [listVersion, setListVersion] = createSignal(0);
+  const [keysNotSent, setKeysNotSent] = createSignal(false);
+  function onScanLinked(recoveryPublished: boolean): void {
+    const next = afterScanLinked({ recoveryPublished });
+    setKeysNotSent(next.keysNotSent);
+    if (next.reloadList) setListVersion((v) => v + 1);
+    setAdd(next.add);
+  }
 
   const session = (): {
     accountIdB64: string;
@@ -158,10 +202,10 @@ export default function Devices(): JSX.Element {
           <h1>{t("settings.devices.title")}</h1>
           <p>{t("settings.devices.lede")}</p>
         </div>
-        {/* UX 17.5: a device joined the account; the same banner as on the
-            Chats list. After a `New` device is removed, the line below it
+        {/* UX 17.5: a device joined the account. The explanation stays for
+            this visit; after a `New` device is removed, the line below it
             takes its place. */}
-        <DeviceAddedBanner onDevices />
+        <DeviceAddedExplanation view={devicesVisit()} />
         <Show when={removedNew()}>
           <div class="lk-alert accent lk-device-added" role="status">
             <div class="lk-fill">{t("settings.devices.removed_change_password")}</div>
@@ -193,14 +237,23 @@ export default function Devices(): JSX.Element {
               accountIdB64={session()!.accountIdB64}
               accountIdBytes={session()!.accountIdBytes}
               onRemovedNew={() => setRemovedNew(true)}
+              reloadKey={listVersion}
             />
+            <Show when={keysNotSent()}>
+              <p class="form-info" role="status">
+                {t("device_link.keys_not_sent")}
+              </p>
+            </Show>
             <div class="lk-actions">
               <button
                 type="button"
                 class="primary"
                 aria-expanded={add() !== "closed"}
                 disabled={!hasUsername()}
-                onClick={() => setAdd(add() === "closed" ? "pick" : "closed")}
+                onClick={() => {
+                  setKeysNotSent(false);
+                  setAdd(add() === "closed" ? "pick" : "closed");
+                }}
               >
                 <Icon name="plus" size={18} />
                 {t("devices.add.title")}
@@ -249,6 +302,7 @@ export default function Devices(): JSX.Element {
                     accountIdBytes={session()!.accountIdBytes}
                     username={session()!.username}
                     onBack={() => setAdd("pick")}
+                    onLinked={onScanLinked}
                   />
                 </Match>
               </Switch>
@@ -295,10 +349,15 @@ function DevicesListView(props: {
   readonly accountIdBytes: Uint8Array;
   /** A row that carried the `New` label was removed. */
   readonly onRemovedNew: () => void;
+  /** Read the list again when this changes (a device was linked here). */
+  readonly reloadKey: () => number;
 }): JSX.Element {
-  /** UX 17.5: the row is a device the notice is about. */
+  /** UX 17.5: the row is a device the notice is about (pending, or seen on
+   *  this visit). */
   const isNew = (device: DeviceListItem): boolean =>
-    !device.isSelf && addedNotice().newKeys.includes(bytesToHex(device.signaturePublicKey));
+    !device.isSelf && highlightedDeviceKeys().has(bytesToHex(device.signaturePublicKey));
+  /** Only the first highlighted row is scrolled into view. */
+  let scrolledToNew = false;
   const auth = useAuth();
   // ADR-0074 section 2.3: removing a device is one operation with an owed
   // record (`devices/removal.ts`); the sheet below starts it.
@@ -334,7 +393,7 @@ function DevicesListView(props: {
   const tick = setInterval(() => setNowMs(Date.now()), 60_000);
   onCleanup(() => clearInterval(tick));
   const viewOf = (row: DeviceRowInput): DeviceRowView =>
-    deviceRowView(row, deviceRowWords(), nowMs(), currentLanguage());
+    deviceRowView(row, deviceRowWords(), nowMs(), displayLocale());
   // "Remove all other devices" (UX section 3): its sheet, and each row's own
   // progress while it runs; a row that failed keeps "Could not remove".
   const [removeAllOpen, setRemoveAllOpen] = createSignal(false);
@@ -724,6 +783,15 @@ function DevicesListView(props: {
   createEffect(() => {
     void load();
   });
+  // A device linked from the scan route: read the list again so its row
+  // shows (docs/ux/second-device.md section 2.1).
+  createEffect(
+    on(
+      () => props.reloadKey(),
+      () => void load(),
+      { defer: true },
+    ),
+  );
   // A record that finished elsewhere (the whole-session runtime) removes a
   // row: read the list again when the set of records changes.
   createEffect(
@@ -784,9 +852,11 @@ function DevicesListView(props: {
               return (
                 <li
                   class="lk-card-row"
+                  classList={{ "lk-device-new": device !== null && isNew(device) }}
                   ref={(el) => {
-                    // The new device's row is scrolled into view.
-                    if (device !== null && isNew(device)) {
+                    // The first new device's row is scrolled into view.
+                    if (!scrolledToNew && device !== null && isNew(device)) {
+                      scrolledToNew = true;
                       queueMicrotask(() => el.scrollIntoView({ block: "nearest" }));
                     }
                   }}
@@ -1244,6 +1314,9 @@ function ScanView(props: {
   readonly accountIdBytes: Uint8Array;
   readonly username: string;
   readonly onBack: () => void;
+  /** The device was linked: back to the list (docs/ux/second-device.md
+   *  section 2.1). `recoveryPublished`: the new device got the keys. */
+  readonly onLinked: (recoveryPublished: boolean) => void;
 }): JSX.Element {
   // ADR-0018 factor (a): the scanner side also transfers ACCESS +
   // IDENTITY to the fresh device (grant + phrase seed, sealed over
@@ -1265,9 +1338,8 @@ function ScanView(props: {
     // `null` when its payload carried none.
     | { kind: "confirm"; scannedBytes: Uint8Array; card: StoredDeviceCard | null }
     | { kind: "processing" }
-    // `keysSent`: whether the new device was handed a session and the
-    // recovery phrase (false when this device does not hold the phrase).
-    | { kind: "done"; keysSent: boolean; name: string | null }
+    // No "done" state: a linked device goes straight back to the list
+    // (docs/ux/second-device.md section 2.1, "When it is done").
     | { kind: "error"; message: () => string };
   const [state, setState] = createSignal<State>({ kind: "idle" });
   // UX 17.4: `Link device` needs the password or a passkey proven now. The
@@ -1335,8 +1407,8 @@ function ScanView(props: {
       // session grant and the recovery phrase this device holds (as its
       // entropy). `runScanFlow` treats it strictly best-effort (a failure
       // there never breaks the pairing) and consumes the entropy. A device
-      // that does not hold the phrase sends no recovery row, and the done
-      // state says so.
+      // that does not hold the phrase sends no recovery row, and the list
+      // says so with the keys-not-sent line.
       const secrets = auth.identitySecrets();
       const recovery =
         secrets !== null
@@ -1372,11 +1444,8 @@ function ScanView(props: {
       });
       // UX 17.5: this device let the new one in; no notice about it here.
       noteDeviceLetIn(props.accountIdB64, scanned.newDeviceKey);
-      setState({
-        kind: "done",
-        keysSent: scanned.recoveryPublished,
-        name: pairingCardName(scanned.newDeviceCard),
-      });
+      // Back to the list; the new row names the device from its card.
+      props.onLinked(scanned.recoveryPublished);
     } catch (err) {
       setState({ kind: "error", message: failureText(err, "settings.devices.error.scan") });
     }
@@ -1546,16 +1615,6 @@ function ScanView(props: {
         </Match>
         <Match when={state().kind === "processing"}>
           <p class="lk-muted">{t("device_link.request.adding")}</p>
-        </Match>
-        <Match when={state().kind === "done"}>
-          <p class="form-info">
-            {pairingScanDone((state() as { name?: string | null }).name ?? null)}
-          </p>
-          <Show when={(state() as { keysSent?: boolean }).keysSent === false}>
-            <p class="form-info" role="status">
-              {t("device_link.keys_not_sent")}
-            </p>
-          </Show>
         </Match>
         <Match when={state().kind === "error"}>
           {(_) => {

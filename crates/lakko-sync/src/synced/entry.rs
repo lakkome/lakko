@@ -874,6 +874,9 @@ pub enum SyncEntry {
     Saved(SavedMessage),
     /// One of the account's invite links (ADR-0079 section 4).
     LinkRecord(super::link_record::LinkRecordEntry),
+    /// A device of the account the person has seen the added-device
+    /// warning for (identity-recovery 17.5). Appended last.
+    DeviceAck(super::device_ack::DeviceAckEntry),
 }
 
 /// Which register an entry writes.
@@ -910,6 +913,8 @@ pub enum RegisterKey {
     Saved(ConversationRef, u64),
     /// The link-record register of this link id (ADR-0079). Appended last.
     LinkRecord([u8; super::link_record::LINK_RECORD_ID_LEN]),
+    /// The acknowledgement register of this device key. Appended last.
+    DeviceAck([u8; super::device_ack::DEVICE_ACK_KEY_LEN]),
 }
 
 impl RegisterKey {
@@ -940,6 +945,7 @@ const TAG_LINEAGE: u8 = 11;
 const TAG_RECOVERY_EMAIL: u8 = 12;
 const TAG_OWN_USERNAME: u8 = 13;
 const TAG_LINK_RECORD: u8 = 14;
+const TAG_DEVICE_ACK: u8 = 15;
 
 impl SyncEntry {
     /// The register this entry writes.
@@ -960,6 +966,7 @@ impl SyncEntry {
             Self::OwnUsername(_) => RegisterKey::OwnUsername,
             Self::Saved(m) => RegisterKey::Saved(m.conversation.clone(), m.message_id),
             Self::LinkRecord(r) => RegisterKey::LinkRecord(r.link_id),
+            Self::DeviceAck(a) => RegisterKey::DeviceAck(a.device_key),
         }
     }
 
@@ -988,7 +995,8 @@ impl SyncEntry {
             | Self::Flags(_)
             | Self::ReadCursor(_)
             | Self::Draft(_)
-            | Self::ConversationOrder(_) => Ok(()),
+            | Self::ConversationOrder(_)
+            | Self::DeviceAck(_) => Ok(()),
         }
     }
 
@@ -1080,6 +1088,10 @@ impl SyncEntry {
             Self::LinkRecord(r) => {
                 out.push(TAG_LINK_RECORD);
                 r.encode_body(&mut out);
+            },
+            Self::DeviceAck(a) => {
+                out.push(TAG_DEVICE_ACK);
+                a.encode_body(&mut out);
             },
             // The key (reference, message id) comes first and the state
             // byte directly after it, so on an exact stamp tie the two
@@ -1220,6 +1232,9 @@ impl SyncEntry {
             TAG_SAVED => Self::Saved(take_saved(&mut cur)?),
             TAG_LINK_RECORD => {
                 Self::LinkRecord(super::link_record::LinkRecordEntry::take_body(&mut cur)?)
+            },
+            TAG_DEVICE_ACK => {
+                Self::DeviceAck(super::device_ack::DeviceAckEntry::take_body(&mut cur)?)
             },
             _ => return Err(CodecError::UnknownTag),
         };

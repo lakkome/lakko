@@ -13,6 +13,7 @@
 import sourceJson from "./catalog/source.json?raw";
 import { loadWasm } from "../wasm";
 import { createL10n, type L10nArgs, type L10nWasm } from "./runtime";
+import { deviceLocale, formatLocaleFor } from "./format-locale";
 
 export type { L10nArgs, LanguageInfo } from "./runtime";
 export { LANGUAGE_STORAGE_KEY } from "./runtime";
@@ -50,6 +51,7 @@ const runtime = createL10n({
     document.documentElement.dir = rtl ? "rtl" : "ltr";
   },
   warn: (message, err) => console.warn(message, err),
+  numberLocale: (language) => formatLocaleFor(language, deviceLocale()),
 });
 
 /** Render a catalog message in the current language. */

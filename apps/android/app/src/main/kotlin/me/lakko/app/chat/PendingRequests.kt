@@ -392,37 +392,6 @@ internal fun rowAnnotation(
     )
 }
 
-/**
- * ADR-0045 S7 residual 2 — the queue an approve just grew, named to the person
- * who grew it.
- *
- * ## Why this line, and why only this line
- *
- * Approving a join no longer admits anyone: it publishes an `Add` proposal into
- * the member pending set, and that set is drained only by a sweep, which
- * ADR-0045 decision 2 gives no deadline. So an admin can approve into a queue
- * indefinitely, and before this the only feedback in the whole system was the
- * core's cap refusal — which lands on **whoever proposes next**, who is very
- * often somebody else entirely.
- *
- * This does not bound anything and does not pretend to. Bounding needs a number
- * this layer does not have: `MAX_PENDING_PROPOSALS` is `pub(crate)` in
- * `lakko-mls` and is on neither FFI surface, and a client-side literal `64`
- * would be exactly the stale-literal drift class this repo already names as
- * failing in the dangerous direction. What it does is make the accumulation
- * *visible at the moment it is caused*, which is the part a client can do
- * honestly.
- *
- * `null` below two, because "1 change is now waiting" after making one change is
- * noise rather than information.
- */
-internal fun waitingQueueLine(pendingCount: Int): UiText? =
-    if (pendingCount < 2) {
-        null
-    } else {
-        UiText("chat.members.pending.queue", counts = mapOf("count" to pendingCount.toULong()))
-    }
-
 // The "Join requests are not saved" note that used to live here is gone with
 // the reason for it: since 2026-09-26 `Group::pending_external_joins` rides the
 // MLS storage snapshot (ADR-0027 update note), so a restart shows the same

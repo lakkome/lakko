@@ -2510,10 +2510,6 @@
       "text": "Добавить участника",
       "status": "machine"
     },
-    "chat.members.add.done": {
-      "text": "Добавлено: {name}.",
-      "status": "machine"
-    },
     "chat.members.add.error.no_bundle": {
       "text": "Этот человек ещё не закончил настройку Lakko. Попробуйте позже.",
       "status": "machine"
@@ -2530,16 +2526,8 @@
       "text": "@username",
       "status": "machine"
     },
-    "chat.members.add.requested": {
-      "text": "Запрошено добавление: {name}. Человек вступит, когда владелец или администратор применит изменение.",
-      "status": "machine"
-    },
     "chat.members.add.submit": {
       "text": "Добавить",
-      "status": "machine"
-    },
-    "chat.members.admin.demoted": {
-      "text": "Роль администратора снята.",
       "status": "machine"
     },
     "chat.members.admin.make": {
@@ -2550,16 +2538,8 @@
       "text": "Админ",
       "status": "machine"
     },
-    "chat.members.admin.promoted": {
-      "text": "Назначен администратор.",
-      "status": "machine"
-    },
     "chat.members.admin.remove": {
       "text": "Снять роль администратора",
-      "status": "machine"
-    },
-    "chat.members.admin.requested": {
-      "text": "Изменение запрошено. Оно вступит в силу, когда владелец или администратор применит его.",
       "status": "machine"
     },
     "chat.members.count": {
@@ -2580,14 +2560,6 @@
     },
     "chat.members.join.approve": {
       "text": "Одобрить",
-      "status": "machine"
-    },
-    "chat.members.join.approved_added": {
-      "text": "Вступление одобрено. Человек добавлен в группу.",
-      "status": "machine"
-    },
-    "chat.members.join.approved_requested": {
-      "text": "Вступление одобрено. Человек вступит, когда владелец или администратор применит изменение.",
       "status": "machine"
     },
     "chat.members.join.heading": {
@@ -2626,10 +2598,6 @@
       "text": "Изменения состава применяет владелец группы или администратор. Они применятся автоматически, когда кто-то из них это сделает.",
       "status": "machine"
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, one {Теперь # изменение ожидает применения.} few {Теперь # изменения ожидают применения.} many {Теперь # изменений ожидают применения.} other {Теперь # изменения ожидают применения.}}",
-      "status": "machine"
-    },
     "chat.members.pending.waiting_added": {
       "text": "Ожидает добавления.",
       "status": "machine"
@@ -2648,18 +2616,6 @@
     },
     "chat.members.remove.confirm_named": {
       "text": "Удалить: {name}",
-      "status": "machine"
-    },
-    "chat.members.remove.done": {
-      "text": "Участник удалён.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested": {
-      "text": "Удаление запрошено. Оно вступит в силу, когда владелец или администратор применит изменение.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested_short": {
-      "text": "Удаление запрошено.",
       "status": "machine"
     },
     "chat.members.remove.title": {
@@ -3254,8 +3210,12 @@
       "text": "Запрос на вступление",
       "status": "machine"
     },
-    "chat.system.members_changed": {
-      "text": "Состав изменён",
+    "chat.system.member_joined": {
+      "text": "{name} присоединяется",
+      "status": "machine"
+    },
+    "chat.system.member_left": {
+      "text": "{name} покидает группу",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -3284,14 +3244,6 @@
     },
     "chat.transfer.candidate_admin": {
       "text": "{name}, администратор",
-      "status": "machine"
-    },
-    "chat.transfer.done_admin": {
-      "text": "Теперь владелец группы — {name}. Вы остаётесь администратором.",
-      "status": "machine"
-    },
-    "chat.transfer.done_member": {
-      "text": "Теперь владелец группы — {name}. Вы теперь обычный участник.",
       "status": "machine"
     },
     "chat.transfer.irreversible_body": {
@@ -3332,10 +3284,6 @@
     },
     "chat.transfer.pending_named": {
       "text": "Ожидает передачи прав владельца: {name}.",
-      "status": "machine"
-    },
-    "chat.transfer.requested": {
-      "text": "Передача прав владельца запрошена. Она вступит в силу, когда владелец или администратор применит изменение.",
       "status": "machine"
     },
     "chat.transfer.role_change_pending": {
@@ -4330,14 +4278,6 @@
       "text": "Ждём, пока другое устройство отсканирует этот код...",
       "status": "machine"
     },
-    "device_link.request.added": {
-      "text": "Устройство добавлено.",
-      "status": "machine"
-    },
-    "device_link.request.added_named": {
-      "text": "«{name}» добавлено.",
-      "status": "machine"
-    },
     "device_link.request.adding": {
       "text": "Добавляем устройство...",
       "status": "machine"
@@ -4464,10 +4404,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "Откройте Lakko, чтобы посмотреть свои устройства.",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "Открыть «Устройства»",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -6546,6 +6482,10 @@
       "text": "Настройки",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "Настройки. В ваш аккаунт добавлено устройство",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "Группы",
       "status": "machine"
@@ -8022,6 +7962,10 @@
       "text": "Нет камеры ни на одном из устройств? Войдите на новом и выберите «{method}»: здесь появится запрос «{prompt}» с кодом для сверки.",
       "status": "machine"
     },
+    "settings.devices.attention_a11y": {
+      "text": "Устройства. В ваш аккаунт добавлено устройство",
+      "status": "machine"
+    },
     "settings.devices.device_n": {
       "text": "Устройство {number}",
       "status": "machine"
@@ -8080,14 +8024,6 @@
     },
     "settings.devices.reset_note": {
       "text": "Сегодня на этом устройстве были сброшены ключи аккаунта. Остальные устройства вышли из аккаунта и удалены. Добавьте их снова в разделе «Настройки» > «Устройства» > «Добавить устройство».",
-      "status": "machine"
-    },
-    "settings.devices.scan.done": {
-      "text": "Устройство добавлено. Оно появится в списке, когда закончит подключение.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done_named": {
-      "text": "«{name}» добавлено. Оно появится в списке, когда закончит подключение.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {
@@ -8560,6 +8496,10 @@
     },
     "settings.section.security": {
       "text": "Безопасность",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "Безопасность. В ваш аккаунт добавлено устройство",
       "status": "machine"
     },
     "settings.security.devices.sub": {

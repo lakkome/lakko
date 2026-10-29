@@ -2410,10 +2410,6 @@
       "text": "Adicionar membro",
       "status": "machine"
     },
-    "chat.members.add.done": {
-      "text": "{name} agora está no grupo.",
-      "status": "machine"
-    },
     "chat.members.add.error.no_bundle": {
       "text": "Esta pessoa ainda não terminou de configurar o Lakko. Tente novamente mais tarde.",
       "status": "machine"
@@ -2430,16 +2426,8 @@
       "text": "@nomedeusuario",
       "status": "machine"
     },
-    "chat.members.add.requested": {
-      "text": "Pedido para adicionar {name} enviado. A pessoa entra quando um proprietário ou administrador aplicar a alteração.",
-      "status": "machine"
-    },
     "chat.members.add.submit": {
       "text": "Adicionar",
-      "status": "machine"
-    },
-    "chat.members.admin.demoted": {
-      "text": "Função de administrador removida.",
       "status": "machine"
     },
     "chat.members.admin.make": {
@@ -2450,16 +2438,8 @@
       "text": "Admin",
       "status": "machine"
     },
-    "chat.members.admin.promoted": {
-      "text": "Função de administrador concedida.",
-      "status": "machine"
-    },
     "chat.members.admin.remove": {
       "text": "Remover administrador",
-      "status": "machine"
-    },
-    "chat.members.admin.requested": {
-      "text": "Alteração solicitada. Ela vale quando um proprietário ou administrador aplicar a alteração.",
       "status": "machine"
     },
     "chat.members.count": {
@@ -2480,14 +2460,6 @@
     },
     "chat.members.join.approve": {
       "text": "Aprovar",
-      "status": "machine"
-    },
-    "chat.members.join.approved_added": {
-      "text": "Entrada aprovada. A pessoa foi adicionada ao grupo.",
-      "status": "machine"
-    },
-    "chat.members.join.approved_requested": {
-      "text": "Entrada aprovada. A pessoa entra quando um proprietário ou administrador aplicar a alteração.",
       "status": "machine"
     },
     "chat.members.join.heading": {
@@ -2526,10 +2498,6 @@
       "text": "As alterações de membros são aplicadas pelo proprietário do grupo ou por um administrador. Elas serão aplicadas automaticamente quando um deles fizer isso.",
       "status": "machine"
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, one {# alteração agora aguarda ser aplicada.} other {# alterações agora aguardam ser aplicadas.}}",
-      "status": "machine"
-    },
     "chat.members.pending.waiting_added": {
       "text": "Aguardando adição.",
       "status": "machine"
@@ -2548,18 +2516,6 @@
     },
     "chat.members.remove.confirm_named": {
       "text": "Remover {name}",
-      "status": "machine"
-    },
-    "chat.members.remove.done": {
-      "text": "Membro removido.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested": {
-      "text": "Remoção solicitada. Ela vale quando um proprietário ou administrador aplicar a alteração.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested_short": {
-      "text": "Remoção solicitada.",
       "status": "machine"
     },
     "chat.members.remove.title": {
@@ -3126,8 +3082,12 @@
       "text": "Pedido para entrar",
       "status": "machine"
     },
-    "chat.system.members_changed": {
-      "text": "Membros alterados",
+    "chat.system.member_joined": {
+      "text": "{name} entrou",
+      "status": "machine"
+    },
+    "chat.system.member_left": {
+      "text": "{name} saiu",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -3156,14 +3116,6 @@
     },
     "chat.transfer.candidate_admin": {
       "text": "{name}, administrador",
-      "status": "machine"
-    },
-    "chat.transfer.done_admin": {
-      "text": "{name} agora é o proprietário do grupo. Você continua como administrador.",
-      "status": "machine"
-    },
-    "chat.transfer.done_member": {
-      "text": "{name} agora é o proprietário do grupo. Agora você é um membro comum.",
       "status": "machine"
     },
     "chat.transfer.irreversible_body": {
@@ -3204,10 +3156,6 @@
     },
     "chat.transfer.pending_named": {
       "text": "Aguardando tornar {name} proprietário.",
-      "status": "machine"
-    },
-    "chat.transfer.requested": {
-      "text": "Transferência de propriedade solicitada. Ela vale quando um proprietário ou administrador aplicar a alteração.",
       "status": "machine"
     },
     "chat.transfer.role_change_pending": {
@@ -4174,14 +4122,6 @@
       "text": "Aguardando seu outro dispositivo escanear este código...",
       "status": "machine"
     },
-    "device_link.request.added": {
-      "text": "Dispositivo adicionado.",
-      "status": "machine"
-    },
-    "device_link.request.added_named": {
-      "text": "“{name}” adicionado.",
-      "status": "machine"
-    },
     "device_link.request.adding": {
       "text": "Adicionando o dispositivo...",
       "status": "machine"
@@ -4308,10 +4248,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "Abra o Lakko para ver seus dispositivos.",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "Abrir Dispositivos",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -6246,6 +6182,10 @@
       "text": "Configurações",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "Configurações. Um dispositivo foi adicionado à sua conta",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "Grupos",
       "status": "machine"
@@ -7498,6 +7438,10 @@
       "text": "Nenhum dos dispositivos tem câmera? Entre no novo e escolha \"{method}\": um aviso \"{prompt}\" com um código para comparar vai aparecer aqui.",
       "status": "machine"
     },
+    "settings.devices.attention_a11y": {
+      "text": "Dispositivos. Um dispositivo foi adicionado à sua conta",
+      "status": "machine"
+    },
     "settings.devices.device_n": {
       "text": "Dispositivo {number}",
       "status": "machine"
@@ -7556,14 +7500,6 @@
     },
     "settings.devices.reset_note": {
       "text": "As chaves da sua conta foram redefinidas hoje neste dispositivo. Os outros dispositivos foram desconectados e removidos. Adicione-os de novo em Configurações > Dispositivos > Adicionar dispositivo.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done": {
-      "text": "Dispositivo adicionado. Ele vai aparecer na lista quando terminar de entrar.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done_named": {
-      "text": "“{name}” adicionado. Ele aparecerá na lista quando terminar de entrar.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {
@@ -8036,6 +7972,10 @@
     },
     "settings.section.security": {
       "text": "Segurança",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "Segurança. Um dispositivo foi adicionado à sua conta",
       "status": "machine"
     },
     "settings.security.devices.sub": {

@@ -36,7 +36,6 @@ import {
   DEVICE_LINK_ANSWER_LIMIT,
   DEVICE_LINK_ANSWER_WINDOW_MS,
   LINK_DECLINED_OLD,
-  LINK_DEVICE_ADDED,
   LINK_ENTER_SIX_DIGITS,
   LINK_HANDLED_ELSEWHERE,
   LINK_NEW_WRONG_CODE,
@@ -291,7 +290,7 @@ describe("old device: the fresh-auth proof (UX 17.4)", () => {
     refuse = false;
     await h.flow.resume();
     expect(h.ports.pair).toHaveBeenCalledTimes(1);
-    expect(h.flow.view()).toEqual({ kind: "closed", message: LINK_DEVICE_ADDED });
+    expect(h.flow.view()).toEqual({ kind: "idle" });
   });
 
   it("a request that goes away under the open question closes with 'expired'", async () => {
@@ -406,19 +405,24 @@ describe("old device: the decision", () => {
     });
     expect(h.ports.pair).toHaveBeenCalledWith(PAYLOAD);
     expect(h.calls).toEqual(["answer", "check", "result:accepted", "pair"]);
-    expect(h.views.map((v) => v.kind)).toEqual(["asking", "answering", "showing", "adding", "closed"]);
-    expect(h.flow.view()).toEqual({ kind: "closed", message: LINK_DEVICE_ADDED });
+    expect(h.views.map((v) => v.kind)).toEqual(["asking", "answering", "showing", "adding", "idle"]);
+    expect(h.flow.view()).toEqual({ kind: "idle" });
   });
 
-  it("names the added device when its payload carried a card (UX second-device 2.1)", async () => {
-    const h = responderHarness({ pair: vi.fn(async () => "Chrome on macOS") });
+  it("on success the prompt simply closes, with no added line (UX second-device 2.1)", async () => {
+    const h = responderHarness();
     await h.flow.poll();
     await h.flow.consent();
     h.setListed(sealedRequest(GOOD_CONFIRM_A));
     await h.flow.poll();
-    const view = h.flow.view();
-    expect(view.kind).toBe("closed");
-    expect(view.kind === "closed" ? view.message() : "").toBe("“Chrome on macOS” added.");
+    expect(h.ports.pair).toHaveBeenCalledTimes(1);
+    // No result toast of any kind: the last view is the closed prompt.
+    expect(h.views.some((v) => v.kind === "closed")).toBe(false);
+    expect(h.flow.view()).toEqual({ kind: "idle" });
+    // The request now carries its outcome; a later poll keeps it closed.
+    h.setListed({ ...sealedRequest(GOOD_CONFIRM_A), outcome: "accepted" });
+    await h.flow.poll();
+    expect(h.flow.view()).toEqual({ kind: "idle" });
   });
 
   it("a wrong code posts wrong_code and pairs nothing", async () => {
@@ -1058,7 +1062,7 @@ describe("the device link over the real wasm core", () => {
     expect(r.results).toEqual(["accepted"]);
     expect(r.paired).toEqual([r.payload]);
     expect(r.confirmed).toBe(true);
-    expect(r.oldView).toEqual({ kind: "closed", message: LINK_DEVICE_ADDED });
+    expect(r.oldView).toEqual({ kind: "idle" });
     expect(r.freshView.kind).toBe("confirmed");
   });
 

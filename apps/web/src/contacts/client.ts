@@ -1479,7 +1479,10 @@ export class ContactsClient {
     identity?: IdentitySecrets | null,
     cursor?: SweepCursorRef,
     onSweptEvent?: (event: IncomingChatEvent) => void,
-  ): Promise<void> {
+  ): Promise<SweepOutcome | null> {
+    // What an owed verdict did, so the caller can show the named membership
+    // row of an own commit it merged (docs/ux/second-device.md section 4).
+    let owedOutcome: SweepOutcome | null = null;
     // ADR-0045 obligation 1 — a staged sweep is DURABLE and freezes this
     // group's own membership operations across restarts, so a verdict owed
     // from a previous run must be finished before anything else. It is wired
@@ -1514,7 +1517,7 @@ export class ContactsClient {
 
       try {
         const ports = await owedPorts();
-        await withGroupMlsLock(base64Encode(group.groupId), async () =>
+        owedOutcome = await withGroupMlsLock(base64Encode(group.groupId), async () =>
           resolveOwedVerdict(ports),
         );
       } catch (err) {
@@ -1559,7 +1562,7 @@ export class ContactsClient {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("ContactsClient: commit-outbox sweep load failed", err);
-      return;
+      return owedOutcome;
     }
     for (const entry of entries) {
       // ADR-0045 — a staged-sweep entry is NOT re-publishable on this path.
@@ -1614,6 +1617,7 @@ export class ContactsClient {
         );
       }
     }
+    return owedOutcome;
   }
 
   /**

@@ -499,40 +499,11 @@ public func transferPendingLabel(successorLabel: String?) -> String {
     return Localization.text("chat.transfer.pending_named", texts: ["name": successorLabel])
 }
 
-/// Which of the two things the publish actually did.
-public enum TransferOutcome: Equatable {
-    /// The proposal was published AND this device's own sweep committed it.
-    case committed
-    /// The proposal was published and is waiting for a committer.
-    case proposed
-}
-
-/// The outcome notice (§6.1.7).
-///
-/// The two swept forms name the transferor's **own new role**, because half the
-/// panel changes under them in one tap: an owner who chose `Become a regular
-/// member` loses the add form, the invite block, every `Remove` and every admin
-/// toggle at once. §5.3's reasoning about a vanishing control applies with more
-/// force to a vanishing section.
-///
-/// The published-but-unswept form names **no** role, because nothing has changed
-/// yet; appending "you are now an admin" to a request that has not landed would
-/// be the optimistic-update lie in its purest form.
-public func transferOutcomeNotice(
-    outcome: TransferOutcome,
-    successorLabel: String,
-    outgoing: OutgoingOwner
-) -> String {
-    guard outcome == .committed else {
-        return Localization.text("chat.transfer.requested")
-    }
-    switch outgoing {
-    case .admin:
-        return Localization.text("chat.transfer.done_admin", texts: ["name": successorLabel])
-    case .member:
-        return Localization.text("chat.transfer.done_member", texts: ["name": successorLabel])
-    }
-}
+/// §6.1.7 — what the transferor sees afterwards: no notice
+/// (`docs/ux/proposal-based-membership.md` section 2, amendment of
+/// 2026-10-29, ``MembershipActionNotice``). A transfer that landed changes the
+/// panel in place; one that has not shows ``transferPendingLabel(successorLabel:)``
+/// on the transfer control until it does.
 
 // MARK: - §6.1.9 telling the new owner
 

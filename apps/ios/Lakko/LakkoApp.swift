@@ -1459,7 +1459,6 @@ private struct SessionRoot: View, Equatable {
                     onOpenFolderSettings: { reorder in
                         push(.chatFolders(reorder: reorder), on: .chats)
                     },
-                    onOpenDevices: { openDevices() },
                     accountNotice: AccountNoticeBanner(center: services.accountProtection),
                     recalledNotice: RecalledNoticeBanner(
                         authRepository: authRepository,
@@ -1537,19 +1536,20 @@ private struct SessionRoot: View, Equatable {
             .tabItem { Label(l10n.t("nav.calls"), systemImage: "phone") }
             .tag(SessionTab.calls)
 
-            NavigationStack(path: guardedSettingsPath) {
-                SettingsScreen(
-                    account: account,
-                    authRepository: authRepository,
-                    accountProtection: services.accountProtection,
-                    onOpen: { settingsPath.append($0) },
-                    onLogout: authRepository.logout,
-                    onForgetDevice: forgetDevice,
-                    onAccountDeleted: { services.wipeAccountLocalData(accountIdB64: $0) }
-                )
-                .navigationDestination(for: TabRoute.self) { routeView($0, tab: .settings) }
+            SettingsTabAttention {
+                NavigationStack(path: guardedSettingsPath) {
+                    SettingsScreen(
+                        account: account,
+                        authRepository: authRepository,
+                        accountProtection: services.accountProtection,
+                        onOpen: { settingsPath.append($0) },
+                        onLogout: authRepository.logout,
+                        onForgetDevice: forgetDevice,
+                        onAccountDeleted: { services.wipeAccountLocalData(accountIdB64: $0) }
+                    )
+                    .navigationDestination(for: TabRoute.self) { routeView($0, tab: .settings) }
+                }
             }
-            .tabItem { Label(l10n.t("nav.settings"), systemImage: "gearshape") }
             .tag(SessionTab.settings)
         }
         // Deep links: park on the current tab's stack when a slug arrives
@@ -2069,7 +2069,9 @@ private struct SessionRoot: View, Equatable {
                             NSLog("ADR-0050 admit device: fan-out failed: \(error)")
                         }
                     }
-                }
+                },
+                // UX section 2.1 — linked: back to the Devices list.
+                onLinked: { pop(.addDevice, from: tab) }
             )
         case .recoveryFactors:
             RecoverySettingsScreen(
@@ -2308,8 +2310,7 @@ private struct SessionRoot: View, Equatable {
         path(for: tab).wrappedValue.append(route)
     }
 
-    /// UX 17.5 — `Open Devices` on the new-device banner (and a tap on its
-    /// local notification): Settings > Devices.
+    /// UX 17.5 — a tap on the new-device notification: Settings > Devices.
     private func openDevices() {
         selectedTab = .settings
         if settingsPath.last != .devices { setSettingsPath([.devices]) }
@@ -2477,4 +2478,24 @@ enum AnonRoute: Hashable {
     case signup
     case login
     case recover
+}
+
+/// UX 17.5 — the Settings tab, carrying the exclamation-mark badge while a
+/// device added to the account is pending here. Its own view observes the
+/// warning, so the session root is not re-evaluated by it.
+private struct SettingsTabAttention<Content: View>: View {
+    @ObservedObject private var notice = NewDeviceNoticeCenter.shared
+    @ObservedObject private var l10n = Localization.shared
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        let attention = notice.badgeVisible
+        content
+            .tabItem {
+                Label(l10n.t("nav.settings"), systemImage: "gearshape")
+                    .accessibilityLabel(
+                        attention ? l10n.t("nav.settings.attention_a11y") : l10n.t("nav.settings"))
+            }
+            .badge(attention ? Text(verbatim: "!") : nil)
+    }
 }

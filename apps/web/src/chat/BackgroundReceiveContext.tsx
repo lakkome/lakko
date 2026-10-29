@@ -189,13 +189,18 @@ import { installDeadSessionGuard } from "./client";
 import { attachmentRefFromPersisted, persistedFromAttachmentRef } from "./persisted-attachment";
 import {
   adminRestoreStep,
-  deviceSwapAcrossCommits,
   mayAddResetIdentity,
   repairPlan,
   resetCase,
   supersededSenderInert,
 } from "./reset-repair";
 import { conversationKindOf } from "./conversation-kind";
+import {
+  membershipChangeOfBatch,
+  sweepBatchWithOwnCommit,
+  withMembershipChange,
+  type MembershipChange,
+} from "./membership-rows";
 import type { ProposalRecordView } from "./pending-requests";
 import type { PushRotationRole } from "../push/group-routing";
 import { proposalKey, recordObservation } from "./pending-requests";
@@ -1623,6 +1628,8 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     const start = await startCursor(account, entry, current);
     if (!current()) return null;
     const before = memberSignatureKeys(entry.group);
+    // docs/ux/second-device.md section 4 — the people before the sweep's reads.
+    const peopleBefore = personKeysOrNull(entry);
     const swept: IncomingChatEvent[] = [];
     let outcome: SweepOutcome | null = null;
     let reached = start;
@@ -1646,8 +1653,14 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       );
     } finally {
       // Applied and cursor-advanced whether or not our commit won: the only
-      // question left is whether they reach the log and the view.
-      if (swept.length > 0) await settle(account, entry, swept, true, before, { current, reached });
+      // question left is whether they reach the log and the view. A merged
+      // own commit joins them as the batch's last commit row, so this device
+      // records the same named membership row as every other member
+      // (docs/ux/second-device.md section 4).
+      const batch = sweepBatchWithOwnCommit(swept, outcome, new Date().toISOString());
+      if (batch.length > 0) {
+        await settle(account, entry, batch, true, before, { current, reached }, peopleBefore);
+      }
     }
     if (!current()) return null;
     if (outcome?.kind === "committed") {
@@ -1842,31 +1855,31 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         }),
       senderKeyOfLeaf: (leaf) => personKeyAtLeafB64(entry, leaf),
     });
-    // ADR-0073 R.7 case 2 / UX 16.5 — a batch that only swapped the devices
-    // of people who stay leaves no `Members changed` row, in the log or in
-    // the view.
-    let swapOnly = false;
+    // docs/ux/second-device.md section 4 — the people a batch of commits
+    // added and removed go on its last commit row, in the log and in the
+    // view. A batch that only swapped devices, or a reset person's keys
+    // (ADR-0073 R.7 case 2 / UX 16.5, across one batch or two), records
+    // nothing, and neither does a one-to-one or this device's own removal.
+    let membershipChange: MembershipChange | null = null;
     if (planned.sawCommit) {
-      const swap = deviceSwapAcrossCommits({
+      const judged = membershipChangeOfBatch({
         personKeysBefore: peopleBefore ?? null,
         personKeysAfter: personKeysOrNull(entry),
         accountOfKey: (k) => superseded.get(k) ?? accountIdB64OfKey(k),
         isSuperseded: (k) => superseded.has(k),
         awaited: awaitedSwaps(account, groupIdB64),
         nowMs: Date.now(),
+        ownPersonKeyB64: ownPersonKeyB64(chats.identity()) ?? null,
       });
-      swapOnly = swap.suppress;
-      setAwaitedSwaps(account, groupIdB64, swap.awaited);
+      setAwaitedSwaps(account, groupIdB64, judged.awaited);
+      if (readIsActive(entry.group) !== false) membershipChange = judged.change;
     }
-    const isCommitRow = (e: IncomingChatEvent): boolean =>
-      e.kind === "system" && e.systemKind === "commit";
-    const plan = swapOnly
-      ? {
-          ...planned,
-          timeline: planned.timeline.filter((e) => !isCommitRow(e)),
-          toView: planned.toView.filter((e) => !isCommitRow(e)),
-        }
-      : planned;
+    const kind = conversationKindOf(entry.group);
+    const plan = {
+      ...planned,
+      timeline: withMembershipChange(planned.timeline, membershipChange, kind),
+      toView: withMembershipChange(planned.toView, membershipChange, kind),
+    };
 
     if (!scope.current()) {
       // The session these rows were received for has ended. Everything below

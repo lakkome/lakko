@@ -179,6 +179,13 @@ public fun resolveName(
     )
 }
 
+/**
+ * The name an avatar's initials are taken from: the display name alone, never
+ * a list label that appends ` · @username` (seen live 2026-10-29: a member row
+ * for "VG2 · @vg2" drew "V·").
+ */
+public fun avatarName(name: ResolvedName): String = name.primary
+
 /** The label for the sender of a request: the list label, or
  *  [PLACEHOLDER_SOMEONE] when nothing is known about them. */
 public fun requestSenderLabel(name: ResolvedName): String =

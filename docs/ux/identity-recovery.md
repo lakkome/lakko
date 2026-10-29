@@ -1544,55 +1544,99 @@ by any route (code, scan, a restore that re-adds a device). This is the
 person's own account security; the rule against surfacing key events
 (section 16) is about other people's keys and does not apply.
 
-**Surface.** One banner (the design system's Banner: icon, text, one action)
-at the top of the Chats list, above the folder bar, and the same banner at
-the top of Settings > Devices. It is not a modal: it must not block someone
-who is mid-conversation, and it must still be there tomorrow.
+Amended 2026-10-29 (maintainer): the warning is a system notification, a
+badge on Settings and a highlighted row in Settings > Devices, and seeing it
+on one device clears it on all of them. The banner card at the top of the
+Chats list is removed.
+
+**Pending.** A device is *pending* on this device when it is in the account's
+DeviceGroup roster, this device has not treated it as known (the rules
+below), and no device of the account has acknowledged it yet (the synced
+register of 17.6). While at least one device is pending, every surface below
+is up; when none is, every surface is gone.
+
+**Surfaces while pending.**
+
+1. **System notification.** Posted once per pending device, at the moment
+   this device learns of it: when Lakko is running, in front or not, and at
+   the next open when it learns of the device then. Title
+   `devices.added_notice.title` (`.title_many` when two or more are pending),
+   body `devices.added_notice.notification_body`. It names no device and no
+   place. Tapping it opens Settings > Devices. It uses a fixed identifier per
+   account, so a second device replaces the first notification instead of
+   stacking. Withdrawn from the notification centre / shade / browser as soon
+   as the pending set becomes empty, whatever device the acknowledgement came
+   from. Web: only when the person already allowed notifications (never asked
+   for here); iOS and Android: through the app's existing notification
+   permission (never asked for here either). A closed app is not woken
+   (17.8): the notification is posted at the next open.
+2. **Badge on Settings.** The Settings destination of the navigation (tab bar
+   on phones, sidebar / rail on wider layouts) carries an exclamation-mark
+   badge, and inside Settings the `Devices` row carries the same badge;
+   where Settings shows its section list beside the open section (web on a
+   wide screen), the section that holds `Devices` carries it too
+   (`settings.security.attention_a11y`). The
+   badge is drawn in the design system's danger colour and is never colour
+   alone: its accessible name is `nav.settings.attention_a11y` on the
+   destination and `settings.devices.attention_a11y` on the row.
+3. **Highlighted row.** In Settings > Devices each pending device's row has an
+   accent-tinted background and the `New` label
+   (`settings.devices.new_badge`, text, so not colour alone), and the first
+   such row is scrolled into view. Above the list, the explanation:
 
 ```
 (device icon)  A device was added to your account
                Added 6 Oct 2026, 14:05.
                If this was not you, remove the device, then change
                your password.
-                                          [Open Devices]   Dismiss
 ```
 
-Keys: `devices.added_notice.title` (or `.title_many` for two or more, with
-`.when` giving the most recent), `.when`, `.not_you`, `.open_devices`,
-`common.dismiss`. `{date}` is the date and time the device joined, formatted
-by the platform in the interface language; it is the join time recorded with
-the device (`second-device.md` section 6) or, when that is not available,
-the time this device learned of it.
+   Keys `devices.added_notice.title` (or `.title_many`), `.when` (the most
+   recent join time), `.not_you`. No button: the screen it would open is this
+   one, and opening it is the acknowledgement.
 
-- **Open Devices** goes to Settings > Devices. The new device's row carries a
-  `New` label (`settings.devices.new_badge`, text, not colour alone) and is
-  scrolled into view. Removing a row that carries `New` shows, in place of
-  the banner: `Device removed. If you did not add it, change your password
-  now.` (`settings.devices.removed_change_password`) with a `Change
-  password` button (`settings.password.change`).
-- **Dismissal.** `Dismiss` or the device's removal ends the notice on this
-  device. Opening Devices does not: looking is not the same as deciding. It
-  is kept across restarts and is not timed out; each device dismisses its
-  own. The `New` label goes with the banner.
-- **Not on the device that was just added.** A device never shows the notice
-  about itself, and it treats every device already in the account when it
-  joined as known.
-- **Not on the device that let it in.** That device showed "Is this you?" or
-  `Link this device?`, took the proof, and showed `Device added.`; a second
-  alert about the same act a moment later teaches people to dismiss the
-  banner without reading. The cost is stated in 17.8.
-- **System notification.** Warranted, because this is the one notice where
-  an hour matters, but only where the app can raise it itself: when Lakko is
-  running and not in front (a hidden web tab with notification permission, an
-  Android or iOS app still alive in the background) it posts a local
-  notification, title `devices.added_notice.title`, body
-  `devices.added_notice.notification_body`, opening Settings > Devices. It
-  names no device and no place. When the app is closed, the banner appears
-  at the next open; waking a closed app for this is not designed (17.8).
-- Accessibility: the banner is announced once when it appears (polite, not
-  assertive: it does not interrupt typing), title and both lines as one
-  announcement; `Open Devices` then `Dismiss` in focus order; it never takes
-  focus by itself.
+**What counts as seen.** Opening Settings > Devices while a device is pending
+(directly, from the badge, or by tapping the notification). At that moment
+this device writes an acknowledgement for **every device pending here** and
+sends it to the account's other devices. On this device the highlight and
+the explanation stay for the rest of this visit to the screen, so the person
+actually sees which row is new; leaving the screen clears them. The badge
+and the notification go at once. A device that becomes pending while Settings > Devices is
+open and in front is acknowledged at once and joins the highlight. If the
+synced state is not ready yet (the DeviceGroup has not opened), opening the
+screen consumes nothing: the rows stay pending and highlighted and the badge
+stays, and the acknowledgement is written the moment the state becomes ready
+if the screen is still open. Removing a pending device also ends its
+warning everywhere (it left the roster). There is no `Dismiss`: looking at
+the list is the decision the person can take, and the list is where the
+`Remove` button is.
+
+**On every other device.** When an acknowledgement arrives, the
+acknowledged devices stop being pending there: the notification is
+withdrawn, the badge goes, and if Settings > Devices is open the highlight
+goes with it. A device that learns of a new device only after it was already
+acknowledged elsewhere never shows anything about it.
+
+**Not on the device that was just added.** A device never shows the warning
+about itself, and it treats every device already in the account when it
+joined as known.
+
+**Not on the device that let it in.** That device showed "Is this you?" or
+`Link this device?`, took the proof, and showed `Device added.`; a second
+alert about the same act a moment later teaches people to dismiss without
+reading. It does not acknowledge the device for the account either: the
+other devices still warn (the cost is stated in 17.8).
+
+**Removed with change of password.** Removing a row that carries `New` shows,
+above the list: `Device removed. If you did not add it, change your password
+now.` (`settings.devices.removed_change_password`) with a `Change password`
+button (`settings.password.change`), unchanged.
+
+**Accessibility.** The badge's accessible name is announced as part of the
+destination's or row's name; it is not a live region. The explanation above
+the list is read as the first element of the screen, title and both lines as
+one announcement; it never takes focus by itself. The highlighted rows
+expose the `New` label in their accessible name.
 
 ### 17.6 Data the UI needs
 
@@ -1622,8 +1666,15 @@ Kept by the client:
 
 - The proof and its expiry, in memory only; gone on sign-out and on restart
   (a restart costs at most one more password entry).
-- Per device: the set of the account's devices already acknowledged, the
-  devices this device itself let in, and whether the banner is dismissed.
+- Per device: the devices this device already treats as known, the devices
+  this device itself let in, and the pending devices with the time this
+  device learned of each (the DeviceGroup carries no join date).
+- Per account, synced between the account's devices: the set of devices
+  whose warning was seen (the `lakko-sync` device-acknowledgement register,
+  one register per device signature key, write-once, carried as a
+  DeviceGroup service envelope `lakko/sync/device-ack/v1` and persisted with
+  the rest of the synced state, so the backup carries it). A device pending
+  locally whose key is in this set is not pending.
 - The join time per device (the device list has no added-on date on web
   today; `Devices.tsx` says so).
 

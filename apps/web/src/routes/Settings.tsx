@@ -42,6 +42,8 @@ import { paths } from "./paths";
 import { isDesktop } from "../platform";
 import { DesktopNotificationsSection, KeyboardShortcutsCard } from "../settings/DesktopSettings";
 import { sectionsForBuild, showsShortcutList } from "../settings/desktop-only";
+import { addedNotice, badgeVisible } from "../devices/added-notice";
+import { DevicesAttention, devicesNeedAttention } from "../devices/DeviceAddedNotice";
 
 type Section =
   | "profile"
@@ -145,9 +147,19 @@ export default function Settings(): JSX.Element {
             classList={{ active: highlighted() === s.id && page() !== null }}
             activeClass=""
             inactiveClass=""
+            // The Devices row lives in Security: on a wide screen Settings
+            // opens on Profile, so the section entry carries the badge too.
+            aria-label={
+              s.id === "security" && devicesNeedAttention()
+                ? t("settings.security.attention_a11y")
+                : undefined
+            }
           >
             <Icon name={s.icon} size={20} />
             <span>{t(s.labelKey)}</span>
+            <Show when={s.id === "security"}>
+              <DevicesAttention />
+            </Show>
             <Show when={s.id === "language"}>
               <span class="lk-settings-nav-trail">
                 <bdi lang={currentLanguage()}>{currentLanguageOwnName()}</bdi>
@@ -281,10 +293,17 @@ function SecuritySection(): JSX.Element {
             <Icon name="devices" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">{t("settings.devices.title")}</span>
+            <span class="lk-card-row-title">
+              {t("settings.devices.title")}
+              <DevicesAttention />
+            </span>
             <span class="lk-card-row-sub">{t("settings.security.devices.sub")}</span>
           </div>
-          <A href={paths.devices} class="lk-card-row-action">
+          <A
+            href={paths.devices}
+            class="lk-card-row-action"
+            aria-label={badgeVisible(addedNotice()) ? t("settings.devices.attention_a11y") : undefined}
+          >
             {t("common.manage")}
           </A>
         </div>

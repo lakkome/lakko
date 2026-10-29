@@ -755,10 +755,6 @@ public enum PairingOrchestrator {
         /// linked but received no keys, and the person is told so
         /// (`device_link.keys_not_sent`).
         public let keysSent: Bool
-        /// UX section 2.1 — the card the new device put in its payload,
-        /// `nil` when it carried none: the result line names the device by
-        /// it. What the new device says about itself; nothing trusts it.
-        public var newDeviceCard: StoredDeviceCard? = nil
     }
 
     /// Inputs for the recovery payload the scanner publishes alongside the
@@ -879,8 +875,7 @@ public enum PairingOrchestrator {
         return ScanResult(
             memberCount: 0,
             newDeviceKey: try keyPackageSignatureKey(keyPackage: decoded.keyPackage),
-            keysSent: result.value ?? false,
-            newDeviceCard: PairingCodec.deviceCard(of: decoded)
+            keysSent: result.value ?? false
         )
     }
 

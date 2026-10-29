@@ -212,17 +212,16 @@ final class DeviceLinkTests: XCTestCase {
         XCTAssertTrue(trusted, "accepted AND the old device's confirmation verified")
         XCTAssertEqual(new.phase, .confirmed)
         XCTAssertEqual(paired.payloads, [payload], "the old device pairs the new device's payload")
-        XCTAssertEqual(old.modal, .added, "UX 2.1: the result is said, not closed silently")
-        XCTAssertNil(old.addedName, "a payload with no card names no device")
-        XCTAssertEqual(DeviceLinkModalCopy.added(old.addedName), Localization.text("device_link.request.added"))
-        old.dismiss()
-        XCTAssertNil(old.modal)
+        XCTAssertNil(old.modal, "UX 2.1: the prompt simply closes, no result line")
         XCTAssertEqual(server.log, ["create", "pake", "payload", "result:accepted"])
     }
 
-    /// UX section 2.1 — on the code route too, the result names the new
-    /// device by the card it sealed into its payload.
-    func testTheCodeRouteResultNamesTheDeviceByItsCard() async throws {
+    /// UX section 2.1 (decided 2026-10-29) — on the six-digit code route the
+    /// "Is this you?" prompt simply closes once the device was added with
+    /// its keys: no "added" line and no OK button, even when the payload
+    /// carries a card naming the device. The payload (with its card) still
+    /// reaches the pairing, which stores the card for the new leaf.
+    func testTheCodeRoutePromptClosesOnSuccess() async throws {
         let server = FakeDeviceLinkServer()
         let paired = Paired()
         let old = responder(server, limit: try limit(), paired: paired)
@@ -243,12 +242,9 @@ final class DeviceLinkTests: XCTestCase {
         _ = await submit.value
         await start.value
 
-        XCTAssertEqual(old.modal, .added)
-        XCTAssertEqual(old.addedName, "Chrome on macOS")
-        let line = DeviceLinkModalCopy.added(old.addedName)
-        XCTAssertEqual(line, Localization.text("device_link.request.added_named", texts: ["name": "Chrome on macOS"]))
-        XCTAssertTrue(line.contains("Chrome on macOS"))
-        XCTAssertNotEqual(line, Localization.text("device_link.request.added"))
+        XCTAssertNil(old.modal, "the prompt closed; nothing waits for an OK")
+        XCTAssertEqual(paired.payloads, [payload], "the payload with its card reaches the pairing")
+        XCTAssertEqual(server.log, ["create", "pake", "payload", "result:accepted"])
     }
 
     /// UX section 2.1 — the code route builds its payload when the code is
@@ -285,7 +281,7 @@ final class DeviceLinkTests: XCTestCase {
 
         XCTAssertEqual(built, 1)
         XCTAssertEqual(paired.payloads, [payload])
-        XCTAssertEqual(old.addedName, "iPhone 16 Pro")
+        XCTAssertNil(old.modal)
     }
 
     /// The old device added the new one but could not hand over the keys (it
@@ -679,7 +675,7 @@ final class DeviceLinkTests: XCTestCase {
         await start.value
         XCTAssertTrue(trusted)
         XCTAssertEqual(paired.payloads, [payload])
-        XCTAssertEqual(old.modal, .added)
+        XCTAssertNil(old.modal)
         XCTAssertEqual(server.log, ["create", "pake", "payload", "result:accepted"])
     }
 

@@ -6797,6 +6797,83 @@ public class ChatRepository(
     }
 
     /**
+     * `docs/ux/second-device.md` section 4 — the row of this device's OWN
+     * merged commit (the ADR-0045 sweep). The DS never hands a device its own
+     * commit back (the echo is dropped), so the named row a receiver writes
+     * from the batch is written here, at the commit's DS message id (the
+     * ADR-0081 commit route's answer): the people before the sweep against
+     * the people after the merge, in a group only.
+     */
+    private suspend fun recordOwnCommitRowBestEffort(
+        record: GroupRecord,
+        groupIdHex: String,
+        commitMessageId: Long,
+        accountKeysBefore: List<String>?,
+    ) {
+        try {
+            val change = providerLock.sessionLock {
+                val after = memberAccountKeysOrNull(record.group)
+                val suppressed = suppressMembersChangedRow(groupIdHex, accountKeysBefore, after)
+                membershipChangeForGroup(groupIdHex, accountKeysBefore, after, suppressed)
+            } ?: return
+            if (record.appendOwnCommitRow(commitMessageId, java.time.Instant.now().toString(), change)) {
+                persistMessageLogBestEffort()
+            }
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "own commit row not written: ${cause.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * `docs/ux/second-device.md` section 4 — the people one receive batch
+     * added and removed, to be recorded on its last commit row: only for a
+     * batch that carries a commit, only in a GROUP (a kind that cannot be read
+     * counts as a group, as [conversationKindOf] does), never when the
+     * device-swap verdict suppressed the batch, never naming this account.
+     */
+    private fun membershipRowChange(
+        groupIdHex: String,
+        events: List<IncomingChatEvent>,
+        accountKeysBefore: List<String>?,
+        accountKeysAfter: List<String>?,
+        swapSuppressed: Boolean,
+    ): MembershipChange? {
+        if (events.none { it is IncomingChatEvent.System && it.systemKind == SystemKind.Commit }) return null
+        return membershipChangeForGroup(groupIdHex, accountKeysBefore, accountKeysAfter, swapSuppressed)
+    }
+
+    /** [membershipRowChange] for a change already known to come from a
+     *  commit (a received batch, or this device's own merged sweep). */
+    private fun membershipChangeForGroup(
+        groupIdHex: String,
+        accountKeysBefore: List<String>?,
+        accountKeysAfter: List<String>?,
+        swapSuppressed: Boolean,
+    ): MembershipChange? {
+        if (conversationKind(groupIdHex) != ConversationKind.Group) return null
+        val superseded = if (accountKeysBefore != null && accountKeysAfter != null &&
+            accountKeysBefore.toSet() != accountKeysAfter.toSet()
+        ) {
+            supersededKeys()
+        } else {
+            emptyMap()
+        }
+        val currentToAccount = HashMap<String, String>()
+        if (superseded.isNotEmpty()) {
+            for ((id, key) in pinnedKeysByAccount(superseded.values.toSet())) currentToAccount[key] = id
+        }
+        return membershipChangeOf(
+            personKeysBefore = accountKeysBefore,
+            personKeysAfter = accountKeysAfter,
+            accountOfKey = { k -> superseded[k] ?: currentToAccount[k] },
+            swapSuppressed = swapSuppressed,
+            ownPersonKey = ownPersonKeyB64(),
+        )
+    }
+
+    /**
      * R.6 - the receive rule for a `group_closed` envelope, which since the
      * visible flow was removed has one producer: a successor claim. Called
      * from the poll's locked apply region, so the roster and role-table read,
@@ -8262,6 +8339,10 @@ public class ChatRepository(
             // dropped here, before any sink, row or call route sees it
             // ([supersededActDropped]). MLS frames were applied above.
             val batchEvents = withoutSupersededSenders(record.group, groupIdHex, result.events)
+            // ADR-0073 R.7 case 2 — read once: the verdict keeps per-group
+            // memory of a reset's devices swapping across two batches.
+            val accountKeysAfterPoll = memberAccountKeysOrNull(record.group)
+            val swapSuppressed = suppressMembersChangedRow(groupIdHex, accountKeysBeforePoll, accountKeysAfterPoll)
             // R.7 case 1 — one predicate for the rows and for the unread
             // count: a re-send whose original is held is neither.
             val heldResend = heldResendPredicate(groupIdHex, batchEvents)
@@ -8295,7 +8376,17 @@ public class ChatRepository(
                     // read-decide-write (C-62 sub-invariant 5).
                     receiveSuccessorClaim(record.group, groupIdHex, messageId, senderKey, closed)
                 },
-                suppressCommitRows = suppressMembersChangedRow(groupIdHex, accountKeysBeforePoll, memberAccountKeysOrNull(record.group)),
+                // UX second-device.md section 4 — a batch of commits that
+                // changed the PEOPLE of a group names them on its last commit
+                // row; a device change or a one-to-one records nothing.
+                membershipChange = membershipRowChange(
+                    groupIdHex,
+                    batchEvents,
+                    accountKeysBeforePoll,
+                    accountKeysAfterPoll,
+                    swapSuppressed,
+                ),
+                suppressCommitRows = swapSuppressed,
                 heldResend = heldResend,
                 pinSink = { senderKey, op ->
                     // ADR-0052 decision 3 — same critical section as the group
@@ -11908,6 +11999,7 @@ public class ChatRepository(
         // window cannot race the shrink diff. Lock order is always group first,
         // provider second.
         var membersBefore: List<String>? = null
+        var accountKeysBeforeSweep: List<String>? = null
         val outcome = try {
             groupLock(groupIdHex).sessionLock {
                 MainThreadGuard.assertOffMain("sweepIfCommitter")
@@ -11917,6 +12009,10 @@ public class ChatRepository(
                 // carried this account's ownership transfer is seen.
                 var ownerBeforeSweep: ByteArray? = null
                 membersBefore = providerLock.sessionLock {
+                    // UX second-device.md section 4 — the people before the
+                    // sweep: this device never receives its own commit back,
+                    // so it writes the named row itself once the commit merges.
+                    accountKeysBeforeSweep = memberAccountKeysOrNull(record.group)
                     // ADR-0050 section 2.5a — a sweep run outside a poll (after
                     // a membership action) still counts as an observed commit
                     // for the superseded check at the next poll tail, which
@@ -11957,6 +12053,7 @@ public class ChatRepository(
             return null
         }
         if (outcome !is SweepOutcome.Committed) return outcome
+        recordOwnCommitRowBestEffort(record, groupIdHex, outcome.commitMessageId, accountKeysBeforeSweep)
         publishThreadList()
         // ADR-0057 obligation 3 — the sweep landed a membership or role change:
         // the owner appoints the newcomers, re-ranks, and drops the departed.
@@ -12098,15 +12195,20 @@ public class ChatRepository(
                         )
                         // R.5 / R.8 — the same drop as the poll's.
                         val sweptEvents = withoutSupersededSenders(record.group, groupIdHex, listOf(sweptEvent))
+                        val accountKeysAfterRow = memberAccountKeysOrNull(record.group)
+                        val sweptSuppressed = sweptEvents.any {
+                            it is IncomingChatEvent.System && it.systemKind == SystemKind.Commit
+                        } && suppressMembersChangedRow(groupIdHex, accountKeysBeforeRow, accountKeysAfterRow)
                         record.consumeEvents(
                             events = sweptEvents,
                             heldResend = heldResendPredicate(groupIdHex, sweptEvents),
-                            suppressCommitRows = sweptEvents.any {
-                                it is IncomingChatEvent.System && it.systemKind == SystemKind.Commit
-                            } && suppressMembersChangedRow(
+                            suppressCommitRows = sweptSuppressed,
+                            membershipChange = membershipRowChange(
                                 groupIdHex,
+                                sweptEvents,
                                 accountKeysBeforeRow,
-                                memberAccountKeysOrNull(record.group),
+                                accountKeysAfterRow,
+                                sweptSuppressed,
                             ),
                             callSignalingSink = { messageId, payload, createdAt, senderLeaf, senderKey, senderPersonKey ->
                                 routeIncomingCallSignaling(
@@ -13210,6 +13312,16 @@ public data class ChatMessage(
      */
     val historyOf: String? = null,
     val historyMessageId: Long = 0,
+    /**
+     * `docs/ux/second-device.md` section 4 — on a group's commit row, the
+     * person keys the receive batch it closed added ([membershipChangeOf]).
+     * Empty on every other row and on a commit that changed no people; a
+     * commit row with both lists empty is never drawn. Names are resolved
+     * when drawn, never stored.
+     */
+    val membershipJoined: List<MemberIdentity> = emptyList(),
+    /** The same, for the person keys that left. */
+    val membershipLeft: List<MemberIdentity> = emptyList(),
 ) {
     /** Whether this is a read-only row of an older segment. */
     val isHistory: Boolean get() = historyOf != null
@@ -13595,6 +13707,10 @@ private class GroupRecord(
          *  group holds and not which PEOPLE: its commit rows are not drawn
          *  ([deviceSwapAcrossCommits]). */
         suppressCommitRows: Boolean = false,
+        /** `docs/ux/second-device.md` section 4 — the people this batch
+         *  added and removed in a GROUP ([membershipChangeOf]), recorded on
+         *  the batch's LAST commit row; `null` records nothing. */
+        membershipChange: MembershipChange? = null,
         /** ADR-0073 R.7 case 1 — whether a received message is a RE-SEND
          *  whose original this device already holds ([resendVerdict]): such a
          *  row is dropped before storage, so it is shown, counted and
@@ -13605,7 +13721,9 @@ private class GroupRecord(
         // incoming row (another leaf sealed it) but is ours: it renders on our
         // side, exactly as if this device had sent it.
         val ownPersonKey by lazy { ownIdentity(group) }
-        for (event in events) {
+        // The batch's last commit row carries the membership change.
+        val membershipRowIndex = membershipRowIndex(events, membershipChange, suppressCommitRows)
+        for ((eventIndex, event) in events.withIndex()) {
             when (event) {
                 is IncomingChatEvent.Application -> if (heldResend?.invoke(event) != true) messages.add(
                     ChatMessage(
@@ -13656,6 +13774,16 @@ private class GroupRecord(
                         direction = Direction.System,
                         text = systemRowText(event.systemKind),
                         createdAt = event.createdAt,
+                        membershipJoined = if (eventIndex == membershipRowIndex) {
+                            membershipChange?.joined.orEmpty()
+                        } else {
+                            emptyList()
+                        },
+                        membershipLeft = if (eventIndex == membershipRowIndex) {
+                            membershipChange?.left.orEmpty()
+                        } else {
+                            emptyList()
+                        },
                     ),
                 )
                 is IncomingChatEvent.ServiceEnvelope -> {
@@ -13997,6 +14125,13 @@ private class GroupRecord(
      * no DS row can take, no author), rendered in the interface language of
      * the moment it is written, as a call row is.
      */
+    fun appendOwnCommitRow(messageId: Long, createdAt: String, change: MembershipChange): Boolean =
+        synchronized(messages) {
+            val at = ownCommitRowInsertIndex(messages, messageId) ?: return@synchronized false
+            messages.add(at, ownCommitRow(messageId, createdAt, change))
+            true
+        }
+
     fun appendLocalSystemRow(text: me.lakko.app.l10n.UiText) {
         synchronized(messages) {
             val lowest = messages.minOfOrNull { it.messageId } ?: 0L
@@ -14024,8 +14159,8 @@ private class GroupRecord(
     }
 
     private fun systemRowText(kind: SystemKind): String = when (kind) {
-        SystemKind.Commit -> "[mls commit]"
-        SystemKind.ExternalJoinProposal -> "[mls external join]"
+        SystemKind.Commit -> COMMIT_ROW_TEXT
+        SystemKind.ExternalJoinProposal -> EXTERNAL_JOIN_ROW_TEXT
     }
 
     companion object {

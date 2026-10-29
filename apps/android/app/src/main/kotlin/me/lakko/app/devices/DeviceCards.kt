@@ -121,12 +121,6 @@ public object DeviceCards {
         pairingName(card)?.let { UiText("devices.scan.confirm.title_named", texts = mapOf("name" to it)) }
             ?: UiText("devices.scan.confirm.title")
 
-    /** The result line on both routes: `"Pixel 7a" added.`, or
-     *  `Device added.` with no name. */
-    public fun addedCopy(card: StoredDeviceCard?): UiText =
-        pairingName(card)?.let { UiText("device_link.request.added_named", texts = mapOf("name" to it)) }
-            ?: UiText("device_link.request.added")
-
     /** The confirm's lines under the title: the same second and third lines
      *  a Devices row shows from [card] (app and system, then the place).
      *  Empty with no card. */

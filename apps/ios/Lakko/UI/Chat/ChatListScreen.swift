@@ -64,8 +64,6 @@ public struct ChatListScreen: View {
     /// `docs/ux/chat-folders.md` 2.2 — Reorder folders / Edit folders open
     /// Settings > Chat folders (`true` = in its reorder state).
     public var onOpenFolderSettings: (_ reorder: Bool) -> Void
-    /// UX 17.5 — `Open Devices` on the new-device banner: Settings > Devices.
-    public var onOpenDevices: () -> Void = {}
     /// UX 18.4, "Done" — the one-session line after the account was taken
     /// back on this device (``RecalledNoticeBanner``). A view of its own, so
     /// this screen is not re-evaluated by it; `nil` draws nothing.
@@ -105,7 +103,6 @@ public struct ChatListScreen: View {
         onFoundChannel: @escaping (String, String) -> Void,
         onOpenPerson: @escaping (FoundPerson) -> Void = { _ in },
         onOpenFolderSettings: @escaping (Bool) -> Void = { _ in },
-        onOpenDevices: @escaping () -> Void = {},
         accountNotice: AccountNoticeBanner? = nil,
         recalledNotice: RecalledNoticeBanner? = nil,
         keysUpdatingLabel: KeysUpdatingLabel? = nil,
@@ -119,7 +116,6 @@ public struct ChatListScreen: View {
         self.onFoundChannel = onFoundChannel
         self.onOpenPerson = onOpenPerson
         self.onOpenFolderSettings = onOpenFolderSettings
-        self.onOpenDevices = onOpenDevices
         self.recalledNotice = recalledNotice
         self.accountNotice = accountNotice
         self.keysUpdatingLabel = keysUpdatingLabel
@@ -156,10 +152,6 @@ public struct ChatListScreen: View {
             // search is over everything (section 2.4).
             .safeAreaInset(edge: .top, spacing: 0) {
               VStack(spacing: 0) {
-                // UX 17.5 — "A device was added to your account", above the
-                // folder bar. Its own view observes the notice, so this
-                // screen is not re-evaluated by it.
-                NewDeviceNoticeBanner(center: .shared, onOpenDevices: onOpenDevices)
                 if let accountNotice { accountNotice }
                 if let recalledNotice { recalledNotice }
                 if showsFolderBar {

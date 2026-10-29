@@ -91,7 +91,8 @@ export type CallSignalingBodyKind =
   | "end"
   | "groupStart"
   | "groupJoin"
-  | "groupLeave";
+  | "groupLeave"
+  | "screenShare";
 
 /**
  * Leading wire tag of an embedded `CallSignalingPayload.body` oneof field
@@ -104,6 +105,9 @@ export type CallSignalingBodyKind =
  *   field 14 (group_start) -> 0x72
  *   field 15 (group_join)  -> 0x7A
  *   field 16 (group_leave) -> 0x82 0x01 (tag 130, a two-byte varint)
+ *   field 17 (screen_share) -> 0x8A 0x01 (tag 138; ADR-0083, a one-to-one
+ *                              call's share state; missing here until
+ *                              2026-10-29, so it rendered as a garbage bubble)
  *
  * A chat envelope is JSON and starts with `{` (0x7B); every `lakko/...`
  * service envelope starts with `l` (0x6C). Neither overlaps this set.
@@ -133,6 +137,9 @@ export function callSignalingBodyKind(
   if (single !== undefined) return single;
   if (first === 0x82 && bytes.length > 1 && bytes[1] === 0x01) {
     return "groupLeave";
+  }
+  if (first === 0x8a && bytes.length > 1 && bytes[1] === 0x01) {
+    return "screenShare";
   }
   return null;
 }

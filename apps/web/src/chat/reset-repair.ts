@@ -179,8 +179,8 @@ export function adminRestoreStep(input: {
 }
 
 /**
- * R.7 case 2 / UX 16.5: the `Members changed` row is suppressed for a commit
- * that leaves the set of PEOPLE unchanged, each person named by account id
+ * R.7 case 2 / UX 16.5: a commit that leaves the set of PEOPLE unchanged
+ * records no membership row (`membership-rows.ts`), each person named by account id
  * (the caller maps every person key, alias or current, to the account it
  * knows it under; a key it knows no account for names itself).
  *

@@ -96,7 +96,9 @@ final class LocalizationTests: XCTestCase {
         XCTAssertFalse(russian.isEmpty)
         XCTAssertNotEqual(russian, "Language")
         XCTAssertNotEqual(russian, "settings.language.title")
-        XCTAssertEqual(l10n.locale.identifier, "ru")
+        // The words are Russian; region and clock are the device's
+        // (`FormatLocale`, docs/ux/localization.md section 5).
+        XCTAssertEqual(l10n.locale.language.languageCode?.identifier, "ru")
     }
 
     func testFormattedMessageCarriesItsArgument() {

@@ -11,7 +11,6 @@ import me.lakko.app.l10n.joinFacts
 import me.lakko.app.ui.chat.formatListTime
 import java.time.Instant
 import java.time.ZoneId
-import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
@@ -172,8 +171,11 @@ public fun relativeTimeLabel(atMs: Long, nowMs: Long, zone: ZoneId, locale: Loca
         delta < hour -> ago("common.time.minutes_ago", delta / minute, strings)
         delta < day -> ago("common.time.hours_ago", delta / hour, strings)
         delta < 7 * day -> ago("common.time.days_ago", delta / day, strings)
-        else -> DateTimeFormatter.ofPattern("d MMM yyyy", locale)
-            .format(Instant.ofEpochMilli(atMs).atZone(zone))
+        else -> me.lakko.app.l10n.DeviceFormats.dayMonthYear(
+            Instant.ofEpochMilli(atMs).atZone(zone),
+            locale,
+            me.lakko.app.l10n.DeviceFormats.region(),
+        )
     }
 }
 
@@ -195,8 +197,12 @@ public fun postRelativeTimeLabel(atMs: Long, nowMs: Long, zone: ZoneId, locale: 
     if (delta < day) return ago("common.time.hours_ago", delta / hour, strings)
     val at = Instant.ofEpochMilli(atMs).atZone(zone)
     val now = Instant.ofEpochMilli(nowMs).atZone(zone)
-    val pattern = if (at.year == now.year) "d MMM" else "d MMM yyyy"
-    return DateTimeFormatter.ofPattern(pattern, locale).format(at)
+    val region = me.lakko.app.l10n.DeviceFormats.region()
+    return if (at.year == now.year) {
+        me.lakko.app.l10n.DeviceFormats.dayMonth(at, locale, region)
+    } else {
+        me.lakko.app.l10n.DeviceFormats.dayMonthYear(at, locale, region)
+    }
 }
 
 /**

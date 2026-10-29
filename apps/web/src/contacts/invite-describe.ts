@@ -8,7 +8,8 @@
  * `invite-describe.test.ts`. The words are catalog messages
  * (`invite.links.*`, ADR-0061).
  */
-import { currentLanguage, t } from "../l10n";
+import { t } from "../l10n";
+import { displayLocale } from "../l10n/display-locale";
 
 /** The `max_uses` sentinel for an unlimited link. */
 export const INVITE_USES_UNLIMITED = 0xffff_ffff;
@@ -69,7 +70,7 @@ export function describeInviteUsage(usedCount: number, maxUses: number): string 
 export function describeInviteCreated(createdAt: string, locale?: string): string {
   const ms = Date.parse(createdAt);
   if (Number.isNaN(ms)) return "";
-  const date = new Date(ms).toLocaleString(locale ?? currentLanguage(), {
+  const date = new Date(ms).toLocaleString(locale ?? displayLocale(), {
     day: "numeric",
     month: "short",
     hour: "numeric",

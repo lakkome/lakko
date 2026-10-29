@@ -9,6 +9,7 @@
  *
  * Pure: the clock and the locale are parameters so the rule is testable.
  */
+import { displayLocale } from "../l10n/display-locale";
 
 const DAY_MS = 86_400_000;
 
@@ -24,7 +25,8 @@ export function calendarDaysBetween(d: Date, now: Date): number {
 
 /**
  * The row's time label for a message stamped `iso`, or "" for an unparseable
- * stamp. `locale` undefined means the browser's own.
+ * stamp. `locale` undefined means `displayLocale()`: the interface language's
+ * words in the device's formats (`l10n/display-locale.ts`).
  */
 export function formatListTime(
   iso: string | null | undefined,
@@ -34,6 +36,7 @@ export function formatListTime(
   if (iso === null || iso === undefined) return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
+  locale ??= displayLocale();
   const days = calendarDaysBetween(d, now);
   if (days <= 0) {
     return new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit" }).format(d);

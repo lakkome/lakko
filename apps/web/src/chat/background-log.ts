@@ -32,6 +32,7 @@ import type { IncomingChatEvent } from "./client";
 import { attachmentsPreviewLabel } from "./list-preview";
 import type { PersistedGroup, PersistedMessage } from "./message-log-store";
 import { persistedFromAttachmentRef } from "./persisted-attachment";
+import { persistedFromMembership } from "./membership-rows";
 import { persistedFromForwardRef } from "./forward";
 import { persistedFromReplyRef } from "./reply-snapshot";
 import { t } from "../l10n";
@@ -347,12 +348,15 @@ export function eventToPersistedMessage(
       ...(e.unsupportedVersion === undefined ? {} : { unsupportedVersion: e.unsupportedVersion }),
     };
   }
+  const membership = persistedFromMembership(e.membership);
   return {
     messageId: String(e.messageId),
     direction: "system",
     text: systemRowText(e.systemKind),
     attachments: [],
     createdAt: e.createdAt,
+    // docs/ux/second-device.md section 4 — the people the batch changed.
+    ...(membership === undefined ? {} : { membership }),
   };
 }
 

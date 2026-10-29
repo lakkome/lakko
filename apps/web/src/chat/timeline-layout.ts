@@ -12,6 +12,7 @@
  * for the renderer to consume.
  */
 import { t } from "../l10n";
+import { displayLocale } from "../l10n/display-locale";
 
 /** How long after a message the same sender's next one still joins its run. */
 export const RUN_WINDOW_MS = 5 * 60_000;
@@ -45,7 +46,7 @@ export function shortTime(iso: string | undefined, locale?: string): string {
   if (iso === undefined) return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
-  return new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" }).format(d);
+  return new Intl.DateTimeFormat(locale ?? displayLocale(), { hour: "2-digit", minute: "2-digit" }).format(d);
 }
 
 function startOfDay(d: Date): number {
@@ -59,7 +60,7 @@ export function dayLabelOf(iso: string, now: Date = new Date(), locale?: string)
   const days = Math.round((startOfDay(now) - startOfDay(d)) / 86_400_000);
   if (days === 0) return t("chat.day.today");
   if (days === 1) return t("chat.day.yesterday");
-  return new Intl.DateTimeFormat(locale, {
+  return new Intl.DateTimeFormat(locale ?? displayLocale(), {
     day: "numeric",
     month: "long",
     ...(d.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),

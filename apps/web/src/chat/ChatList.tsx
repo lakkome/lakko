@@ -59,9 +59,8 @@ import { paths } from "../routes/paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { createLongPress } from "../ui/long-press";
-import { currentLanguage, t } from "../l10n";
+import { t } from "../l10n";
 import { FolderBar, type FolderTab } from "./folders/FolderBar";
-import { DeviceAddedBanner } from "../devices/DeviceAddedNotice";
 import { RecallDoneNotice } from "../devices/RecallDoneNotice";
 import { KeysRotatedNotice } from "../devices/KeysRotatedNotice";
 import { AddToFolderItems } from "./folders/AddToFolderMenu";
@@ -93,6 +92,7 @@ import {
   shownPendingContacts,
   type PendingContact,
 } from "../contacts/pending-contacts";
+import { displayLocale } from "../l10n/display-locale";
 
 type Flag = "pinned" | "muted" | "archived";
 
@@ -531,8 +531,6 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           onInput={(e) => setQuery(e.currentTarget.value)}
         />
       </label>
-      {/* docs/ux/identity-recovery.md 17.5: a device joined the account. */}
-      <DeviceAddedBanner />
       {/* docs/ux/identity-recovery.md 18.4: the account was taken back here. */}
       <RecallDoneNotice />
       <KeysRotatedNotice />
@@ -635,7 +633,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               const unread = (): number => (endedLine(g) === null ? summary().unread : 0);
               const label = (): string => chatLabel(g);
               const sub = (): string => subOf(g);
-              const time = (): string => formatListTime(summary().lastAt, clock(), currentLanguage());
+              const time = (): string => formatListTime(summary().lastAt, clock(), displayLocale());
               /**
                * A call from this conversation, arriving while it is muted
                * (`docs/ux/calls.md` section 2.1.1, second surface).
@@ -702,7 +700,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                             classList={{ muted: flags().muted }}
                             title={t("chats.row.unread", { count: unread() })}
                           >
-                            {unread() >= 100 ? t("chats.row.unread_overflow") : unread().toLocaleString(currentLanguage())}
+                            {unread() >= 100 ? t("chats.row.unread_overflow") : unread().toLocaleString(displayLocale())}
                           </span>
                         </Show>
                       </span>

@@ -4633,6 +4633,10 @@ public final class ChatRepository: ObservableObject {
         // against any commit landing in the fetch window.
         let membersBeforePoll = PushGroupRouting.memberSignatureKeys(group: record.group)
         let leafKeysBeforePoll = Self.leafKeysB64(group: record.group)
+        // Membership rows — the people before the batch, and where the rows it
+        // files start.
+        let personKeysBeforeBatch = Self.personKeysB64(of: record.group)
+        let firstNewRow = record.messages.count
         // ADR-0057 — the epoch BEFORE the batch, so a batch that moved it
         // (a membership or role change) re-checks the journal's registrars.
         let epochBeforeBatch = try? record.group.epoch()
@@ -4746,6 +4750,10 @@ public final class ChatRepository: ObservableObject {
                     successorGroupId: successorGroupId, senderLeaf: senderLeaf)
             }
         )
+        // Membership rows — before the log is written below.
+        noteMembershipChange(
+            groupIdHex: groupIdHex, record: record, events: events,
+            personKeysBefore: personKeysBeforeBatch, firstNewRow: firstNewRow)
         // THE ORDERING RULE — persist first, advance the cursor second, and hold
         // the cursor when the write does not land. See `Chat/DurableCursor.swift`
         // for why the cursor may lag the durable MLS state but must never lead
@@ -6265,7 +6273,15 @@ public final class ChatRepository: ObservableObject {
                     guard bound.isCurrent, let identity = self?.canonicalIdentity else {
                         throw ChatError.argument("ChatRepository not bootstrapped — cannot merge")
                     }
+                    // Membership rows — this device never receives its own
+                    // commit back, so it writes the row itself (the roster
+                    // before the merge against the roster after it).
+                    let personKeysBeforeMerge = Self.personKeysB64(of: record.group)
                     _ = try record.group.mergeStagedSweep(identity: identity)
+                    self?.noteOwnCommitMembershipChange(
+                        groupIdHex: groupIdHex, record: record,
+                        personKeysBefore: personKeysBeforeMerge,
+                        commitMessageId: record.ownPublishedCommitMessageId)
                 },
                 abandonStagedSweep: { [weak self] in
                     guard bound.isCurrent, let identity = self?.canonicalIdentity else {
@@ -6288,6 +6304,9 @@ public final class ChatRepository: ObservableObject {
                     // deliberately OUTSIDE the surfacing below: a throw here must
                     // reach `adjudicate`, which skips the row exactly as the poll
                     // loop does, and a skipped row must surface nothing.
+                    // Membership rows — the people before this row's apply.
+                    let personKeysBeforeRow = Self.personKeysB64(of: record.group)
+                    let firstNewRow = record.messages.count
                     let processed = try record.group.processIncomingVerifyingRoles(
                         identity: identity, bytes: row.payload)
                     let event = ChatClient.toEvent(
@@ -6384,6 +6403,10 @@ public final class ChatRepository: ObservableObject {
                                 successorGroupId: successorGroupId, senderLeaf: senderLeaf)
                         }
                     )
+                    // Membership rows — the same rule as the poll, per row.
+                    self.noteMembershipChange(
+                        groupIdHex: groupIdHex, record: record, events: events,
+                        personKeysBefore: personKeysBeforeRow, firstNewRow: firstNewRow)
                     // Per row, and deliberately not deferred to the end of the
                     // sweep: this is what republishes `record.messages` into the
                     // observable state the chat screen reads, and it must happen on
@@ -6600,6 +6623,7 @@ public final class ChatRepository: ObservableObject {
             wrapWelcome: { welcome in welcome },
             markOwnPublished: { [weak self] id in
                 guard bound.isCurrent else { return }
+                record.ownPublishedCommitMessageId = id
                 self?.chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: id)
             },
             persist: { [weak self] in
@@ -9325,6 +9349,10 @@ final class GroupRecord {
     /// after a restart (an owed verdict re-registers nothing; the owner's
     /// reconcile dismisses the departed registrars afterwards).
     var stagedEvictedAccountKeys: [Data] = []
+    /// The DS message id of this device's own staged commit, set when the
+    /// commit route answered it; the membership row of the merge is filed
+    /// under it (``ChatRepository/noteOwnCommitMembershipChange``).
+    var ownPublishedCommitMessageId: Int64?
     /// ADR-0053 point 7 — how far this device has read the group's knocks. Its
     /// own id space, never mixed with ``cursor``. Seeded from, and written back
     /// to, a per-account `UserDefaults` key by the knock poll.
@@ -9877,9 +9905,22 @@ final class GroupRecord {
         )
     }
 
+    /// `docs/ux/second-device.md` section 4, "Membership rows" — write `row`
+    /// on the LAST plain commit row at or after `fromIndex` (the rows one
+    /// batch appended). `false` when the batch filed no commit row.
+    @discardableResult
+    func recordMembershipChange(_ row: MembershipRow, fromIndex: Int) -> Bool {
+        guard let index = messages.indices.last(where: {
+            $0 >= fromIndex && messages[$0].direction == .system
+                && messages[$0].text == MembershipRow.plainCommitText
+        }) else { return false }
+        messages[index].text = row.marker
+        return true
+    }
+
     private static func systemRowText(_ kind: SystemKind) -> String {
         switch kind {
-        case .commit: return "[mls commit]"
+        case .commit: return MembershipRow.plainCommitText
         case .externalJoinProposal: return "[mls external join]"
         }
     }

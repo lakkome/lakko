@@ -2410,10 +2410,6 @@
       "text": "הוספת חבר",
       "status": "machine"
     },
-    "chat.members.add.done": {
-      "text": "ההוספה של {name} הושלמה.",
-      "status": "machine"
-    },
     "chat.members.add.error.no_bundle": {
       "text": "האדם הזה עדיין לא סיים להגדיר את Lakko. נסו שוב מאוחר יותר.",
       "status": "machine"
@@ -2430,16 +2426,8 @@
       "text": "@username",
       "status": "machine"
     },
-    "chat.members.add.requested": {
-      "text": "נשלחה בקשה להוסיף את {name}. ההצטרפות תיכנס לתוקף כשהבעלים או אחד המנהלים יחילו את השינוי.",
-      "status": "machine"
-    },
     "chat.members.add.submit": {
       "text": "הוספה",
-      "status": "machine"
-    },
-    "chat.members.admin.demoted": {
-      "text": "הוסר מתפקיד הניהול.",
       "status": "machine"
     },
     "chat.members.admin.make": {
@@ -2450,16 +2438,8 @@
       "text": "מנהל",
       "status": "machine"
     },
-    "chat.members.admin.promoted": {
-      "text": "מונה למנהל.",
-      "status": "machine"
-    },
     "chat.members.admin.remove": {
       "text": "הסרה מניהול",
-      "status": "machine"
-    },
-    "chat.members.admin.requested": {
-      "text": "נשלחה בקשה לשינוי. הוא ייכנס לתוקף כשהבעלים או אחד המנהלים יחילו את השינוי.",
       "status": "machine"
     },
     "chat.members.count": {
@@ -2480,14 +2460,6 @@
     },
     "chat.members.join.approve": {
       "text": "אישור",
-      "status": "machine"
-    },
-    "chat.members.join.approved_added": {
-      "text": "ההצטרפות אושרה. הצירוף לקבוצה בוצע.",
-      "status": "machine"
-    },
-    "chat.members.join.approved_requested": {
-      "text": "ההצטרפות אושרה. היא תיכנס לתוקף כשהבעלים או אחד המנהלים יחילו את השינוי.",
       "status": "machine"
     },
     "chat.members.join.heading": {
@@ -2526,10 +2498,6 @@
       "text": "את שינויי החברות מחילים הבעלים של הקבוצה או אחד המנהלים. הם יוחלו אוטומטית כשאחד מהם יעשה זאת.",
       "status": "machine"
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, one {עכשיו שינוי אחד ממתין להחלה.} two {עכשיו שני שינויים ממתינים להחלה.} other {עכשיו # שינויים ממתינים להחלה.}}",
-      "status": "machine"
-    },
     "chat.members.pending.waiting_added": {
       "text": "ממתין להוספה.",
       "status": "machine"
@@ -2548,18 +2516,6 @@
     },
     "chat.members.remove.confirm_named": {
       "text": "הסרת {name}",
-      "status": "machine"
-    },
-    "chat.members.remove.done": {
-      "text": "החבר הוסר.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested": {
-      "text": "נשלחה בקשת הסרה. היא תיכנס לתוקף כשהבעלים או אחד המנהלים יחילו את השינוי.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested_short": {
-      "text": "נשלחה בקשת הסרה.",
       "status": "machine"
     },
     "chat.members.remove.title": {
@@ -3126,8 +3082,12 @@
       "text": "בקשת הצטרפות",
       "status": "machine"
     },
-    "chat.system.members_changed": {
-      "text": "החברים השתנו",
+    "chat.system.member_joined": {
+      "text": "{name} הצטרף/ה",
+      "status": "machine"
+    },
+    "chat.system.member_left": {
+      "text": "{name} עזב/ה",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -3156,14 +3116,6 @@
     },
     "chat.transfer.candidate_admin": {
       "text": "{name}, מנהל",
-      "status": "machine"
-    },
-    "chat.transfer.done_admin": {
-      "text": "הבעלות על הקבוצה עברה אל {name}. אתם עדיין מנהלים.",
-      "status": "machine"
-    },
-    "chat.transfer.done_member": {
-      "text": "הבעלות על הקבוצה עברה אל {name}. אתם עכשיו חברים רגילים.",
       "status": "machine"
     },
     "chat.transfer.irreversible_body": {
@@ -3204,10 +3156,6 @@
     },
     "chat.transfer.pending_named": {
       "text": "ממתינים להפיכת {name} לבעלים.",
-      "status": "machine"
-    },
-    "chat.transfer.requested": {
-      "text": "נשלחה בקשה להעברת הבעלות. היא תיכנס לתוקף כשהבעלים או אחד המנהלים יחילו את השינוי.",
       "status": "machine"
     },
     "chat.transfer.role_change_pending": {
@@ -4174,14 +4122,6 @@
       "text": "ממתינים שהמכשיר האחר שלכם יסרוק את הקוד...",
       "status": "machine"
     },
-    "device_link.request.added": {
-      "text": "המכשיר נוסף.",
-      "status": "machine"
-    },
-    "device_link.request.added_named": {
-      "text": "„{name}” נוסף.",
-      "status": "machine"
-    },
     "device_link.request.adding": {
       "text": "מוסיפים את המכשיר...",
       "status": "machine"
@@ -4308,10 +4248,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "פתחו את Lakko כדי לראות את המכשירים שלכם.",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "פתיחת המכשירים",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -6246,6 +6182,10 @@
       "text": "הגדרות",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "הגדרות. מכשיר נוסף לחשבון שלך",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "קבוצות",
       "status": "machine"
@@ -7498,6 +7438,10 @@
       "text": "אין מצלמה באף אחד מהמכשירים? התחברו במכשיר החדש ובחרו „{method}”: כאן תופיע בקשת „{prompt}” עם קוד להשוואה.",
       "status": "machine"
     },
+    "settings.devices.attention_a11y": {
+      "text": "מכשירים. מכשיר נוסף לחשבון שלך",
+      "status": "machine"
+    },
     "settings.devices.device_n": {
       "text": "מכשיר {number}",
       "status": "machine"
@@ -7556,14 +7500,6 @@
     },
     "settings.devices.reset_note": {
       "text": "מפתחות החשבון שלכם אופסו היום במכשיר הזה. המכשירים האחרים נותקו והוסרו. הוסיפו אותם שוב דרך הגדרות > מכשירים > הוספת מכשיר.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done": {
-      "text": "המכשיר נוסף. הוא יופיע ברשימה כשיסיים להצטרף.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done_named": {
-      "text": "„{name}” נוסף. הוא יופיע ברשימה כשיסיים להצטרף.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {
@@ -8036,6 +7972,10 @@
     },
     "settings.section.security": {
       "text": "אבטחה",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "אבטחה. מכשיר נוסף לחשבון שלך",
       "status": "machine"
     },
     "settings.security.devices.sub": {

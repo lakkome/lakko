@@ -33,12 +33,13 @@ import { useLineage } from "../chat/use-lineage";
 import type { ActiveGroup } from "../chat/ChatContext";
 import { bytesToHex } from "../chat/blob-ids";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
-import { currentLanguage, t } from "../l10n";
+import { t } from "../l10n";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { createLongPress } from "../ui/long-press";
 import { Icon } from "../ui/icons";
 import { paths } from "./paths";
+import { displayLocale } from "../l10n/display-locale";
 
 /** The stored message a held row is, or `undefined`. */
 function heldMessage(
@@ -189,7 +190,7 @@ export default function Saved(): JSX.Element {
               const date = (): string => {
                 const held = message()?.createdAt;
                 const heldMs = held === undefined ? null : new Date(held).getTime();
-                return formatListTime(new Date(savedRowDateMs(row, heldMs)).toISOString(), new Date(), currentLanguage());
+                return formatListTime(new Date(savedRowDateMs(row, heldMs)).toISOString(), new Date(), displayLocale());
               };
               return (
                 <li>

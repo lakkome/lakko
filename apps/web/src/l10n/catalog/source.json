@@ -2562,10 +2562,6 @@
       "text": "Add member",
       "comment": "Menu item in a group's header menu that opens group info with the add-member field."
     },
-    "chat.members.add.done": {
-      "text": "{name} added.",
-      "comment": "Notice after someone was added to the group."
-    },
     "chat.members.add.error.no_bundle": {
       "text": "This person has not finished setting up Lakko yet. Try again later.",
       "comment": "Adding someone failed because their account is not fully set up."
@@ -2582,17 +2578,9 @@
       "text": "@username",
       "comment": "Placeholder of the field for adding someone to a group by username. Keep the @."
     },
-    "chat.members.add.requested": {
-      "text": "{name} requested. They join when an owner or an admin applies the change.",
-      "comment": "Notice after the reader asked to add {name}; the addition is applied later by an owner or admin."
-    },
     "chat.members.add.submit": {
       "text": "Add",
       "comment": "Button that adds the person whose username was typed."
-    },
-    "chat.members.admin.demoted": {
-      "text": "Removed as admin.",
-      "comment": "Notice after the owner removed a member's admin role."
     },
     "chat.members.admin.make": {
       "text": "Make admin",
@@ -2602,17 +2590,9 @@
       "text": "Admin",
       "comment": "Marker next to a member who is an admin."
     },
-    "chat.members.admin.promoted": {
-      "text": "Promoted to admin.",
-      "comment": "Notice after the owner made a member an admin."
-    },
     "chat.members.admin.remove": {
       "text": "Remove admin",
       "comment": "Button next to an admin in the member list: take away their admin role."
-    },
-    "chat.members.admin.requested": {
-      "text": "Change requested. It applies when an owner or an admin applies the change.",
-      "comment": "Notice after an admin role change was requested and not yet applied."
     },
     "chat.members.count": {
       "text": "{count, plural, one {# member} other {# members}}",
@@ -2633,14 +2613,6 @@
     "chat.members.join.approve": {
       "text": "Approve",
       "comment": "Button that approves a request to join the group."
-    },
-    "chat.members.join.approved_added": {
-      "text": "Join approved. They have been added to the group.",
-      "comment": "Notice after approving a join request that was applied at once."
-    },
-    "chat.members.join.approved_requested": {
-      "text": "Join approved. They join when an owner or an admin applies the change.",
-      "comment": "Notice after approving a join request that is applied later."
     },
     "chat.members.join.heading": {
       "text": "Join requests ({count})",
@@ -2679,10 +2651,6 @@
       "text": "Membership changes are applied by the group owner or an admin. They will apply automatically when one does.",
       "comment": "Second line of the notice about waiting membership changes."
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, one {# change is now waiting to apply.} other {# changes are now waiting to apply.}}",
-      "comment": "Added after an admin approves a join request: how many membership changes are now waiting to be applied."
-    },
     "chat.members.pending.waiting_added": {
       "text": "Waiting to be added.",
       "comment": "Next to a person whose addition to the group was requested but not applied yet."
@@ -2703,19 +2671,6 @@
     "chat.members.remove.confirm_named": {
       "text": "Remove {name}",
       "comment": "Button in the dialog confirming a removal from a group; {name} is the member's name."
-    },
-    "chat.members.remove.done": {
-      "text": "Member removed.",
-      "comment": "Notice after someone was removed from the group."
-    },
-    "chat.members.remove.requested": {
-      "text": "Removal requested. It applies when an owner or an admin applies the change.",
-      "comment": "Notice after the reader asked to remove someone; the removal is applied later.",
-      "security_critical": true
-    },
-    "chat.members.remove.requested_short": {
-      "text": "Removal requested.",
-      "comment": "Short notice after the reader asked to remove someone from the group."
     },
     "chat.members.remove.title": {
       "text": "Remove this member?",
@@ -3310,9 +3265,13 @@
       "text": "Join request",
       "comment": "Line in the timeline where someone asked to join the group."
     },
-    "chat.system.members_changed": {
-      "text": "Members changed",
-      "comment": "Line in the timeline where the group's membership changed."
+    "chat.system.member_joined": {
+      "text": "{name} joined",
+      "comment": "Row in a group's timeline: this person became a member. {name} is the person's display name, or 'Member' when unknown."
+    },
+    "chat.system.member_left": {
+      "text": "{name} left",
+      "comment": "Row in a group's timeline: this person is no longer a member (left or was removed). {name} is the person's display name, or 'Member' when unknown."
     },
     "chat.timeline.empty": {
       "text": "No messages yet. Say hi.",
@@ -3341,14 +3300,6 @@
     "chat.transfer.candidate_admin": {
       "text": "{name}, admin",
       "comment": "Accessible name of an admin in the list of possible new owners."
-    },
-    "chat.transfer.done_admin": {
-      "text": "{name} is now the group owner. You are still an admin.",
-      "comment": "Notice after an ownership transfer applied; the former owner kept admin."
-    },
-    "chat.transfer.done_member": {
-      "text": "{name} is now the group owner. You are now a regular member.",
-      "comment": "Notice after an ownership transfer applied; the former owner became a plain member."
     },
     "chat.transfer.irreversible_body": {
       "text": "Only an owner can change roles. Once you transfer this group you cannot take it back, you cannot restore your own owner role, and you cannot change your own role again unless the new owner does it for you.",
@@ -3391,10 +3342,6 @@
     "chat.transfer.pending_named": {
       "text": "Waiting to make {name} the owner.",
       "comment": "An ownership transfer to {name} was requested and has not been applied yet."
-    },
-    "chat.transfer.requested": {
-      "text": "Ownership transfer requested. It applies when an owner or an admin applies the change.",
-      "comment": "Notice after the owner requests an ownership transfer."
     },
     "chat.transfer.role_change_pending": {
       "text": "A role change is already waiting to apply. Wait for it to land, then try again.",
@@ -4395,14 +4342,6 @@
       "text": "Waiting for your other device to scan this code...",
       "comment": "Shown under the pairing QR code while the other device has not scanned it yet."
     },
-    "device_link.request.added": {
-      "text": "Device added.",
-      "comment": "Shown after a new device was added."
-    },
-    "device_link.request.added_named": {
-      "text": "“{name}” added.",
-      "comment": "Shown after a new device was added. {name} is what the new device says it is, e.g. 'Chrome on macOS'."
-    },
     "device_link.request.adding": {
       "text": "Adding the device...",
       "comment": "Busy label while the new device is added."
@@ -4538,30 +4477,26 @@
     },
     "devices.added_notice.not_you": {
       "text": "If this was not you, remove the device, then change your password.",
-      "comment": "Second line of the notice shown on a person's other devices after a new device joined their own account. Tells them what to do if they did not add it.",
+      "comment": "Second line of the explanation shown in Settings > Devices after a new device joined the person's own account. Tells them what to do if they did not add it.",
       "security_critical": true
     },
     "devices.added_notice.notification_body": {
       "text": "Open Lakko to see your devices.",
-      "comment": "Body of the system notification shown when a new device joined the person's own account while Lakko was running but not in front. The notification title is 'A device was added to your account'."
-    },
-    "devices.added_notice.open_devices": {
-      "text": "Open Devices",
-      "comment": "Button on the 'A device was added to your account' notice. Opens Settings > Devices, where the device can be removed. 'Devices' is the name of that settings screen."
+      "comment": "Body of the system notification posted on the person's other devices when a new device joined their own account. Tapping it opens Settings > Devices. The notification title is 'A device was added to your account'."
     },
     "devices.added_notice.title": {
       "text": "A device was added to your account",
-      "comment": "Title of the notice shown on a person's other devices after one new device joined their own account. Also the title of the matching system notification.",
+      "comment": "Title of the explanation above the list in Settings > Devices, and of the system notification, after one new device joined the person's own account.",
       "security_critical": true
     },
     "devices.added_notice.title_many": {
       "text": "Devices were added to your account",
-      "comment": "Title of the same notice when two or more new devices joined the person's own account since the notice was last dismissed.",
+      "comment": "The same title when two or more new devices joined the person's own account and the person has not looked at them yet.",
       "security_critical": true
     },
     "devices.added_notice.when": {
       "text": "Added {date}.",
-      "comment": "First line of the 'A device was added to your account' notice. {date} is the date and time the device joined, formatted by the device (for example '6 Oct 2026, 14:05'). With several devices it is the most recent one."
+      "comment": "First line of the 'A device was added to your account' explanation in Settings > Devices. {date} is the date and time the device joined, formatted by the device (for example '6 Oct 2026, 14:05'). With several devices it is the most recent one."
     },
     "devices.pairing.qr_description": {
       "text": "Pairing QR code",
@@ -6645,6 +6580,11 @@
       "text": "Settings",
       "comment": "Primary navigation: settings."
     },
+    "nav.settings.attention_a11y": {
+      "text": "Settings. A device was added to your account",
+      "comment": "Accessible name of the Settings navigation destination while it carries the exclamation-mark badge: a new device joined the person's own account and the person has not looked at it yet in Settings > Devices.",
+      "security_critical": true
+    },
     "new_group.back": {
       "text": "Groups",
       "comment": "Web: back button to the groups list on a narrow screen."
@@ -8197,6 +8137,11 @@
       "comment": "{method} is the recovery method name \"Another device\"; {prompt} is the prompt title \"Is this you?\". Both are passed already translated.",
       "security_critical": true
     },
+    "settings.devices.attention_a11y": {
+      "text": "Devices. A device was added to your account",
+      "comment": "Accessible name of the Devices row inside Settings while it carries the exclamation-mark badge: a new device joined the person's own account and the person has not looked at it yet.",
+      "security_critical": true
+    },
     "settings.devices.device_n": {
       "text": "Device {number}",
       "comment": "Row label of another device, by its order in the list; {number} is a number."
@@ -8276,14 +8221,6 @@
       "text": "Your account keys were reset on this device today. The other devices were signed out and removed. Add them again from Settings > Devices > Add a device.",
       "comment": "Dismissible note at the top of Settings > Devices for the rest of the session after the account keys were reset on this device (UX identity-recovery 15.3).",
       "security_critical": true
-    },
-    "settings.devices.scan.done": {
-      "text": "Device added. It will appear in the list once it has finished joining.",
-      "comment": "The scanned device was let in."
-    },
-    "settings.devices.scan.done_named": {
-      "text": "“{name}” added. It will appear in the list once it has finished joining.",
-      "comment": "The scanned device was let in. {name} is what the new device says it is, e.g. 'Chrome on macOS'."
     },
     "settings.devices.scan.opening": {
       "text": "Opening the camera...",
@@ -8808,6 +8745,11 @@
     "settings.section.security": {
       "text": "Security",
       "comment": "Settings section: passkeys, devices, recovery."
+    },
+    "settings.security.attention_a11y": {
+      "text": "Security. A device was added to your account",
+      "comment": "Accessible name of the Security entry in the Settings section list while it carries the exclamation-mark badge: a new device joined the person's own account and the person has not looked at it yet in Settings > Devices (which is inside Security).",
+      "security_critical": true
     },
     "settings.security.devices.sub": {
       "text": "See, add and remove the devices on this account.",

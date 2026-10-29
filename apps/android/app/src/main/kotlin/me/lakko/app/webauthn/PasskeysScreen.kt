@@ -44,9 +44,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import java.text.DateFormat
-import java.util.Date
-import java.util.Locale
 import me.lakko.app.l10n.LocalStrings
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
@@ -394,13 +391,8 @@ private fun metadataLine(c: CredentialSummary, language: String): String {
 /** A date and time in the interface language (docs/l10n/batch-2-settings.md). */
 private fun format(ms: Long?, language: String): String? {
     if (ms == null) return null
-    val date = Date(ms)
-    val formatter = DateFormat.getDateTimeInstance(
-        DateFormat.MEDIUM,
-        DateFormat.SHORT,
-        Locale.forLanguageTag(language),
-    )
-    return formatter.format(date)
+    // Words from the language, order and clock from the device (localization.md 5).
+    return me.lakko.app.l10n.DeviceFormats.mediumDateTime(ms, language)
 }
 
 /**

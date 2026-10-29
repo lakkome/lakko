@@ -121,6 +121,22 @@ Never translated and never altered:
   words (BIP39 English wordlist; the instructions around them are
   translated, the words are not).
 
+**The language decides words, the device decides formats (2026-10-29,
+maintainer).** Seen live: a device set to a 24-hour clock showed `12:58 PM`
+in Lakko because English was the interface language. The interface
+language supplies only words: month and weekday names, the words of
+relative times, the `AM`/`PM` marker when one is shown. Everything else
+comes from the device's own regional settings, whatever the interface
+language: 12- or 24-hour clock, the order of day, month and year, the
+first day of the week, and the decimal and grouping separators. On iOS and
+Android that is the system's current locale and its time setting (iOS
+`Locale.autoupdatingCurrent` and its hour cycle; Android
+`DateFormat.is24HourFormat` and the system region). A browser does not
+expose the operating system's clock setting, so the web takes these from
+the browser's own default locale (`navigator.language`), which follows the
+browser's language and region settings; a browser set to US English keeps
+a 12-hour clock even on a 24-hour system.
+
 Digits: the safety number and recovery-phrase positions always use Latin
 digits `0-9` so two people can compare them across languages. Elsewhere
 numbers follow the language (Arabic and Persian may use their own

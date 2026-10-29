@@ -429,10 +429,30 @@ final class DeviceCardsTests: XCTestCase {
         XCTAssertEqual(
             titled, Localization.shared.t("devices.scan.confirm.title_named", texts: ["name": "Chrome on macOS"]))
         XCTAssertTrue(titled.contains("Chrome on macOS"))
-        XCTAssertEqual(DeviceLinkModalCopy.added(nil), Localization.text("device_link.request.added"))
-        let added = DeviceLinkModalCopy.added("Chrome on macOS")
-        XCTAssertEqual(added, Localization.text("device_link.request.added_named", texts: ["name": "Chrome on macOS"]))
-        XCTAssertTrue(added.contains("Chrome on macOS"))
+    }
+
+    /// UX section 2.1 (decided 2026-10-29) — the scan route has no result
+    /// line: a linked device goes straight back to the Devices list, which
+    /// shows nothing when the keys were handed over.
+    func testTheScanRouteReturnsToTheListOnceLinked() {
+        let notice = DeviceScanNotice()
+        notice.linked(accountIdB64: "acct", keysSent: true)
+        XCTAssertFalse(notice.showsKeysNotSent(accountIdB64: "acct"), "no line under the list")
+    }
+
+    /// UX section 2.1 — a scan link that could not hand over the keys keeps
+    /// the keys-not-sent line, under the Devices list, until `Add a device`
+    /// is pressed again; it is not shown for another account.
+    func testAScanLinkWithoutKeysKeepsTheLineUntilAddADevice() {
+        let notice = DeviceScanNotice()
+        notice.linked(accountIdB64: "acct", keysSent: false)
+        XCTAssertTrue(notice.showsKeysNotSent(accountIdB64: "acct"))
+        XCTAssertFalse(notice.showsKeysNotSent(accountIdB64: "other"))
+        notice.addDevicePressed()
+        XCTAssertFalse(notice.showsKeysNotSent(accountIdB64: "acct"), "cleared by Add a device")
+        notice.linked(accountIdB64: "acct", keysSent: false)
+        notice.linked(accountIdB64: "acct", keysSent: true)
+        XCTAssertFalse(notice.showsKeysNotSent(accountIdB64: "acct"), "a later link with keys clears it")
     }
 
     func testThePayloadCardNamesTheNewLeafUntilItsOwnCardArrives() async throws {

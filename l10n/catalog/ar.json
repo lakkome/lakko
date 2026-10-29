@@ -2410,10 +2410,6 @@
       "text": "إضافة عضو",
       "status": "machine"
     },
-    "chat.members.add.done": {
-      "text": "تمت إضافة {name}.",
-      "status": "machine"
-    },
     "chat.members.add.error.no_bundle": {
       "text": "لم ينتهِ هذا الشخص من إعداد Lakko بعد. حاول لاحقًا.",
       "status": "machine"
@@ -2430,16 +2426,8 @@
       "text": "@username",
       "status": "machine"
     },
-    "chat.members.add.requested": {
-      "text": "تم طلب إضافة {name}. سينضم عندما يطبّق المالك أو أحد المشرفين التغيير.",
-      "status": "machine"
-    },
     "chat.members.add.submit": {
       "text": "إضافة",
-      "status": "machine"
-    },
-    "chat.members.admin.demoted": {
-      "text": "تمت إزالته من الإشراف.",
       "status": "machine"
     },
     "chat.members.admin.make": {
@@ -2450,16 +2438,8 @@
       "text": "مشرف",
       "status": "machine"
     },
-    "chat.members.admin.promoted": {
-      "text": "تمت ترقيته إلى مشرف.",
-      "status": "machine"
-    },
     "chat.members.admin.remove": {
       "text": "إزالة الإشراف",
-      "status": "machine"
-    },
-    "chat.members.admin.requested": {
-      "text": "تم طلب التغيير. يسري عندما يطبّق المالك أو أحد المشرفين التغيير.",
       "status": "machine"
     },
     "chat.members.count": {
@@ -2480,14 +2460,6 @@
     },
     "chat.members.join.approve": {
       "text": "موافقة",
-      "status": "machine"
-    },
-    "chat.members.join.approved_added": {
-      "text": "تمت الموافقة على الانضمام. أُضيف إلى المجموعة.",
-      "status": "machine"
-    },
-    "chat.members.join.approved_requested": {
-      "text": "تمت الموافقة على الانضمام. سينضم عندما يطبّق المالك أو أحد المشرفين التغيير.",
       "status": "machine"
     },
     "chat.members.join.heading": {
@@ -2526,10 +2498,6 @@
       "text": "يطبّق مالك المجموعة أو أحد المشرفين تغييرات العضوية. ستُطبَّق تلقائيًا عندما يفعل أحدهم ذلك.",
       "status": "machine"
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, zero {لا توجد تغييرات بانتظار التطبيق الآن.} one {تغيير واحد بانتظار التطبيق الآن.} two {تغييران بانتظار التطبيق الآن.} few {# تغييرات بانتظار التطبيق الآن.} many {# تغييرًا بانتظار التطبيق الآن.} other {# تغيير بانتظار التطبيق الآن.}}",
-      "status": "machine"
-    },
     "chat.members.pending.waiting_added": {
       "text": "بانتظار الإضافة.",
       "status": "machine"
@@ -2548,18 +2516,6 @@
     },
     "chat.members.remove.confirm_named": {
       "text": "إزالة {name}",
-      "status": "machine"
-    },
-    "chat.members.remove.done": {
-      "text": "تمت إزالة العضو.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested": {
-      "text": "تم طلب الإزالة. تسري عندما يطبّق المالك أو أحد المشرفين التغيير.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested_short": {
-      "text": "تم طلب الإزالة.",
       "status": "machine"
     },
     "chat.members.remove.title": {
@@ -3126,8 +3082,12 @@
       "text": "طلب انضمام",
       "status": "machine"
     },
-    "chat.system.members_changed": {
-      "text": "تغيّر الأعضاء",
+    "chat.system.member_joined": {
+      "text": "انضم {name}",
+      "status": "machine"
+    },
+    "chat.system.member_left": {
+      "text": "غادر {name}",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -3156,14 +3116,6 @@
     },
     "chat.transfer.candidate_admin": {
       "text": "{name}، مشرف",
-      "status": "machine"
-    },
-    "chat.transfer.done_admin": {
-      "text": "أصبح {name} الآن مالك المجموعة. ما زلت مشرفًا.",
-      "status": "machine"
-    },
-    "chat.transfer.done_member": {
-      "text": "أصبح {name} الآن مالك المجموعة. أصبحت الآن عضوًا عاديًا.",
       "status": "machine"
     },
     "chat.transfer.irreversible_body": {
@@ -3204,10 +3156,6 @@
     },
     "chat.transfer.pending_named": {
       "text": "بانتظار جعل {name} المالك.",
-      "status": "machine"
-    },
-    "chat.transfer.requested": {
-      "text": "تم طلب نقل الملكية. يسري عندما يطبّق المالك أو أحد المشرفين التغيير.",
       "status": "machine"
     },
     "chat.transfer.role_change_pending": {
@@ -4174,14 +4122,6 @@
       "text": "بانتظار أن يمسح جهازك الآخر هذا الرمز...",
       "status": "machine"
     },
-    "device_link.request.added": {
-      "text": "أُضيف الجهاز.",
-      "status": "machine"
-    },
-    "device_link.request.added_named": {
-      "text": "أُضيف «{name}».",
-      "status": "machine"
-    },
     "device_link.request.adding": {
       "text": "جارٍ إضافة الجهاز...",
       "status": "machine"
@@ -4308,10 +4248,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "افتح Lakko لرؤية أجهزتك.",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "فتح الأجهزة",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -6246,6 +6182,10 @@
       "text": "الإعدادات",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "الإعدادات. تمت إضافة جهاز إلى حسابك",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "المجموعات",
       "status": "machine"
@@ -7498,6 +7438,10 @@
       "text": "لا توجد كاميرا على أيّ من الجهازين؟ سجّل الدخول على الجهاز الجديد واختر «{method}»: ستظهر هنا رسالة «{prompt}» مع رمز للمقارنة.",
       "status": "machine"
     },
+    "settings.devices.attention_a11y": {
+      "text": "الأجهزة. تمت إضافة جهاز إلى حسابك",
+      "status": "machine"
+    },
     "settings.devices.device_n": {
       "text": "الجهاز {number}",
       "status": "machine"
@@ -7556,14 +7500,6 @@
     },
     "settings.devices.reset_note": {
       "text": "أُعيد تعيين مفاتيح حسابك اليوم على هذا الجهاز. سُجّل خروج الأجهزة الأخرى وأُزيلت. أضفها مجددًا من الإعدادات > الأجهزة > إضافة جهاز.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done": {
-      "text": "أُضيف الجهاز. سيظهر في القائمة بعد أن يكتمل انضمامه.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done_named": {
-      "text": "أُضيف «{name}». سيظهر في القائمة بعد أن يكتمل انضمامه.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {
@@ -8036,6 +7972,10 @@
     },
     "settings.section.security": {
       "text": "الأمان",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "الأمان. تمت إضافة جهاز إلى حسابك",
       "status": "machine"
     },
     "settings.security.devices.sub": {

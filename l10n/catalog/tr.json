@@ -2410,10 +2410,6 @@
       "text": "Üye ekle",
       "status": "machine"
     },
-    "chat.members.add.done": {
-      "text": "Eklendi: {name}.",
-      "status": "machine"
-    },
     "chat.members.add.error.no_bundle": {
       "text": "Bu kişi Lakko kurulumunu henüz tamamlamadı. Daha sonra tekrar deneyin.",
       "status": "machine"
@@ -2430,16 +2426,8 @@
       "text": "@kullaniciadi",
       "status": "machine"
     },
-    "chat.members.add.requested": {
-      "text": "Ekleme istendi: {name}. Bir sahip veya yönetici değişikliği uyguladığında gruba katılır.",
-      "status": "machine"
-    },
     "chat.members.add.submit": {
       "text": "Ekle",
-      "status": "machine"
-    },
-    "chat.members.admin.demoted": {
-      "text": "Yöneticilikten çıkarıldı.",
       "status": "machine"
     },
     "chat.members.admin.make": {
@@ -2450,16 +2438,8 @@
       "text": "Yönetici",
       "status": "machine"
     },
-    "chat.members.admin.promoted": {
-      "text": "Yöneticiliğe yükseltildi.",
-      "status": "machine"
-    },
     "chat.members.admin.remove": {
       "text": "Yöneticiliği kaldır",
-      "status": "machine"
-    },
-    "chat.members.admin.requested": {
-      "text": "Değişiklik istendi. Bir sahip veya yönetici değişikliği uyguladığında geçerli olur.",
       "status": "machine"
     },
     "chat.members.count": {
@@ -2480,14 +2460,6 @@
     },
     "chat.members.join.approve": {
       "text": "Onayla",
-      "status": "machine"
-    },
-    "chat.members.join.approved_added": {
-      "text": "Katılma onaylandı. Kişi gruba eklendi.",
-      "status": "machine"
-    },
-    "chat.members.join.approved_requested": {
-      "text": "Katılma onaylandı. Bir sahip veya yönetici değişikliği uyguladığında gruba katılır.",
       "status": "machine"
     },
     "chat.members.join.heading": {
@@ -2526,10 +2498,6 @@
       "text": "Üyelik değişikliklerini grup sahibi veya bir yönetici uygular. Biri bunu yaptığında otomatik olarak uygulanırlar.",
       "status": "machine"
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, one {Şimdi # değişiklik uygulanmayı bekliyor.} other {Şimdi # değişiklik uygulanmayı bekliyor.}}",
-      "status": "machine"
-    },
     "chat.members.pending.waiting_added": {
       "text": "Eklenmeyi bekliyor.",
       "status": "machine"
@@ -2548,18 +2516,6 @@
     },
     "chat.members.remove.confirm_named": {
       "text": "Çıkar: {name}",
-      "status": "machine"
-    },
-    "chat.members.remove.done": {
-      "text": "Üye çıkarıldı.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested": {
-      "text": "Çıkarma istendi. Bir sahip veya yönetici değişikliği uyguladığında geçerli olur.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested_short": {
-      "text": "Çıkarma istendi.",
       "status": "machine"
     },
     "chat.members.remove.title": {
@@ -3126,8 +3082,12 @@
       "text": "Katılma isteği",
       "status": "machine"
     },
-    "chat.system.members_changed": {
-      "text": "Üyeler değişti",
+    "chat.system.member_joined": {
+      "text": "{name} katıldı",
+      "status": "machine"
+    },
+    "chat.system.member_left": {
+      "text": "{name} ayrıldı",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -3156,14 +3116,6 @@
     },
     "chat.transfer.candidate_admin": {
       "text": "{name}, yönetici",
-      "status": "machine"
-    },
-    "chat.transfer.done_admin": {
-      "text": "Grubun yeni sahibi: {name}. Yönetici olarak kalıyorsunuz.",
-      "status": "machine"
-    },
-    "chat.transfer.done_member": {
-      "text": "Grubun yeni sahibi: {name}. Artık normal bir üyesiniz.",
       "status": "machine"
     },
     "chat.transfer.irreversible_body": {
@@ -3204,10 +3156,6 @@
     },
     "chat.transfer.pending_named": {
       "text": "Sahip yapılması bekleniyor: {name}.",
-      "status": "machine"
-    },
-    "chat.transfer.requested": {
-      "text": "Sahiplik devri istendi. Bir sahip veya yönetici değişikliği uyguladığında geçerli olur.",
       "status": "machine"
     },
     "chat.transfer.role_change_pending": {
@@ -4174,14 +4122,6 @@
       "text": "Diğer cihazınızın bu kodu taraması bekleniyor...",
       "status": "machine"
     },
-    "device_link.request.added": {
-      "text": "Cihaz eklendi.",
-      "status": "machine"
-    },
-    "device_link.request.added_named": {
-      "text": "“{name}” eklendi.",
-      "status": "machine"
-    },
     "device_link.request.adding": {
       "text": "Cihaz ekleniyor...",
       "status": "machine"
@@ -4308,10 +4248,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "Cihazlarınızı görmek için Lakko'yu açın.",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "Cihazlar'ı aç",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -6246,6 +6182,10 @@
       "text": "Ayarlar",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "Ayarlar. Hesabınıza bir cihaz eklendi",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "Gruplar",
       "status": "machine"
@@ -7498,6 +7438,10 @@
       "text": "İki cihazda da kamera yok mu? Yenisinde giriş yapın ve \"{method}\" seçeneğini seçin: burada karşılaştırılacak bir kodla \"{prompt}\" istemi görünür.",
       "status": "machine"
     },
+    "settings.devices.attention_a11y": {
+      "text": "Cihazlar. Hesabınıza bir cihaz eklendi",
+      "status": "machine"
+    },
     "settings.devices.device_n": {
       "text": "Cihaz {number}",
       "status": "machine"
@@ -7556,14 +7500,6 @@
     },
     "settings.devices.reset_note": {
       "text": "Hesap anahtarlarınız bugün bu cihazda sıfırlandı. Diğer cihazların oturumu kapatıldı ve cihazlar kaldırıldı. Onları Ayarlar > Cihazlar > Cihaz ekle bölümünden yeniden ekleyin.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done": {
-      "text": "Cihaz eklendi. Katılımı tamamlandığında listede görünecek.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done_named": {
-      "text": "“{name}” eklendi. Katılmayı bitirdiğinde listede görünecek.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {
@@ -8036,6 +7972,10 @@
     },
     "settings.section.security": {
       "text": "Güvenlik",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "Güvenlik. Hesabınıza bir cihaz eklendi",
       "status": "machine"
     },
     "settings.security.devices.sub": {
