@@ -45,7 +45,7 @@ import {
   decodeStateBundle,
   encodeStateBundle,
   mergeCarriedPredecessorSeeds,
-  type StateBundleV2,
+  type StateBundleV3,
 } from "./state-bundle";
 
 beforeAll(async () => {
@@ -77,8 +77,8 @@ function encodeRaw(value: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(value));
 }
 
-const base: StateBundleV2 = {
-  v: 2,
+const base: StateBundleV3 = {
+  v: 3,
   contacts: [],
   pins: [
     {
@@ -93,6 +93,9 @@ const base: StateBundleV2 = {
     { seedB64: base64Encode(seed(1)), adoptedAtMs: 1_700_000_000_000 },
     { seedB64: base64Encode(seed(2)), adoptedAtMs: 1_700_000_100_000 },
   ],
+  groupNames: [],
+  profiles: [],
+  pendingContacts: [],
 };
 
 let local: MemoryStorage;
@@ -115,7 +118,7 @@ describe("state bundle v2 codec (ADR-0074)", () => {
     expect(decodeStateBundle(encodeStateBundle(base))).toEqual(base);
   });
 
-  it("refuses v1 and a v2 bundle that lacks either new field", () => {
+  it("refuses v1 and a bundle that lacks either v2 field", () => {
     expect(decodeStateBundle(encodeRaw({ v: 1, contacts: [], pins: [], knownGroupIdsB64: [] }))).toBeNull();
     const { ownPredecessors: _own, ...withoutOwn } = base;
     expect(decodeStateBundle(encodeRaw(withoutOwn))).toBeNull();
@@ -153,7 +156,7 @@ describe("state bundle v2 codec (ADR-0074)", () => {
 
   it("an account that never rotated carries an empty array", () => {
     const built = buildStateBundle([], SENDER);
-    expect(built.v).toBe(2);
+    expect(built.v).toBe(3);
     expect(built.ownPredecessors).toEqual([]);
     expect(decodeStateBundle(encodeStateBundle(built))).toEqual(built);
   });

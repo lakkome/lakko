@@ -71,10 +71,42 @@ public object DeviceCardCenter {
     @Volatile private var sender: (suspend (ByteArray) -> Unit)? = null
     @Volatile private var growthJob: Job? = null
     private val deciding = AtomicBoolean(false)
+    private val sending = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** Whether the app is showing; set by `MainActivity`. */
+    /**
+     * The stored own card is owed to the account's other devices: its send
+     * failed, or a growth re-send came due while the app was not showing.
+     * Persisted, so a restart keeps it owed. Sent on the next DeviceGroup
+     * poll pass or the next time the app shows, whichever comes first, and
+     * only while the app is showing (never from the background).
+     */
+    @Volatile private var owed: Boolean = false
+
+    /** Whether the app is showing; set by `MainActivity`. Becoming shown
+     *  sends an owed own card. */
     @Volatile public var foreground: Boolean = false
+        set(value) {
+            val was = field
+            field = value
+            if (value && !was) sendOwedIfAny()
+        }
+
+    /** The own card's envelope; the native composer, replaceable in a test
+     *  (the JVM suite has no native library). */
+    @Volatile public var composeEnvelope: (StoredDeviceCard) -> ByteArray? = { card ->
+        runCatching { uniffi.lakko_ffi_uniffi.composeDeviceCardEnvelope(toFfi(card)) }.getOrNull()
+    }
+
+    /** One plain-text log line; no identifier beyond a platform word. Never
+     *  throws (a host test has no `android.util.Log`). */
+    private fun log(message: String) {
+        try {
+            Log.i(TAG, message)
+        } catch (_: Throwable) {
+            // no log in a host test
+        }
+    }
 
     /** Whether the anti-censorship connection is armed (then no city is
      *  asked for: the device's address is Lakko's relay). Replaceable in a
@@ -115,6 +147,7 @@ public object DeviceCardCenter {
         city = p.getString(DeviceCards.cityKey(accountIdB64), null)
             ?.let { runCatching { json.decodeFromString(CityAnswer.serializer(), it) }.getOrNull() }
         mutableShowCity.value = p.getBoolean(DeviceCards.showCityKey(accountIdB64), true)
+        owed = own != null && p.getBoolean(DeviceCards.owedKey(accountIdB64), false)
     }
 
     @Synchronized
@@ -124,6 +157,7 @@ public object DeviceCardCenter {
         sender = null
         city = null
         own = null
+        owed = false
         growthJob?.cancel()
         growthJob = null
         mutableCards.value = emptyMap()
@@ -211,23 +245,79 @@ public object DeviceCardCenter {
     /** The own card's envelope, stamps verbatim; `null` before the first. */
     public fun ownEnvelope(): ByteArray? {
         val card = own ?: return null
-        return runCatching { uniffi.lakko_ffi_uniffi.composeDeviceCardEnvelope(toFfi(card)) }.getOrNull()
+        return composeEnvelope(card)
     }
 
+    /** Whether the stored own card is owed (visible for tests). */
+    public fun isOwed(): Boolean = owed
+
+    private fun setOwed(account: String, value: Boolean) {
+        owed = value
+        val p = prefs ?: return
+        AccountStoreGate.write(account) { p.edit().putBoolean(DeviceCards.owedKey(account), value).apply() }
+    }
+
+    /** Send the stored own card. A failure keeps it owed. */
     private suspend fun sendOwn() {
+        val bound = accountIdB64 ?: return
         val envelope = ownEnvelope() ?: return
         val send = sender ?: return
         try {
             send(envelope)
+            if (accountIdB64 == bound) setOwed(bound, false)
+            log("own device card sent (android)")
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            if (accountIdB64 == bound) setOwed(bound, true)
             throw cancellation
         } catch (cause: Throwable) {
-            Log.w(TAG, "own device card not sent (${cause.javaClass.simpleName})")
+            if (accountIdB64 == bound) setOwed(bound, true)
+            log("own device card not sent, kept owed (${cause.javaClass.simpleName})")
+        }
+    }
+
+    /**
+     * Send the own card when it is owed and the app is showing. Called on
+     * every DeviceGroup poll pass and when the app comes to the foreground;
+     * one send at a time.
+     */
+    public fun sendOwedIfAny() {
+        val bound = accountIdB64 ?: return
+        if (!owed || !foreground || own == null) return
+        if (!sending.compareAndSet(false, true)) return
+        scope.launch {
+            try {
+                if (accountIdB64 == bound && owed && foreground) sendOwn()
+            } finally {
+                sending.set(false)
+            }
+        }
+    }
+
+    /**
+     * This device's own add commit just landed (a local pairing): send the
+     * stored own card at once on the post-add handle, so the new device
+     * learns this one without waiting for the growth timer.
+     */
+    public fun sendHandOver() {
+        val bound = accountIdB64 ?: return
+        if (own == null) return
+        if (!sending.compareAndSet(false, true)) {
+            setOwed(bound, true)
+            return
+        }
+        scope.launch {
+            try {
+                if (accountIdB64 == bound) sendOwn()
+            } finally {
+                sending.set(false)
+            }
         }
     }
 
     /** The DeviceGroup grew: re-send the stored own card, unchanged, after up
-     *  to 30 s (the ADR-0058 discipline), so the new device learns this one. */
+     *  to 30 s (the ADR-0058 discipline), so the new device learns this one.
+     *  When the wait ends while the app is not showing, the re-send stays
+     *  owed and goes out at the next foreground. */
     @Synchronized
     public fun scheduleResend(random: Double = kotlin.random.Random.nextDouble()) {
         val bound = accountIdB64 ?: return
@@ -235,7 +325,13 @@ public object DeviceCardCenter {
         val wait = DeviceCards.growthDelayMs(random)
         growthJob = scope.launch {
             delay(wait)
-            if (accountIdB64 == bound && foreground) sendOwn()
+            if (accountIdB64 != bound) return@launch
+            if (foreground) {
+                sendOwn()
+            } else {
+                setOwed(bound, true)
+                log("device card re-send owed until the app is shown")
+            }
         }
     }
 
@@ -244,9 +340,20 @@ public object DeviceCardCenter {
     @Synchronized
     public fun receive(senderKeyHex: String, card: StoredDeviceCard, rosterKeysHex: Collection<String>) {
         val account = accountIdB64 ?: return
-        val next = DeviceCards.receive(mutableCards.value, senderKeyHex, card, rosterKeysHex) ?: return
+        val word = card.platform.name.lowercase()
+        val next = DeviceCards.receive(mutableCards.value, senderKeyHex, card, rosterKeysHex)
+        if (next == null) {
+            log("device card received and refused ($word)")
+            return
+        }
         mutableCards.value = next
         persist(account)
+        log("device card received and stored ($word)")
+    }
+
+    /** A card arrived that could not be bound to a device of the roster. */
+    public fun noteRefused(reason: String) {
+        log("device card received and refused ($reason)")
     }
 
     /** The roster changed: drop cards of leaves that left. */
@@ -264,6 +371,7 @@ public object DeviceCardCenter {
             .remove(DeviceCards.cardsKey(accountIdB64))
             .remove(DeviceCards.cityKey(accountIdB64))
             .remove(DeviceCards.showCityKey(accountIdB64))
+            .remove(DeviceCards.owedKey(accountIdB64))
             .commit()
     }
 

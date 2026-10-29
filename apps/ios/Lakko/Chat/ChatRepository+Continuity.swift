@@ -991,6 +991,7 @@ extension ChatRepository {
     /// Forget everything held (sign-out, account wipe).
     func clearHeldSends() {
         heldRows = [:]
+        displayCopyCache = nil
         preparedSuccessors = [:]
         continuityInFlight = []
         claimIdentityCheckedAtMs = [:]

@@ -55,6 +55,11 @@ import {
 import { readIsActive } from "./membership-ended";
 import { conversationKindOf } from "./conversation-kind";
 import { durableSnapshotHook } from "./persist-hooks";
+import {
+  groupNamesToStore,
+  subscribeCarriedNames,
+  takeCarriedGroupNames,
+} from "../devices/carried-state";
 
 /** The receive-loop event this runtime consumes. */
 export type GroupNameEvent = Extract<IncomingChatEvent, { kind: "group-name" }>;
@@ -199,10 +204,51 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
       }
       scheduler.start();
       opened = store.open(account);
+      void takeCarried(account);
     });
+  });
+
+  /**
+   * The pairing state bundle v3 (`devices/carried-state.ts`): the names the
+   * confirming device holds, taken for the bound account and stored under
+   * the same per-group lock and the same "strictly newer stamp wins" rule
+   * an envelope passes. The bundle comes from this account's own device, so
+   * the owner/admin gate of the in-group path does not apply; a one-to-one
+   * this device already holds still takes no name (ADR-0062). Nothing is
+   * posted to any group.
+   */
+  async function takeCarried(account: string): Promise<void> {
+    const carried = takeCarriedGroupNames(account);
+    if (carried.size === 0) return;
+    try {
+      const wasm = await loadWasm();
+      for (const [groupIdB64, value] of carried) {
+        const entry = chats.get(groupIdB64);
+        if (entry !== undefined && conversationKindOf(entry.group) === "chat") continue;
+        await withRoutingRowLock(account, groupIdB64, async () => {
+          await opened;
+          if (accountId() !== account) return;
+          const toStore = groupNamesToStore(
+            new Map([[groupIdB64, value]]),
+            (id) => store.get(id),
+            (a, b) => wasm.groupNameIsNewer(a, b),
+          );
+          const next = toStore.get(groupIdB64);
+          if (next !== undefined) await store.set(account, groupIdB64, next);
+        });
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[group-name] carried names not stored", err instanceof Error ? err.name : "");
+    }
+  }
+  const unsubscribeCarried = subscribeCarriedNames(() => {
+    const account = accountId();
+    if (account !== null) void takeCarried(account);
   });
   onCleanup(() => {
     unsubscribeStore();
+    unsubscribeCarried();
     scheduler.stop();
   });
 

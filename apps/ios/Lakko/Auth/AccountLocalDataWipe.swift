@@ -294,6 +294,7 @@ enum AccountLocalDataWipe {
         step("group-closed") { GroupClosedStore.clear(ownerAccountIdB64: accountIdB64) }
         step("continuity-store") { ContinuityStore.clear(ownerAccountIdB64: accountIdB64) }
         step("held-sends") { HeldSendQueue.clearAccount(ownerAccountId: accountIdB64) }
+        step("pending-display-copies") { PendingDisplayCopies.clearAccount(ownerAccountIdB64: accountIdB64) }
         step("lineage-unsent") {
             standard.removeObject(
                 forKey: DeviceGroupSyncRepository.lineageUnsentKey(accountIdB64: accountIdB64))
@@ -419,6 +420,7 @@ enum AccountLocalDataWipe {
             standard.removeObject(forKey: DeviceCards.cardsKey(accountIdB64: accountIdB64))
             standard.removeObject(forKey: DeviceCards.cityKey(accountIdB64: accountIdB64))
             standard.removeObject(forKey: DeviceCards.showCityKey(accountIdB64: accountIdB64))
+            standard.removeObject(forKey: DeviceCards.resendOwedKey(accountIdB64: accountIdB64))
         }
         step("decrypted-media") {
             MediaSessionCache.shared.purge()

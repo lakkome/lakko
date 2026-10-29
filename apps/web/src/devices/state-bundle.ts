@@ -23,7 +23,26 @@
  * device's, it reads the predecessor mailboxes for what is left of their
  * windows, and a contact's old-key leaves name the same person. The format
  * is hand-mirrored on iOS (`StateBundle.swift`) and Android
- * (`StateBundle.kt`); `v` is 2 and nothing else is accepted.
+ * (`StateBundle.kt`).
+ *
+ * v3 (2026-10-28, flag day: v2 refused, no dual accept) adds three arrays,
+ * because a device paired into an existing account is no membership growth,
+ * so nothing else ever sends it the names the confirming device holds:
+ *
+ *   * `groupNames` — the ADR-0051 group-name envelope of each known group,
+ *     composed with the name and the ORIGINAL stamp this device stores (a
+ *     later rename must still win);
+ *   * `profiles` — the ADR-0048 profile envelope of every person this device
+ *     holds one for (contacts and group members), with the original stamp,
+ *     never this account's own;
+ *   * `pendingContacts` — the ADR-0079 section 5 pending contacts, each with
+ *     the messages held for it, carried as DISPLAY-ONLY copies: the new
+ *     device shows them waiting and never sends them (the device where they
+ *     were typed does).
+ *
+ * The bundle comes from this account's own device under the DeviceGroup
+ * exporter, so its names are trusted like the contacts it carries: the
+ * ADR-0051 owner/admin check of the in-group path does not apply.
  *
  * Channel subscriptions are NOT here yet: the channel list does not survive a
  * reload on this device either (`docs/PRODUCT-READINESS.md`), so there is
@@ -90,9 +109,61 @@ export interface CarriedOwnPredecessor {
   readonly adoptedAtMs: number;
 }
 
+/** ADR-0051 — one known group's shared name, as its envelope. */
+export interface CarriedGroupName {
+  /** Standard base64 group id. */
+  readonly groupIdB64: string;
+  /** Standard base64 of `composeGroupNameEnvelope(name, storedStamp)`. */
+  readonly envelopeB64: string;
+}
+
+/** ADR-0048 — one person's profile, as its envelope. */
+export interface CarriedProfile {
+  /** Standard base64 of the 32-byte person (account) key it is filed under. */
+  readonly personKeyB64: string;
+  /** Standard base64 of the profile envelope composed with the stored stamp. */
+  readonly envelopeB64: string;
+}
+
+/** One message held for a pending contact, as a display-only copy. */
+export interface CarriedHeldMessage {
+  readonly text: string;
+  /** The sending client's own JSON form of the held attachment references
+   *  (web: `PersistedAttachment`; any JSON value per element, since each
+   *  client has its own). Only their number is read here. */
+  readonly attachments: readonly unknown[];
+  /** The DS message id the held message replies to, or `null`. */
+  readonly replyTo: number | null;
+  readonly heldAtMs: number;
+}
+
+/** ADR-0079 section 5 — a person this account added through their invite
+ *  link whose app has not answered yet. */
+export interface CarriedPendingContact {
+  /** 32 lower-case hex characters. */
+  readonly accountIdHex: string;
+  readonly signaturePubkeyB64: string;
+  readonly x25519PubkeyB64: string;
+  readonly displayName: string;
+  readonly username: string;
+  readonly addedAtMs: number;
+  /** Standard base64 of the 16-byte invite-link id. */
+  readonly linkIdB64: string;
+  /** What was written to them so far, in queue order. */
+  readonly heldMessages: readonly CarriedHeldMessage[];
+}
+
+/** The most entries a bundle carries; one more refuses the whole bundle on
+ *  decode, and a builder keeps the first ones in a stable order. Chosen,
+ *  not measured. */
+export const MAX_CARRIED_GROUP_NAMES = 1000;
+export const MAX_CARRIED_PROFILES = 2000;
+export const MAX_CARRIED_PENDING_CONTACTS = 500;
+export const MAX_CARRIED_HELD_MESSAGES = 200;
+
 /** The bundle. `v` is the only version there is. */
-export interface StateBundleV2 {
-  readonly v: 2;
+export interface StateBundleV3 {
+  readonly v: 3;
   readonly contacts: readonly AcceptedContact[];
   readonly pins: readonly CarriedPin[];
   /** base64 group ids the old device holds; the new device counts the ones
@@ -101,17 +172,34 @@ export interface StateBundleV2 {
   /** The own account's earlier keys, OLDEST first; empty when the account
    *  never rotated. */
   readonly ownPredecessors: readonly CarriedOwnPredecessor[];
+  /** At most one per group id, only for groups in `knownGroupIdsB64`. */
+  readonly groupNames: readonly CarriedGroupName[];
+  /** At most one per person key, never this account's own. */
+  readonly profiles: readonly CarriedProfile[];
+  /** At most one per account id. */
+  readonly pendingContacts: readonly CarriedPendingContact[];
+}
+
+/** What the sending device adds beside the localStorage state (read from its
+ *  encrypted stores by `carried-state.ts`). */
+export interface CarriedExtras {
+  readonly groupNames?: readonly CarriedGroupName[];
+  readonly profiles?: readonly CarriedProfile[];
+  readonly pendingContacts?: readonly CarriedPendingContact[];
 }
 
 /** Read the account's contacts, pins and the given group ids into a bundle.
  *  `ownerAccountIdB64` is the account being paired (the contacts are that
  *  account's, never another account's on this browser). `ownPredecessors`
- *  is {@link collectOwnPredecessors}'s answer on the sending device. */
+ *  is {@link collectOwnPredecessors}'s answer on the sending device;
+ *  `extras` the names and pending contacts (bounded and de-duplicated here,
+ *  and trimmed so the encoded bundle stays under its size cap). */
 export function buildStateBundle(
   knownGroupIdsB64: readonly string[],
   ownerAccountIdB64: string,
   ownPredecessors: readonly CarriedOwnPredecessor[] = [],
-): StateBundleV2 {
+  extras: CarriedExtras = {},
+): StateBundleV3 {
   const contacts = loadAccepted(ownerAccountIdB64);
   const pins: CarriedPin[] = [];
   for (const c of contacts) {
@@ -126,13 +214,132 @@ export function buildStateBundle(
       provenPredecessorsB64: carriedKeys(pin.provenPredecessorsB64 ?? []),
     });
   }
-  return {
-    v: 2,
+  return fitToSizeCap({
+    v: 3,
     contacts,
     pins,
     knownGroupIdsB64: [...knownGroupIdsB64],
     ownPredecessors: carriedOwn(ownPredecessors),
-  };
+    groupNames: carriedGroupNames(extras.groupNames ?? [], knownGroupIdsB64),
+    profiles: carriedProfiles(extras.profiles ?? []),
+    pendingContacts: carriedPending(extras.pendingContacts ?? []),
+  });
+}
+
+/** One name per KNOWN group, in the known-group order, bounded. */
+function carriedGroupNames(
+  names: readonly CarriedGroupName[],
+  knownGroupIdsB64: readonly string[],
+): CarriedGroupName[] {
+  const byGroup = new Map<string, CarriedGroupName>();
+  for (const n of names) {
+    if (!byGroup.has(n.groupIdB64) && decodesNonEmpty(n.envelopeB64)) byGroup.set(n.groupIdB64, n);
+  }
+  const out: CarriedGroupName[] = [];
+  for (const id of knownGroupIdsB64) {
+    const n = byGroup.get(id);
+    if (n === undefined) continue;
+    byGroup.delete(id);
+    out.push(n);
+    if (out.length === MAX_CARRIED_GROUP_NAMES) break;
+  }
+  return out;
+}
+
+/** One profile per person key, ordered by key, bounded. */
+function carriedProfiles(profiles: readonly CarriedProfile[]): CarriedProfile[] {
+  const byKey = new Map<string, CarriedProfile>();
+  for (const p of profiles) {
+    if (byKey.has(p.personKeyB64)) continue;
+    if (!decodesTo(p.personKeyB64, SIGNATURE_KEY_LENGTH) || !decodesNonEmpty(p.envelopeB64)) continue;
+    byKey.set(p.personKeyB64, p);
+  }
+  return [...byKey.values()]
+    .sort((a, b) => (a.personKeyB64 < b.personKeyB64 ? -1 : a.personKeyB64 > b.personKeyB64 ? 1 : 0))
+    .slice(0, MAX_CARRIED_PROFILES);
+}
+
+/** One record per account id, in the order held, bounded; each with at most
+ *  the first {@link MAX_CARRIED_HELD_MESSAGES} held messages. */
+function carriedPending(list: readonly CarriedPendingContact[]): CarriedPendingContact[] {
+  const out: CarriedPendingContact[] = [];
+  const seen = new Set<string>();
+  for (const c of list) {
+    const bounded = { ...c, heldMessages: c.heldMessages.slice(0, MAX_CARRIED_HELD_MESSAGES) };
+    if (seen.has(c.accountIdHex) || pendingContactProblem(bounded) !== null) continue;
+    seen.add(c.accountIdHex);
+    out.push(bounded);
+    if (out.length === MAX_CARRIED_PENDING_CONTACTS) break;
+  }
+  return out;
+}
+
+/**
+ * Keep the encoded bundle under {@link MAX_BUNDLE_BYTES}, which the
+ * receiver refuses as a whole: the profiles go first (from the end of the
+ * key order), then the group names (from the end of the known-group
+ * order), then the held messages of the pending contacts. Contacts, pins and keys are never trimmed. Pure.
+ */
+function fitToSizeCap(bundle: StateBundleV3): StateBundleV3 {
+  const size = (b: StateBundleV3): number => encodeStateBundle(b).length;
+  let b = bundle;
+  if (size(b) <= MAX_BUNDLE_BYTES) return b;
+  const entryBytes = (x: unknown): number => new TextEncoder().encode(JSON.stringify(x)).length + 1;
+  let over = size(b) - MAX_BUNDLE_BYTES;
+  const profiles = [...b.profiles];
+  while (over > 0 && profiles.length > 0) over -= entryBytes(profiles.pop());
+  b = { ...b, profiles };
+  const groupNames = [...b.groupNames];
+  while (over > 0 && groupNames.length > 0) over -= entryBytes(groupNames.pop());
+  b = { ...b, groupNames };
+  if (over > 0) b = { ...b, pendingContacts: b.pendingContacts.map((c) => ({ ...c, heldMessages: [] })) };
+  return b;
+}
+
+function decodesNonEmpty(b64: string): boolean {
+  try {
+    return base64Decode(b64).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+const ACCOUNT_ID_HEX_RE = /^[0-9a-f]{32}$/;
+const LINK_ID_LENGTH = 16;
+
+/** `null` when one carried held message is well-formed, else why not. */
+function heldMessageProblem(m: unknown): string | null {
+  if (typeof m !== "object" || m === null) return "not an object";
+  const r = m as Record<string, unknown>;
+  if (typeof r["text"] !== "string") return "text";
+  if (!Array.isArray(r["attachments"])) return "attachments";
+  const replyTo = r["replyTo"];
+  if (replyTo !== null && (typeof replyTo !== "number" || !Number.isSafeInteger(replyTo))) return "replyTo";
+  const heldAtMs = r["heldAtMs"];
+  if (typeof heldAtMs !== "number" || !Number.isSafeInteger(heldAtMs)) return "heldAtMs";
+  return null;
+}
+
+/** `null` when one carried pending contact is well-formed, else why not. */
+function pendingContactProblem(c: unknown): string | null {
+  if (typeof c !== "object" || c === null) return "not an object";
+  const r = c as Record<string, unknown>;
+  const accountIdHex = r["accountIdHex"];
+  if (typeof accountIdHex !== "string" || !ACCOUNT_ID_HEX_RE.test(accountIdHex)) return "accountIdHex";
+  const sig = r["signaturePubkeyB64"];
+  if (typeof sig !== "string" || !decodesTo(sig, SIGNATURE_KEY_LENGTH)) return "signaturePubkeyB64";
+  const x = r["x25519PubkeyB64"];
+  if (typeof x !== "string" || !decodesTo(x, SIGNATURE_KEY_LENGTH)) return "x25519PubkeyB64";
+  if (typeof r["displayName"] !== "string") return "displayName";
+  if (typeof r["username"] !== "string") return "username";
+  const addedAtMs = r["addedAtMs"];
+  if (typeof addedAtMs !== "number" || !Number.isSafeInteger(addedAtMs)) return "addedAtMs";
+  const link = r["linkIdB64"];
+  if (typeof link !== "string" || !decodesTo(link, LINK_ID_LENGTH)) return "linkIdB64";
+  const held = r["heldMessages"];
+  if (!Array.isArray(held) || held.length > MAX_CARRIED_HELD_MESSAGES) return "heldMessages";
+  for (const m of held as unknown[]) if (heldMessageProblem(m) !== null) return "heldMessage";
+  return null;
 }
 
 function decodesTo(b64: string, length: number): boolean {
@@ -163,14 +370,14 @@ function carriedOwn(own: readonly CarriedOwnPredecessor[]): CarriedOwnPredecesso
   return first === undefined ? newest : [first, ...newest];
 }
 
-export function encodeStateBundle(bundle: StateBundleV2): Uint8Array {
+export function encodeStateBundle(bundle: StateBundleV3): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(bundle));
 }
 
 /** Decode a bundle, refusing anything that is not the shape above. A refused
  *  bundle is `null` — the joiner then lands without contacts, as before.
  *  A bundle of any other version is refused (no dual accept). */
-export function decodeStateBundle(bytes: Uint8Array): StateBundleV2 | null {
+export function decodeStateBundle(bytes: Uint8Array): StateBundleV3 | null {
   if (bytes.length === 0 || bytes.length > MAX_BUNDLE_BYTES) return null;
   let parsed: unknown;
   try {
@@ -180,10 +387,12 @@ export function decodeStateBundle(bytes: Uint8Array): StateBundleV2 | null {
   }
   if (typeof parsed !== "object" || parsed === null) return null;
   const o = parsed as Record<string, unknown>;
-  if (o["v"] !== 2) return null;
+  if (o["v"] !== 3) return null;
   if (!Array.isArray(o["contacts"]) || !Array.isArray(o["pins"])) return null;
   if (!Array.isArray(o["knownGroupIdsB64"])) return null;
   if (!Array.isArray(o["ownPredecessors"])) return null;
+  if (!Array.isArray(o["groupNames"]) || !Array.isArray(o["profiles"])) return null;
+  if (!Array.isArray(o["pendingContacts"])) return null;
   const contacts: AcceptedContact[] = [];
   for (const c of o["contacts"] as unknown[]) {
     if (typeof c !== "object" || c === null) return null;
@@ -235,7 +444,72 @@ export function decodeStateBundle(bytes: Uint8Array): StateBundleV2 | null {
     if (typeof adoptedAtMs !== "number" || !Number.isSafeInteger(adoptedAtMs)) return null;
     ownPredecessors.push({ seedB64, adoptedAtMs });
   }
-  return { v: 2, contacts, pins, knownGroupIdsB64, ownPredecessors };
+  const names = o["groupNames"] as unknown[];
+  if (names.length > MAX_CARRIED_GROUP_NAMES) return null;
+  const groupNames: CarriedGroupName[] = [];
+  const namedGroups = new Set<string>();
+  for (const n of names) {
+    if (typeof n !== "object" || n === null) return null;
+    const r = n as Record<string, unknown>;
+    const groupIdB64 = r["groupIdB64"];
+    const envelopeB64 = r["envelopeB64"];
+    if (typeof groupIdB64 !== "string" || !decodesNonEmpty(groupIdB64)) return null;
+    if (typeof envelopeB64 !== "string" || !decodesNonEmpty(envelopeB64)) return null;
+    if (namedGroups.has(groupIdB64)) return null;
+    namedGroups.add(groupIdB64);
+    groupNames.push({ groupIdB64, envelopeB64 });
+  }
+  const carried = o["profiles"] as unknown[];
+  if (carried.length > MAX_CARRIED_PROFILES) return null;
+  const profiles: CarriedProfile[] = [];
+  const profiled = new Set<string>();
+  for (const p of carried) {
+    if (typeof p !== "object" || p === null) return null;
+    const r = p as Record<string, unknown>;
+    const personKeyB64 = r["personKeyB64"];
+    const envelopeB64 = r["envelopeB64"];
+    if (typeof personKeyB64 !== "string" || !decodesTo(personKeyB64, SIGNATURE_KEY_LENGTH)) return null;
+    if (typeof envelopeB64 !== "string" || !decodesNonEmpty(envelopeB64)) return null;
+    if (profiled.has(personKeyB64)) return null;
+    profiled.add(personKeyB64);
+    profiles.push({ personKeyB64, envelopeB64 });
+  }
+  const pendingRaw = o["pendingContacts"] as unknown[];
+  if (pendingRaw.length > MAX_CARRIED_PENDING_CONTACTS) return null;
+  const pendingContacts: CarriedPendingContact[] = [];
+  const pendingIds = new Set<string>();
+  for (const c of pendingRaw) {
+    if (pendingContactProblem(c) !== null) return null;
+    const r = c as Record<string, unknown>;
+    const accountIdHex = r["accountIdHex"] as string;
+    if (pendingIds.has(accountIdHex)) return null;
+    pendingIds.add(accountIdHex);
+    pendingContacts.push({
+      accountIdHex,
+      signaturePubkeyB64: r["signaturePubkeyB64"] as string,
+      x25519PubkeyB64: r["x25519PubkeyB64"] as string,
+      displayName: r["displayName"] as string,
+      username: r["username"] as string,
+      addedAtMs: r["addedAtMs"] as number,
+      linkIdB64: r["linkIdB64"] as string,
+      heldMessages: (r["heldMessages"] as Record<string, unknown>[]).map((m) => ({
+        text: m["text"] as string,
+        attachments: m["attachments"] as unknown[],
+        replyTo: m["replyTo"] as number | null,
+        heldAtMs: m["heldAtMs"] as number,
+      })),
+    });
+  }
+  return {
+    v: 3,
+    contacts,
+    pins,
+    knownGroupIdsB64,
+    ownPredecessors,
+    groupNames,
+    profiles,
+    pendingContacts,
+  };
 }
 
 /** Merge a bundle into this browser, into the list of `ownerAccountIdB64`
@@ -244,7 +518,7 @@ export function decodeStateBundle(bytes: Uint8Array): StateBundleV2 | null {
  *  new device may run this before its session lands, so the account is
  *  named, not taken from the binding. */
 export function applyStateBundle(
-  bundle: StateBundleV2,
+  bundle: StateBundleV3,
   ownerAccountIdB64: string,
 ): { contacts: number; pins: number } {
   const have = new Set(loadAccepted(ownerAccountIdB64).map((c) => c.signaturePubkeyB64));
@@ -345,7 +619,7 @@ export async function collectOwnPredecessors(
  * install them again before any KeyPackage is published.
  */
 export async function applyOwnPredecessors(
-  bundle: StateBundleV2,
+  bundle: StateBundleV3,
   accountIdB64: string,
   deviceKey: CryptoKey,
   keyHexOfSeed: (seed: Uint8Array) => string,

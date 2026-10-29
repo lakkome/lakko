@@ -44,7 +44,13 @@ struct PendingChatScreen: View {
                     }
                     ForEach(messages, id: \.localId) { entry in
                         HStack(alignment: .bottom, spacing: 6) {
-                            Text(entry.text)
+                            SwiftUI.Group {
+                                if entry.text.isEmpty {
+                                    Image(systemName: "paperclip")
+                                } else {
+                                    Text(entry.text)
+                                }
+                            }
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 8)
                                 .background(Color.lakkoAccentSoft)
@@ -125,7 +131,23 @@ struct PendingChatScreen: View {
 
     private func reload() {
         guard let contact else { return }
-        messages = chat.pendingInvitedMessages(queueKey: contact.queueKey)
+        // Pairing state bundle v3 — what another device of this account wrote
+        // to the person is shown here too, as display-only copies in the same
+        // waiting state; the device it was typed on sends it.
+        let own = chat.pendingInvitedMessages(queueKey: contact.queueKey)
+        let copies = chat.pendingInvitedDisplayCopies(queueKey: contact.queueKey)
+        messages = Self.merged(own: own, copies: copies)
+    }
+
+    /// This device's own messages and the display copies, oldest first (a
+    /// stable order: on a tie, own messages first, each in its queue order).
+    static func merged(own: [HeldSendQueue.Entry], copies: [HeldSendQueue.Entry]) -> [HeldSendQueue.Entry] {
+        let all = own.enumerated().map { (0, $0.offset, $0.element) }
+            + copies.enumerated().map { (1, $0.offset, $0.element) }
+        return all.sorted { a, b in
+            if a.2.queuedAtMs != b.2.queuedAtMs { return a.2.queuedAtMs < b.2.queuedAtMs }
+            return (a.0, a.1) < (b.0, b.1)
+        }.map(\.2)
     }
 
     private func send() {

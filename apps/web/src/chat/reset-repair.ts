@@ -232,7 +232,7 @@ export type AwaitedSwaps = Readonly<Record<string, number>>;
  *
  * | the commit ...                                                         | row        | memory                 |
  * |------------------------------------------------------------------------|------------|------------------------|
- * | changes no key                                                         | kept       | unchanged              |
+ * | changes no person key (only device leaves came or went, ADR-0050)      | suppressed | unchanged              |
  * | changes keys, not people (one batch)                                   | suppressed | unchanged              |
  * | only REMOVES people, each present through superseded keys alone        | suppressed | those people are added |
  * | only ADDS people, each one awaited                                     | suppressed | those people leave it  |
@@ -247,6 +247,13 @@ export type AwaitedSwaps = Readonly<Record<string, number>>;
  *
  * The order Add-then-Remove needs no memory: neither commit changes the
  * people.
+ *
+ * The inputs are PERSON keys (account keys, ADR-0050), never leaf keys: a
+ * commit that admits a person's new device or retires a removed one leaves
+ * the set of person keys equal, and is no change of members. The first row
+ * of the table used to read "changes no key: kept", written when the inputs
+ * were leaf keys; with person keys it showed `Members changed` for every
+ * device admission (seen live 2026-10-28 in a one-to-one).
  */
 export function deviceSwapAcrossCommits(input: {
   readonly personKeysBefore: readonly string[] | null;
@@ -263,7 +270,8 @@ export function deviceSwapAcrossCommits(input: {
   const before = input.personKeysBefore;
   const after = input.personKeysAfter;
   if (before === null || after === null) return { suppress: false, awaited: live };
-  if (membersChangedSuppressed(before, after)) return { suppress: false, awaited: live };
+  // The same person keys either side: only device leaves changed.
+  if (membersChangedSuppressed(before, after)) return { suppress: true, awaited: live };
   const name = (k: string): string => input.accountOfKey(k) ?? k;
   const peopleBefore = peopleByAccount(before, input.accountOfKey);
   const peopleAfter = peopleByAccount(after, input.accountOfKey);

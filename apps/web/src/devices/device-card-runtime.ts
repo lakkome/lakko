@@ -8,6 +8,15 @@
  * actions whether to send a fresh own card; re-sends it when the DeviceGroup
  * grows. The rules themselves are `device-cards.ts`.
  *
+ * Delivery (live run 2026-10-28, a card that never arrived):
+ *   * the own card is stored before it is published, so the row also keeps
+ *     `ownUnsent` until the outbox reports it sent; a reload re-marks it,
+ *     and a failed publish is retried on every DeviceGroup poll pass
+ *     (`retryDirtyServiceEnvelopes`);
+ *   * a growth re-send whose timer fires while the page is hidden is kept
+ *     owed (`resendOwed`) and sent at the next foreground, never from a
+ *     background timer.
+ *
  * Storage: `localStorage`, per account (`wipe-account.ts` deletes the keys).
  * The cards say what the account's own devices are and where; nothing of it
  * leaves this browser except the own card, end-to-end encrypted in the
@@ -33,6 +42,7 @@ import {
 import {
   markServiceEnvelopeDirty,
   setServiceEnvelopeComposer,
+  setServiceEnvelopeSentListener,
 } from "../reach/service-envelope-outbox";
 
 /** The city is asked for again at most this often (chosen, not measured). */
@@ -45,6 +55,10 @@ export const WEB_APP_VERSION = "web";
 interface PersistedCards {
   readonly cards: DeviceCardMap;
   readonly own: StoredDeviceCard | null;
+  /** The own card was stored and has not been sent yet. */
+  readonly ownUnsent?: boolean;
+  /** A growth re-send fell due while the page was hidden. */
+  readonly resendOwed?: boolean;
 }
 
 interface CityAnswer {
@@ -69,6 +83,8 @@ let city: CityAnswer | null = null;
 let locating: Promise<void> | null = null;
 let deciding = false;
 let growthTimer: ReturnType<typeof setTimeout> | null = null;
+let ownUnsent = false;
+let resendOwed = false;
 
 function readJson<T>(key: string): T | null {
   try {
@@ -89,8 +105,30 @@ function writeJson(key: string, value: unknown): void {
 
 function persistCards(): void {
   if (account === null) return;
-  const row: PersistedCards = { cards: cards(), own: ownCard() };
+  const row: PersistedCards = {
+    cards: cards(),
+    own: ownCard(),
+    ...(ownUnsent ? { ownUnsent: true } : {}),
+    ...(resendOwed ? { resendOwed: true } : {}),
+  };
   writeJson(cardsStorageKey(account), row);
+}
+
+/** Hand the own card to the outbox and remember it is not sent yet. */
+function markOwnCardDirty(): void {
+  if (ownCard() === null) return;
+  ownUnsent = true;
+  persistCards();
+  markServiceEnvelopeDirty("deviceCard");
+}
+
+/** The outbox sent the own card. */
+function ownCardSent(): void {
+  // eslint-disable-next-line no-console
+  console.info("[device-card] own card sent");
+  if (!ownUnsent) return;
+  ownUnsent = false;
+  persistCards();
 }
 
 /** Bind the runtime to an account (on sign-in) and register the composer. */
@@ -101,6 +139,8 @@ export function bindDeviceCards(accountIdB64: string): void {
   const row = readJson<PersistedCards>(cardsStorageKey(accountIdB64));
   setCards(row?.cards ?? {});
   setOwnCard(row?.own ?? null);
+  ownUnsent = row?.ownUnsent === true;
+  resendOwed = row?.resendOwed === true;
   city = readJson<CityAnswer>(cityStorageKey(accountIdB64));
   let shown = true;
   try {
@@ -110,6 +150,12 @@ export function bindDeviceCards(accountIdB64: string): void {
   }
   setShowCitySignal(shown);
   setServiceEnvelopeComposer("deviceCard", composeOwnCardEnvelope);
+  setServiceEnvelopeSentListener("deviceCard", ownCardSent);
+  // A card stored and not sent before the page went (a failed publish, a
+  // reload): marked again, the outbox sends it once a sender is there.
+  if (ownUnsent && row?.own != null) markServiceEnvelopeDirty("deviceCard");
+  // A growth re-send that fell due while hidden waits for a foreground.
+  if (resendOwed) noteDeviceForeground();
 }
 
 /** Sign-out: nothing of one account is used for the next. */
@@ -119,10 +165,13 @@ export function unbindDeviceCards(): void {
   locating = null;
   if (growthTimer !== null) clearTimeout(growthTimer);
   growthTimer = null;
+  ownUnsent = false;
+  resendOwed = false;
   setCards({});
   setOwnCard(null);
   setShowCitySignal(true);
   setServiceEnvelopeComposer("deviceCard", null);
+  setServiceEnvelopeSentListener("deviceCard", null);
 }
 
 async function composeOwnCardEnvelope(): Promise<Uint8Array | null> {
@@ -200,7 +249,10 @@ async function refreshCity(bound: string, nowMs: number): Promise<void> {
  */
 export function noteDeviceAction(nowMs: number = Date.now()): void {
   const bound = account;
-  if (bound === null || !visible() || deciding) return;
+  if (bound === null || !visible()) return;
+  // An action is a foreground: a growth re-send that waited goes now.
+  noteDeviceForeground();
+  if (deciding) return;
   const own = ownCard();
   const cityDue =
     showCity() && (city === null || nowMs - city.fetchedAtMs < 0 || nowMs - city.fetchedAtMs >= CITY_REFRESH_MS);
@@ -213,8 +265,7 @@ export function noteDeviceAction(nowMs: number = Date.now()): void {
       const fields = currentOwnFields();
       if (!shouldSendOwnCard(ownCard(), fields, nowMs)) return;
       setOwnCard({ ...fields, updatedAtMs: nowMs, lastActiveMs: nowMs });
-      persistCards();
-      markServiceEnvelopeDirty("deviceCard");
+      markOwnCardDirty();
     } finally {
       deciding = false;
     }
@@ -240,12 +291,13 @@ export function receiveOwnDeviceCard(
   senderKeyHex: string,
   card: StoredDeviceCard,
   rosterKeysHex: readonly string[],
-): void {
-  if (account === null) return;
+): boolean {
+  if (account === null) return false;
   const next = receiveDeviceCard(cards(), senderKeyHex, card, rosterKeysHex);
-  if (next === null) return;
+  if (next === null) return false;
   setCards(next);
   persistCards();
+  return true;
 }
 
 /** The roster changed: drop cards of leaves that left. */
@@ -264,7 +316,21 @@ export function scheduleOwnCardResend(random: () => number = Math.random): void 
   const bound = account;
   growthTimer = setTimeout(() => {
     growthTimer = null;
-    if (account !== bound || !visible()) return;
-    markServiceEnvelopeDirty("deviceCard");
+    if (account !== bound) return;
+    if (!visible()) {
+      // Hidden: kept owed and sent at the next foreground, never from here.
+      resendOwed = true;
+      persistCards();
+      return;
+    }
+    markOwnCardDirty();
   }, cardGrowthDelayMs(random));
+}
+
+/** The page came to the foreground (or the person acted on it): send a
+ *  growth re-send that fell due while it was hidden. */
+export function noteDeviceForeground(): void {
+  if (account === null || !resendOwed || !visible()) return;
+  resendOwed = false;
+  markOwnCardDirty();
 }

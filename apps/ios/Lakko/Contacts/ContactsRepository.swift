@@ -210,10 +210,14 @@ public final class ContactsRepository: ObservableObject {
         stateBundleObserver = NotificationCenter.default.addObserver(
             forName: .lakkoStateBundleApplied, object: nil, queue: .main
         ) { [weak self] note in
-            guard let contacts = note.object as? [AcceptedContact], !contacts.isEmpty,
-                  let accountIdB64 = note.userInfo?[StateBundle.appliedAccountKey] as? String
-            else { return }
-            Task { @MainActor in self?.mergeBundledContacts(contacts, accountIdB64: accountIdB64) }
+            guard let accountIdB64 = note.userInfo?[StateBundle.appliedAccountKey] as? String else { return }
+            let contacts = note.object as? [AcceptedContact] ?? []
+            // Bundle v3 — pending contacts the bundle added to the store.
+            let pendingAdded = note.userInfo?[StateBundle.pendingAddedKey] as? Bool == true
+            Task { @MainActor in
+                if !contacts.isEmpty { self?.mergeBundledContacts(contacts, accountIdB64: accountIdB64) }
+                if pendingAdded { self?.reloadBundledPendingContacts(accountIdB64: accountIdB64) }
+            }
         }
         // Follow the session: bind the persisted accepted list and inbox of
         // whichever account is live, unbind on logout / forgetDevice. The
@@ -2150,6 +2154,19 @@ public final class ContactsRepository: ObservableObject {
             introMessage: Data(),
             link: link,
             linkAnswer: FfiLinkAnswer(linkId: invite.linkId, linkSecret: invite.linkSecret))
+    }
+
+    /// Pairing state bundle v3 — the bundle added pending contacts to the
+    /// store of `accountIdB64`: the bound list takes them, keeping any record
+    /// written here meanwhile (``PendingContacts/adding(_:to:)``).
+    func reloadBundledPendingContacts(accountIdB64: String) {
+        guard boundAccountIdB64 == accountIdB64 else { return }
+        var list = invited
+        for contact in PendingContactStore.load(accountIdB64: accountIdB64)
+        where !list.contains(where: { $0.accountIdHex == contact.accountIdHex }) {
+            list = PendingContacts.adding(contact, to: list)
+        }
+        if list != invited { setInvited(list, accountIdB64: accountIdB64) }
     }
 
     private func setInvited(_ list: [PendingContact], accountIdB64: String) {

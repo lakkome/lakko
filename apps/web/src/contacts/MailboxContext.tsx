@@ -125,6 +125,7 @@ import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { personKeysOf } from "../chat/person-key";
 import { heldSends, persistHeldSends } from "../chat/held-send-queue";
+import { dropCarriedCopies, moveCarriedCopies } from "./carried-copies";
 import { DIRECT_CHAT_STAND_IN } from "../chat/group-title";
 import {
   restoreRemovedContact,
@@ -138,6 +139,7 @@ import {
   moveHeldToConversation,
   pendingContactRefusedBy,
   pendingContacts,
+  pendingQueueKey,
   removePendingContact,
 } from "./pending-contacts";
 import {
@@ -890,6 +892,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           // it (a failed send keeps the rest for the next attempt).
           moveHeldToConversation(heldSends, contact, conversationHex, Date.now());
           await persistHeldSends(accountIdB64);
+          // State bundle v3: what was written to them on another device of
+          // this account, shown here as copies, follows into the chat (still
+          // display only; that device sends them).
+          await moveCarriedCopies(accountIdB64, pendingQueueKey(contact), conversationHex);
           return true;
         },
       );
@@ -1002,6 +1008,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           );
           if (refused === null) continue;
           await removePendingContact(accountIdB64, refused.accountIdHex);
+          await dropCarriedCopies(accountIdB64, refused.accountIdHex);
           void reachSession()?.closeRepliesTo(journalHex(base64Decode(refused.signaturePubkeyB64)));
         } else {
           // 1.9b1: contact-ack — the recipient of our ContactRequest pressed

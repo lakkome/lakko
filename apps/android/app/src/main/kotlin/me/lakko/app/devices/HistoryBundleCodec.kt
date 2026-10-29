@@ -82,8 +82,13 @@ public object HistoryBundleCodec {
         for (hex in groupHexes) {
             val slot = log.groups[hex] ?: continue
             val groupIdBytes = hexToBytes(hex) ?: continue
-            val trimmed = slot.messages.takeLast(perGroupCap)
-            val capped = trimmed.size < slot.messages.size
+            // The MLS bookkeeping rows (a commit, an external-join request)
+            // are never carried: they name no people, and a receiver that
+            // draws a commit row as "Members changed" showed one per device
+            // commit. Same rule on web and iOS.
+            val carried = bundledMessages(slot.messages)
+            val trimmed = carried.takeLast(perGroupCap)
+            val capped = trimmed.size < carried.size
             val messages = mutableListOf<StructuredHistoryMessage>()
             for (m in trimmed) {
                 // G-6 step 2: encode the canonical cross-platform
@@ -159,35 +164,19 @@ public object HistoryBundleCodec {
             val hex = bytesToHex(g.groupId)
             val slot = nextGroups[hex]
                 ?: PersistedGroup(cursor = 0L, messages = emptyList())
-            val existingIds = slot.messages.map { it.messageId }.toMutableSet()
-            val merged = slot.messages.toMutableList()
-            for (m in g.messages) {
+            val decodedRows = g.messages.mapNotNull { m ->
                 // G-6 step 2: decode the canonical cross-platform
                 // placeholder via the shared Rust core. Bytes from
                 // a web or iOS scanner decode identically here.
-                val decoded = try {
+                try {
                     decodePlaceholder(m.payloadBytes)
                 } catch (cause: Throwable) {
                     Log.v(LOG_TAG, "decode placeholder failed", cause)
-                    continue
+                    null
                 }
-                if (decoded.messageId in existingIds) continue
-                merged.add(decoded)
-                existingIds.add(decoded.messageId)
-                applied += 1
             }
-            // Sort by HLC-derived numeric messageId so the
-            // timeline lands in order.
-            merged.sortWith(
-                Comparator { a, b ->
-                    a.messageId.compareTo(b.messageId).also { _ ->
-                        // Body intentionally trivial — kept as a
-                        // Comparator { } block for symmetry with
-                        // the sibling iOS implementation that
-                        // exposes the same shape.
-                    }
-                },
-            )
+            val (merged, added) = mergeRows(slot.messages, decodedRows)
+            applied += added
             // `copy`, not a new slot: the feed's seen marks (ADR-0063
             // section 5) ride the same slot and must survive the merge.
             nextGroups[hex] = slot.copy(messages = merged)
@@ -203,6 +192,39 @@ public object HistoryBundleCodec {
         )
         return applied
     }
+
+    /**
+     * The rows of one group after a bundle's [incoming] rows are merged into
+     * the [held] ones, sorted by message id, and how many were added. A
+     * bookkeeping row from a sender that still carries them is dropped (it is
+     * nothing the person reads), and a message id already held is kept as
+     * held.
+     */
+    internal fun mergeRows(held: List<PersistedMessage>, incoming: List<PersistedMessage>): Pair<List<PersistedMessage>, Int> {
+        val ids = held.map { it.messageId }.toMutableSet()
+        val merged = held.toMutableList()
+        var added = 0
+        for (row in incoming) {
+            if (isBookkeepingSystemRow(row)) continue
+            if (!ids.add(row.messageId)) continue
+            merged += row
+            added += 1
+        }
+        merged.sortBy { it.messageId }
+        return merged to added
+    }
+
+    /** A system row the receive loop files for an MLS commit or an
+     *  external-join request (`[mls commit]`, `[mls external join]`, the same
+     *  `[mls <kind>]` text on every client). A call row is a system row too
+     *  and is not one of these. */
+    internal fun isBookkeepingSystemRow(m: PersistedMessage): Boolean =
+        m.direction == "system" && m.call == null && m.text.startsWith("[mls ") && m.text.endsWith("]")
+
+    /** The rows of a group a history bundle carries: every row but the
+     *  bookkeeping ones. */
+    internal fun bundledMessages(messages: List<PersistedMessage>): List<PersistedMessage> =
+        messages.filterNot(::isBookkeepingSystemRow)
 
     // ----------------------------------------------------------------
     // Placeholder codec (G-6 step 2)

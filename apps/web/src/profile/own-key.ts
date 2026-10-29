@@ -27,3 +27,23 @@ export function isOwnKeyB64(own: OwnKeys, keyB64: string): boolean {
   const account = own.accountPublicKey;
   return account !== undefined && account !== null && base64Encode(account) === keyB64;
 }
+
+/** Every key an identity can be named by, plus `more` (the conversation
+ *  account identity's key after a rotation), base64, without repeats. */
+export function ownKeysB64Of(
+  own: OwnKeys | null,
+  more: readonly (Uint8Array | null | undefined)[] = [],
+): string[] {
+  const out: string[] = [];
+  const add = (k: Uint8Array | null | undefined): void => {
+    if (k === null || k === undefined || k.length === 0) return;
+    const b64 = base64Encode(k);
+    if (!out.includes(b64)) out.push(b64);
+  };
+  if (own !== null) {
+    add(own.signaturePublicKey);
+    add(own.accountPublicKey);
+  }
+  for (const k of more) add(k);
+  return out;
+}

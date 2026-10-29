@@ -34,6 +34,7 @@ import type { ActiveGroup } from "../chat/ChatContext";
 import { bytesToHex } from "../chat/blob-ids";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { currentLanguage, t } from "../l10n";
+import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { createLongPress } from "../ui/long-press";
 import { Icon } from "../ui/icons";
@@ -128,7 +129,7 @@ export default function Saved(): JSX.Element {
       sharedName: groupNames.nameOf(groupIdB64),
       contactNameById: undefined,
       contactNameByMember: undefined,
-      nameOf: (k) => profiles.resolve(k).name,
+      nameOf: (k) => memberNameOf(profiles.resolve(k)),
       groupTitle,
     });
   };

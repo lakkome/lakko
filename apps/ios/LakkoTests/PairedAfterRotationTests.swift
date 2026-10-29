@@ -47,13 +47,14 @@ final class PairedAfterRotationTests: XCTestCase {
     private func publicKey(_ seed: Data) throws -> Data { try Identity.fromSeed(seed: seed).signaturePublicKey() }
 
     private func json(
-        v: Int = 2, own: String = "[]", pinPredecessors: String? = "[]"
+        v: Int = 3, own: String = "[]", pinPredecessors: String? = "[]"
     ) -> Data {
         let pinField = pinPredecessors.map { #","provenPredecessorsB64":\#($0)"# } ?? ""
         return Data("""
         {"v":\(v),"contacts":[],"pins":[{"accountIdB64":"\(peerAccount)",\
         "pinnedSignaturePubkeyB64":"\(key(0xC3))","rotationMarker":7\(pinField)}],\
-        "knownGroupIdsB64":[],"ownPredecessors":\(own)}
+        "knownGroupIdsB64":[],"ownPredecessors":\(own),\
+        "groupNames":[],"profiles":[],"pendingContacts":[]}
         """.utf8)
     }
 
@@ -65,7 +66,7 @@ final class PairedAfterRotationTests: XCTestCase {
     // MARK: - The codec
 
     func testAFormat2BundleRoundTripsWithPredecessors() throws {
-        let bundle = StateBundle.V2(
+        let bundle = StateBundle.V3(
             contacts: [],
             pins: [StateBundle.CarriedPin(
                 accountIdB64: peerAccount, pinnedSignaturePubkeyB64: key(0xC3), rotationMarker: 7,
@@ -75,7 +76,7 @@ final class PairedAfterRotationTests: XCTestCase {
                 StateBundle.OwnPredecessor(seedB64: seed(1).base64EncodedString(), adoptedAtMs: 1_000),
                 StateBundle.OwnPredecessor(seedB64: seed(2).base64EncodedString(), adoptedAtMs: 2_000),
             ])
-        XCTAssertEqual(bundle.v, 2)
+        XCTAssertEqual(bundle.v, 3)
         XCTAssertEqual(StateBundle.decode(StateBundle.encode(bundle)), bundle)
 
         // The contract's field names, read from another client's JSON.
@@ -90,7 +91,8 @@ final class PairedAfterRotationTests: XCTestCase {
     func testFormat1AndEveryOtherVersionIsRefused() {
         XCTAssertNotNil(StateBundle.decode(json()))
         XCTAssertNil(StateBundle.decode(json(v: 1)), "flag day: no dual accept")
-        XCTAssertNil(StateBundle.decode(json(v: 3)))
+        XCTAssertNil(StateBundle.decode(json(v: 2)), "format 2 is refused too (bundle v3 flag day)")
+        XCTAssertNil(StateBundle.decode(json(v: 4)))
         XCTAssertNil(StateBundle.decode(
             Data(#"{"v":1,"contacts":[],"pins":[],"knownGroupIdsB64":[]}"#.utf8)))
     }
@@ -122,10 +124,10 @@ final class PairedAfterRotationTests: XCTestCase {
         XCTAssertNil(
             StateBundle.decode(json(pinPredecessors: #"["\#(Data(repeating: 1, count: 31).base64EncodedString())"]"#)),
             "a proven key that is not 32 bytes")
-        XCTAssertNil(StateBundle.decode(json(pinPredecessors: nil)), "the field is part of format 2")
+        XCTAssertNil(StateBundle.decode(json(pinPredecessors: nil)), "the field is part of the format")
         XCTAssertNil(
-            StateBundle.decode(Data(#"{"v":2,"contacts":[],"pins":[],"knownGroupIdsB64":[]}"#.utf8)),
-            "ownPredecessors is part of format 2")
+            StateBundle.decode(Data(#"{"v":3,"contacts":[],"pins":[],"knownGroupIdsB64":[]}"#.utf8)),
+            "ownPredecessors is part of the format")
     }
 
     // MARK: - The sending side
@@ -165,7 +167,7 @@ final class PairedAfterRotationTests: XCTestCase {
             ownPredecessors: InMemoryOwnPredecessorStore(),
             adoptions: PredecessorMailbox.AdoptionStore(defaults: defaults),
             provenStore: ProvenPredecessorStore(ownerAccountIdB64: account, defaults: defaults))
-        XCTAssertEqual(built.v, 2)
+        XCTAssertEqual(built.v, 3)
         XCTAssertEqual(built.ownPredecessors, [], "an account that never rotated sends an empty array")
     }
 
@@ -374,7 +376,7 @@ final class PairedAfterRotationTests: XCTestCase {
         try senderStore.add(seed(0xA0), accountIdB64: account)
 
         // Over the wire.
-        let sent = StateBundle.V2(
+        let sent = StateBundle.V3(
             contacts: [], pins: [], knownGroupIdsB64: [],
             ownPredecessors: StateBundle.carriedOwnPredecessors(
                 seeds: senderStore.load(accountIdB64: account)) { _ in 1_000 })

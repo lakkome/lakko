@@ -238,6 +238,28 @@ final class ReceivedProfileStore {
     /// Every received profile, by signature key (b64).
     func all() -> [String: ProfileClaim] { profiles }
 
+    /// Every profile kept for `accountIdB64`: the live map when it is the
+    /// active account, else what is on disk for it.
+    func all(accountIdB64: String) -> [String: ProfileClaim] {
+        if accountIdB64 == self.accountIdB64 { return profiles }
+        guard let data = persistence.load(accountIdB64: accountIdB64) else { return [:] }
+        return (try? JSONDecoder().decode([String: ProfileClaim].self, from: data)) ?? [:]
+    }
+
+    /// ``accept(_:signatureKeyB64:)`` for `accountIdB64`, active or not: the
+    /// live map when it is the active account (so its next save keeps the
+    /// row), else the account's map on disk, under the same rule.
+    func accept(
+        _ claim: ProfileClaim, signatureKeyB64: String?, intoAccount accountIdB64: String
+    ) -> ProfileAcceptance {
+        if accountIdB64 == self.accountIdB64 {
+            return accept(claim, signatureKeyB64: signatureKeyB64)
+        }
+        let other = ReceivedProfileStore(persistence: persistence, isNewer: isNewer)
+        other.activate(accountIdB64: accountIdB64)
+        return other.accept(claim, signatureKeyB64: signatureKeyB64)
+    }
+
     func profile(signatureKeyB64: String) -> ProfileClaim? {
         profiles[signatureKeyB64]
     }

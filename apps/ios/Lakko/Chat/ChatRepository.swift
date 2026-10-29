@@ -278,6 +278,11 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0073 R.7 case 1 — where the pending row of each held message is
     /// drawn: queue entry id -> (group, the row's local id).
     var heldRows: [String: (groupIdHex: String, localId: Int64)] = [:]
+    /// Pairing state bundle v3 — the display-only copies of what another
+    /// device of this account wrote to a pending contact, by key, as last
+    /// read from ``PendingDisplayCopies``; `nil` until read (and after every
+    /// change). See `ChatRepository+PendingInvited.swift`.
+    var displayCopyCache: [String: [HeldSendQueue.Entry]]?
     /// When the roster identities of a group were last re-checked because a
     /// claim was kept pending, UNIX ms.
     var claimIdentityCheckedAtMs: [String: Int64] = [:]
@@ -735,15 +740,38 @@ public final class ChatRepository: ObservableObject {
             forName: .lakkoStateBundleApplied, object: nil, queue: .main
         ) { [weak self] note in
             guard let accountIdB64 = note.userInfo?[StateBundle.appliedAccountKey] as? String else { return }
+            let pendingAdded = note.userInfo?[StateBundle.pendingAddedKey] as? Bool == true
             Task { @MainActor in
                 // The own-key resolver reads the predecessor slot.
                 ReachCenter.shared.reloadKeyResolver()
                 self?.rebindAfterStateBundle(accountIdB64: accountIdB64)
+                // Bundle v3 — display copies of a pending contact's messages.
+                if pendingAdded, self?.currentAccountIdB64 == accountIdB64 {
+                    self?.invalidateDisplayCopies()
+                }
             }
         }
+        observeStateBundleNames()
     }
 
     private var stateBundleObserver: NSObjectProtocol?
+    private var stateBundleNamesObserver: NSObjectProtocol?
+
+    /// Pairing state bundle v3 — group names stored by the bundle re-title
+    /// the chat list and the open chat in place (profiles bump the profile
+    /// directory on their own); display copies of a pending contact's
+    /// messages are read again.
+    private func observeStateBundleNames() {
+        stateBundleNamesObserver = NotificationCenter.default.addObserver(
+            forName: .lakkoStateBundleNamesApplied, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let accountIdB64 = note.userInfo?[StateBundle.appliedAccountKey] as? String else { return }
+            MainActor.assumeIsolated {
+                guard let self, self.currentAccountIdB64 == accountIdB64 else { return }
+                self.groupNameRevision &+= 1
+            }
+        }
+    }
 
     // MARK: - Lifecycle
 
@@ -4629,6 +4657,7 @@ public final class ChatRepository: ObservableObject {
             result.events, resendOrigins: result.resendOrigins,
             eventSenders: result.eventSenders, groupIdHex: groupIdHex)
         noteAppliedForUnread(events, groupIdHex: groupIdHex)
+        matchDisplayCopies(events, groupIdHex: groupIdHex, ownAuthorKey: AuthorIdentity.own(group: record.group))
         record.consumeEvents(
             events,
             ownAuthorKey: AuthorIdentity.own(group: record.group),
@@ -6286,6 +6315,8 @@ public final class ChatRepository: ObservableObject {
                         eventSenders: [ChatClient.applicationSender(of: processed, group: record.group)],
                         groupIdHex: groupIdHex)
                     self.noteAppliedForUnread(events, groupIdHex: groupIdHex)
+                    self.matchDisplayCopies(
+                        events, groupIdHex: groupIdHex, ownAuthorKey: AuthorIdentity.own(group: record.group))
                     record.consumeEvents(
                         events,
                         ownAuthorKey: AuthorIdentity.own(group: record.group),
@@ -8808,12 +8839,19 @@ public final class ChatRepository: ObservableObject {
                     history.append(message.asHistoryRow(distanceFromHead: distance))
                 }
             }
-            return head.toThread(
+            let thread = head.toThread(
                 unread: unread,
                 conversationIdHex: plan.conversationHex,
                 history: history,
                 historyGroupIdHexes: older,
                 segmentIndex: conversationLineage.segmentIndexOf(plan.headHex))
+            // Bundle v3 — what another device of this account wrote to the
+            // person before this one-to-one existed, drawn as own waiting
+            // rows until the real messages arrive. Display only: not in the
+            // record, so no send, retry or log write ever sees them.
+            let copies = displayCopyRows(
+                conversationHex: plan.conversationHex, ownKey: AuthorIdentity.own(group: head.group))
+            return copies.isEmpty ? thread : thread.appending(copies)
         }
         .sorted { $0.conversationIdHex < $1.conversationIdHex }
     }
@@ -8944,6 +8982,23 @@ public struct ChatThread: Equatable {
         self.feedSeen = feedSeen
         self.lastViewedMessageId = lastViewedMessageId
         self.membershipEnded = membershipEnded
+    }
+}
+
+extension ChatThread {
+    /// The same thread with `rows` after its messages (display-only rows).
+    func appending(_ rows: [ChatMessage]) -> ChatThread {
+        ChatThread(
+            groupIdHex: groupIdHex,
+            messages: messages + rows,
+            cursor: cursor,
+            unread: unread,
+            feedSeen: feedSeen,
+            lastViewedMessageId: lastViewedMessageId,
+            membershipEnded: membershipEnded,
+            conversationIdHex: conversationIdHex,
+            historyGroupIdHexes: historyGroupIdHexes,
+            segmentIndex: segmentIndex)
     }
 }
 

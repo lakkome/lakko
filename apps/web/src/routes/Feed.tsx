@@ -377,7 +377,7 @@ export default function Feed(): JSX.Element {
       sharedName: groupNames.nameOf(g.groupIdB64),
       contactNameById: undefined,
       contactNameByMember: undefined,
-      nameOf: (k) => profiles.resolve(k).name,
+      nameOf: (k) => memberNameOf(profiles.resolve(k)),
       groupTitle,
     });
 

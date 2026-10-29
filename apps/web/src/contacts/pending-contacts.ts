@@ -378,6 +378,26 @@ export async function loadPendingContacts(accountIdB64: string): Promise<void> {
 }
 
 /**
+ * Read the account's pending contacts from the store, behind the account's
+ * write queue (so a write in flight is seen). `[]` when there are none or
+ * the row cannot be read. Never throws.
+ */
+export function readPendingContacts(accountIdB64: string): Promise<readonly PendingContact[]> {
+  const run = async (): Promise<readonly PendingContact[]> => {
+    const key = await deviceKeyOf(accountIdB64);
+    if (key === null) return [];
+    try {
+      return await read(accountIdB64, key);
+    } catch {
+      return [];
+    }
+  };
+  const queued = (queues.get(accountIdB64) ?? Promise.resolve()).then(run, run);
+  queues.set(accountIdB64, queued);
+  return queued;
+}
+
+/**
  * Apply a change to the account's list: the reactive list at once, the
  * store behind the account's write queue. The change returns `null` to
  * refuse (nothing is written). Resolves to the new list, or `null` when

@@ -153,6 +153,136 @@ public enum PendingContactStore {
     }
 }
 
+/// ADR-0079 section 5, pairing state bundle v3 — the messages another device
+/// of this account wrote to a pending contact, as DISPLAY-ONLY copies on this
+/// one.
+///
+/// They are shown as own rows in the waiting state (in the pending chat, then
+/// in the one-to-one once it lands), and nothing else: they are never put in
+/// this device's own held-send queue and never sent from here, because the
+/// device they were typed on sends them, and two senders would deliver each
+/// one twice. Each copy goes when the real message arrives from the other
+/// device (``matchIndex(_:text:attachmentCount:)``), or
+/// ``maxAgeMs`` after it was written.
+///
+/// Kept per account and per key (the pending contact's ``PendingContact/queueKey``,
+/// then the conversation hex once the one-to-one lands) in the
+/// ``HeldSendQueue`` file format under its own directory, so the held-send
+/// flush never reads them: message plaintext, sealed under the device key,
+/// behind the account store gate, wiped with the account.
+public struct PendingDisplayCopies {
+    /// A copy still unmatched this long after it was written is dropped.
+    public static let maxAgeMs: Int64 = 7 * 24 * 60 * 60 * 1000
+    static let directoryName = "PendingDisplayCopies"
+
+    private let queue: HeldSendQueue
+
+    public init(
+        ownerAccountIdB64: String,
+        sealer: HeldSendQueue.Sealer = PendingDisplayCopies.deviceKeySealer,
+        baseDirectory: URL? = nil
+    ) {
+        queue = HeldSendQueue(
+            ownerAccountId: ownerAccountIdB64, sealer: sealer,
+            baseDirectory: baseDirectory ?? Self.defaultBaseDirectory())
+    }
+
+    /// The device-key wrap the message log and the held-send queue use.
+    public static let deviceKeySealer = HeldSendQueue.Sealer(
+        seal: { try MessageLogStore.sealUnderWrapKey($0) },
+        open: { try MessageLogStore.openUnderWrapKey($0) })
+
+    static func defaultBaseDirectory() -> URL? {
+        HeldSendQueue.defaultBaseDirectory()?.appendingPathComponent(directoryName, isDirectory: true)
+    }
+
+    /// Keep `messages` as copies under `key`, in order. Idempotent: a copy is
+    /// named by its position and time, so a second bundle with the same
+    /// messages adds nothing. Returns how many are held under `key` now.
+    @discardableResult
+    public func store(_ messages: [StateBundle.CarriedHeldMessage], key: String) -> Int {
+        for (index, message) in messages.enumerated() {
+            let attachments = message.attachments.compactMap { try? JSONEncoder().encode($0) }
+            queue.enqueue(
+                conversationHex: key,
+                entry: HeldSendQueue.Entry(
+                    localId: "copy-\(message.heldAtMs)-\(index)",
+                    queuedAtMs: message.heldAtMs,
+                    text: message.text,
+                    attachments: attachments))
+        }
+        return queue.count(conversationHex: key)
+    }
+
+    /// The copies held under `key`, in order, without those past
+    /// ``maxAgeMs`` (which are removed).
+    public func list(key: String, nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> [HeldSendQueue.Entry] {
+        let all = queue.list(conversationHex: key)
+        let live = Self.live(all, nowMs: nowMs)
+        if live.count != all.count {
+            for entry in all where !live.contains(entry) {
+                queue.remove(conversationHex: key, localId: entry.localId)
+            }
+        }
+        return live
+    }
+
+    /// Every key with copies, unfiltered by age.
+    public func all() -> [(key: String, entries: [HeldSendQueue.Entry])] {
+        queue.all().map { (key: $0.conversationHex, entries: $0.entries) }
+    }
+
+    /// Move every copy from `from` to `to`, keeping the order (the pending
+    /// contact's one-to-one landed). `false` when a write failed; the copies
+    /// not moved stay where they were.
+    @discardableResult
+    public func move(from: String, to: String) -> Bool {
+        let entries = queue.list(conversationHex: from)
+        guard !entries.isEmpty else { return true }
+        let there = Set(queue.list(conversationHex: to).map(\.localId))
+        for entry in entries where !there.contains(entry.localId) {
+            guard queue.enqueue(conversationHex: to, entry: entry) else { return false }
+        }
+        return queue.clear(conversationHex: from)
+    }
+
+    /// The real message `text` with `attachmentCount` attachments arrived
+    /// from this account's other device: remove the first copy it matches.
+    /// Returns whether one was removed.
+    @discardableResult
+    public func consumeMatch(key: String, text: String, attachmentCount: Int) -> Bool {
+        let copies = queue.list(conversationHex: key)
+        guard let index = Self.matchIndex(copies, text: text, attachmentCount: attachmentCount) else {
+            return false
+        }
+        return queue.remove(conversationHex: key, localId: copies[index].localId)
+    }
+
+    @discardableResult
+    public func clear(key: String) -> Bool {
+        queue.clear(conversationHex: key)
+    }
+
+    /// Forget device: every copy of the account.
+    @discardableResult
+    public static func clearAccount(ownerAccountIdB64: String, baseDirectory: URL? = nil) -> Bool {
+        HeldSendQueue.clearAccount(
+            ownerAccountId: ownerAccountIdB64,
+            baseDirectory: baseDirectory ?? defaultBaseDirectory())
+    }
+
+    /// The copy a real message replaces: the FIRST, in order, with exactly
+    /// the same text and the same number of attachments. `nil` when none.
+    public static func matchIndex(_ copies: [HeldSendQueue.Entry], text: String, attachmentCount: Int) -> Int? {
+        copies.firstIndex { $0.text == text && $0.attachments.count == attachmentCount }
+    }
+
+    /// `copies` without those written ``maxAgeMs`` or more before `nowMs`.
+    public static func live(_ copies: [HeldSendQueue.Entry], nowMs: Int64) -> [HeldSendQueue.Entry] {
+        copies.filter { nowMs - $0.queuedAtMs < maxAgeMs }
+    }
+}
+
 /// ADR-0079 section 4 — the rules over the synced link-record register that
 /// the lists need. iOS mirror of `apps/web/src/devices/sync/link-records.ts`;
 /// the verdict on a request's link answer is the core's

@@ -20,7 +20,9 @@
  * as it is at send time, composed with its stored stamp: an envelope is
  * never re-stamped to be sent (the ADR-0044 lesson), so a late or repeated
  * send can never outrank a newer change. A send that fails leaves the kind
- * dirty for the next change or the next registration of a sender.
+ * dirty; the DeviceGroup poll retries it on every pass
+ * ({@link retryDirtyServiceEnvelopes}), and so does the next change or the
+ * next registration of a sender.
  */
 
 /** The envelopes that ride the DeviceGroup `ServiceEnvelope` body: the
@@ -38,6 +40,8 @@ export type ServiceEnvelopeSender = (envelope: Uint8Array) => Promise<void>;
 const KINDS: readonly ServiceEnvelopeKind[] = ["visibility", "reachState", "profile", "deviceCard"];
 
 const composers = new Map<ServiceEnvelopeKind, ServiceEnvelopeComposer>();
+/** Kind -> told after a send of that kind went out and cleared its mark. */
+const sentListeners = new Map<ServiceEnvelopeKind, () => void>();
 /** Kind -> generation of its latest mark. A send clears the kind only when
  *  no newer mark arrived while it was in flight. */
 const dirty = new Map<ServiceEnvelopeKind, number>();
@@ -52,6 +56,29 @@ export function setServiceEnvelopeComposer(
 ): void {
   if (composer === null) composers.delete(kind);
   else composers.set(kind, composer);
+}
+
+/** Register (or, with `null`, remove) what is told when a send of `kind`
+ *  went out and no newer mark is waiting (the owner clears a persisted
+ *  "not yet sent" flag there). */
+export function setServiceEnvelopeSentListener(kind: ServiceEnvelopeKind, listener: (() => void) | null): void {
+  if (listener === null) sentListeners.delete(kind);
+  else sentListeners.set(kind, listener);
+}
+
+/** Whether `kind` is marked and not yet sent. */
+export function isServiceEnvelopeDirty(kind: ServiceEnvelopeKind): boolean {
+  return dirty.has(kind);
+}
+
+/**
+ * The DeviceGroup poll answered: send again whatever is still marked (a
+ * publish that failed earlier). Sends nothing new: only kinds already
+ * marked. Never rejects.
+ */
+export function retryDirtyServiceEnvelopes(): Promise<void> {
+  if (dirty.size === 0) return chain;
+  return flushServiceEnvelopes();
 }
 
 /** A local change of `kind`: send the current envelope when possible. */
@@ -83,11 +110,14 @@ export function flushServiceEnvelopes(): Promise<void> {
         const envelope = await compose();
         if (envelope === null) continue;
         await send(envelope);
-        if (dirty.get(kind) === mark) dirty.delete(kind);
+        if (dirty.get(kind) === mark) {
+          dirty.delete(kind);
+          sentListeners.get(kind)?.();
+        }
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn(
-          `[reach] sending the ${kind} envelope to the other devices failed; retried at the next change`,
+          `[reach] sending the ${kind} envelope to the other devices failed; retried at the next poll`,
           err instanceof Error ? err.message : "",
         );
       }

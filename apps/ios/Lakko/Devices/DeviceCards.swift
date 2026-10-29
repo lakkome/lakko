@@ -205,4 +205,6 @@ public enum DeviceCards {
     public static func cardsKey(accountIdB64: String) -> String { "lakko.device-cards.v1.\(accountIdB64)" }
     public static func cityKey(accountIdB64: String) -> String { "lakko.device-city.v1.\(accountIdB64)" }
     public static func showCityKey(accountIdB64: String) -> String { "lakko.device-city-shown.v1.\(accountIdB64)" }
+    /// A growth re-send owed until the next foreground (``DeviceCardCenter``).
+    public static func resendOwedKey(accountIdB64: String) -> String { "lakko.device-card-resend-owed.v1.\(accountIdB64)" }
 }

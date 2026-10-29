@@ -15,11 +15,11 @@ import {
   isStateRow,
   unwrapStateRow,
   wrapStateRow,
-  type StateBundleV2,
+  type StateBundleV3,
 } from "./state-bundle";
 
-const bundle: StateBundleV2 = {
-  v: 2,
+const bundle: StateBundleV3 = {
+  v: 3,
   contacts: [
     {
       signaturePubkeyB64: "c2ln",
@@ -38,6 +38,9 @@ const bundle: StateBundleV2 = {
   ],
   knownGroupIdsB64: ["Z3JvdXA="],
   ownPredecessors: [],
+  groupNames: [],
+  profiles: [],
+  pendingContacts: [],
 };
 
 describe("state bundle codec (ADR-0050 section 2.9)", () => {
@@ -46,17 +49,20 @@ describe("state bundle codec (ADR-0050 section 2.9)", () => {
   });
 
   it("refuses a bundle of another version or a malformed contact", () => {
-    for (const v of [1, 3, "2"]) {
-      const other = { ...bundle, v } as unknown as StateBundleV2;
+    for (const v of [1, 2, 4, "3"]) {
+      const other = { ...bundle, v } as unknown as StateBundleV3;
       expect(decodeStateBundle(encodeStateBundle(other))).toBeNull();
     }
     const broken = new TextEncoder().encode(
       JSON.stringify({
-        v: 2,
+        v: 3,
         contacts: [{ displayName: 1 }],
         pins: [],
         knownGroupIdsB64: [],
         ownPredecessors: [],
+        groupNames: [],
+        profiles: [],
+        pendingContacts: [],
       }),
     );
     expect(decodeStateBundle(broken)).toBeNull();

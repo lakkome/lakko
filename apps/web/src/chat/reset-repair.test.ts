@@ -314,8 +314,20 @@ describe("deviceSwapAcrossCommits (UX 16.5, the Remove and the Add in two commit
       awaited: {},
     });
   });
-  it("an ordinary commit and a torn read suppress nothing and keep the memory", () => {
+  it("a commit that changes no person key (a device admitted or retired) is suppressed and keeps the memory", () => {
     expect(judge(["me", "bob"], ["me", "bob"], { "acct-anna": 1_000 }, 2_000)).toEqual({
+      suppress: true,
+      awaited: { "acct-anna": 1_000 },
+    });
+    // A one-to-one where this account's new device was admitted.
+    expect(judge(["me", "bob"], ["bob", "me"]).suppress).toBe(true);
+  });
+  it("a person who joins or leaves still keeps the row", () => {
+    expect(judge(["me", "bob"], ["me", "bob", "carol"]).suppress).toBe(false);
+    expect(judge(["me", "bob", "carol"], ["me", "bob"]).suppress).toBe(false);
+  });
+  it("a torn read suppresses nothing and keeps the memory", () => {
+    expect(judge(["me", "bob"], null, { "acct-anna": 1_000 }, 2_000)).toEqual({
       suppress: false,
       awaited: { "acct-anna": 1_000 },
     });

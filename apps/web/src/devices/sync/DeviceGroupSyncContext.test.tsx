@@ -156,7 +156,9 @@ vi.mock("../../reach/service-envelope-outbox", () => ({
   flushServiceEnvelopes: async () => undefined,
   registerServiceEnvelopeSender: () => () => undefined,
   setServiceEnvelopeComposer: () => undefined,
+  setServiceEnvelopeSentListener: () => undefined,
   markServiceEnvelopeDirty: () => undefined,
+  retryDirtyServiceEnvelopes: async () => undefined,
 }));
 vi.mock("../../chat/folders/folder-model", () => ({
   bytesToHex: () => "",

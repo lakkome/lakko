@@ -951,7 +951,32 @@ public class ContactsRepository(
             me.lakko.app.devices.StateBundle.contactsSink = { accountIdB64, incoming ->
                 mergeAcceptedFor(accountIdB64, incoming)
             }
+            // State bundle v3 — the pending contacts land in the live list too.
+            me.lakko.app.devices.StateBundle.pendingContactsSink = { accountIdB64, incoming ->
+                mergePendingFor(accountIdB64, incoming)
+            }
         }
+    }
+
+    /**
+     * ADR-0079 section 5 / state bundle v3 — add the carried pending contacts
+     * this device holds neither as an accepted contact nor as a pending
+     * contact (by account key or account id) to [accountIdB64]'s live list,
+     * through the same entry point Add uses. `null` when this repository is
+     * not bound to that account (the caller then writes the store directly).
+     */
+    public fun mergePendingFor(accountIdB64: String, incoming: List<PendingContact>): Int? {
+        bindAccountIfSignedIn()
+        val accountB64 = AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+        if (boundAccountB64 != accountB64) return null
+        val fresh = me.lakko.app.devices.StateBundle.freshPendingContacts(
+            incoming,
+            mutableState.value.accepted,
+            mutableInvited.value,
+        )
+        if (fresh.isEmpty()) return 0
+        updateInvited(accountB64) { list -> fresh.fold(list) { acc, c -> PendingContacts.adding(c, acc) } }
+        return fresh.size
     }
 
     /** [mergeAccepted] into [accountIdB64]'s live list, or `null` when this

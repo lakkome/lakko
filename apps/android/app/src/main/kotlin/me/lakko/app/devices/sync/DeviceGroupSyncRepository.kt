@@ -487,9 +487,11 @@ public class DeviceGroupSyncRepository(
         } catch (_: Throwable) {
             return false
         }
-        val leaf = senderLeaf ?: return true
-        val roster = runCatching { g.devices() }.getOrNull() ?: return true
-        val sender = roster.firstOrNull { it.leafIndex == leaf } ?: return true
+        val center = me.lakko.app.devices.DeviceCardCenter
+        val leaf = senderLeaf ?: return true.also { center.noteRefused("no sender") }
+        val roster = runCatching { g.devices() }.getOrNull() ?: return true.also { center.noteRefused("roster not read") }
+        val sender = roster.firstOrNull { it.leafIndex == leaf }
+            ?: return true.also { center.noteRefused("sender not in roster") }
         me.lakko.app.devices.DeviceCardCenter.receive(
             hexOf(sender.signaturePublicKey),
             me.lakko.app.devices.DeviceCardCenter.fromFfi(card),
@@ -1541,7 +1543,10 @@ public class DeviceGroupSyncRepository(
      */
     public fun onLocalDeviceAdded(priorLeaves: List<UInt>) {
         if (!reopenAfterLocalChange(letIn = true)) return
-        me.lakko.app.devices.DeviceCardCenter.scheduleResend()
+        // ADR-0080 - the hand-over: the stored own card at once on the
+        // post-add handle (this device never sees its own add commit come
+        // back, so no growth timer is needed for the device it let in).
+        me.lakko.app.devices.DeviceCardCenter.sendHandOver()
         onGrowth(priorLeaves)
     }
 
@@ -1606,6 +1611,9 @@ public class DeviceGroupSyncRepository(
                 // The fetch answered, so the network works: send whatever of
                 // ours is still waiting.
                 flushPendingIfAny()
+                // ADR-0080 - an own device card that failed or came due in
+                // the background goes out now (only while the app shows).
+                me.lakko.app.devices.DeviceCardCenter.sendOwedIfAny()
                 val drainedBatch = result.messages.isEmpty() && !result.hasMore
 
                 // ADR-0081 decision 2, step 6 — a DeviceGroup commit of this

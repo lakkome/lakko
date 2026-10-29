@@ -487,7 +487,7 @@ public enum PairingOrchestrator {
         var historySealed: Data?
         /// The state bundle (contacts, pins, known groups), applied at
         /// ``persist()``.
-        var stateBundle: StateBundle.V2?
+        var stateBundle: StateBundle.V3?
         /// The only owner of the device-identity seed once the join moved
         /// it here; zeroed in place after the write and on release.
         private var deviceSeed: Data
@@ -918,13 +918,21 @@ public enum PairingOrchestrator {
             NSLog("no recovery phrase on this device: no recovery row published")
         }
 
-        // ADR-0050 section 2.9 — the state bundle: contacts, pins and the ids
-        // of every group this device holds, sealed under the per-pairing
+        // ADR-0050 section 2.9 — the state bundle: contacts, pins, the ids
+        // of every group this device holds, their shared names, the profiles
+        // it holds and the pending contacts (bundle v3), sealed under the per-pairing
         // exporter like the recovery row. Best-effort; a failure leaves the new
         // device with the chats it is admitted to and no contact names.
         do {
+            // Bundle v3 — the profiles this device holds for other people
+            // ride along (read here, on the main actor), never this
+            // account's own.
+            let bundle = StateBundle.build(
+                accountIdB64: accountIdB64,
+                profiles: ProfileDirectory.shared.profilesForBundle(accountIdB64: accountIdB64),
+                ownKeysB64: StateBundle.ownKeysB64(accountIdB64: accountIdB64))
             try await StateBundle.publish(
-                bundle: StateBundle.build(accountIdB64: accountIdB64),
+                bundle: bundle,
                 group: ensured.group,
                 identity: ensured.identity,
                 rendezvousPseudonym: decoded.rendezvousPseudonym
