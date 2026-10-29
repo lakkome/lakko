@@ -1576,7 +1576,9 @@ is up; when none is, every surface is gone.
    where Settings shows its section list beside the open section (web on a
    wide screen), the section that holds `Devices` carries it too
    (`settings.security.attention_a11y`). The
-   badge is drawn in the design system's danger colour and is never colour
+   badge is drawn in the design system's warning colour (yellow; the
+   maintainer, 2026-10-29: it asks to look, it reports no failure), the
+   text on it in the colour used on the accent, and it is never colour
    alone: its accessible name is `nav.settings.attention_a11y` on the
    destination and `settings.devices.attention_a11y` on the row.
 3. **Highlighted row.** In Settings > Devices each pending device's row has an

@@ -112,6 +112,7 @@ struct LakkoApp: App {
         // TEMPORARY, see ``WebRTCDiagnosticLogging``: libwebrtc announces both
         // frame-decryptor attachment gates at info level, which iOS suppresses.
         WebRTCDiagnosticLogging.installOnce()
+        NewDeviceAttentionTabBadge.installAppearance()
         // G3-sframe-native N-4 — runtime probe for the non-public
         // `setFrameEncryptor:` / `setFrameDecryptor:` selectors
         // libwebrtc M125's RTCRtpSender / RTCRtpReceiver carry.

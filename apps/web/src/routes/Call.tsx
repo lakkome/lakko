@@ -2356,7 +2356,11 @@ const Call: Component<{
         props.group === true,
         callBarPhase(rules, callState.phase().kind, false),
       );
-    if (rings) sounds.startLoop("ringback-outgoing");
+    if (rings) {
+      // eslint-disable-next-line no-console
+      console.info(`[call-sounds] outgoing tone for phase ${callState.phase().kind}`);
+      sounds.startLoop("ringback-outgoing");
+    }
     else sounds.stopLoop("ringback-outgoing");
   });
 

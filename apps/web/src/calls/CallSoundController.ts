@@ -78,6 +78,22 @@ type CueCache = Partial<Record<SoundName, HTMLAudioElement>>;
  * wire-up. Disposing the controller (call ended, route
  * changed) stops every active loop and zeroes the cache.
  */
+/** Every live controller, so a page that is going away silences them all. */
+const LIVE_CONTROLLERS = new Set<CallSoundController>();
+
+/**
+ * Seen live 2026-10-29: the outgoing tone started on the sign-in page of a
+ * Safari tab at the moment the person closed it, with no call in that tab.
+ * The cause is not known. Whatever started it, nothing of a call may sound
+ * from a page that is being left, so `pagehide` stops every cue. (Not
+ * `visibilitychange`: an incoming call must still ring in a background tab.)
+ */
+if (typeof globalThis.addEventListener === "function") {
+  globalThis.addEventListener("pagehide", () => {
+    for (const controller of LIVE_CONTROLLERS) controller.stopAll();
+  });
+}
+
 export class CallSoundController {
   private readonly cache: CueCache = {};
 
@@ -87,7 +103,9 @@ export class CallSoundController {
    * 1.0 (the AAC encoding already targets a comfortable −10 dB
    * peak, so the OS volume slider is the user-facing knob).
    */
-  public constructor(private readonly volume: number = 1.0) {}
+  public constructor(private readonly volume: number = 1.0) {
+    LIVE_CONTROLLERS.add(this);
+  }
 
   /**
    * Play `name` once. Repeated `playOnce(name)` calls rewind
@@ -122,6 +140,9 @@ export class CallSoundController {
     }
     audio.loop = true;
     audio.volume = this.volume;
+    // One plain line per loop start, so a tone nobody expected can be traced
+    // in the console (the 2026-10-29 sign-in page case).
+    console.info(`[call-sounds] loop started: ${name}`);
     void audio.play().catch((err) => {
       console.warn(`[call-sounds] startLoop("${name}") failed`, err);
     });
@@ -160,6 +181,7 @@ export class CallSoundController {
    * alive for the lifetime of the page.
    */
   public dispose(): void {
+    LIVE_CONTROLLERS.delete(this);
     this.stopAll();
     for (const key of Object.keys(this.cache) as SoundName[]) {
       const audio = this.cache[key];

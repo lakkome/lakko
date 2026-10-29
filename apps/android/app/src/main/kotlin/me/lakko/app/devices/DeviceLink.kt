@@ -299,6 +299,10 @@ public class DeviceLinkAnswerLimit(
     private val load: () -> List<Long>,
     private val save: (List<Long>) -> Unit,
     private val nowMs: () -> Long = System::currentTimeMillis,
+    /** `false` turns the limit off (every answer allowed): debug builds only,
+     *  so testing sign-ins on one phone does not run out of answers
+     *  (maintainer, 2026-10-29). A release build keeps it. */
+    private val enforced: Boolean = true,
 ) {
     /** Record one answer if the budget allows and return its time, or `null`
      *  when the budget is spent. */
@@ -306,7 +310,7 @@ public class DeviceLinkAnswerLimit(
     public fun tryConsume(): Long? {
         val now = nowMs()
         val recent = load().filter { now - it in 0 until WINDOW_MS }
-        if (recent.size >= MAX_ANSWERS) {
+        if (enforced && recent.size >= MAX_ANSWERS) {
             save(recent)
             return null
         }

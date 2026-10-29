@@ -121,6 +121,7 @@ public fun deviceLinkAnswerLimit(context: Context, accountIdB64: String): Device
                 prefs.edit().putString(key, encodeAnswerTimes(times)).apply()
             }
         },
+        enforced = !me.lakko.app.BuildConfig.DEBUG,
     )
 }
 

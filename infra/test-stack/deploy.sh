@@ -66,7 +66,10 @@ if [[ ${SKIP_WEB:-0} != 1 ]]; then
   # absent key builds a client that simply does not offer Web Push.
   vapid_public="$(remote 'cat /etc/lakko-test/vapid_public.b64url 2>/dev/null || true' | tr -d '[:space:]')"
   [[ -n $vapid_public ]] || log "no VAPID public key on the server; Web Push stays off"
+  # The test stack turns off the device-link answer limit (5 a day on the
+  # signed-in device), so sign-in tests do not run out of answers.
   (cd "$REPO/apps/web" && VITE_LAKKO_SFU_URL="wss://$DOMAIN/sfu" \
+    VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT=off \
     VITE_LAKKO_WEBPUSH_VAPID_PUBLIC_KEY_B64URL="$vapid_public" npm run build)
 fi
 

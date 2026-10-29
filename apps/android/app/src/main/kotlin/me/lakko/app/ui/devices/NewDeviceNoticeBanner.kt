@@ -87,8 +87,18 @@ public fun NewDeviceExplanationBlock(modifier: Modifier = Modifier) {
 public fun AttentionBadge(modifier: Modifier = Modifier) {
     androidx.compose.material3.Badge(
         modifier = modifier,
-        containerColor = MaterialTheme.colorScheme.error,
-        contentColor = MaterialTheme.colorScheme.onError,
+        // The warning token, not the error one (maintainer, 2026-10-29): the
+        // badge asks the person to look, it does not report a failure.
+        containerColor = if (me.lakko.app.ui.theme.isLakkoDark()) {
+            me.lakko.app.ui.theme.LakkoDark.warning
+        } else {
+            me.lakko.app.ui.theme.LakkoLight.warning
+        },
+        contentColor = if (me.lakko.app.ui.theme.isLakkoDark()) {
+            me.lakko.app.ui.theme.LakkoDark.accentFg
+        } else {
+            me.lakko.app.ui.theme.LakkoLight.accentFg
+        },
     ) {
         Text("!", fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
     }
