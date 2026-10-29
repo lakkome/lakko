@@ -10,10 +10,16 @@
 //! - `POST state` `{callLive, unread}`: what the page knows; sets the badge;
 //! - `GET settings` -> `{keepRunning, openAtLogin}`;
 //! - `POST settings` `{keepRunning?, openAtLogin?}` -> the new settings;
-//! - `POST quit`: the person confirmed quitting (after a call question).
+//! - `POST quit`: the person confirmed quitting (after a call question);
+//! - `POST notify` `{tag, title, body, target?}`: show a system notification
+//!   (`notify.rs`); `503 notifications-unsupported` where none can be shown;
+//! - `POST withdraw` `{tag}`: take one back where the OS can (not macOS);
+//! - `POST attention`: bounce the Dock icon once / flash the taskbar (an
+//!   incoming call with the window open, `desktop.md` section 4.1).
 //!
 //! The host talks to the page with a DOM event, `lakko:host`, whose `detail`
-//! is `{kind: "quit-requested"}` or `{kind: "open-settings"}`.
+//! is `{kind: "quit-requested"}`, `{kind: "open-settings"}` or
+//! `{kind: "open-target", target}` (a notification was clicked).
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -21,9 +27,12 @@ use std::sync::Mutex;
 use http::{Method, Request, Response, StatusCode};
 use serde_json::{json, Value};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewWindow};
+use std::sync::Arc;
+
+use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, UserAttentionType, WebviewWindow};
 use tracing::{info, warn};
 
+use crate::notify::{self, Notifier};
 use crate::proxy::plain;
 
 /// Path prefix of the app routes.
@@ -85,6 +94,7 @@ pub struct Geometry {
 pub struct Shell {
     dir: PathBuf,
     inner: Mutex<Inner>,
+    notifier: Arc<Notifier>,
 }
 
 struct Inner {
@@ -98,13 +108,14 @@ struct Inner {
 impl Shell {
     /// Load from `dir` (the app's config directory); missing or damaged files
     /// read as defaults.
-    pub fn load(dir: PathBuf) -> Self {
+    pub fn load(dir: PathBuf, notifier: Notifier) -> Self {
         let settings = read_json(&dir.join("settings.json"))
             .map(|v| Settings::from_json(&v))
             .unwrap_or_default();
         Self {
             dir,
             inner: Mutex::new(Inner { settings, call_live: false, unread: 0, quitting: false }),
+            notifier: Arc::new(notifier),
         }
     }
 
@@ -204,8 +215,15 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
 
 /// Send `{kind}` to the page as a `lakko:host` DOM event.
 pub fn notify_page<R: Runtime>(app: &AppHandle<R>, kind: &str) {
+    send_page_event(app, &json!({ "kind": kind }));
+}
+
+/// Send `detail` to the page as a `lakko:host` DOM event. `detail` is JSON
+/// built here, so it is a valid script expression.
+fn send_page_event<R: Runtime>(app: &AppHandle<R>, detail: &Value) {
+    let kind = detail.get("kind").and_then(Value::as_str).unwrap_or("");
     if let Some(w) = app.get_webview_window(MAIN) {
-        let detail = json!({ "kind": kind }).to_string();
+        let detail = detail.to_string();
         let js = format!("window.dispatchEvent(new CustomEvent('lakko:host', {{ detail: {detail} }}))");
         if let Err(e) = w.eval(&js) {
             warn!(error = %e, kind, "notify page");
@@ -288,6 +306,38 @@ pub fn handle<R: Runtime>(app: &AppHandle<R>, shell: &Shell, request: &Request<V
             }
             write_json(&shell.dir.join("settings.json"), &after.to_json());
             json_response(&after.to_json())
+        }
+        (&Method::POST, "/notify") => {
+            let Ok(v) = serde_json::from_slice::<Value>(request.body()) else {
+                return plain(StatusCode::BAD_REQUEST, "json");
+            };
+            let Some(req) = notify::Request::from_json(&v) else {
+                return plain(StatusCode::BAD_REQUEST, "notification");
+            };
+            if !shell.notifier.available() {
+                return plain(StatusCode::SERVICE_UNAVAILABLE, "notifications-unsupported");
+            }
+            let app = app.clone();
+            let shown = shell.notifier.show(req, move |target| {
+                show_main(&app);
+                if let Some(target) = target {
+                    send_page_event(&app, &json!({ "kind": "open-target", "target": target }));
+                }
+            });
+            if shown {
+                no_content()
+            } else {
+                plain(StatusCode::SERVICE_UNAVAILABLE, "notifications-unsupported")
+            }
+        }
+        (&Method::POST, "/withdraw") => no_content(),
+        (&Method::POST, "/attention") => {
+            if let Some(w) = app.get_webview_window(MAIN) {
+                if let Err(e) = w.request_user_attention(Some(UserAttentionType::Informational)) {
+                    warn!(error = %e, "attention");
+                }
+            }
+            no_content()
         }
         (&Method::POST, "/quit") => {
             info!("quit confirmed by the page");
@@ -442,10 +492,10 @@ mod tests {
     #[test]
     fn geometry_round_trips_through_the_config_dir() {
         let dir = std::env::temp_dir().join(format!("lakko-shell-test-{}", std::process::id()));
-        let shell = Shell::load(dir.clone());
+        let shell = Shell::load(dir.clone(), Notifier::new("test"));
         assert!(shell.saved_geometry().is_none());
         shell.save_geometry(Geometry { x: -100, y: 40, width: 1100, height: 760 });
-        let again = Shell::load(dir.clone());
+        let again = Shell::load(dir.clone(), Notifier::new("test"));
         assert_eq!(again.saved_geometry(), Some(Geometry { x: -100, y: 40, width: 1100, height: 760 }));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -453,7 +503,7 @@ mod tests {
     #[test]
     fn close_hides_unless_keep_running_is_off() {
         let dir = std::env::temp_dir().join(format!("lakko-shell-close-{}", std::process::id()));
-        let shell = Shell::load(dir.clone());
+        let shell = Shell::load(dir.clone(), Notifier::new("test"));
         assert!(matches!(on_close_requested(&shell), CloseAction::Hide));
         if let Ok(mut i) = shell.inner.lock() {
             i.settings.keep_running = false;

@@ -11,20 +11,33 @@
  *   count the folder tabs show, over All chats.
  * - Answers the host's `quit-requested` with "End the call and quit?", and
  *   `open-settings` by opening Settings.
+ * - Raises the system notifications of `desktop.md` sections 4 and 4.1: a
+ *   message when a conversation's unread count rises (rules in
+ *   `desktop-notifications.ts`), a ringing call when the window is not in
+ *   front; a click on one opens its conversation (`open-target`).
  * - Turns `Mod+K` / `Mod+N` / `Alt+Up` / `Alt+Down` into commands for the
  *   conversation list (`platform/shortcuts.ts`), and `Mod+Shift+1..5` into
  *   the five destinations.
  */
-import { createEffect, createMemo, onCleanup, onMount, type JSX } from "solid-js";
-import { useNavigate } from "@solidjs/router";
+import { createEffect, createMemo, createSignal, onCleanup, onMount, untrack, type JSX } from "solid-js";
+import { useLocation, useNavigate } from "@solidjs/router";
 
+import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { useCallHost } from "../calls/CallHostContext";
+import type { ConversationRow } from "../chat/conversation-list";
 import { createConversationRows } from "../chat/conversation-rows";
 import { allChatsUnreadCount } from "../chat/folders/folder-view";
 import { t } from "../l10n";
 import { paths } from "../routes/paths";
 import { requestConfirm } from "../ui/confirm-dialog";
-import { onHostEvent, postHostState, requestHostQuit } from "./host";
+import { callAlert, messageNotifications, type NotifyRow } from "./desktop-notifications";
+import {
+  onHostEvent,
+  postHostState,
+  requestHostAttention,
+  requestHostQuit,
+  showHostNotification,
+} from "./host";
 import { isDesktop } from "./index";
 import {
   conversationListMounted,
@@ -47,7 +60,20 @@ const DESTINATION_PATHS: Readonly<Record<Destination, string>> = {
 export function DesktopBridge(): JSX.Element {
   const callHost = useCallHost();
   const navigate = useNavigate();
-  const { orderedRows } = createConversationRows();
+  const location = useLocation();
+  const { orderedRows, groupById, kindOf, conversationIdOf } = createConversationRows();
+
+  /** Where a row opens, as the conversation list routes it. */
+  const hrefOf = (row: ConversationRow): string | null => {
+    if (row.kind === "channel") return paths.channel(row.id);
+    const g = groupById().get(row.id);
+    if (g === undefined) return null;
+    const slug = base64UrlEncodeNoPad(conversationIdOf(g));
+    return kindOf(g) === "chat" ? paths.chat(slug) : paths.groupChat(slug);
+  };
+
+  /** Whether the window is in front of the person. */
+  const [focused, setFocused] = createSignal(typeof document !== "undefined" && document.hasFocus());
 
   const callLive = (): boolean => callHost.anyCallInProgress();
   const unread = createMemo(() => allChatsUnreadCount(orderedRows()));
@@ -60,6 +86,50 @@ export function DesktopBridge(): JSX.Element {
     if (key === posted) return;
     posted = key;
     void postHostState(state);
+  });
+
+  // Messages: announce a rise in a conversation's unread count.
+  let counts: ReadonlyMap<string, number> | null = null;
+  createEffect(() => {
+    const rows: NotifyRow[] = orderedRows().map((r) => ({
+      key: `${r.kind}:${r.id}`,
+      unread: r.unread,
+      muted: r.muted,
+      title: r.title,
+      preview: r.preview,
+      href: hrefOf(r),
+    }));
+    const view = untrack(() => ({ focused: focused(), path: location.pathname }));
+    const { next, notify } = messageNotifications(counts, rows, view, t("notification.message.new"));
+    counts = next;
+    for (const n of notify) void showHostNotification(n);
+  });
+
+  // Calls: one alert per ringing 1x1 call.
+  let alertedCall: string | null = null;
+  createEffect(() => {
+    const ringing = callHost.ringingCallIdHex();
+    const quiet = callHost.quietIncomingCall() !== null;
+    if (ringing === null) {
+      alertedCall = null;
+      return;
+    }
+    const groupB64 = untrack(() => callHost.activeGroupIdB64());
+    const callerRow = untrack(() =>
+      orderedRows().find((r) => r.kind !== "channel" && groupById().get(r.id)?.groupIdB64 === groupB64),
+    );
+    const alert = callAlert({
+      ringingCallId: ringing,
+      quiet,
+      alreadyAlerted: alertedCall,
+      focused: untrack(focused),
+      callerTitle: callerRow?.title ?? t("call.notification.incoming"),
+      incomingWord: t("call.notification.incoming"),
+    });
+    if (alert.kind === "none") return;
+    alertedCall = ringing;
+    if (alert.kind === "attention") void requestHostAttention();
+    else void showHostNotification(alert.notification);
   });
 
   let asking = false;
@@ -94,6 +164,13 @@ export function DesktopBridge(): JSX.Element {
     if (!isDesktop()) return;
     const offQuit = onHostEvent("quit-requested", () => void onQuitRequested());
     const offSettings = onHostEvent("open-settings", () => navigate(paths.settings));
+    const offTarget = onHostEvent("open-target", (target) => {
+      if (target !== null) navigate(target);
+    });
+    const onFocus = (): void => { setFocused(true); };
+    const onBlur = (): void => { setFocused(false); };
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
     const mac = isMacPlatform();
     const onKey = (e: KeyboardEvent): void => {
       if (e.defaultPrevented || e.isComposing) return;
@@ -119,6 +196,9 @@ export function DesktopBridge(): JSX.Element {
     onCleanup(() => {
       offQuit();
       offSettings();
+      offTarget();
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
       window.removeEventListener("keydown", onKey);
     });
   });

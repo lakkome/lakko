@@ -18,20 +18,35 @@ vi.mock("./index", () => ({ isDesktop: (): boolean => platform.desktop }));
 
 const [rows, setRows] = createSignal<readonly ConversationRow[]>([]);
 vi.mock("../chat/conversation-rows", () => ({
-  createConversationRows: () => ({ orderedRows: rows }),
+  createConversationRows: () => ({
+    orderedRows: rows,
+    groupById: () => new Map(rows().map((r) => [r.id, { groupIdB64: `g-${r.id}` }])),
+    kindOf: () => "chat",
+    conversationIdOf: () => new Uint8Array([1, 2, 3]),
+  }),
 }));
 
 const [callLive, setCallLive] = createSignal(false);
+const [ringing, setRinging] = createSignal<string | null>(null);
 const endCurrentCall = vi.fn(() => {
   setCallLive(false);
   return Promise.resolve();
 });
 vi.mock("../calls/CallHostContext", () => ({
-  useCallHost: () => ({ anyCallInProgress: () => callLive(), endCurrentCall }),
+  useCallHost: () => ({
+    anyCallInProgress: () => callLive(),
+    endCurrentCall,
+    ringingCallIdHex: ringing,
+    quietIncomingCall: () => null,
+    activeGroupIdB64: () => "g-ann",
+  }),
 }));
 
 const navigate = vi.fn();
-vi.mock("@solidjs/router", () => ({ useNavigate: () => navigate }));
+vi.mock("@solidjs/router", () => ({
+  useNavigate: () => navigate,
+  useLocation: () => ({ pathname: "/" }),
+}));
 
 const confirmAnswer = { value: true };
 const requestConfirm = vi.fn((_r: unknown) => Promise.resolve(confirmAnswer.value));
@@ -57,14 +72,15 @@ function row(id: string, unread: number, muted = false): ConversationRow {
   };
 }
 
-const hostEvent = (kind: string): boolean =>
-  window.dispatchEvent(new CustomEvent(HOST_EVENT, { detail: { kind } }));
+const hostEvent = (kind: string, extra: Record<string, unknown> = {}): boolean =>
+  window.dispatchEvent(new CustomEvent(HOST_EVENT, { detail: { kind, ...extra } }));
 
 beforeEach(() => {
   platform.desktop = true;
   posts = [];
   setRows([]);
   setCallLive(false);
+  setRinging(null);
   confirmAnswer.value = true;
   navigate.mockClear();
   requestConfirm.mockClear();
@@ -129,6 +145,37 @@ describe("DesktopBridge", () => {
     await settle();
     expect(endCurrentCall).not.toHaveBeenCalled();
     expect(posts.some((p) => p.url === "/__host/app/quit")).toBe(false);
+  });
+
+  it("notifies a rise in unread, never for a muted chat, and opens it on click", async () => {
+    setRows([row("a", 1), row("b", 0, true)]);
+    renderUi(() => <DesktopBridge />);
+    await settle();
+    // The first snapshot announces nothing.
+    expect(posts.filter((p) => p.url === "/__host/app/notify")).toEqual([]);
+    setRows([row("a", 2), row("b", 3, true)]);
+    await settle();
+    const notified = posts.filter((p) => p.url === "/__host/app/notify").map((p) => p.body);
+    expect(notified).toEqual([
+      { tag: "conversation:chat:a", title: "a", body: "New message", target: "/chat/AQID" },
+    ]);
+    hostEvent("open-target", { target: "/chat/AQID" });
+    expect(navigate).toHaveBeenCalledWith("/chat/AQID");
+    hostEvent("open-target", { target: "https://evil.example" });
+    expect(navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it("raises one notification for a call ringing behind the window", async () => {
+    setRows([row("ann", 0)]);
+    renderUi(() => <DesktopBridge />);
+    await settle();
+    setRinging("c1");
+    await settle();
+    setRinging("c1");
+    await settle();
+    const notified = posts.filter((p) => p.url === "/__host/app/notify").map((p) => p.body);
+    expect(notified).toHaveLength(1);
+    expect(notified[0]).toMatchObject({ tag: "call:c1", title: "ann", target: null });
   });
 
   it("opens Settings for the menu item", async () => {

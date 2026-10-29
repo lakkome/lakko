@@ -507,31 +507,69 @@ build-desktop-web:
 
 # Build, sign and run the desktop app (macOS debug build).
 #
+# The binary runs from a minimal `Lakko.app` bundle in the debug target
+# directory, registered with Launch Services: macOS attributes system
+# notifications to an app by its bundle, so a bare binary cannot show them as
+# Lakko (ADR-0085 section 5). The executable inside is started directly, so
+# its log stays in this terminal.
+#
 # The linker only ad-hoc signs a debug binary, with an identifier derived
 # from its own hash, so after every rebuild macOS takes it for a new app and
 # asks again for the login-keychain password the debug device-key fallback
 # needs. Signing with a fixed identifier and a real certificate lets
 # "Always Allow" survive rebuilds. The identity is the first
 # "Apple Development" certificate in the keychain unless
-# LAKKO_DESKTOP_SIGN_IDENTITY names one; with neither, the binary runs
+# LAKKO_DESKTOP_SIGN_IDENTITY names one; with neither, the bundle runs
 # ad-hoc signed, as before.
 dev-desktop:
     #!/usr/bin/env bash
     set -euo pipefail
     cd apps/desktop/src-tauri
     cargo build
-    bin=target/debug/lakko-desktop
+    id=me.lakko.desktop.dev
+    app=target/debug/Lakko.app
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+    cp target/debug/lakko-desktop "$app/Contents/MacOS/lakko-desktop"
+    if [ ! -f "$app/Contents/Resources/icon.icns" ] || [ icons/icon.png -nt "$app/Contents/Resources/icon.icns" ]; then
+        set_dir=$(mktemp -d)/icon.iconset
+        mkdir -p "$set_dir"
+        for s in 16 32 128 256 512; do
+            sips -z $s $s icons/icon.png --out "$set_dir/icon_${s}x${s}.png" >/dev/null
+            sips -z $((s * 2)) $((s * 2)) icons/icon.png --out "$set_dir/icon_${s}x${s}@2x.png" >/dev/null
+        done
+        iconutil -c icns "$set_dir" -o "$app/Contents/Resources/icon.icns"
+    fi
+    cat > "$app/Contents/Info.plist" <<PLIST
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0"><dict>
+    <key>CFBundleIdentifier</key><string>$id</string>
+    <key>CFBundleName</key><string>Lakko</string>
+    <key>CFBundleDisplayName</key><string>Lakko</string>
+    <key>CFBundleExecutable</key><string>lakko-desktop</string>
+    <key>CFBundleIconFile</key><string>icon</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSMicrophoneUsageDescription</key><string>Lakko uses the microphone for calls.</string>
+    <key>NSCameraUsageDescription</key><string>Lakko uses the camera for video calls.</string>
+    </dict></plist>
+    PLIST
     identity="${LAKKO_DESKTOP_SIGN_IDENTITY:-}"
     if [ -z "$identity" ]; then
         identity=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -n 1)
     fi
     if [ -n "$identity" ]; then
-        codesign --force --sign "$identity" --identifier me.lakko.desktop.dev "$bin"
+        codesign --force --sign "$identity" --identifier "$id" "$app"
         echo "signed with: $identity"
     else
+        codesign --force --sign - --identifier "$id" "$app"
         echo "WARN no Apple Development certificate; running ad-hoc signed (keychain will ask after each rebuild)"
     fi
-    RUST_LOG="${RUST_LOG:-info}" "./$bin"
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app"
+    RUST_LOG="${RUST_LOG:-info}" "./$app/Contents/MacOS/lakko-desktop"
 
 # Production build of apps/web — wasm-pack release + tsc --noEmit +
 # `vite build`. Output lands in `apps/web/dist/`.

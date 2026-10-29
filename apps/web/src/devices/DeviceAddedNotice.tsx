@@ -27,6 +27,8 @@ import {
   type AddedNoticeView,
 } from "./added-notice";
 import { useDeviceGroupSync } from "./sync/DeviceGroupSyncContext";
+import { isDesktop } from "../platform";
+import { showHostNotification, withdrawHostNotification } from "../platform/host";
 import { displayLocale } from "../l10n/display-locale";
 
 /** The message the service worker posts when its copy of the notification
@@ -34,6 +36,9 @@ import { displayLocale } from "../l10n/display-locale";
 const OPEN_DEVICES_MESSAGE = "LAKKO_OPEN_DEVICES";
 
 function notificationPermission(): "granted" | "denied" | "default" | "unsupported" {
+  // The desktop app shows it through the host (ADR-0085): the webview has no
+  // Notification API, and the OS asks for permission itself.
+  if (isDesktop()) return "granted";
   return typeof Notification === "undefined" ? "unsupported" : Notification.permission;
 }
 
@@ -54,6 +59,11 @@ async function swRegistration(): Promise<ServiceWorkerRegistration | undefined> 
 async function postNotice(tag: string, view: AddedNoticeView, openDevices: () => void): Promise<void> {
   const title = t(view.titleKey);
   const body = t("devices.added_notice.notification_body");
+  if (isDesktop()) {
+    // A click opens Settings > Devices through the host's `open-target`.
+    await showHostNotification({ tag, title, body, target: paths.devices });
+    return;
+  }
   try {
     const n = new Notification(title, { body, tag });
     n.onclick = () => {
@@ -80,6 +90,10 @@ async function postNotice(tag: string, view: AddedNoticeView, openDevices: () =>
 
 /** Withdraw the account's notification wherever it was shown from. */
 async function withdrawNotice(tag: string): Promise<void> {
+  if (isDesktop()) {
+    await withdrawHostNotification(tag);
+    return;
+  }
   shownHere.get(tag)?.close();
   shownHere.delete(tag);
   const reg = await swRegistration();

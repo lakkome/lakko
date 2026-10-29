@@ -18,6 +18,7 @@
 mod app_shell;
 mod device_key;
 mod key_store;
+mod notify;
 mod probe;
 mod proxy;
 
@@ -97,7 +98,8 @@ fn main() {
         })
         .setup(move |app| {
             let dir = app.path().app_config_dir()?;
-            app.manage(Shell::load(dir));
+            let notifier = notify::Notifier::new(&app.config().identifier);
+            app.manage(Shell::load(dir, notifier));
             if let Some(menu) = app_shell::menu(app.handle())? {
                 app.set_menu(menu)?;
             }

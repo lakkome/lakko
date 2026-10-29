@@ -19,7 +19,7 @@ export const HOST_APP_PATH = "/__host/app";
 export const HOST_EVENT = "lakko:host";
 
 /** What the host can tell the page. */
-export type HostEventKind = "quit-requested" | "open-settings";
+export type HostEventKind = "quit-requested" | "open-settings" | "open-target";
 
 /** The desktop-only settings the host keeps on this computer. */
 export interface HostSettings {
@@ -107,14 +107,82 @@ export async function requestHostQuit(): Promise<void> {
 
 /**
  * Subscribe to one kind of host event. Returns the unsubscribe function.
- * Outside the desktop app nothing is subscribed.
+ * Outside the desktop app nothing is subscribed. The handler gets the event's
+ * `target` (an app path) for `open-target`, `null` otherwise.
  */
-export function onHostEvent(kind: HostEventKind, handler: () => void): () => void {
+export function onHostEvent(kind: HostEventKind, handler: (target: string | null) => void): () => void {
   if (!isDesktop()) return () => {};
   const listener = (e: Event): void => {
-    const detail = (e as CustomEvent<unknown>).detail as { kind?: unknown } | null;
-    if (detail !== null && typeof detail === "object" && detail.kind === kind) handler();
+    const detail = (e as CustomEvent<unknown>).detail as { kind?: unknown; target?: unknown } | null;
+    if (detail === null || typeof detail !== "object" || detail.kind !== kind) return;
+    const target = typeof detail.target === "string" && isAppPath(detail.target) ? detail.target : null;
+    handler(target);
   };
   window.addEventListener(HOST_EVENT, listener);
   return () => window.removeEventListener(HOST_EVENT, listener);
+}
+
+/** A path inside the app; the host checks the same before it sends one. */
+export function isAppPath(p: string): boolean {
+  return (
+    p.startsWith("/") &&
+    !p.startsWith("//") &&
+    !p.includes("\\") &&
+    !p.includes("://") &&
+    // eslint-disable-next-line no-control-regex
+    !/[\u0000-\u001f\u007f]/.test(p)
+  );
+}
+
+/** One system notification, already rendered in the interface language. */
+export interface HostNotification {
+  /** Notifications with one tag replace each other where the OS can. */
+  tag: string;
+  title: string;
+  body: string;
+  /** The app path a click opens; `null` only brings the window forward. */
+  target: string | null;
+}
+
+/**
+ * Ask the host to show a system notification (`docs/ux/desktop.md` section
+ * 4). Resolves `false` outside the desktop app or where the host cannot show
+ * one; never throws.
+ */
+export async function showHostNotification(n: HostNotification): Promise<boolean> {
+  if (!isDesktop()) return false;
+  try {
+    const res = await fetch(`${HOST_APP_PATH}/notify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(n),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Take a notification back where the OS can (not on macOS). Never throws. */
+export async function withdrawHostNotification(tag: string): Promise<void> {
+  if (!isDesktop()) return;
+  try {
+    await fetch(`${HOST_APP_PATH}/withdraw`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tag }),
+    });
+  } catch {
+    // best-effort
+  }
+}
+
+/** Bounce the Dock icon once / flash the taskbar. Never throws. */
+export async function requestHostAttention(): Promise<void> {
+  if (!isDesktop()) return;
+  try {
+    await fetch(`${HOST_APP_PATH}/attention`, { method: "POST" });
+  } catch {
+    // cosmetic
+  }
 }

@@ -7,8 +7,10 @@
   (2026-10-16): Tauri 2 on macOS, Windows and Linux, the host does the system
   work and keeps the device key, the messaging logic and MLS stay in the web
   client's wasm inside the window (option A of section "Alternatives"). The
-  five decisions of section 9 are the maintainer's too (2026-10-16). Beyond
-  S1 and the macOS half of S2 nothing is built.
+  five decisions of section 9 are the maintainer's too (2026-10-16). S3 is
+  built on macOS (section 12, 2026-10-29), with system notifications not yet
+  seen on screen; S4 and S5 are not started, nor anything on Windows or
+  Linux.
 - **Date:** 2026-10-16
 - **Amends:** [ADR-0002](0002-rust-core.md) (the desktop row of the
   per-platform UI table, and its open question "is Tauri 2.x mature enough").
@@ -363,6 +365,42 @@ hidden window for longer than two minutes.
   `backup/device-phrase.ts`) still turn any `getDeviceKey` failure into
   "no key"; and the reset landing now stops on a refusal partway through a
   key reset, which relies on the ADR-0073 owed record to finish later.
+
+### 12. S3 on macOS (2026-10-29)
+
+- **Built earlier with S2 (`app_shell.rs`):** one window titled "Lakko" with
+  its geometry restored on a connected display, close hides it unless "Keep
+  running" is off, quit during a call asks "End the call and quit?", the Dock
+  badge with the All chats unread count, "Open Lakko when I sign in" as a
+  per-user LaunchAgent started with `--hidden`, the macOS menu bar, and the
+  shortcuts of `desktop.md` section 5 in the page (`platform/shortcuts.ts`).
+- **System notifications (`notify.rs`):** the page asks the host with
+  `POST /__host/app/notify {tag, title, body, target}`; the host shows an
+  `NSUserNotification` through `mac-notification-sys` on a thread of its own
+  and, on a click, shows the window and sends the page
+  `{kind: "open-target", target}`, which navigates there. `target` must be an
+  app path, checked by both sides (`notify::is_app_path`, `isAppPath`). At
+  most 16 notifications wait for a click at once; later ones are shown
+  without waiting. The page raises one for a message when a conversation's
+  unread count rises (not muted, not the conversation open in the focused
+  window; the first snapshot after start announces nothing), for a 1x1 call
+  ringing behind the window (a muted call raises nothing; with the window in
+  front the Dock icon bounces once, `POST /__host/app/attention`), and for
+  "A device was added" (target Settings > Devices). Rules in
+  `platform/desktop-notifications.ts`, host-tested and unit-tested.
+- **A notification needs a bundle:** macOS attributes one to the app's bundle
+  identifier, so `just dev-desktop` now builds `target/debug/Lakko.app`
+  (Info.plist, icon, signature), registers it with Launch Services and runs
+  the executable inside it. Without a registered bundle the host logs that
+  notifications are unavailable and the route answers
+  `503 notifications-unsupported`.
+- **Not built:** withdrawing a delivered notification on macOS (the library
+  has no call for it, so the "A device was added" notification stays in
+  Notification Center after the warning is cleared); Accept / Decline on a
+  call notification; "Open system settings" when notifications are off; the
+  refusal screen of section 4.2; the tray, the "still running" notice and
+  start at login on Windows and Linux. Nothing of the notifications has been
+  seen on screen.
 
 ## Alternatives
 
