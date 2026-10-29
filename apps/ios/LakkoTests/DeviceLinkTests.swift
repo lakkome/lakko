@@ -118,7 +118,11 @@ final class DeviceLinkTests: XCTestCase {
         var payloads: [Data] = []
         /// Whether the pairing reports the keys as handed over.
         var keysSent = true
+        /// Whether the pairing throws (a failure on this side).
+        var fails = false
     }
+
+    private struct PairingFailed: Error {}
 
     /// The fresh-auth side, scripted (UX 17.4).
     private final class FakeProof {
@@ -158,7 +162,11 @@ final class DeviceLinkTests: XCTestCase {
             checkPayload: { payload, handle in
                 _ = try PairingCodec.parsePairingQrPayload(wireBytes: payload, expectedLoginHandle: handle)
             },
-            runPairing: { paired.payloads.append($0); return paired.keysSent },
+            runPairing: {
+                paired.payloads.append($0)
+                if paired.fails { throw PairingFailed() }
+                return paired.keysSent
+            },
             limit: limit,
             proof: proof.ports))
     }
@@ -232,6 +240,59 @@ final class DeviceLinkTests: XCTestCase {
         XCTAssertEqual(DeviceLinkModalCopy.keysNotSent, Localization.text("device_link.keys_not_sent"))
         old.dismiss()
         XCTAssertNil(old.modal)
+    }
+
+    /// Run one exchange with the old device's budget one short of full, and
+    /// say whether one more answer is allowed afterwards.
+    private func budgetAfterExchange(
+        paired: Paired, typeWrongCode: Bool = false, until: @escaping (DeviceLinkResponderFlow) -> Bool
+    ) async throws -> Bool {
+        let server = FakeDeviceLinkServer()
+        let limit = try limit()
+        for _ in 0..<(DeviceLinkAnswerLimit.maxAnswers - 1) { limit.record() }
+        let old = responder(server, limit: limit, paired: paired)
+        let new = joiner(server, payload: try pairingPayload())
+        let start = Task { await new.start() }
+        while server.row == nil { await Task.yield() }
+        await old.check()
+        await old.yesItsMe()
+        guard case .code(let shown) = old.modal else {
+            XCTFail("no code")
+            return false
+        }
+        XCTAssertFalse(limit.canAnswer(), "the answer is counted when the code is shown")
+        while new.phase != .enterCode { await Task.yield() }
+        let typed = typeWrongCode
+            ? String(shown.filter(\.isNumber).map { $0 == "9" ? "0" : "9" })
+            : shown
+        let submit = Task { await new.submit(code: typed) }
+        await runOldDevice(old) { until(old) }
+        submit.cancel()
+        start.cancel()
+        return limit.canAnswer()
+    }
+
+    /// A right code whose pairing then failed on this side is not a guess:
+    /// the answer is given back.
+    func testAFailedPairingGivesTheAnswerBack() async throws {
+        let paired = Paired()
+        paired.fails = true
+        let canAnswer = try await budgetAfterExchange(paired: paired) { $0.modal == .failed }
+        XCTAssertTrue(canAnswer)
+    }
+
+    func testKeysNotHandedOverGiveTheAnswerBack() async throws {
+        let paired = Paired()
+        paired.keysSent = false
+        let canAnswer = try await budgetAfterExchange(paired: paired) { $0.modal == .keysNotSent }
+        XCTAssertTrue(canAnswer)
+    }
+
+    func testAWrongCodeKeepsTheAnswerCounted() async throws {
+        let canAnswer = try await budgetAfterExchange(paired: Paired(), typeWrongCode: true) {
+            $0.modal == .wrongCode
+        }
+        XCTAssertFalse(canAnswer)
     }
 
     func testAWrongCodePairsNothingOnEitherSide() async throws {

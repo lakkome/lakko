@@ -9,6 +9,7 @@ import kotlinx.coroutines.yield
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -357,10 +358,94 @@ class DeviceLinkTest {
     @Test
     fun `the limit window slides`() {
         val state = Limit()
-        repeat(DeviceLinkAnswerLimit.MAX_ANSWERS) { assertTrue(state.limit.tryConsume()) }
-        assertFalse(state.limit.tryConsume())
+        repeat(DeviceLinkAnswerLimit.MAX_ANSWERS) { assertNotNull(state.limit.tryConsume()) }
+        assertNull(state.limit.tryConsume())
         state.now += DeviceLinkAnswerLimit.WINDOW_MS
-        assertTrue(state.limit.tryConsume())
+        assertNotNull(state.limit.tryConsume())
+    }
+
+    // ------------------------------------------------- answers given back
+
+    @Test
+    fun `a right code whose pairing fails on this side gives the answer back`() = runTest {
+        val state = Limit()
+        val server = Server()
+        val new = newDevice(server)
+        val old = OldDeviceLink(
+            api = server,
+            responderFor = { Responder("471903") },
+            formatCode = { it },
+            openPayload = { it },
+            pair = { throw IllegalStateException("commit refused") },
+            limit = state.limit,
+        )
+        new.start(handle)
+        old.poll()
+        old.confirm()
+        assertEquals(1, state.times.size)
+        new.awaitAnswer()
+        val submit = async { new.submitCode("471903") }
+        while (server.pakeA == null) yield()
+        assertEquals(OldDeviceLinkState.Notice(DEVICE_LINK_ADD_FAILED_COPY), old.poll())
+        assertTrue("our own failure is not a guess", state.times.isEmpty())
+        submit.cancel()
+    }
+
+    @Test
+    fun `a right code whose result does not land gives the answer back`() = runTest {
+        val state = Limit()
+        val inner = Server()
+        val failing = object : DeviceLinkApi by inner {
+            override suspend fun postResult(requestId: ByteArray, accepted: Boolean, confirmB: ByteArray?) {
+                throw java.io.IOException("offline")
+            }
+        }
+        val new = newDevice(inner)
+        val old = OldDeviceLink(
+            api = failing,
+            responderFor = { Responder("471903") },
+            formatCode = { it },
+            openPayload = { it },
+            pair = { error("must not pair") },
+            limit = state.limit,
+        )
+        new.start(handle)
+        old.poll()
+        old.confirm()
+        new.awaitAnswer()
+        val submit = async { new.submitCode("471903") }
+        while (inner.pakeA == null) yield()
+        assertTrue(runCatching { old.poll() }.isFailure)
+        assertTrue(state.times.isEmpty())
+        submit.cancel()
+    }
+
+    @Test
+    fun `a wrong code keeps the answer counted`() = runTest {
+        val state = Limit()
+        val server = Server()
+        val new = newDevice(server)
+        val old = oldDevice(server, limit = state.limit)
+        new.start(handle)
+        old.poll()
+        old.confirm()
+        new.awaitAnswer()
+        val submit = async { new.submitCode("000000") }
+        while (server.pakeA == null) yield()
+        assertEquals(OldDeviceLinkState.Notice(DEVICE_LINK_OLD_WRONG_CODE_COPY), old.poll())
+        submit.await()
+        assertEquals(1, state.times.size)
+    }
+
+    @Test
+    fun `an answer that shows no code gives it back`() = runTest {
+        val state = Limit()
+        val server = Server().apply { answeredElsewhere = true }
+        val old = oldDevice(server, limit = state.limit)
+        server.createRequest(handle)
+        old.poll()
+        assertEquals(OldDeviceLinkState.Notice(DEVICE_LINK_HANDLED_ELSEWHERE_COPY), old.confirm())
+        assertTrue(state.times.isEmpty())
     }
 
     @Test
