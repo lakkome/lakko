@@ -23,7 +23,7 @@ pub const PROBE_PATH: &str = "/__probe";
 const PAGE: &str = include_str!("../probe/probe.html");
 
 /// Debug builds: forwards page errors, rejected promises and
-/// `console.error` / `console.warn` to `/__probe/report`.
+/// `console.error` / `console.warn` / `console.info` to `/__probe/report`.
 pub const ERROR_REPORTER: &str = r#"
 (() => {
   const send = (kind, msg) => {
@@ -34,9 +34,9 @@ pub const ERROR_REPORTER: &str = r#"
   };
   addEventListener("error", (e) => send("page-error", (e.message || "") + " @ " + (e.filename || "") + ":" + (e.lineno || "")));
   addEventListener("unhandledrejection", (e) => send("rejection", e.reason && (e.reason.stack || e.reason.message) || e.reason));
-  for (const level of ["error", "warn"]) {
+  for (const level of ["error", "warn", "info"]) {
     const orig = console[level].bind(console);
-    console[level] = (...args) => { send("console-" + level, args.map((a) => a && a.stack || a).join(" ")); orig(...args); };
+    console[level] = (...args) => { send("console-" + level, args.map((a) => a && a.stack ? (a.message || String(a)) + " | " + a.stack : a).join(" ")); orig(...args); };
   }
   addEventListener("DOMContentLoaded", () => send("dom-ready", document.title));
 })();

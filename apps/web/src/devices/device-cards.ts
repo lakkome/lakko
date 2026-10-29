@@ -191,7 +191,7 @@ export const DESKTOP_APP_VERSION = "desktop";
  * The own card's platform, model, app and system. The desktop app is a
  * computer, not a browser: its web view's user agent names a browser engine
  * that says nothing about the app, so only the system is read from it and
- * the model is the kind of computer.
+ * the model names the app on that system ("Lakko desktop on macOS").
  */
 export function ownDeviceFacts(desktop: boolean, userAgent: string): OwnDeviceFacts {
   const facts = browserFacts(userAgent);
@@ -199,8 +199,7 @@ export function ownDeviceFacts(desktop: boolean, userAgent: string): OwnDeviceFa
     return { platform: "web", model: facts.model, appVersion: WEB_APP_VERSION, os: facts.os };
   }
   const system = facts.os.split(" ")[0] ?? "";
-  const model =
-    system === "macOS" ? "Mac" : system === "Windows" ? "Windows PC" : system === "Linux" ? "Linux PC" : "Computer";
+  const model = system === "" ? "Lakko desktop" : `Lakko desktop on ${system}`;
   return { platform: "desktop", model, appVersion: DESKTOP_APP_VERSION, os: facts.os };
 }
 

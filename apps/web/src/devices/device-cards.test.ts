@@ -189,13 +189,13 @@ describe("ownDeviceFacts", () => {
   it("names the desktop app a computer, never a browser", () => {
     expect(ownDeviceFacts(true, webkitMac)).toEqual({
       platform: "desktop",
-      model: "Mac",
+      model: "Lakko desktop on macOS",
       appVersion: "desktop",
       os: "macOS",
     });
-    expect(ownDeviceFacts(true, chromeMac).model).toBe("Mac");
-    expect(ownDeviceFacts(true, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)").model).toBe("Windows PC");
-    expect(ownDeviceFacts(true, "").model).toBe("Computer");
+    expect(ownDeviceFacts(true, chromeMac).model).toBe("Lakko desktop on macOS");
+    expect(ownDeviceFacts(true, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)").model).toBe("Lakko desktop on Windows");
+    expect(ownDeviceFacts(true, "").model).toBe("Lakko desktop");
   });
 
   it("keeps the browser's name on the web", () => {
