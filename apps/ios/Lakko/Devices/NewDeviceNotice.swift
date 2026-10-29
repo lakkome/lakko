@@ -476,14 +476,31 @@ final class NewDeviceNoticeCenter: ObservableObject {
     }
 }
 
-/// The exclamation-mark badge of UX 17.5, in the danger colour and never
-/// colour alone: the caller gives the element its accessible name.
+/// The exclamation-mark badge of UX 17.5, in the warning colour (yellow,
+/// maintainer 2026-10-29) and never colour alone: the caller gives the
+/// element its accessible name.
 struct NewDeviceAttentionBadge: View {
     var body: some View {
         Image(systemName: "exclamationmark.circle.fill")
             .font(.body)
-            .foregroundStyle(Color.lakkoDanger)
+            .foregroundStyle(Color.lakkoWarning)
             .accessibilityHidden(true)
+    }
+}
+
+/// The tab-bar badge colour (UX 17.5): the Settings tab's "!" is the only
+/// tab badge Lakko draws, and SwiftUI's `.badge` has no colour of its own,
+/// so the tab bar's item appearance carries the warning colour with
+/// readable text on it in both appearances. Installed once, before the tab
+/// bar exists.
+enum NewDeviceAttentionTabBadge {
+    @MainActor
+    static func installAppearance() {
+        let item = UITabBarItem.appearance()
+        item.badgeColor = UIColor(named: "LakkoWarning")
+        let text = UIColor(named: "LakkoAccentForeground") ?? .white
+        item.setBadgeTextAttributes([.foregroundColor: text], for: .normal)
+        item.setBadgeTextAttributes([.foregroundColor: text], for: .selected)
     }
 }
 

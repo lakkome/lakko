@@ -7646,8 +7646,8 @@ button.lk-folder-new {
   height: 16px;
   padding: 0 4px;
   border-radius: var(--radius-pill);
-  background: var(--danger);
-  color: var(--danger-fg);
+  background: var(--warning);
+  color: var(--accent-fg);
   font-size: 11px;
   font-weight: 700;
   line-height: 16px;

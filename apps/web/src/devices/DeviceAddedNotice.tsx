@@ -182,7 +182,7 @@ export function DeviceAddedExplanation(props: { readonly view: AddedNoticeView |
   );
 }
 
-/** The exclamation-mark badge (17.5 surface 2): danger colour, never colour
+/** The exclamation-mark badge (17.5 surface 2): warning colour, never colour
  *  alone (the host element carries the accessible name). */
 export function AttentionBadge(): JSX.Element {
   return (
