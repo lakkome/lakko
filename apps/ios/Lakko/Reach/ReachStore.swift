@@ -68,8 +68,24 @@ public struct ReachRecord: Codable, Equatable {
     /// last registration, so the next one sees which it left and rotates
     /// that class's one key. `nil` until the first registration.
     public var memberOf: ReachRules.Membership?
+    /// ADR-0060 section 6, "An add of a person found by search" — the people
+    /// this device proposed to add to a group after finding them in
+    /// Everyone, with the mailbox binding their public record carried. A
+    /// device never receives its own group messages, so its own sweep reads
+    /// this in place of the committer-delegation envelope it posted. Removed
+    /// once the Welcome to that person in that group was written. Optional
+    /// so a record stored before it still decodes.
+    public var openAdds: [OpenAdd]?
 
     public init() {}
+
+    /// One ``openAdds`` entry.
+    public struct OpenAdd: Codable, Equatable {
+        public var groupIdHex: String
+        public var accountKeyB64: String
+        public var bindingB64: String
+        public var storedAtMs: UInt64
+    }
 
     public struct StoredBundle: Codable, Equatable {
         public var updatedAtMs: UInt64

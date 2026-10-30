@@ -105,7 +105,7 @@ describe("infoOpenLabel", () => {
     expect(infoOpenLabel("channel")).toBe("Channel info");
   });
 
-  it("the layer's heading is the same words as the button", () => {
+  it("the screen's heading is the same words as the button", () => {
     for (const target of ["person", "group", "channel"] as const) {
       expect(infoHeading(target)).toBe(infoOpenLabel(target));
     }
@@ -451,11 +451,11 @@ describe("infoOpening", () => {
     expect(infoOpening("person", null)).toBe("nothing");
   });
 
-  it("a group opens the layer whatever record is at hand", () => {
-    expect(infoOpening("group", null)).toBe("layer");
+  it("a group opens its screen whatever record is at hand", () => {
+    expect(infoOpening("group", null)).toBe("group-screen");
     // A record cannot belong to a group, but a caller handing one over by
     // mistake must not be sent to a contact page for a group.
-    expect(infoOpening("group", record)).toBe("layer");
+    expect(infoOpening("group", record)).toBe("group-screen");
   });
 
   it("opens nothing until the destination is known", () => {

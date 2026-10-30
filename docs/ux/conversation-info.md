@@ -133,7 +133,8 @@ either side.
 - Name, and the members' names when it has none.
 - How many people.
 - Members, each with their role shown where they have one, and add or remove
-  for whoever may ([ADR-0022](../adr/0022-group-admin-roles.md)).
+  for whoever may ([ADR-0022](../adr/0022-group-admin-roles.md)). Adding is
+  **Add members** at the top of the members list (section 2.4).
 - Rename, for the owner and admins; read-only for everyone else
   ([ADR-0051](../adr/0051-group-and-channel-names.md)).
 - Invite link, for whoever may mint one
@@ -143,6 +144,9 @@ either side.
 
 This is what exists today, minus its habit of appearing where there is no
 group.
+
+Tapping a member who is a contact opens their contact screen, which returns
+to the group's info by its back control (section 3.1).
 
 ### 2.3 A channel
 
@@ -160,28 +164,89 @@ not delete the registration on the server - no channels route retires a
 subscriber - so the copy says what happens to *this device* and never claims
 the channel has been told.
 
-## 3. It is a layer, not a panel
+### 2.4 Adding members (decided 2026-10-29)
 
-The info opens **over** the conversation, which stays where it is behind it.
+Seen live 2026-10-29: on the web the only way to add someone to a group was
+an `Add member` item in the chat's overflow menu, which opened the group info
+with a field for a full `@username`; the info itself offered only `Create
+invite link`. A person had to know the exact username even of a contact.
 
-The web panel pushed the messages sideways, which reads as the screen
-breaking rather than as something opening, and it is the reason a click felt
-like nothing. A layer also matches what the natives already do, so the three
-stop diverging on something a person notices immediately.
+**Entry.** The first row of the members list, for whoever may add (the owner
+and admins; anyone in a group with no role table): a person-plus icon and
+**Add members**. It is the only way in: the overflow menu item and the typed
+`@username` form go.
 
-**Per platform** - the layer's idiom: web a centred modal with a maximum
-width, dimmed behind, dismissed by the backdrop or `Esc`; iOS a sheet;
-Android a `ModalBottomSheet` or a full-screen dialog. What is the same
-everywhere: the conversation is still there behind it, and there is one
-obvious way out.
+**The Add members screen.** Pushed over the group's info, like any screen in
+this spec (section 3), with the back control returning to the info.
 
-**Except a person (2026-09-26).** A person's info IS the contact screen, and
-there is one of it: it opens from the conversation exactly the way the contact
-list opens it - pushed with a Back control on iOS and Android, the contact's
-own page on web - with the same controls in the same order. It used to open as
-a layer from the chat and as a screen from the list, with Message on one and
-not the other, and a person looking at both saw two cards for one contact. The
-layer rule above is for a group, whose info has no screen of its own to reuse.
+- Top bar: back icon, the title **Add members**, and at the trailing end
+  **Add** (with the count once more than one is picked: **Add 3**), disabled
+  until somebody is picked.
+- A search field under the bar, placeholder "Search contacts or people".
+- Picked people as removable chips between the field and the list, so a pick
+  made from a search result stays visible after the search text changes.
+- The list: the person's contacts, each with avatar, name, `@username` where
+  known, and a checkbox. Contacts already in the group, or already asked for
+  (an add waiting for the owner's or an admin's sweep), are not listed. A
+  contact that cannot be added (no captured account id, `new-group.md`
+  section 3) is listed dimmed with its line.
+- Typing filters the contacts from the first letter, loosely, on the device.
+  From 3 characters it also searches the network exactly as the search field
+  of [`who-can-find-me.md`](who-can-find-me.md) section 6.1 does (500 ms after
+  the last keystroke, by username and by name), and shows the results under
+  the heading **People**, each with a checkbox instead of Add contact. A
+  result that is already a member, or a contact already listed above, is not
+  shown twice. The People states (searching, not found, network failure, out
+  of searches) are that section's, word for word.
+
+Adding a person who is not a contact is allowed exactly when the network
+search found them: finding someone is the permission to reach them
+(`who-can-find-me.md` section 12). Being added to a group does not make two
+people contacts.
+
+**Add.** The screen closes back to the group's info at once. Each pick is
+added through the conversation's normal add path, one after another. Each
+new person shows in the members list's **Waiting to be added** section until
+the change lands, then as a member
+([`proposal-based-membership.md`](proposal-based-membership.md) section 5.2),
+and no notice is shown, in effect or not (section 2 of that document). A
+pick that could not be added at all is reported once, in place, in the
+group's info: "Could not add {names}. Try again." The others still land.
+
+## 3. It is a screen with a way back
+
+**Amended 2026-10-29 (maintainer):** a group's info is a screen, not a layer.
+Until then it opened as a centred modal on the web and as a sheet or a dialog
+on the natives, which made it the one info that did not look like the
+others: a person's info is the contact screen, a channel's info is the
+channel screen, and both are screens.
+
+A group's info opens the way the contact screen does: it takes the place of
+the conversation, with a **back icon** at the leading end of its top bar that
+returns to the conversation as it was left (scroll position, the draft in the
+composer). The conversation is not closed while its info is shown; the info
+is a step forward from it, not a different place.
+
+**Per platform** - the idiom of a pushed screen: web the info takes the
+conversation's column, with a back icon button in its header and a history
+entry so the browser's Back does the same thing, and `Esc` too; iOS a push on
+the navigation stack with the standard back button; Android a screen with a
+top app bar whose navigation icon is the back arrow, and the system back
+does the same.
+
+### 3.1 The back control, everywhere this spec opens something
+
+Every screen this spec opens - a group's info, a channel's info, a contact
+screen, the Add members screen - shows the back icon whenever it was opened
+from another screen it now covers, and the icon returns there: to the
+conversation, to the group's info a member was tapped in, to the search a
+result was opened from. Seen live 2026-10-29: the contact screen opened from
+a chat had no way back on the web except the sidebar.
+
+The one place it has no back icon is where nothing is covered: a contact
+opened from the Contacts list on a wide web layout, where the list stays
+beside it. On a narrow web layout the same screen covers the list and shows
+the icon.
 
 ## 4. States
 
@@ -190,7 +255,8 @@ layer rule above is for a group, whose info has no screen of its own to reuse.
 | Default | The header, the actions, the detail. |
 | A group still loading its roster | The header and what is known; never an empty list presented as "no members". |
 | Membership ended | The info opens and is read-only: the conversation is over, and the record of who was in it is not ([ADR-0045](../adr/0045-remote-commit-epoch-fork.md) UX 6.2). `Call` goes, because the per-call key comes from a group this device is no longer in. `Delete this chat` arrives in its place - **on a one-to-one exactly as on a group**, because it is the one thing the reader still can do, and because the control used to live in the group panel that a one-to-one has just stopped opening. Everything about the PERSON is unaffected: the conversation ended, they did not. |
-| An action refused | One sentence on what happened and one on what to do, in place, and the layer stays open. |
+| An action refused | One sentence on what happened and one on what to do, in place, and the screen stays open. |
+| Some picks could not be added | "Could not add {names}. Try again." in the group's info; the others are added (section 2.4). |
 
 ## 5. What the data has to provide
 
@@ -199,10 +265,15 @@ routes a tap in the merged list ([`navigation.md`](navigation.md) section
 2.1) - and already has all three screens. What changes is which one the
 header opens and how it is presented.
 
+Adding members (section 2.4) needs, for every pick, what the add path takes:
+the person's account id and signature key. A contact record carries both; a
+network search result has to carry them too, so a person found there is
+added without a second lookup.
+
 ## 6. One model, three implementations
 
 One entry point, three destinations chosen by the conversation's kind, one
-common shape, and a layer over the conversation rather than beside it. The
+common shape, and a screen pushed from the conversation with a way back. The
 **Per platform** notes are the only differences.
 
 **And the model is one copy, in Rust.** `lakko_ui_rules::info` decides the

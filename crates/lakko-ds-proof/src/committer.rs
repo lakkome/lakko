@@ -18,6 +18,10 @@
 //! * no two delegations name the same delegate, so "the one naming me" is
 //!   unambiguous.
 //!
+//! An envelope with no delegation passes when its binding verifies: the
+//! added person's mailbox is open (Everyone) and the committer writes the
+//! Welcome there without a proof, spending a `mailbox-write` token.
+//!
 //! Any failure refuses the **whole** envelope: a partly bad envelope is from
 //! a broken or hostile proposer, and the caller keeps the previous one.
 //!
@@ -209,6 +213,25 @@ mod tests {
         // envelope claims another account added it: the binding fails.
         let mut env = envelope(9, &[account(1)]);
         env.added_account_key = account(8);
+        assert_eq!(
+            check_committer_delegations(&env),
+            Err(CommitterDelegationCheckError::BadMailboxBinding)
+        );
+    }
+
+    #[test]
+    fn an_open_mailbox_envelope_carries_no_delegation_but_a_checked_binding() {
+        // A person in Everyone: the proposer holds no grant, so the envelope
+        // names the mailbox through the binding alone and the committer
+        // writes without a proof (lakko_contacts::committer_delegation).
+        let env = envelope(9, &[]);
+        let parsed = check_committer_delegations(&env).unwrap();
+        assert!(parsed.is_empty());
+        assert!(delegation_for(&parsed, &account(1)).is_none());
+        // The binding is still checked: it can only name the added person's
+        // own mailbox.
+        let mut env = envelope(9, &[]);
+        env.added_mailbox_binding = MailboxBinding::for_account_seed(&[8; 32]);
         assert_eq!(
             check_committer_delegations(&env),
             Err(CommitterDelegationCheckError::BadMailboxBinding)

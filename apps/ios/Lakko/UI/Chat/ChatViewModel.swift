@@ -103,11 +103,10 @@ public final class ChatViewModel: ObservableObject {
     /// Live MLS roster for this group at the current epoch — refreshed by
     /// ``refreshMembers()`` and after every add / remove.
     @Published public private(set) var members: [GroupMember] = []
-    /// `true` while the conversation's info is presented over the chat
-    /// (`docs/ux/conversation-info.md` sections 1 and 3).
-    @Published public var conversationInfoOpen: Bool = false
-    /// `@username` typed into the add-member field.
-    @Published public var addMemberInput: String = ""
+    /// `true` while the group's info screen is on top of the stack
+    /// (`docs/ux/conversation-info.md` section 3): the roster and the pending
+    /// set are refreshed for it then.
+    @Published public private(set) var conversationInfoOpen: Bool = false
     /// `true` while an add or remove commit is in flight (disables the form).
     @Published public private(set) var membershipBusy: Bool = false
     /// Last add/remove error surfaced to the sheet, else `nil`.
@@ -274,11 +273,6 @@ public final class ChatViewModel: ObservableObject {
     /// refuse, fail-closed); the composition root passes
     /// `{ authRepository.identitySecrets?.sessionToken }`.
     private let sessionTokenProvider: () -> String?
-    /// Resolves `@username -> (accountId, signaturePubkey)` through the
-    /// G-4-verified contacts path for the add-member flow. Defaults to a
-    /// fail-closed stub (add-member then refuses); the composition root
-    /// passes `{ try await contactsClient.resolveVerifiedRecipient(...) }`.
-    private let resolveRecipient: (String) async throws -> (accountId: Data, signaturePubkey: Data)
     private var cancellables: Set<AnyCancellable> = []
     /// Drives ``trackGroupCallFreshness``; cancelled when the record goes away
     /// and on teardown.
@@ -304,13 +298,7 @@ public final class ChatViewModel: ObservableObject {
         groupIdHex: String,
         callHost: CallHost? = nil,
         groupCallHost: GroupCallHost? = nil,
-        sessionTokenProvider: @escaping () -> String? = { nil },
-        resolveRecipient: @escaping (String) async throws
-            -> (accountId: Data, signaturePubkey: Data) = { _ in
-                throw ChatError.argument(
-                    "no @username resolver wired — add-member unavailable"
-                )
-            }
+        sessionTokenProvider: @escaping () -> String? = { nil }
     ) {
         self.repository = repository
         // The route may name the conversation or ANY of its groups (a link
@@ -328,7 +316,6 @@ public final class ChatViewModel: ObservableObject {
         self.groupCallHost = groupCallHost
             ?? GroupCallHost.live(repository: repository, sessionTokenProvider: sessionTokenProvider)
         self.sessionTokenProvider = sessionTokenProvider
-        self.resolveRecipient = resolveRecipient
         sync(state: repository.state)
         repository.$state
             .receive(on: RunLoop.main)
@@ -865,23 +852,93 @@ public final class ChatViewModel: ObservableObject {
 
     // MARK: - Group membership actions (A4)
 
-    /// Open this conversation's info (`docs/ux/conversation-info.md`
-    /// section 1). Refreshes the roster when what opens is the group's.
+    /// The group's info is being opened from the conversation
+    /// (`docs/ux/conversation-info.md` sections 1 and 3). A notice or an error
+    /// describes one action's outcome, so it does not outlive the visit that
+    /// produced it: the pending row annotation is the durable signal.
     func openConversationInfo() {
-        conversationInfoOpen = true
         membershipError = nil
-        // A notice describes one action's outcome, so it must not outlive
-        // the panel that produced it: the pending row annotation is the
-        // durable signal, not this.
         membershipNotice = nil
-        // A conversation between two people opens the other person, which has
-        // no roster to read.
-        if presentsAsGroup { refreshMembers() }
     }
 
-    /// Close the info layer. The conversation is still behind it (section 3).
-    func closeConversationInfo() {
+    /// The info screen is on top of the stack (pushed, or uncovered by a
+    /// back from a screen above it).
+    func groupInfoAppeared() {
+        conversationInfoOpen = true
+        refreshMembers()
+    }
+
+    /// The info screen is covered or gone.
+    func groupInfoDisappeared() {
         conversationInfoOpen = false
+    }
+
+    // MARK: - Add members (`docs/ux/conversation-info.md` section 2.4)
+
+    /// The people in the group, by person (account) key.
+    var memberPersonKeys: Set<Data> { Set(members.map(\.signaturePublicKey)) }
+
+    /// ADR-0060 section 6 — keeps a grant a search read for the person with
+    /// the given account key. Injectable for tests.
+    var foundGrantKeeper: @MainActor (_ grant: FfiReachGrant, _ accountKey: Data) -> Void = { grant, key in
+        ReachCenter.shared.keepFoundGrant(grant, accountKey: key)
+    }
+
+    /// The people with an add waiting for the sweep: not listed again.
+    var pendingAddPersonKeys: Set<Data> {
+        repository.pendingAddPersonKeys(groupIdHex: groupIdHex)
+    }
+
+    /// Add the people picked on the Add members screen: each through the
+    /// conversation's add path (the same call New group makes for its later
+    /// picks), one after another, then one sweep. No notice on success; the
+    /// people who could not be added are named once, in place, in the info.
+    func onAddMembers(_ picks: [AddMembersPick]) {
+        guard !picks.isEmpty, !membershipBusy else { return }
+        membershipBusy = true
+        membershipError = nil
+        membershipNotice = nil
+        Task { @MainActor in
+            defer { membershipBusy = false }
+            let failed = await AddMembersRun.run(
+                picks: picks,
+                add: { [self] pick in
+                    // ADR-0060 section 6 — a person the search found through
+                    // a grant they handed out: the grant is kept first, so
+                    // the committer delegations are signed with it and the
+                    // sweep's Welcome can be written with it. A grant that
+                    // cannot be kept is logged and the add goes on (the
+                    // Welcome then waits for another grant).
+                    if let grant = pick.foundGrant {
+                        foundGrantKeeper(grant, pick.personKey)
+                    }
+                    // ADR-0045 UX §7 — armed against the person's key and
+                    // account id, so a queue-full refusal re-sends by itself.
+                    _ = try await withMembershipRetry(
+                        .add(
+                            subjectKeyB64: base64Encode(pick.personKey),
+                            subjectAccountIdB64: base64Encode(pick.accountId))
+                    ) {
+                        try await repository.addMemberToGroup(
+                            groupIdHex: groupIdHex,
+                            recipientAccountId: pick.accountId,
+                            recipientSignaturePubkey: pick.personKey,
+                            openMailbox: pick.openMailbox)
+                    }
+                },
+                sweep: { [self] in
+                    _ = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
+                })
+            refreshMembers()
+            if !failed.isEmpty {
+                let names = failed.map(\.name)
+                membershipError = UiText {
+                    Localization.text(
+                        "chat.members.add.error.some_failed",
+                        texts: ["names": Localization.joinList(names)])
+                }
+            }
+        }
     }
 
     /// The person on the other side of a conversation between two people, as
@@ -933,27 +990,6 @@ public final class ChatViewModel: ObservableObject {
         if DsClientError.clockSkewCopy(in: error) != nil { return .key("ds.clock_skew") }
         if AnonTokenUnavailable.isQuotaExhausted(error) { return .key("tokens.action_allowance_used") }
         return .key(fallbackKey)
-    }
-
-    /// The add-member form's failure: a name that does not resolve and a
-    /// person who has not finished setting up say so; the rest as any action.
-    /// A name that does not resolve reads the neutral search answer
-    /// (ADR-0060, `docs/ux/who-can-find-me.md` 6.1): the same whether the
-    /// account does not exist or does not let this person find it, never
-    /// claiming which and never echoing the name back. `username` is kept
-    /// for the callers; nothing here renders it.
-    nonisolated static func addMemberErrorText(for error: Error, username: String) -> UiText {
-        switch error as? ContactsError {
-        case .usernameUnknown?:
-            return .key("search.people.not_found")
-        case .noIdentityBundle?:
-            return .key("chat.members.add.error.no_bundle")
-        default:
-            if AnonTokenUnavailable.isQuotaExhausted(error), membershipRefusalReason(of: error) == nil {
-                return .key("tokens.lookup_allowance_used")
-            }
-            return errorText(for: error, fallbackKey: "chat.error.add_member")
-        }
     }
 
     func refreshMembers() {
@@ -1221,10 +1257,9 @@ public final class ChatViewModel: ObservableObject {
         // Stand down while a MANUAL membership operation is in flight.
         //
         // The disarm-on-tap covers every handler that knows its descriptor up
-        // front, but `onAddMember` cannot: the request only becomes nameable
-        // once the typed handle has resolved, so between the tap and the
-        // resolution there is a window in which a retry for the same person
-        // could fire behind the user's own attempt. Standing down costs at
+        // front, but an Add members run covers several people one after
+        // another, so while it is in flight a retry for one of them could
+        // fire behind the user's own attempt. Standing down costs at
         // most one refresh — the roster refresh that follows the manual
         // operation, or the beacon tick, re-evaluates.
         if membershipBusy { return }
@@ -1560,57 +1595,6 @@ public final class ChatViewModel: ObservableObject {
         }
         guard let count = repository.memberCount(groupIdHex: groupIdHex) else { return nil }
         return ConversationTitle.memberCountLabel(count)
-    }
-
-    /// Resolve the typed `@username` (G-4-verified) and add it to this group:
-    /// publish the add commit to the journal (own-marked) + ferry the Welcome.
-    /// Fail-closed — a resolve / verify / publish failure surfaces an error and
-    /// leaves the group untouched.
-    func onAddMember() {
-        // ADR-0048 §4 — no lookup for a name that fails the username rule; the
-        // reason is already on screen under the field.
-        guard case .valid(let username) = checkUsername(addMemberInput) else {
-            let typed = addMemberInput
-            if checkUsername(typed).inlineMessage != nil {
-                membershipError = UiText { checkUsername(typed).inlineMessage ?? "" }
-            }
-            return
-        }
-        guard !membershipBusy else { return }
-        membershipBusy = true
-        membershipError = nil
-        Task { @MainActor in
-            defer { membershipBusy = false }
-            do {
-                let resolved = try await resolveRecipient(username)
-                // ADR-0045 UX §7 — the descriptor is only knowable once the
-                // typed handle has resolved, which is why it is built here and
-                // not before: re-resolving a username later could name a
-                // different account if the handle has since been
-                // re-registered, and adding the wrong person is not a retry.
-                let outcome = try await withMembershipRetry(
-                    .add(
-                        subjectKeyB64: base64Encode(resolved.signaturePubkey),
-                        subjectAccountIdB64: base64Encode(resolved.accountId))
-                ) {
-                    try await repository.addMemberToGroup(
-                        groupIdHex: groupIdHex,
-                        recipientAccountId: resolved.accountId,
-                        recipientSignaturePubkey: resolved.signaturePubkey
-                    )
-                }
-                addMemberInput = ""
-                // ADR-0045 — `proposed` is not a quieter `committed`: nobody has
-                // been added yet. `refreshMembers` re-reads the roster (which is
-                // unchanged) AND the pending set (which now holds the request),
-                // so the sheet shows a request rather than a member.
-                _ = outcome
-                refreshMembers()
-            } catch {
-                membershipError = Self.addMemberErrorText(for: error, username: username)
-                NSLog("onAddMember failed: %@", error.localizedDescription)
-            }
-        }
     }
 
     /// Remove a member by leaf index: publish the removal commit to the journal

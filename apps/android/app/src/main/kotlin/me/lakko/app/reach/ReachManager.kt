@@ -1635,43 +1635,146 @@ public class ReachManager internal constructor(
     }
 
     /**
-     * The committer-delegation envelope a contact of [addedAccountKey] sends
-     * next to an Add it proposed (ADR-0060 §6): one delegation per committer
-     * candidate ([candidateKeys], owner first then admins by rank, at most
-     * 16), each to that candidate's account key, living [ttlMs] (at most 24 h).
-     * `null` when this device holds no `contact` grant for the added person.
+     * The committer-delegation envelope this device sends next to an Add it
+     * proposed for [addedAccountKey] in [groupHex] (ADR-0060 section 6): one
+     * delegation per committer candidate ([candidateKeys], owner first then
+     * admins by rank, at most 16), each to that candidate's account key,
+     * living [ttlMs] (at most 24 h), signed with the first grant held for the
+     * person whose binding verifies against their current key
+     * ([delegationGrantOrder]: contact, group, channel, contacts of
+     * contacts; a grant a search found them through was kept as one).
+     *
+     * With no such grant but a binding this device recorded for the add of a
+     * person found in Everyone ([recordOpenBinding]): the envelope with that
+     * binding and NO delegation, which tells the committer it may write the
+     * Welcome into their open mailbox without a proof (ADR-0060 section 6,
+     * amended 2026-10-29). `null` when neither is held.
      */
     public fun composeDelegations(
         addedAccountKey: ByteArray,
         candidateKeys: List<ByteArray>,
+        groupHex: String? = null,
         ttlMs: Long = DELEGATION_TTL_MS,
         nowMs: Long = System.currentTimeMillis(),
     ): ByteArray? {
-        val contact = heldFor(addedAccountKey).firstOrNull { it.first.kind == ReachKind.CONTACT }?.second
-            ?: return null
         // ADR-0074 3.5a rule 1: the delegation opens the added person's
         // CURRENT mailbox, and is signed to each candidate's current key
         // (the key that candidate's device signs the write with).
         val addedCurrent = mailboxAccountKey(addedAccountKey)
-        // ADR-0078: the mailbox comes from the contact grant's binding,
-        // verified against that current key; a refused binding sends no
-        // delegation.
-        val mailboxPk = mailboxCrypto.grantMailboxPkOrNull(contact, addedCurrent) ?: return null
-        val mailbox = mailboxCrypto.address(mailboxPk)
-        val expires = (nowMs + ttlMs).toULong()
-        val max = uniffi.lakko_ffi_uniffi.maxCommitterDelegations().toInt()
-        val blobs = candidateKeys.take(max).map { candidate ->
-            val nonce = ByteArray(DELEGATION_NONCE_LEN).also(random::nextBytes)
-            uniffi.lakko_ffi_uniffi.signDelegationBlob(contact.seed, mailbox, mailboxAccountKey(candidate), expires, nonce)
+        val held = heldFor(addedAccountKey)
+        // ADR-0078: the mailbox comes from the grant's binding, verified
+        // against that current key; a grant whose binding is refused is
+        // passed over.
+        val signing = delegationGrantOrder(held.map { it.first }).asSequence()
+            .flatMap { ref -> held.filter { it.first == ref }.map { it.second }.asSequence() }
+            .mapNotNull { grant -> mailboxCrypto.grantMailboxPkOrNull(grant, addedCurrent)?.let { grant to it } }
+            .firstOrNull()
+        if (signing != null) {
+            val (grant, mailboxPk) = signing
+            val mailbox = mailboxCrypto.address(mailboxPk)
+            val expires = (nowMs + ttlMs).toULong()
+            val max = uniffi.lakko_ffi_uniffi.maxCommitterDelegations().toInt()
+            val blobs = candidateKeys.take(max).map { candidate ->
+                val nonce = ByteArray(DELEGATION_NONCE_LEN).also(random::nextBytes)
+                uniffi.lakko_ffi_uniffi.signDelegationBlob(grant.seed, mailbox, mailboxAccountKey(candidate), expires, nonce)
+            }
+            if (blobs.isEmpty()) return null
+            return uniffi.lakko_ffi_uniffi.composeCommitterDelegationEnvelope(
+                uniffi.lakko_ffi_uniffi.FfiCommitterDelegationEnvelope(
+                    addedAccountKey = addedAccountKey,
+                    addedMailboxBinding = grant.binding,
+                    delegations = blobs,
+                ),
+            )
         }
-        if (blobs.isEmpty()) return null
+        val group = groupHex ?: return null
+        val binding = ownOpenBindingFor(group, addedAccountKey) ?: return null
         return uniffi.lakko_ffi_uniffi.composeCommitterDelegationEnvelope(
             uniffi.lakko_ffi_uniffi.FfiCommitterDelegationEnvelope(
                 addedAccountKey = addedAccountKey,
-                addedMailboxBinding = contact.binding,
-                delegations = blobs,
+                addedMailboxBinding = binding,
+                delegations = emptyList(),
             ),
         )
+    }
+
+    // -----------------------------------------------------------------
+    // A person found in Everyone (ADR-0060 section 6, amended 2026-10-29)
+    // -----------------------------------------------------------------
+
+    /**
+     * Record the [mailboxBinding] a search found the Everyone person
+     * [accountKey] with, for the add this device is about to propose in
+     * [groupHex]: verified under their CURRENT account key first (a binding
+     * that does not verify is not recorded and `false` is returned). The
+     * delegation envelope then carries it ([composeDelegations]) and this
+     * device's own sweep may write their Welcome into that open mailbox
+     * ([openWelcomeMailboxPk]).
+     */
+    public suspend fun recordOpenBinding(groupHex: String, accountKey: ByteArray, mailboxBinding: ByteArray): Boolean {
+        val b = binding.get() ?: return false
+        val current = mailboxAccountKey(accountKey)
+        mailboxCrypto.bindingMailboxPkOrNull(mailboxBinding, current) ?: return false
+        val changed = lock.withLock {
+            if (binding.get() !== b) return@withLock false
+            val next = withOpenBinding(doc.openBindings, groupHex, reachHex(current), reachHex(mailboxBinding))
+            if (next == doc.openBindings) return@withLock true
+            doc = doc.copy(openBindings = next)
+            store.save(b.accountIdB64, doc)
+            true
+        }
+        // A Welcome already owed to them is retried now.
+        if (changed) notifyGrantHeld(current)
+        return changed
+    }
+
+    /** The binding this device recorded for the add of [accountKey] in
+     *  [groupHex], still verifying under their current key, or `null`. */
+    private fun ownOpenBindingFor(groupHex: String, accountKey: ByteArray): ByteArray? {
+        val current = mailboxAccountKey(accountKey)
+        return openWelcomeBindings(doc.openBindings, emptyList(), groupHex, personKeys(accountKey))
+            .firstOrNull { mailboxCrypto.bindingMailboxPkOrNull(it, current) != null }
+    }
+
+    /**
+     * The mailbox key a sweep's Welcome to [accountKey] in [groupHex] may be
+     * written to WITHOUT a proof, or `null`: only for a person this device
+     * recorded as found in Everyone for that add, or one a kept
+     * no-delegation envelope names ([openWelcomeBindings]), the binding
+     * verified under their current account key. The caller writes there only
+     * when it holds no usable grant or delegation for them at all; a refused
+     * one keeps the Welcome owed ([me.lakko.app.chat.writeWelcomeWithGrants]).
+     */
+    public fun openWelcomeMailboxPk(groupHex: String, accountKey: ByteArray): ByteArray? {
+        if (binding.get() == null) return null
+        val current = mailboxAccountKey(accountKey)
+        val kept = doc.delegations.filter { it.groupHex == groupHex.lowercase() }.mapNotNull { d ->
+            val env = runCatching {
+                uniffi.lakko_ffi_uniffi.decodeCommitterDelegationEnvelope(reachUnhex(d.envelopeHex)!!)
+            }.getOrNull() ?: return@mapNotNull null
+            KeptDelegationView(d.addedAccountKeyHex, env.addedMailboxBinding, env.delegations.size)
+        }
+        return openWelcomeBindings(doc.openBindings, kept, groupHex, personKeys(accountKey))
+            .firstNotNullOfOrNull { mailboxCrypto.bindingMailboxPkOrNull(it, current) }
+    }
+
+    /**
+     * The mailbox key a Welcome to [accountKey] goes to: [mailboxPkFor] (a
+     * held grant's binding), else, in [groupHex], the binding of a kept
+     * delegation naming this account, else the open binding of
+     * [openWelcomeMailboxPk]. `null`: no mailbox known, nothing is written.
+     * Only the ADDRESS is chosen here; what signs the write is
+     * [reachAuthCandidates]' (or the proofless fallback's).
+     */
+    public fun welcomeMailboxPkFor(accountKey: ByteArray, groupHex: String?): ByteArray? {
+        mailboxPkFor(accountKey)?.let { return it }
+        val group = groupHex ?: return null
+        val current = mailboxAccountKey(accountKey)
+        delegationFor(group, accountKey)?.let { picked ->
+            picked.signerSeed.fill(0)
+            mailboxCrypto.bindingMailboxPkOrNull(picked.addedMailboxBinding, current)?.let { return it }
+        }
+        return openWelcomeMailboxPk(group, accountKey)
     }
 
     // -----------------------------------------------------------------

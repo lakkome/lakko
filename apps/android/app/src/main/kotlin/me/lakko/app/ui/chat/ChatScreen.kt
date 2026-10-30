@@ -35,6 +35,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.material.icons.filled.Close
@@ -131,8 +133,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import java.time.ZoneId
 import java.util.Locale
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -205,6 +205,9 @@ public fun ChatScreen(
      *  on the back stack, so Back (and the screen's `Message`) return here. */
     onOpenContact: (contactKey: String) -> Unit,
     modifier: Modifier = Modifier,
+    /** docs/ux/conversation-info.md section 2.4 — the people search the Add
+     *  members screen asks the network with; `null` shows contacts only. */
+    peopleSearch: me.lakko.app.search.PeopleSearchService? = null,
     /** The group's title (local name or member-derived) for a group chat;
      *  a 1x1 chat names the other person itself. Never a hex id. */
     groupTitle: String? = null,
@@ -674,6 +677,41 @@ public fun ChatScreen(
         peerUsername != null -> "@$peerUsername"
         else -> null
     }
+    // docs/ux/conversation-info.md section 3 — a group's info is a SCREEN
+    // pushed over the conversation, not a layer on it: while it (or a screen
+    // pushed over it) is up it takes the conversation's place. The
+    // conversation's state outlives it — the timeline's scroll position is
+    // `listState` above and the draft is the view model's — so its back
+    // control returns to the conversation as it was left.
+    //
+    // Gated on the conversation's KIND, not on the flag alone: a conversation
+    // between two people has no group info, and no caller of
+    // `toggleMembersPanel` may put one in front of them (section 0).
+    val membersPanelOpen by viewModel.membersPanelOpen.collectAsStateWithLifecycle()
+    val addMembersOpen by viewModel.addMembersOpen.collectAsStateWithLifecycle()
+    val transferStepOpen by viewModel.transferStepOpen.collectAsStateWithLifecycle()
+    val infoLayer = me.lakko.app.chat.groupInfoLayer(
+        infoOpen = membersPanelOpen,
+        isGroup = conversationInfo == ConversationInfo.Group,
+        addMembersOpen = addMembersOpen,
+        transferOpen = transferStepOpen,
+    )
+    if (infoLayer == me.lakko.app.chat.GroupInfoLayer.ADD_MEMBERS) {
+        AddMembersScreen(
+            viewModel = viewModel,
+            contactsRepository = contactsRepository,
+            peopleSearch = peopleSearch,
+            modifier = modifier,
+        )
+    } else if (infoLayer != me.lakko.app.chat.GroupInfoLayer.CONVERSATION) {
+        MembersSheet(
+            viewModel = viewModel,
+            onChatDeleted = onNavigateBack,
+            onOpenContact = onOpenContact,
+            contactsRepository = contactsRepository,
+            modifier = modifier,
+        )
+    } else
     Scaffold(
         modifier = modifier.fillMaxSize(),
         // Edge-to-edge: the top bar takes the status bar, the composer sits
@@ -857,25 +895,6 @@ public fun ChatScreen(
                 } else {
                     null
                 },
-            )
-        }
-
-        // The GROUP's info: the roster, the name, the invite link, the roles
-        // and the exit, as a Dialog over the conversation while
-        // `membersPanelOpen` is true.
-        //
-        // The second half of that condition is the guard, not a nicety: this
-        // sheet is about a group, and a conversation between two people has
-        // none. Gating the render on the conversation's kind rather than on
-        // the flag alone means no future caller of `toggleMembersPanel` can
-        // put `Group name`, `Create invite link`, `Make admin` and `Transfer
-        // ownership` in front of somebody chatting with one other person,
-        // which is the defect docs/ux/conversation-info.md section 0 records.
-        val membersPanelOpen by viewModel.membersPanelOpen.collectAsStateWithLifecycle()
-        if (membersPanelOpen && conversationInfo == ConversationInfo.Group) {
-            MembersSheet(
-                viewModel = viewModel,
-                onChatDeleted = onNavigateBack,
             )
         }
 
@@ -3500,15 +3519,30 @@ private fun GroupNameRow(viewModel: ChatViewModel, canRename: Boolean) {
     }
 }
 
+/**
+ * The group's info (`docs/ux/conversation-info.md` sections 2.2 and 3): a
+ * screen pushed over the conversation with a back arrow in its top bar, and
+ * the system back doing the same. The transfer step is pushed over it the
+ * same way (its own back returns here).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MembersSheet(
     viewModel: ChatViewModel,
     /** ADR-0045 UX §6.2.4 — invoked after `Delete this chat` has removed the
      *  registry row, so the screen leaves a thread it can no longer open. */
     onChatDeleted: () -> Unit,
+    /** Section 2.2 — a member who is a contact opens the contact screen,
+     *  pushed over this one; its back returns here. */
+    onOpenContact: (contactKey: String) -> Unit,
+    contactsRepository: me.lakko.app.contacts.ContactsRepository,
+    modifier: Modifier = Modifier,
 ) {
     val members by viewModel.members.collectAsStateWithLifecycle()
-    val input by viewModel.addMemberInput.collectAsStateWithLifecycle()
+    val contactsState by contactsRepository.state.collectAsStateWithLifecycle()
+    val contactKeysB64 = remember(contactsState.accepted) {
+        contactsState.accepted.map { me.lakko.app.chat.outboxB64(it.request.fromPubkey) }.toSet()
+    }
     val busy by viewModel.membershipBusy.collectAsStateWithLifecycle()
     val error by viewModel.membershipError.collectAsStateWithLifecycle()
     val canManage by viewModel.canManageMembers.collectAsStateWithLifecycle()
@@ -3679,21 +3713,83 @@ private fun MembersSheet(
         )
     }
 
-    Dialog(
-        onDismissRequest = viewModel::toggleMembersPanel,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            shape = MaterialTheme.shapes.large,
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = t("chat.members.heading", emptyMap(), mapOf("count" to members.size.toULong())),
-                    style = MaterialTheme.typography.titleMedium,
+    // Section 3 / ADR-0045 UX §6.1.5 — the transfer step is pushed over the
+    // info; its back control (and the system back) cancels it and returns
+    // here, which is what its Cancel button does.
+    if (transferOpen && exit is me.lakko.app.chat.ExitBlock.Owner) {
+        BackHandler { viewModel.cancelTransferStep() }
+        Scaffold(
+            modifier = modifier.fillMaxSize(),
+            contentWindowInsets = WindowInsets.safeDrawing,
+            topBar = {
+                TopAppBar(
+                    title = { Text(t("chat.transfer.action")) },
+                    navigationIcon = {
+                        IconButton(onClick = viewModel::cancelTransferStep) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        }
+                    },
                 )
+            },
+        ) { padding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+            ) {
+                TransferOwnershipStep(
+                    candidates = transferCandidates,
+                    pickedKeyB64 = transferPick,
+                    outgoing = transferOutgoing,
+                    busy = busy,
+                    onPick = viewModel::setTransferPick,
+                    onOutgoing = viewModel::setTransferOutgoing,
+                    onCancel = viewModel::cancelTransferStep,
+                    onTransfer = { successor ->
+                        viewModel.onTransferOwnership(successor, transferOutgoing)
+                    },
+                )
+                // A refusal keeps the step open with the pick intact, so its
+                // sentence shows here, where the person is.
+                error?.let { message ->
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = message.text(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        }
+        return
+    }
+
+    BackHandler { viewModel.toggleMembersPanel() }
+    Scaffold(
+        modifier = modifier.fillMaxSize(),
+        contentWindowInsets = WindowInsets.safeDrawing,
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(t("chat.members.heading", emptyMap(), mapOf("count" to members.size.toULong())))
+                },
+                navigationIcon = {
+                    IconButton(onClick = viewModel::toggleMembersPanel) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                    }
+                },
+            )
+        },
+    ) { scaffoldPadding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(scaffoldPadding)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            ) {
                 // ADR-0045 (UX §6.1.9) — tell the new owner they are the new
                 // owner. Panel level, dismissible, rendered once.
                 //
@@ -3736,28 +3832,6 @@ private fun MembersSheet(
                         kind = me.lakko.app.ui.settings.FindMeScopeKind.GROUP,
                         idHex = viewModel.groupIdHex,
                     )
-                }
-                // ADR-0022 — only owner/admin (or an open/legacy group) sees the
-                // add affordance; a plain member's add would be refused by peers.
-                if (InfoSection.ADD_MEMBER in sections) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(
-                            value = input,
-                            onValueChange = viewModel::setAddMemberInput,
-                            label = { Text(t("chat.members.add.placeholder")) },
-                            singleLine = true,
-                            enabled = !busy,
-                            keyboardOptions = KeyboardOptions(
-                                capitalization = KeyboardCapitalization.None,
-                            ),
-                            modifier = Modifier.weight(1f),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Button(
-                            onClick = viewModel::onAddMember,
-                            enabled = !busy && input.trim().isNotEmpty(),
-                        ) { Text(t("chat.members.add.submit")) }
-                    }
                 }
                 // ADR-0028 (G-3) — owner/admin "create invite link" affordance.
                 // Mints a /g/<slug> link conveying this group's id; a non-member
@@ -4065,18 +4139,59 @@ private fun MembersSheet(
                 // a section, because the rule names the LIST and says nothing
                 // about what a row carries.
                 if (InfoSection.MEMBER_LIST in sections) {
-                    // The roster gives up height while the transfer step is open, so
-                    // the step's action button cannot be pushed off a small screen.
-                    // The alternative — a second `Dialog` with its own scroll — is
-                    // the stacking [TransferOwnershipStep]'s doc rejects.
-                    LazyColumn(
-                        modifier = Modifier.heightIn(max = if (transferOpen) 140.dp else 360.dp),
-                    ) {
-                        items(members) { member ->
+                    // Section 2.4 — the one way to add people: the FIRST row of
+                    // the members list, for whoever may add (the same section the
+                    // rule grants the add to).
+                    if (InfoSection.ADD_MEMBER in sections) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !busy, onClick = viewModel::openAddMembers)
+                                .padding(vertical = 8.dp),
+                        ) {
+                            Icon(
+                                Icons.Filled.PersonAdd,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(32.dp).padding(4.dp),
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                text = t("chat.members.add.action"),
+                                color = MaterialTheme.colorScheme.primary,
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        }
+                    }
+                    // The whole screen scrolls, so the roster is a plain column
+                    // (a group's roster is bounded by MLS, and a lazy list inside
+                    // a scrolling column would need a fixed height).
+                    Column {
+                        members.forEach { member ->
+                            // Section 2.2 — a member who is a contact (and not
+                            // this account) opens the contact screen.
+                            val memberKeyB64 = me.lakko.app.chat.outboxB64(member.signaturePublicKey)
+                            val opensContact = me.lakko.app.chat.memberOpensContact(
+                                memberKeyB64 = memberKeyB64,
+                                ownRow = ownLeaf == member.leafIndex,
+                                contactKeysB64 = contactKeysB64,
+                            )
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .then(
+                                        if (opensContact) {
+                                            Modifier.clickable {
+                                                onOpenContact(
+                                                    me.lakko.app.ui.contacts.contactRouteKey(member.signaturePublicKey),
+                                                )
+                                            }
+                                        } else {
+                                            Modifier
+                                        },
+                                    )
                                     .padding(vertical = 4.dp),
                             ) {
                                 // ADR-0045 — NO optimistic update: a member with a
@@ -4306,33 +4421,8 @@ private fun MembersSheet(
                 // ADR-0045 (UX §6.1.4 / §6.1.5) — the transfer step, inline
                 // beneath the control that opened it. See
                 // [TransferOwnershipStep] for why it is not a second `Dialog`.
-                if (transferOpen && exit is me.lakko.app.chat.ExitBlock.Owner) {
-                    Spacer(Modifier.height(8.dp))
-                    TransferOwnershipStep(
-                        candidates = transferCandidates,
-                        pickedKeyB64 = transferPick,
-                        outgoing = transferOutgoing,
-                        busy = busy,
-                        onPick = viewModel::setTransferPick,
-                        onOutgoing = viewModel::setTransferOutgoing,
-                        onCancel = viewModel::cancelTransferStep,
-                        // The role choice is passed EXPLICITLY rather than read
-                        // back inside the action, so the required-argument
-                        // property the core protects with a type survives all
-                        // the way to the tap: there is no call site here that
-                        // can omit it.
-                        onTransfer = { successor ->
-                            viewModel.onTransferOwnership(successor, transferOutgoing)
-                        },
-                    )
-                }
-                Spacer(Modifier.height(12.dp))
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = viewModel::toggleMembersPanel) { Text(t("common.done")) }
-                }
+                Spacer(Modifier.height(16.dp))
             }
-        }
     }
 }
 

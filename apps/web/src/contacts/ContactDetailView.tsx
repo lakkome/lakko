@@ -69,6 +69,14 @@ export interface ContactDetailViewProps {
   readonly myPubkey: () => Uint8Array | null;
   /** The narrow-screen way back to the list. */
   readonly onBack: () => void;
+  /**
+   * `docs/ux/conversation-info.md` section 3.1 — set when this screen was
+   * opened from another screen it now covers (a conversation, a group's info,
+   * a search result): the back icon is shown at every width and returns
+   * there, in place of the narrow-only way back to the list. Absent when
+   * nothing is covered (the Contacts list beside it).
+   */
+  readonly onBackToOrigin?: (() => void) | undefined;
   /** Message: open the conversation with this person. Always offered; a
    *  caller that IS the conversation passes the way back to it. */
   readonly onMessage: () => void;
@@ -262,15 +270,33 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   return (
     <article>
       <div class="lk-page lk-stack lk-contact-detail">
-        <button
-          type="button"
-          class="ghost small lk-narrow-only"
-          style={{ "align-self": "flex-start" }}
-          onClick={() => props.onBack()}
+        <Show
+          when={props.onBackToOrigin}
+          fallback={
+            <button
+              type="button"
+              class="ghost small lk-narrow-only"
+              style={{ "align-self": "flex-start" }}
+              onClick={() => props.onBack()}
+            >
+              <Icon name="back" size={16} />
+              {t("nav.contacts")}
+            </button>
+          }
         >
-          <Icon name="back" size={16} />
-          {t("nav.contacts")}
-        </button>
+          {(back) => (
+            <button
+              type="button"
+              class="lk-icon-button"
+              style={{ "align-self": "flex-start" }}
+              aria-label={t("common.back")}
+              title={t("common.back")}
+              onClick={() => back()()}
+            >
+              <Icon name="back" size={20} />
+            </button>
+          )}
+        </Show>
 
         <header class="lk-contact-head">
           <Avatar label={name()} id={props.personKeyB64} size="xl" personKey={props.personKeyB64} playVideo />

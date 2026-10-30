@@ -35,7 +35,7 @@ import Foundation
 /// ## Why a plain module and not part of `ChatScreen.swift`
 ///
 /// The test target drives rules, not views, so the decision lives here where it
-/// is executable and `MembersSheet` renders what it decides — the same split
+/// is executable and `GroupInfoScreen` renders what it decides — the same split
 /// `MembershipEnded.swift`, `OwnershipTransfer.swift`, `LeaveGroup.swift` and
 /// `PendingRequests.swift` already use.
 ///

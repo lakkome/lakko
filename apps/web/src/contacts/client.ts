@@ -133,6 +133,7 @@ import type { ActingCommitter } from "../chat/committer-beacon";
 import { consumeRegistrarSeed, ChatClient, rosterOf, toEvent } from "../chat/client";
 import { noteOwnerTransition, readRoleTableOwner } from "../ds/root-handover";
 import { bestGrantForPerson } from "../reach/received-grants";
+import { keepFoundGrant, openCommitterEnvelope } from "../reach/found-grant";
 import { personKeysHex, resolveAccountKey } from "./address-resolver";
 import { DELEGATION_TTL_MS, committerCandidates } from "../reach/delegation-rules";
 import type { ReachGrant as WasmReachGrant } from "../../wasm/lakko_ffi_wasm";
@@ -3415,6 +3416,26 @@ export class ContactsClient {
     group: WasmGroup,
     recipientAccountId: Uint8Array,
     recipientSignaturePubkey: Uint8Array,
+    options?: {
+      /**
+       * `docs/ux/conversation-info.md` section 2.4, ADR-0060 section 6 - the
+       * reach grant a network search found a non-contact through (the
+       * 134-byte grant wire, standard base64). Kept as a grant this device
+       * holds for the person (`reach/found-grant.ts`) before the add, so the
+       * committer delegations are signed with it and a sweep run here can
+       * deliver the Welcome. Secret.
+       */
+      readonly foundGrantWireB64?: string | null;
+      /**
+       * ADR-0060 section 6 - the 97-byte mailbox binding (standard base64)
+       * of a person the search found in Everyone, from their public record.
+       * With no grant held for them, the committer-delegation envelope is
+       * posted with NO delegation and this binding (verified under the
+       * person's account key), so whichever candidate commits writes the
+       * Welcome unsigned to it.
+       */
+      readonly openBindingB64?: string | null;
+    },
   ): Promise<MembershipOutcome> {
     // 0. ADR-0073 R.2: adding someone is an identity fetch that runs the
     //    fail-closed check (the directory serves the CURRENT identity's
@@ -3445,6 +3466,11 @@ export class ContactsClient {
     if (devices.length === 0) {
       throw ContactsError.noIdentityBundle(recipientAccountId);
     }
+    // ADR-0060 section 6 - a grant the search found the person through is
+    // kept as one held for them (binding verified there), before the add is
+    // proposed: the delegations below and any sweep sign with it.
+    const foundGrant = options?.foundGrantWireB64 ?? null;
+    if (foundGrant !== null) await keepFoundGrant(recipientSignaturePubkey, foundGrant);
 
     // 2. Resolve the canonical Identity — same instance every
     //    Group on this device uses (1.16e6c2). The `addMember`
@@ -3489,7 +3515,12 @@ export class ContactsClient {
           },
           devices.map((d) => base64Encode(d.deviceId)),
         );
-        await this.publishCommitterDelegations(identity, group, recipientSignaturePubkey);
+        await this.publishCommitterDelegations(
+          identity,
+          group,
+          recipientSignaturePubkey,
+          options?.openBindingB64 ?? null,
+        );
       }
       return outcome;
     });
@@ -3528,16 +3559,26 @@ export class ContactsClient {
    * ADR-0060 section 6 — post a committer-delegation envelope for an Add this
    * device proposed: one delegation per committer candidate (the owner, then
    * the admins by rank, at most `maxCommitterDelegations()`), each signed with
-   * the grant this account keeps for the added person and naming the
-   * candidate's account key. Nothing is posted when this account holds no
-   * grant for them (the added person is then reachable only if they are in
-   * Everyone, or a committer holds a key of its own). Never throws: a missing
-   * delegation costs the added person their Welcome, not the proposal.
+   * the grant this account keeps for the added person (a grant a search found
+   * them through is kept before the add, `reach/found-grant.ts`) and naming
+   * the candidate's account key.
+   *
+   * With no grant held, a person found in **Everyone** gets the envelope with
+   * NO delegation and their mailbox binding (`openBindingB64`, from their
+   * public record, verified under the added account key): whichever candidate
+   * commits writes the Welcome unsigned to that mailbox. This device records
+   * the same envelope for itself (a device never receives its own group
+   * messages), so its own sweep can deliver; a re-request of the add with no
+   * binding in hand re-sends the recorded one. With neither, nothing is
+   * posted. Never throws: a missing envelope costs the added person their
+   * Welcome, not the proposal.
    */
   private async publishCommitterDelegations(
     identity: IdentitySecrets | null,
     group: WasmGroup,
     addedAccountKey: Uint8Array,
+    /** The Everyone mailbox binding the search found the person with. */
+    openBindingB64: string | null = null,
   ): Promise<void> {
     const session = reachSession();
     if (session === null) return;
@@ -3548,71 +3589,14 @@ export class ContactsClient {
       personKeysHex(journalHex(addedAccountKey)),
       { scopeHex: journalHex(group.groupId) },
     );
-    if (held === null) return;
     try {
-      const wasm = await loadWasm();
-      let ownerHex: string | null = null;
-      const adminHexes: string[] = [];
-      const owner = group.roleTableOwner();
-      if (owner !== undefined && owner !== null) ownerHex = journalHex(owner);
-      const flat = group.roleTableAdmins();
-      for (let i = 0; i + 32 <= flat.length; i += 32) adminHexes.push(journalHex(flat.slice(i, i + 32)));
-      const candidates = committerCandidates(
-        ownerHex,
-        adminHexes,
-        // The role table names ACCOUNT keys; `committerRank` ranks a LEAF key
-        // (ADR-0050: an account key holds no leaf on a bound device), so the
-        // account is ranked through any of its leaves, all of which hold the
-        // account's rank (section 2.5a item 6).
-        (hex) => {
-          const leaf = rosterOf(group).find(
-            (m) => journalHex(m.accountKey ?? m.signaturePublicKey) === hex,
-          );
-          return leaf === undefined ? undefined : group.committerRank(leaf.signaturePublicKey);
-        },
-        wasm.maxCommitterDelegations(),
-      );
-      if (candidates.length === 0) return;
-      const grant = wasm.decodeReachGrant(base64Decode(held.wireB64));
-      // ADR-0078 - the added person's mailbox is the one the grant's binding
-      // names, verified against the account key the Add adds (and its proven
-      // chain); the envelope carries the binding so the committer can verify
-      // it too. A binding that does not verify posts nothing.
-      const target = await verifiedTargetOfGrant(grant, personKeysOf(addedAccountKey));
-      const binding = grant.binding;
-      const seed = grant.seed;
-      grant.free();
-      if (target === null) {
-        seed.fill(0);
-        // eslint-disable-next-line no-console
-        console.warn("ADR-0078: committer delegations not posted; the kept grant's mailbox binding did not verify");
-        return;
+      let bytes: Uint8Array | null;
+      if (held === null) {
+        bytes = await openCommitterEnvelope(journalHex(group.groupId), addedAccountKey, openBindingB64);
+      } else {
+        bytes = await this.signedCommitterEnvelope(group, addedAccountKey, held.wireB64);
       }
-      const mailbox = target.address;
-      const expires = BigInt(Date.now() + DELEGATION_TTL_MS);
-      const blobs: Uint8Array[] = [];
-      try {
-        for (const hex of candidates) {
-          blobs.push(
-            wasm.signDelegationBlob(
-              seed,
-              mailbox,
-              // The committer as the role table names it, resolved: a
-              // committer whose account rotated signs with its current key
-              // (it also tries the key named here unresolved, for a proposer
-              // that has not observed the rotation).
-              resolveAccountKey(hexBytes(hex)),
-              expires,
-              crypto.getRandomValues(new Uint8Array(16)),
-            ),
-          );
-        }
-      } finally {
-        seed.fill(0);
-      }
-      const env = new wasm.CommitterDelegationEnvelope(addedAccountKey, binding, blobs);
-      const bytes = wasm.composeCommitterDelegationEnvelope(env);
-      env.free();
+      if (bytes === null) return;
       const chat = new ChatClient(undefined, {
         ...(this.identityProvider === undefined ? {} : { identityProvider: this.identityProvider }),
         ...(this.onPersist === undefined ? {} : { onPersist: this.onPersist }),
@@ -3621,6 +3605,82 @@ export class ContactsClient {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("ContactsClient: committer delegations not posted", err instanceof Error ? err.message : "");
+    }
+  }
+
+  /** The envelope of {@link publishCommitterDelegations} signed with a held
+   *  grant, or `null` (no candidate, or the grant's binding does not verify
+   *  under the added account key). */
+  private async signedCommitterEnvelope(
+    group: WasmGroup,
+    addedAccountKey: Uint8Array,
+    grantWireB64: string,
+  ): Promise<Uint8Array | null> {
+    const wasm = await loadWasm();
+    let ownerHex: string | null = null;
+    const adminHexes: string[] = [];
+    const owner = group.roleTableOwner();
+    if (owner !== undefined && owner !== null) ownerHex = journalHex(owner);
+    const flat = group.roleTableAdmins();
+    for (let i = 0; i + 32 <= flat.length; i += 32) adminHexes.push(journalHex(flat.slice(i, i + 32)));
+    const candidates = committerCandidates(
+      ownerHex,
+      adminHexes,
+      // The role table names ACCOUNT keys; `committerRank` ranks a LEAF key
+      // (ADR-0050: an account key holds no leaf on a bound device), so the
+      // account is ranked through any of its leaves, all of which hold the
+      // account's rank (section 2.5a item 6).
+      (hex) => {
+        const leaf = rosterOf(group).find(
+          (m) => journalHex(m.accountKey ?? m.signaturePublicKey) === hex,
+        );
+        return leaf === undefined ? undefined : group.committerRank(leaf.signaturePublicKey);
+      },
+      wasm.maxCommitterDelegations(),
+    );
+    if (candidates.length === 0) return null;
+    const grant = wasm.decodeReachGrant(base64Decode(grantWireB64));
+    // ADR-0078 - the added person's mailbox is the one the grant's binding
+    // names, verified against the account key the Add adds (and its proven
+    // chain); the envelope carries the binding so the committer can verify
+    // it too. A binding that does not verify posts nothing.
+    const target = await verifiedTargetOfGrant(grant, personKeysOf(addedAccountKey));
+    const binding = grant.binding;
+    const seed = grant.seed;
+    grant.free();
+    if (target === null) {
+      seed.fill(0);
+      // eslint-disable-next-line no-console
+      console.warn("ADR-0078: committer delegations not posted; the kept grant's mailbox binding did not verify");
+      return null;
+    }
+    const mailbox = target.address;
+    const expires = BigInt(Date.now() + DELEGATION_TTL_MS);
+    const blobs: Uint8Array[] = [];
+    try {
+      for (const hex of candidates) {
+        blobs.push(
+          wasm.signDelegationBlob(
+            seed,
+            mailbox,
+            // The committer as the role table names it, resolved: a
+            // committer whose account rotated signs with its current key
+            // (it also tries the key named here unresolved, for a proposer
+            // that has not observed the rotation).
+            resolveAccountKey(hexBytes(hex)),
+            expires,
+            crypto.getRandomValues(new Uint8Array(16)),
+          ),
+        );
+      }
+    } finally {
+      seed.fill(0);
+    }
+    const env = new wasm.CommitterDelegationEnvelope(addedAccountKey, binding, blobs);
+    try {
+      return wasm.composeCommitterDelegationEnvelope(env);
+    } finally {
+      env.free();
     }
   }
 

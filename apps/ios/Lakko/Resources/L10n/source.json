@@ -2559,28 +2559,32 @@
       "comment": "Screen-reader label of a voice or video message: {label} is its kind (Voice message, Video message), {duration} its spoken length."
     },
     "chat.members.add.action": {
-      "text": "Add member",
-      "comment": "Menu item in a group's header menu that opens group info with the add-member field."
+      "text": "Add members",
+      "comment": "First row of a group's members list in group info, for the owner and admins; opens the Add members screen."
     },
     "chat.members.add.error.no_bundle": {
       "text": "This person has not finished setting up Lakko yet. Try again later.",
       "comment": "Adding someone failed because their account is not fully set up."
     },
     "chat.members.add.error.some_failed": {
-      "text": "Could not add {names}. Add them from the members panel.",
-      "comment": "After creating a group, some of the chosen people could not be added; {names} lists them."
+      "text": "Could not add {names}. Try again.",
+      "comment": "Shown in group info when some of the people picked on the Add members screen (or when creating a group) could not be added; {names} lists them."
     },
-    "chat.members.add.error.unknown_username": {
-      "text": "No account is registered as {name}.",
-      "comment": "Adding someone by username failed: nobody has that username. {name} is the username with an @ in front."
-    },
-    "chat.members.add.placeholder": {
-      "text": "@username",
-      "comment": "Placeholder of the field for adding someone to a group by username. Keep the @."
+    "chat.members.add.search_placeholder": {
+      "text": "Search contacts or people",
+      "comment": "Placeholder of the search field on the Add members screen; it filters contacts and searches people by username or name."
     },
     "chat.members.add.submit": {
       "text": "Add",
       "comment": "Button that adds the person whose username was typed."
+    },
+    "chat.members.add.submit_count": {
+      "text": "Add {count}",
+      "comment": "Button on the Add members screen when more than one person is picked; {count} is the number picked (2 or more)."
+    },
+    "chat.members.add.title": {
+      "text": "Add members",
+      "comment": "Title of the screen where the owner or an admin picks contacts and found people to add to a group."
     },
     "chat.members.admin.make": {
       "text": "Make admin",

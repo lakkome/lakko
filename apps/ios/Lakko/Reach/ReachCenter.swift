@@ -375,6 +375,8 @@ public final class ReachCenter: ObservableObject {
         bindingCache = [:]
         keyResolver = AccountKeyResolver()
         record = ReachRecord()
+        delegations = [:]
+        openEnvelopes = [:]
         reachState = FfiReachState(entries: [], updatedAtMs: 0)
         setting = defaultVisibilitySetting()
         status = .applied
@@ -1172,11 +1174,162 @@ public final class ReachCenter: ObservableObject {
     /// delegation in it checks (`checkCommitterDelegations`, which also
     /// verifies the added person's mailbox binding against
     /// `addedAccountKey`).
-    public func keepDelegation(_ envelope: FfiCommitterDelegationEnvelope, fromAccountKeyB64: String?) {
+    ///
+    /// ADR-0060 section 6, "An add of a person found by search" — an
+    /// envelope with NO delegation names a person the proposer found in
+    /// Everyone: it is kept for the group it arrived in (`groupIdHex`; none
+    /// given, it is dropped), its binding verified under the added account
+    /// key, and lets a sweep of that group write that person's Welcome to
+    /// that mailbox without a proof (``openWelcomeTarget(ofPerson:groupIdHex:)``).
+    /// The newest envelope per (sender, added person) wins, whichever kind.
+    public func keepDelegation(
+        _ envelope: FfiCommitterDelegationEnvelope, fromAccountKeyB64: String?, groupIdHex: String? = nil
+    ) {
         guard let sender = fromAccountKeyB64,
               (try? checkCommitterDelegations(envelope: envelope)) != nil else { return }
-        delegations[sender + "|" + envelope.addedAccountKey.base64EncodedString()] = envelope
-        onGrantKept?(envelope.addedAccountKey.base64EncodedString())
+        let added = envelope.addedAccountKey.base64EncodedString()
+        let pair = sender + "|" + added
+        if envelope.delegations.isEmpty {
+            guard let groupIdHex,
+                  target(binding: envelope.addedMailboxBinding, accountKey: envelope.addedAccountKey) != nil
+            else { return }
+            delegations[pair] = nil
+            openEnvelopes[groupIdHex.lowercased() + "|" + pair] = envelope
+        } else {
+            delegations[pair] = envelope
+            openEnvelopes = openEnvelopes.filter { !$0.key.hasSuffix("|" + pair) }
+        }
+        onGrantKept?(added)
+    }
+
+    // MARK: - A person found in Everyone (ADR-0060 section 6)
+
+    /// Kept committer-delegation envelopes with no delegation, by
+    /// `group | sender | added`. In memory only, like the delegations: the
+    /// proposer's own device keeps its durable record (``ReachRecord/openAdds``).
+    private var openEnvelopes: [String: FfiCommitterDelegationEnvelope] = [:]
+
+    /// At most this many ``ReachRecord/openAdds`` are kept, the oldest
+    /// dropped first. Chosen, not measured.
+    static let maxOpenAdds = 256
+
+    /// The proposer's side for a person found in Everyone: a
+    /// committer-delegation envelope with no delegation, naming the person's
+    /// verified mailbox `target`, ready to send in the group. `nil` when the
+    /// core refuses it.
+    public func composeOpenEnvelope(target: MailboxTarget) -> Data? {
+        try? composeCommitterDelegationEnvelope(
+            envelope: FfiCommitterDelegationEnvelope(
+                addedAccountKey: target.accountKey,
+                addedMailboxBinding: target.binding,
+                delegations: []))
+    }
+
+    /// Record, durably, that this device proposed to add the person whose
+    /// verified Everyone mailbox is `target` to `groupIdHex`: its own sweep
+    /// reads this in place of the envelope it posted (a device never receives
+    /// its own group messages). The binding is verified again here.
+    public func recordOpenAdd(groupIdHex: String, target: MailboxTarget) {
+        guard isActive,
+              let verified = self.target(binding: target.binding, accountKey: target.accountKey) else { return }
+        let group = groupIdHex.lowercased()
+        let keyB64 = verified.accountKey.base64EncodedString()
+        var adds = (record.openAdds ?? []).filter { !($0.groupIdHex == group && $0.accountKeyB64 == keyB64) }
+        adds.append(ReachRecord.OpenAdd(
+            groupIdHex: group, accountKeyB64: keyB64,
+            bindingB64: verified.binding.base64EncodedString(), storedAtMs: Self.nowMs()))
+        if adds.count > Self.maxOpenAdds { adds.removeFirst(adds.count - Self.maxOpenAdds) }
+        record.openAdds = adds
+        persist()
+        onGrantKept?(keyB64)
+    }
+
+    /// The mailbox a sweep of `groupIdHex` may write the Welcome of `person`
+    /// to WITHOUT a proof: the verified binding of a kept no-delegation
+    /// envelope received in that group, or of this device's own record, that
+    /// names this person (under any of their keys). `nil` otherwise, and
+    /// always for this account's own key. The caller writes unsigned only
+    /// when it holds no grant or delegation for the person.
+    public func openWelcomeTarget(ofPerson person: Data, groupIdHex: String) -> MailboxTarget? {
+        guard !keyResolver.isOwn(person), person != ownAccountKey else { return nil }
+        let current = keyResolver.current(of: person)
+        let group = groupIdHex.lowercased()
+        for (key, envelope) in openEnvelopes.sorted(by: { $0.key < $1.key })
+        where key.hasPrefix(group + "|") && keyResolver.current(of: envelope.addedAccountKey) == current {
+            if let verified = target(binding: envelope.addedMailboxBinding, accountKey: envelope.addedAccountKey) {
+                return verified
+            }
+        }
+        for add in (record.openAdds ?? []).reversed() where add.groupIdHex == group {
+            guard let key = Data(base64Encoded: add.accountKeyB64),
+                  keyResolver.current(of: key) == current,
+                  let binding = Data(base64Encoded: add.bindingB64),
+                  let verified = target(binding: binding, accountKey: key) else { continue }
+            return verified
+        }
+        return nil
+    }
+
+    /// ``openWelcomeTarget(ofPerson:groupIdHex:)`` for a Welcome addressed
+    /// by a mailbox: the open target whose address it is.
+    public func openWelcomeTarget(forMailbox address: Data, groupIdHex: String) -> MailboxTarget? {
+        let group = groupIdHex.lowercased()
+        var people: [Data] = openEnvelopes.filter { $0.key.hasPrefix(group + "|") }
+            .sorted(by: { $0.key < $1.key }).map(\.value.addedAccountKey)
+        people += (record.openAdds ?? []).filter { $0.groupIdHex == group }
+            .compactMap { Data(base64Encoded: $0.accountKeyB64) }
+        for person in people {
+            if let open = openWelcomeTarget(ofPerson: person, groupIdHex: groupIdHex), open.address == address {
+                return open
+            }
+        }
+        return nil
+    }
+
+    /// The Welcome to `person` in `groupIdHex` was written: forget what let
+    /// it go without a proof there.
+    public func dropOpenAdd(groupIdHex: String, person: Data) {
+        let current = keyResolver.current(of: person)
+        let group = groupIdHex.lowercased()
+        openEnvelopes = openEnvelopes.filter { key, envelope in
+            !(key.hasPrefix(group + "|") && keyResolver.current(of: envelope.addedAccountKey) == current)
+        }
+        guard let adds = record.openAdds else { return }
+        let kept = adds.filter { add in
+            guard add.groupIdHex == group, let key = Data(base64Encoded: add.accountKeyB64) else { return true }
+            return keyResolver.current(of: key) != current
+        }
+        guard kept.count != adds.count else { return }
+        record.openAdds = kept.isEmpty ? nil : kept
+        persist()
+    }
+
+    /// ADR-0060 section 6 — keep the grant a search read for the person with
+    /// account key `accountKey` (an introduction's `fof` grant) as a grant
+    /// this device holds for them, so the committer delegations of an add are
+    /// signed with it and this device can write their Welcome itself. Only a
+    /// `fof` grant is read by a search without being held already; any other
+    /// class is refused. Its binding must verify under one of the person's
+    /// keys, as for every grant kept. Returns whether it was kept.
+    @discardableResult
+    public func keepFoundGrant(_ grant: FfiReachGrant, accountKey: Data) -> Bool {
+        guard isActive, grant.class == .fof, grant.seed.count == 32,
+              !keyResolver.isOwn(accountKey), accountKey != ownAccountKey,
+              keyResolver.allKeys(of: accountKey).contains(where: { key in
+                  (try? reachGrantMailboxPkVerified(grant: grant, accountPk: key)) != nil
+              }) else {
+            NSLog("ADR-0060: a grant found by search was not kept")
+            return false
+        }
+        let key = keyResolver.current(of: accountKey).base64EncodedString()
+        let held = ReachRules.HeldGrant(grant: grant, scopeHex: nil, storedAtMs: Self.nowMs())
+        let merged = ReachRules.merging(held, into: record.held[key] ?? [])
+        if merged != record.held[key] {
+            record.held[key] = merged
+            persist()
+        }
+        onGrantKept?(key)
+        return true
     }
 
     /// The people (current keys) delegations are kept for.

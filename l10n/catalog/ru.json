@@ -2507,7 +2507,7 @@
       "status": "machine"
     },
     "chat.members.add.action": {
-      "text": "Добавить участника",
+      "text": "Добавить участников",
       "status": "machine"
     },
     "chat.members.add.error.no_bundle": {
@@ -2515,19 +2515,23 @@
       "status": "machine"
     },
     "chat.members.add.error.some_failed": {
-      "text": "Не удалось добавить: {names}. Добавьте их через список участников.",
+      "text": "Не удалось добавить: {names}. Попробуйте ещё раз.",
       "status": "machine"
     },
-    "chat.members.add.error.unknown_username": {
-      "text": "Аккаунт {name} не зарегистрирован.",
-      "status": "machine"
-    },
-    "chat.members.add.placeholder": {
-      "text": "@username",
+    "chat.members.add.search_placeholder": {
+      "text": "Поиск по контактам и людям",
       "status": "machine"
     },
     "chat.members.add.submit": {
       "text": "Добавить",
+      "status": "machine"
+    },
+    "chat.members.add.submit_count": {
+      "text": "Добавить {count}",
+      "status": "machine"
+    },
+    "chat.members.add.title": {
+      "text": "Добавить участников",
       "status": "machine"
     },
     "chat.members.admin.make": {

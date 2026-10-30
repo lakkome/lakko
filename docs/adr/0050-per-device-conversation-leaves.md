@@ -314,6 +314,10 @@ it working in practice. Each is decided here; the DS half is in
    this group, any group, channel), moving to the next on a `401`; with no
    grant left it does not write, keeps the Welcome owed and retries it on
    the next poll and whenever a new grant for that account arrives.
+   One exception since 2026-10-29: a person the proposer found in
+   Everyone, named by a committer-delegation envelope with no delegation and
+   a verified mailbox binding, is written to without a proof
+   ([ADR-0060](0060-scoped-discovery.md) section 6, with its residual).
 8. **Every device of every registrar holds its registrar seed.** The owner
    sends the ADR-0057 registrar seed once per account and only the device
    that processed it stores it, so a device that joined later cannot

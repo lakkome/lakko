@@ -2500,10 +2500,42 @@ private fun SessionRoot(
                                 sessionTokenProvider = {
                                     authRepository.identitySecrets.value?.sessionToken
                                 },
-                                // A4 — resolve @username -> (accountId, signaturePubkey)
-                                // through the G-4-verified contacts path for add-member.
-                                resolveRecipient = { username ->
-                                    contactsRepository.resolveVerifiedRecipient(username)
+                                // docs/ux/conversation-info.md section 2.4 — a
+                                // person a search found through a grant they
+                                // handed out: keep the grant, so the Welcome the
+                                // sweep owes them can be written with it. A grant
+                                // that cannot be kept is logged and the add goes
+                                // on (the Welcome then waits for another grant).
+                                keepFoundGrant = { accountKey, wireB64 ->
+                                    try {
+                                        val grant = uniffi.lakko_ffi_uniffi.decodeReachGrant(
+                                            java.util.Base64.getDecoder().decode(wireB64),
+                                        )
+                                        me.lakko.app.reach.ReachManager.get(appContext)
+                                            .fileHeld(accountKey, grant, scopeHex = "")
+                                    } catch (cause: Throwable) {
+                                        me.lakko.app.rethrowIfCancelled(cause)
+                                        android.util.Log.w("MainActivity", "found grant not kept: ${cause.javaClass.simpleName}")
+                                    }
+                                },
+                                // ADR-0060 section 6 (amended 2026-10-29) — a
+                                // person found in Everyone: record the binding
+                                // their public record carried for this add
+                                // (verified under their account key first). A
+                                // binding that is refused is logged and the add
+                                // goes on (the Welcome then stays owed).
+                                keepFoundBinding = { gidHex, accountKey, bindingB64 ->
+                                    try {
+                                        val recorded = me.lakko.app.reach.ReachManager.get(appContext).recordOpenBinding(
+                                            gidHex,
+                                            accountKey,
+                                            java.util.Base64.getDecoder().decode(bindingB64),
+                                        )
+                                        if (!recorded) android.util.Log.w("MainActivity", "found binding not recorded")
+                                    } catch (cause: Throwable) {
+                                        me.lakko.app.rethrowIfCancelled(cause)
+                                        android.util.Log.w("MainActivity", "found binding not recorded: ${cause.javaClass.simpleName}")
+                                    }
                                 },
                                 callHost = callHost,
                                 groupCallHost = me.lakko.app.calls.AppCallHost.group,
@@ -2548,6 +2580,10 @@ private fun SessionRoot(
                             // list pushes it (the same route, above). This chat
                             // stays beneath it, so Back and `Message` return here.
                             onOpenContact = { key -> navController.navigate(Routes.contact(key)) },
+                            // docs/ux/conversation-info.md section 2.4 — the Add
+                            // members screen asks the network the way the
+                            // search fields do, with the same session memory.
+                            peopleSearch = peopleSearch,
                             groupTitle = groupTitle,
                             // ADR-0052 decision 2 / UX 5.1 — Forward opens the
                             // picker with the message in the one-shot slot; the

@@ -38,6 +38,10 @@ public struct ChatScreen: View {
     /// the Contacts list pushes it: one card (`docs/ux/conversation-info.md`
     /// section 3, "Except a person").
     public var onOpenContact: (Int64) -> Void
+    /// Push the group's info over this conversation
+    /// (`docs/ux/conversation-info.md` section 3): a screen with a back that
+    /// returns here as it was left.
+    public var onOpenGroupInfo: () -> Void
     /// ADR-0052 decision 2 — open another conversation, pushed the way the
     /// Chats list pushes it: after a forward, the conversation it went to;
     /// on a tapped attribution, the origin, with the message to scroll to.
@@ -84,6 +88,11 @@ public struct ChatScreen: View {
     /// ADR-0052 / section 3.1 "tap to jump" — the row a tapped quote pointed
     /// at, highlighted for about a second and a half, then `nil`.
     @State private var highlightedMessageId: Int64?
+
+    /// The timeline was scrolled to the newest message when this screen first
+    /// appeared; a later appearance (a back from a pushed screen) keeps the
+    /// position the person left.
+    @State private var timelineOpenedAtNewest = false
 
     /// A quote tap the timeline's `ScrollViewReader` has yet to act on. A
     /// counter rides along so two taps on the same quote both scroll.
@@ -133,12 +142,14 @@ public struct ChatScreen: View {
         contacts: ContactsViewModel,
         onBack: @escaping () -> Void,
         onOpenContact: @escaping (Int64) -> Void = { _ in },
+        onOpenGroupInfo: @escaping () -> Void = {},
         onOpenConversation: @escaping (String, Int64?) -> Void = { _, _ in }
     ) {
         self.viewModel = viewModel
         self.contacts = contacts
         self.onBack = onBack
         self.onOpenContact = onOpenContact
+        self.onOpenGroupInfo = onOpenGroupInfo
         self.onOpenConversation = onOpenConversation
         _media = StateObject(wrappedValue: ChatMediaController(port: viewModel.mediaPort()))
     }
@@ -436,14 +447,15 @@ public struct ChatScreen: View {
                 Button {
                     // A person opens the one contact card, pushed - a person
                     // the viewer removed too, whose card then offers `Add to
-                    // contacts` (amended 2026-10-24); a group opens its
-                    // layer. A one-to-one whose other person cannot be read
+                    // contacts` (amended 2026-10-24); a group pushes its info
+                    // screen (amended 2026-10-29). A one-to-one whose other person cannot be read
                     // opens nothing: that is not a state with a screen.
                     switch infoDestination {
                     case .person(let contactMessageId?):
                         onOpenContact(contactMessageId)
                     case .group:
                         viewModel.openConversationInfo()
+                        onOpenGroupInfo()
                     case .person(nil), .channel:
                         break
                     }
@@ -495,7 +507,6 @@ public struct ChatScreen: View {
             // info belongs back here.
             }
         }
-        .sheet(isPresented: $viewModel.conversationInfoOpen) { conversationInfoLayer }
         .task {
             // Continuous foreground polling. SwiftUI's `.task`
             // ties the lifecycle to the view: the loop starts on
@@ -856,6 +867,13 @@ public struct ChatScreen: View {
                 // does not do. The second call runs after the lazy stack has
                 // laid its rows out, when the first one may have had nothing
                 // to measure yet.
+                //
+                // Only on the FIRST appearance: a back from a screen pushed
+                // over the chat (the group's info, a contact) appears this
+                // view again, and the conversation must return as it was left
+                // (`docs/ux/conversation-info.md` section 3).
+                guard !timelineOpenedAtNewest else { return }
+                timelineOpenedAtNewest = true
                 guard let last = lastDrawnMessageId else { return }
                 scrollProxy.scrollTo(last, anchor: .bottom)
                 Task { @MainActor in
@@ -1247,22 +1265,6 @@ public struct ChatScreen: View {
         case .withdrawn(let notice, let draft, let draftLabel):
             withdrawnComposer(notice: notice, draft: draft, draftLabel: draftLabel)
         }
-    }
-
-    /// The layer the conversation's name opens.
-    @ViewBuilder
-    private var conversationInfoLayer: some View {
-        // Section 3 — a layer over the conversation, which stays where it
-        // is behind it. On iOS that is a sheet, which is what this already
-        // was.
-        ConversationInfoSheet(
-            destination: infoDestination,
-            chat: viewModel,
-            // ADR-0045 UX 6.2.4 - a deleted chat's row is gone from the
-            // registry, so the screen it was opened from has nothing left
-            // to show. Route back the same way the Back button does.
-            onDeleted: onBack
-        )
     }
 
     /// The bar that occupies the composer's own slot so the layout does not
@@ -2855,12 +2857,18 @@ private struct GroupNameSection: View {
 /// name, the roster with roles and add / remove, the invite link, transfer
 /// ownership and `Leave group`.
 ///
-/// Reached only through ``ConversationInfoSheet``, and only for a group —
-/// which is the fix: this panel used to open on any conversation, so a chat
-/// between two people was shown a group with the group-only parts hidden,
-/// which is not the same thing as a screen about a person.
-struct MembersSheet: View {
+/// A screen pushed over the conversation on the tab's stack (section 3,
+/// amended 2026-10-29), with the system back returning to the conversation as
+/// it was left. It used to be a sheet with a Done button. Reached only for a
+/// group: a chat between two people opens the person.
+struct GroupInfoScreen: View {
     @ObservedObject var viewModel: ChatViewModel
+    /// The contacts, read to know which members open a contact screen.
+    @ObservedObject var contacts: ContactsViewModel
+    /// Section 2.4 — push the Add members screen over this one.
+    var onAddMembers: () -> Void = {}
+    /// Section 2.2 — push a member's contact screen over this one.
+    var onOpenContact: (Int64) -> Void = { _ in }
     /// ADR-0061 — observed so a language switch re-renders the panel.
     @ObservedObject var l10n = Localization.shared
 
@@ -2884,7 +2892,8 @@ struct MembersSheet: View {
 
     /// What the screen does after the chat is gone: the row it was reached from
     /// no longer exists, so staying on it would leave the user looking at a
-    /// thread the registry has forgotten. Supplied by the presenting screen.
+    /// thread the registry has forgotten. Supplied by the navigation (the info
+    /// and the conversation under it both go).
     var onDeleted: () -> Void = {}
 
     /// Which blocks this panel holds — `docs/ux/conversation-info.md` section
@@ -2923,8 +2932,7 @@ struct MembersSheet: View {
         // Once per render, never per row: this crosses the FFI, and the
         // roster below is a `ForEach` that asks about `.roles` on every member.
         let sections = groupSections
-        return NavigationStack {
-            List {
+        return List {
                 // ADR-0045 UX §6.1.9 — tell the new owner, best-effort and
                 // fail-open. Nothing on the wire announces a transfer, so this
                 // is an inference from an observed role-table change and can
@@ -2965,8 +2973,8 @@ struct MembersSheet: View {
                 //
                 // The gate used to be `presentsAsGroup || groupName != nil`,
                 // which is unconditionally true HERE: this panel is reached
-                // only through ``ConversationInfoSheet``'s `.group` arm, and
-                // that arm is `infoTarget(.group)`. So `.groupName` is the
+                // only through the header's `.group` destination, and that is
+                // `infoTarget(.group)`. So `.groupName` is the
                 // same answer, asked of the rule that owns it — and it also
                 // stays true once the membership has ended, which is right:
                 // the name is still what the group was called.
@@ -2978,24 +2986,6 @@ struct MembersSheet: View {
                 // `docs/ux/who-can-find-me.md` section 5 — present only while
                 // the setting includes groups at all.
                 MembersCanFindMeSection(groupIdHex: viewModel.groupIdHex)
-                // ADR-0022 — only owner/admin (or an open/legacy group) sees
-                // the add affordance; a plain member's add would be refused.
-                if sections.contains(.addMember) {
-                    Section(l10n.t("chat.members.add.action")) {
-                        HStack {
-                            TextField(l10n.t("chat.members.add.placeholder"), text: $viewModel.addMemberInput)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled(true)
-                                .disabled(viewModel.membershipBusy)
-                            Button(l10n.t("chat.members.add.submit")) { viewModel.onAddMember() }
-                                .disabled(
-                                    viewModel.membershipBusy
-                                        || !checkUsername(viewModel.addMemberInput).allowsLookup)
-                        }
-                        // ADR-0048 §4 — the reason, before any lookup.
-                        UsernameRuleHint(input: viewModel.addMemberInput)
-                    }
-                }
                 // ADR-0045 (UX §14) — the membership error/notice slot is
                 // UNGATED, and that is a fix rather than a layout choice. It
                 // used to live inside the `canManageMembers` `Add member`
@@ -3233,26 +3223,25 @@ struct MembersSheet: View {
                 // exception.
                 if sections.contains(.memberList) {
                     Section(memberCountLabel) {
+                        // Section 2.4 — Add members is the FIRST row of the
+                        // list, for whoever may add (ADR-0022: the owner and
+                        // admins; anyone in a group with no role table). It is
+                        // the only way in: the typed `@username` form is gone.
+                        if sections.contains(.addMember) {
+                            Button(action: onAddMembers) {
+                                Label {
+                                    Text(l10n.t("chat.members.add.action"))
+                                        .foregroundStyle(Color.lakkoAccent)
+                                } icon: {
+                                    Image(systemName: "person.badge.plus")
+                                        .foregroundStyle(Color.lakkoAccent)
+                                }
+                            }
+                            .accessibilityIdentifier("group-info-add-members")
+                        }
                         ForEach(viewModel.members, id: \.leafIndex) { member in
                             HStack {
-                                InitialsAvatar(
-                                    name: viewModel.memberInitialsName(member),
-                                    identity: base64Encode(member.signaturePublicKey),
-                                    size: 32, placeholderSymbol: "person.fill",
-                                    photo: viewModel.memberPhoto(member))
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(viewModel.memberLabel(member))
-                                    // ADR-0045 S4a — NO optimistic update: a member
-                                    // with a pending removal stays in the roster and
-                                    // is annotated. Dropping the row would assert
-                                    // they are gone while they are still in the
-                                    // group and still decrypting every message.
-                                    if let annotation = viewModel.pendingAnnotation(member) {
-                                        Text(annotation)
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
+                                memberIdentity(member)
                                 Spacer()
                                 // ADR-0022 — the promote / demote toggle. The rule
                                 // makes `.roles` OWNER-only, not owner-or-admin:
@@ -3446,9 +3435,8 @@ struct MembersSheet: View {
                     }
                 }
             }
-            // ADR-0045 UX §6.1.11 / §14 — the transfer step is a PUSHED
-            // destination inside the members sheet's own `NavigationStack`,
-            // never a sheet over a sheet: one modal surface owns the whole
+            // ADR-0045 UX §6.1.11 / §14 — the transfer step is a further push
+            // on the same stack, never a sheet: one surface owns the whole
             // choice, because splitting it would put the warning and the button
             // on different screens.
             .navigationDestination(isPresented: $viewModel.transferStepOpen) {
@@ -3509,7 +3497,6 @@ struct MembersSheet: View {
                     // error slot filled, rather than dropping the user out of a
                     // chat that is still there.
                     if viewModel.onDeleteChat() {
-                        viewModel.closeConversationInfo()
                         onDeleted()
                     }
                 },
@@ -3519,17 +3506,51 @@ struct MembersSheet: View {
             // roster, and it is now only ever opened for a group.
             .navigationTitle(l10n.t("chat.info.group"))
             .navigationBarTitleDisplayMode(.inline)
+            // Section 3 — the system back returns to the conversation; there
+            // is no Done any more.
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: .topBarTrailing) {
                     if viewModel.membershipBusy {
                         ProgressView().controlSize(.small)
                     }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(l10n.t("common.done")) { viewModel.closeConversationInfo() }
+            }
+            .onAppear { viewModel.groupInfoAppeared() }
+            .onDisappear { viewModel.groupInfoDisappeared() }
+    }
+
+    /// A member's avatar, name and pending annotation. A member who is a
+    /// contact (never this account) opens their contact screen (section 2.2),
+    /// whose back returns here; anyone else is not tappable.
+    @ViewBuilder
+    private func memberIdentity(_ member: GroupMember) -> some View {
+        let content = HStack {
+            InitialsAvatar(
+                name: viewModel.memberInitialsName(member),
+                identity: base64Encode(member.signaturePublicKey),
+                size: 32, placeholderSymbol: "person.fill",
+                photo: viewModel.memberPhoto(member))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(viewModel.memberLabel(member))
+                    .foregroundStyle(Color.lakkoText)
+                // ADR-0045 S4a — NO optimistic update: a member with a pending
+                // removal stays in the roster and is annotated. Dropping the row
+                // would assert they are gone while they are still in the group
+                // and still decrypting every message.
+                if let annotation = viewModel.pendingAnnotation(member) {
+                    Text(annotation)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .onAppear { viewModel.refreshMembers() }
+        }
+        if viewModel.ownLeafIndex != member.leafIndex,
+           let messageId = contacts.contactMessageId(forPersonKey: member.signaturePublicKey) {
+            Button { onOpenContact(messageId) } label: { content.contentShape(Rectangle()) }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("group-info-member-contact")
+        } else {
+            content
         }
     }
 

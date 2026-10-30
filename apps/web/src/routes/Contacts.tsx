@@ -65,6 +65,7 @@ import {
 import { ContactsClient } from "../contacts/client";
 import type { IncomingContactRequest } from "../contacts/client";
 import { ContactDetailView } from "../contacts/ContactDetailView";
+import { contactBackTarget, coversOrigin } from "../chat/info-navigation";
 import { ContactListPane, type AddMode } from "../contacts/ContactListPane";
 import { waitingSentRequests, type SentRequestRecord } from "../contacts/contact-list-model";
 import { contactsErrorText } from "../contacts/errors";
@@ -315,6 +316,30 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       // at `/contacts`.
       setSelectedKey(null);
     }
+  });
+  /**
+   * `docs/ux/conversation-info.md` section 3.1 — where the contact screen's
+   * back icon returns: the screen that opened it and that it covers (a
+   * conversation, a group's info, a search in Chats), recorded in the history
+   * entry's state (`chat/info-navigation.ts`). Only for the person that entry
+   * names: once another contact is picked from the list beside it, nothing is
+   * covered any more.
+   */
+  const backToOrigin = createMemo((): (() => void) | undefined => {
+    const origin = contactBackTarget(location.state);
+    if (origin === null || !coversOrigin(origin)) return undefined;
+    const slug = params.key;
+    if (slug === undefined) return undefined;
+    let named: string;
+    try {
+      named = base64Encode(base64UrlDecodeNoPad(slug));
+    } catch {
+      return undefined;
+    }
+    if (selectedKey() !== named) return undefined;
+    // The entry was pushed from the origin, so going back through it returns
+    // there with the origin's own history intact.
+    return () => navigate(-1);
   });
   /** Deselect, and stop the URL naming a person who is no longer shown. */
   function clearSelection(): void {
@@ -632,6 +657,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
               error={detailError}
               myPubkey={() => chats.identity()?.signaturePublicKey ?? null}
               onBack={clearSelection}
+              onBackToOrigin={backToOrigin()}
               onMessage={() => void onMessage(c())}
               onCall={(withVideo) => onCall(c(), withVideo)}
               onRename={(name) => onRenameAccepted(c(), name)}

@@ -101,7 +101,7 @@ import { createLiveText } from "../l10n/live-text";
 import { paths } from "./paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
-import { ModalLayer } from "../ui/ModalLayer";
+import { PushedScreen } from "../ui/PushedScreen";
 import { MembersCanFindMeSwitch } from "../settings/MembersCanFindMeSwitch";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { screenAnchor } from "../ui/screen-anchor";
@@ -1074,7 +1074,7 @@ const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
       fallback={<Navigate href={paths.channelSubscribe(params.id)} />}
     >
       <article class="lk-chat lk-channel">
-        <div class="lk-chat-body">
+        <div class="lk-chat-body" style={{ position: "relative" }}>
           <ChannelHead
             id={params.id}
             name={meta().name}
@@ -1099,16 +1099,16 @@ const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
               </Show>
             }
           />
-          {/* `docs/ux/conversation-info.md` — the channel's info, over the
-              channel rather than beside it. The owner's manage screen is
-              REACHED from here rather than moved into here: it stays mounted
-              behind this view so the fan-out, the rotation heartbeat and the
-              request poll keep running, and a layer that unmounts on close
-              would stop them. */}
-          <ModalLayer
+          {/* `docs/ux/conversation-info.md` sections 3 and 3.1 — the channel's
+              info, a screen over the channel with a back icon (it was a layer
+              until 2026-10-29). The owner's manage screen is REACHED from here
+              rather than moved into here: it stays mounted behind this screen
+              so the fan-out, the rotation heartbeat and the request poll keep
+              running, and a screen that unmounted the view would stop them. */}
+          <PushedScreen
             open={infoOpen()}
             title={infoHeading("channel")}
-            onClose={(): void => {
+            onBack={(): void => {
               setInfoOpen(false);
             }}
           >
@@ -1139,7 +1139,7 @@ const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
                 });
               }}
             />
-          </ModalLayer>
+          </PushedScreen>
           <Show
             when={isOwner()}
             fallback={
@@ -1492,7 +1492,7 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
 
   return (
     <article class="lk-chat lk-channel">
-      <div class="lk-chat-body">
+      <div class="lk-chat-body" style={{ position: "relative" }}>
         <ChannelHead
           id={params.id}
           name={meta().name}
@@ -1502,10 +1502,10 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
             }}
         />
         {/* The reader's view of the same info the publisher's view opens. */}
-        <ModalLayer
+        <PushedScreen
           open={infoOpen()}
           title={infoHeading("channel")}
-          onClose={(): void => {
+          onBack={(): void => {
               setInfoOpen(false);
             }}
         >
@@ -1532,7 +1532,7 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
               });
             }}
           />
-        </ModalLayer>
+        </PushedScreen>
         <Switch>
           <Match when={bootstrap() === "polling"}>
             <div class="lk-alert info lk-channel-notice" role="status">

@@ -533,7 +533,7 @@ public enum ReachRules {
 
     /// Every distinct seed held for one person, in the order ``writeSeed(from:groupIdHex:)``
     /// prefers them: `contact`, then `member` of the group the write concerns,
-    /// then any `member`, `group`, `channel`, `reply` — newest first within a
+    /// then any `member`, `group`, `channel`, `fof`, `reply` — newest first within a
     /// class. A Welcome writer tries them in this order and moves to the next
     /// on a `401` (ADR-0050 2.5a item 7): one key the owner rotated away must
     /// not cost a Welcome another key still opens.
@@ -549,6 +549,9 @@ public enum ReachRules {
             out += all(.member)
             out += all(.group)
             out += all(.channel)
+            // ADR-0060 section 6 — a `fof` grant is held only when this
+            // device added a person the search found through it.
+            out += all(.fof)
             out += all(.reply)
             return out
         }
@@ -689,5 +692,15 @@ public enum ReachRules {
             if seen.insert(target).inserted { out.append(target) }
         }
         return out
+    }
+}
+
+/// ADR-0060 section 6 — which committer-delegation envelope an add posts:
+/// the one signed with a grant this device holds for the added person when
+/// there is one; else, for a person found in Everyone, the one with no
+/// delegation naming their open mailbox; else none.
+public enum CommitterDelegationChoice {
+    public static func envelope(signed: Data?, open: Data?) -> Data? {
+        signed ?? open
     }
 }

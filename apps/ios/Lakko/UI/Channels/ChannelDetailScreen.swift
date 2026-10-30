@@ -94,9 +94,10 @@ struct ChannelDetailScreen: View {
                     .accessibilityHint)
             }
         }
-        .sheet(isPresented: $infoOpen) {
-            // Section 3 — a layer over the channel, which stays where it is
-            // behind it.
+        .navigationDestination(isPresented: $infoOpen) {
+            // Section 3 / 3.1 — a screen pushed over the channel, whose back
+            // returns to it as it was left (amended 2026-10-29: it was a sheet
+            // with a Done button).
             ChannelInfoSheet(
                 channelId: channelId,
                 state: state,
@@ -106,8 +107,7 @@ struct ChannelDetailScreen: View {
                 onUnsubscribed: {
                     infoOpen = false
                     dismiss()
-                },
-                onDone: { infoOpen = false }
+                }
             )
         }
     }

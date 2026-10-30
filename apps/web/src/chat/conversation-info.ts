@@ -33,7 +33,7 @@
  *   - finding the contact record a one-to-one is about ({@link
  *     findPersonRecord}), which is this device's storage and nobody else's
  *     business;
- *   - whether the header opens a layer at all or goes to the contact's own
+ *   - whether the header opens the group's screen or goes to the contact's own
  *     page ({@link infoOpening}), which is this client's navigation - the
  *     spec says "the contact's own page on web", and a page is a route.
  *
@@ -221,7 +221,7 @@ export function infoOpenLabel(target: InfoTarget): string {
   }
 }
 
-/** The heading the opened layer carries. Same words as the button. */
+/** The heading the opened screen carries. Same words as the button. */
 export function infoHeading(target: InfoTarget): string {
   return infoOpenLabel(target);
 }
@@ -262,30 +262,31 @@ export function personInfoSections(
  *   Until 2026-09-26 the chat rendered a second copy of the card as a layer
  *   with Message withheld, which needed an "origin" threaded through the
  *   shared rule and showed the same person twice.
- * - `layer`: a group's info, which has no screen of its own to reuse. The
- *   layer is the group's idiom and nobody else's.
+ * - `group-screen`: a group's info, a screen pushed from the conversation
+ *   with a way back (amended 2026-10-29; until then it was a layer over the
+ *   conversation, the one info that did not look like the others).
  * - `nothing`: the destination is not yet known (the shared rules have not
  *   loaded), or it is a person whose contact record cannot be found. The
- *   first: opening a layer now would show whatever branch the rules resolve
+ *   first: opening a screen now would show whatever branch the rules resolve
  *   to a moment later. The second: every one-to-one peer is a contact by
  *   construction (`contacts/adopt-one-to-one.ts`), so a missing record means
  *   a roster that cannot be read, and there is no "not a contact" card to
  *   draw in its place - the not-a-contact state was retired on 2026-09-26
  *   along with the layer that rendered it.
  */
-export type InfoOpening = "contact-page" | "layer" | "nothing";
+export type InfoOpening = "contact-page" | "group-screen" | "nothing";
 
 /**
  * The header's opening decision. `personRecord` is only consulted for a
- * person: a group carries a contact record for nobody and still opens the
- * layer.
+ * person: a group carries a contact record for nobody and still opens its
+ * screen.
  */
 export function infoOpening(
   target: InfoTarget | null,
   personRecord: PersonRecordLike | null,
 ): InfoOpening {
   if (target === "person") return personRecord === null ? "nothing" : "contact-page";
-  if (target === "group") return "layer";
+  if (target === "group") return "group-screen";
   return "nothing";
 }
 
@@ -339,7 +340,7 @@ export function channelInfoSections(
   );
 }
 
-/** A contact record as the info layer needs to find one. */
+/** A contact record as the info needs to find one. */
 export interface PersonRecordLike {
   readonly signaturePubkeyB64: string;
   readonly groupIdB64?: string;
