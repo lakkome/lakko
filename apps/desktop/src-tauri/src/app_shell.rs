@@ -12,27 +12,38 @@
 //! - `POST settings` `{keepRunning?, openAtLogin?}` -> the new settings;
 //! - `POST quit`: the person confirmed quitting (after a call question);
 //! - `POST notify` `{tag, title, body, target?}`: show a system notification
-//!   (`notify.rs`); `503 notifications-unsupported` where none can be shown;
-//! - `POST withdraw` `{tag}`: take one back where the OS can (not macOS);
+//!   (`notify.rs`), with `call: {accept, decline, callId, video}` for a ringing
+//!   call; `503 notifications-unsupported` where none can be shown;
+//! - `POST withdraw` `{tag}`: take a delivered notification back;
+//! - `POST labels` `{open, quit}`: the tray menu in the interface language;
+//! - `GET capabilities` -> `{privacySettings}`: whether this OS has a link to
+//!   its microphone and camera settings;
+//! - `POST open-privacy` `{what: "microphone" | "camera"}`: open that page;
 //! - `POST attention`: bounce the Dock icon once / flash the taskbar (an
 //!   incoming call with the window open, `desktop.md` section 4.1).
 //!
 //! The host talks to the page with a DOM event, `lakko:host`, whose `detail`
-//! is `{kind: "quit-requested"}`, `{kind: "open-settings"}` or
-//! `{kind: "open-target", target}` (a notification was clicked).
+//! is `{kind: "quit-requested"}`, `{kind: "open-settings"}`,
+//! `{kind: "open-target", target}` (a notification was clicked),
+//! `{kind: "call-action", action, callId, video}` (Accept or Decline on one)
+//! or `{kind: "still-running"}` (the window was hidden for the first time, on
+//! the OSes that say so, `desktop.md` section 3).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use http::{Method, Request, Response, StatusCode};
 use serde_json::{json, Value};
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use std::sync::Arc;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 
-use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, UserAttentionType, WebviewWindow};
+use tauri::{
+    AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, UserAttentionType, WebviewWindow,
+};
 use tracing::{info, warn};
 
-use crate::notify::{self, Notifier};
+use crate::notify::{self, Notifier, Outcome};
 use crate::proxy::plain;
 
 /// Path prefix of the app routes.
@@ -55,7 +66,10 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { keep_running: true, open_at_login: false }
+        Self {
+            keep_running: true,
+            open_at_login: false,
+        }
     }
 }
 
@@ -67,16 +81,28 @@ impl Settings {
     fn from_json(v: &Value) -> Self {
         let d = Self::default();
         Self {
-            keep_running: v.get("keepRunning").and_then(Value::as_bool).unwrap_or(d.keep_running),
-            open_at_login: v.get("openAtLogin").and_then(Value::as_bool).unwrap_or(d.open_at_login),
+            keep_running: v
+                .get("keepRunning")
+                .and_then(Value::as_bool)
+                .unwrap_or(d.keep_running),
+            open_at_login: v
+                .get("openAtLogin")
+                .and_then(Value::as_bool)
+                .unwrap_or(d.open_at_login),
         }
     }
 
     /// Apply a partial update from the page.
     fn merged(self, v: &Value) -> Self {
         Self {
-            keep_running: v.get("keepRunning").and_then(Value::as_bool).unwrap_or(self.keep_running),
-            open_at_login: v.get("openAtLogin").and_then(Value::as_bool).unwrap_or(self.open_at_login),
+            keep_running: v
+                .get("keepRunning")
+                .and_then(Value::as_bool)
+                .unwrap_or(self.keep_running),
+            open_at_login: v
+                .get("openAtLogin")
+                .and_then(Value::as_bool)
+                .unwrap_or(self.open_at_login),
         }
     }
 }
@@ -95,6 +121,8 @@ pub struct Shell {
     dir: PathBuf,
     inner: Mutex<Inner>,
     notifier: Arc<Notifier>,
+    /// A tray icon is on screen, so a hidden window has a way back.
+    has_tray: AtomicBool,
 }
 
 struct Inner {
@@ -114,9 +142,35 @@ impl Shell {
             .unwrap_or_default();
         Self {
             dir,
-            inner: Mutex::new(Inner { settings, call_live: false, unread: 0, quitting: false }),
+            inner: Mutex::new(Inner {
+                settings,
+                call_live: false,
+                unread: 0,
+                quitting: false,
+            }),
             notifier: Arc::new(notifier),
+            has_tray: AtomicBool::new(false),
         }
+    }
+
+    /// Record whether the tray icon went up.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub fn set_has_tray(&self, on: bool) {
+        self.has_tray.store(on, Ordering::SeqCst);
+    }
+
+    /// True once, the first time on this computer: the page says that Lakko
+    /// is still running. macOS says nothing (`desktop.md` section 3).
+    fn first_hide(&self) -> bool {
+        if cfg!(target_os = "macos") {
+            return false;
+        }
+        let marker = self.dir.join("still-running-told");
+        if marker.exists() {
+            return false;
+        }
+        write_json(&marker, &json!(true));
+        true
     }
 
     pub fn settings(&self) -> Settings {
@@ -131,7 +185,7 @@ impl Shell {
         self.inner.lock().map(|i| i.quitting).unwrap_or(false)
     }
 
-    fn set_quitting(&self) {
+    pub fn set_quitting(&self) {
         if let Ok(mut i) = self.inner.lock() {
             i.quitting = true;
         }
@@ -178,14 +232,18 @@ pub fn restore_geometry<R: Runtime>(window: &WebviewWindow<R>, shell: &Shell) {
         let _ = window.center();
         return;
     };
-    let on_a_display = window.available_monitors().unwrap_or_default().iter().any(|m| {
-        let p = m.position();
-        let s = m.size();
-        let (mx, my) = (i64::from(p.x), i64::from(p.y));
-        let (mw, mh) = (i64::from(s.width), i64::from(s.height));
-        let (cx, cy) = (i64::from(g.x) + 40, i64::from(g.y) + 40);
-        cx >= mx && cx < mx + mw && cy >= my && cy < my + mh
-    });
+    let on_a_display = window
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .any(|m| {
+            let p = m.position();
+            let s = m.size();
+            let (mx, my) = (i64::from(p.x), i64::from(p.y));
+            let (mw, mh) = (i64::from(s.width), i64::from(s.height));
+            let (cx, cy) = (i64::from(g.x) + 40, i64::from(g.y) + 40);
+            cx >= mx && cx < mx + mw && cy >= my && cy < my + mh
+        });
     let _ = window.set_size(PhysicalSize::new(g.width, g.height));
     if on_a_display {
         let _ = window.set_position(PhysicalPosition::new(g.x, g.y));
@@ -200,7 +258,12 @@ pub fn remember_geometry<R: Runtime>(window: &WebviewWindow<R>, shell: &Shell) {
         return;
     }
     if let (Ok(p), Ok(s)) = (window.outer_position(), window.inner_size()) {
-        shell.save_geometry(Geometry { x: p.x, y: p.y, width: s.width, height: s.height });
+        shell.save_geometry(Geometry {
+            x: p.x,
+            y: p.y,
+            width: s.width,
+            height: s.height,
+        });
     }
 }
 
@@ -224,7 +287,8 @@ fn send_page_event<R: Runtime>(app: &AppHandle<R>, detail: &Value) {
     let kind = detail.get("kind").and_then(Value::as_str).unwrap_or("");
     if let Some(w) = app.get_webview_window(MAIN) {
         let detail = detail.to_string();
-        let js = format!("window.dispatchEvent(new CustomEvent('lakko:host', {{ detail: {detail} }}))");
+        let js =
+            format!("window.dispatchEvent(new CustomEvent('lakko:host', {{ detail: {detail} }}))");
         if let Err(e) = w.eval(&js) {
             warn!(error = %e, kind, "notify page");
         }
@@ -235,15 +299,25 @@ fn send_page_event<R: Runtime>(app: &AppHandle<R>, detail: &Value) {
 pub enum CloseAction {
     /// Hide the window; the app keeps running.
     Hide,
+    /// Minimise it: Linux with no tray has no other way back.
+    Minimize,
     /// Treat as a quit request.
     Quit,
 }
 
 pub fn on_close_requested(shell: &Shell) -> CloseAction {
-    if shell.settings().keep_running {
-        CloseAction::Hide
-    } else {
-        CloseAction::Quit
+    let has_way_back = cfg!(target_os = "macos") || shell.has_tray.load(Ordering::SeqCst);
+    match (shell.settings().keep_running, has_way_back) {
+        (false, _) => CloseAction::Quit,
+        (true, true) => CloseAction::Hide,
+        (true, false) => CloseAction::Minimize,
+    }
+}
+
+/// The window was hidden; tell the page the first time.
+pub fn after_hide<R: Runtime>(app: &AppHandle<R>, shell: &Shell) {
+    if shell.first_hide() {
+        notify_page(app, "still-running");
     }
 }
 
@@ -260,7 +334,11 @@ pub fn quit_may_proceed<R: Runtime>(app: &AppHandle<R>, shell: &Shell) -> bool {
 }
 
 /// Answer a request under [`PATH`].
-pub fn handle<R: Runtime>(app: &AppHandle<R>, shell: &Shell, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
+pub fn handle<R: Runtime>(
+    app: &AppHandle<R>,
+    shell: &Shell,
+    request: &Request<Vec<u8>>,
+) -> Response<Vec<u8>> {
     let op = request.uri().path().strip_prefix(PATH).unwrap_or("");
     match (request.method(), op) {
         (&Method::POST, "/state") => {
@@ -275,19 +353,16 @@ pub fn handle<R: Runtime>(app: &AppHandle<R>, shell: &Shell, request: &Request<V
                     let changed = i.unread != unread;
                     i.unread = unread;
                     changed
-                }
+                },
                 Err(_) => false,
             };
             if changed_unread {
                 if let Some(w) = app.get_webview_window(MAIN) {
-                    let badge = (unread > 0).then_some(unread);
-                    if let Err(e) = w.set_badge_count(badge) {
-                        warn!(error = %e, "badge");
-                    }
+                    set_unread_badge(&w, unread);
                 }
             }
             no_content()
-        }
+        },
         (&Method::GET, "/settings") => json_response(&shell.settings().to_json()),
         (&Method::POST, "/settings") => {
             let Ok(v) = serde_json::from_slice::<Value>(request.body()) else {
@@ -306,7 +381,7 @@ pub fn handle<R: Runtime>(app: &AppHandle<R>, shell: &Shell, request: &Request<V
             }
             write_json(&shell.dir.join("settings.json"), &after.to_json());
             json_response(&after.to_json())
-        }
+        },
         (&Method::POST, "/notify") => {
             let Ok(v) = serde_json::from_slice::<Value>(request.body()) else {
                 return plain(StatusCode::BAD_REQUEST, "json");
@@ -318,19 +393,52 @@ pub fn handle<R: Runtime>(app: &AppHandle<R>, shell: &Shell, request: &Request<V
                 return plain(StatusCode::SERVICE_UNAVAILABLE, "notifications-unsupported");
             }
             let app = app.clone();
-            let shown = shell.notifier.show(req, move |target| {
-                show_main(&app);
-                if let Some(target) = target {
-                    send_page_event(&app, &json!({ "kind": "open-target", "target": target }));
-                }
-            });
+            let shown = shell
+                .notifier
+                .show(req, move |outcome, req| on_notification(&app, outcome, req));
             if shown {
                 no_content()
             } else {
                 plain(StatusCode::SERVICE_UNAVAILABLE, "notifications-unsupported")
             }
-        }
-        (&Method::POST, "/withdraw") => no_content(),
+        },
+        (&Method::POST, "/withdraw") => {
+            let Ok(v) = serde_json::from_slice::<Value>(request.body()) else {
+                return plain(StatusCode::BAD_REQUEST, "json");
+            };
+            let Some(tag) = v.get("tag").and_then(Value::as_str) else {
+                return plain(StatusCode::BAD_REQUEST, "tag");
+            };
+            // The OS call may block; the scheme handler must not.
+            let notifier = Arc::clone(&shell.notifier);
+            let tag = tag.to_owned();
+            std::thread::spawn(move || notifier.withdraw(&tag));
+            no_content()
+        },
+        (&Method::POST, "/labels") => {
+            let Ok(v) = serde_json::from_slice::<Value>(request.body()) else {
+                return plain(StatusCode::BAD_REQUEST, "json");
+            };
+            let label = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("");
+            set_tray_labels(app, label("open"), label("quit"));
+            no_content()
+        },
+        (&Method::GET, "/capabilities") => {
+            json_response(&json!({ "privacySettings": privacy_link("microphone").is_some() }))
+        },
+        (&Method::POST, "/open-privacy") => {
+            let Ok(v) = serde_json::from_slice::<Value>(request.body()) else {
+                return plain(StatusCode::BAD_REQUEST, "json");
+            };
+            let Some(link) = v.get("what").and_then(Value::as_str).and_then(privacy_link) else {
+                return plain(StatusCode::NOT_FOUND, "no link");
+            };
+            if let Err(e) = std::process::Command::new(OPENER).arg(link).spawn() {
+                warn!(error = %e, "open privacy settings");
+                return plain(StatusCode::INTERNAL_SERVER_ERROR, "open");
+            }
+            no_content()
+        },
         (&Method::POST, "/attention") => {
             if let Some(w) = app.get_webview_window(MAIN) {
                 if let Err(e) = w.request_user_attention(Some(UserAttentionType::Informational)) {
@@ -338,7 +446,7 @@ pub fn handle<R: Runtime>(app: &AppHandle<R>, shell: &Shell, request: &Request<V
                 }
             }
             no_content()
-        }
+        },
         (&Method::POST, "/quit") => {
             info!("quit confirmed by the page");
             shell.set_quitting();
@@ -347,8 +455,107 @@ pub fn handle<R: Runtime>(app: &AppHandle<R>, shell: &Shell, request: &Request<V
             }
             app.exit(0);
             no_content()
-        }
+        },
         _ => plain(StatusCode::NOT_FOUND, "not found"),
+    }
+}
+
+/// A notification was answered.
+fn on_notification<R: Runtime>(app: &AppHandle<R>, outcome: Outcome, req: notify::Request) {
+    if let (Some(call), Outcome::Accepted | Outcome::Declined) = (&req.call, outcome) {
+        let action = if outcome == Outcome::Accepted {
+            "accept"
+        } else {
+            "decline"
+        };
+        // Accept opens the window straight into the call; Decline leaves it
+        // where it is (`desktop.md` section 4.1).
+        if outcome == Outcome::Accepted {
+            show_main(app);
+        }
+        send_page_event(
+            app,
+            &json!({ "kind": "call-action", "action": action, "callId": call.call_id, "video": call.video }),
+        );
+        return;
+    }
+    show_main(app);
+    if let Some(target) = req.target {
+        send_page_event(app, &json!({ "kind": "open-target", "target": target }));
+    }
+}
+
+/// The command that opens a settings link.
+#[cfg(windows)]
+const OPENER: &str = "explorer.exe";
+#[cfg(not(windows))]
+const OPENER: &str = "open";
+
+/// The OS page for `what`, from a fixed table: nothing the page sends reaches
+/// the command. Linux has no such page.
+fn privacy_link(what: &str) -> Option<&'static str> {
+    if cfg!(target_os = "macos") {
+        match what {
+            "microphone" => {
+                Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+            },
+            "camera" => {
+                Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Camera")
+            },
+            _ => None,
+        }
+    } else if cfg!(windows) {
+        match what {
+            "microphone" => Some("ms-settings:privacy-microphone"),
+            "camera" => Some("ms-settings:privacy-webcam"),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_tray_labels<R: Runtime>(app: &AppHandle<R>, open: &str, quit: &str) {
+    if open.trim().is_empty() || quit.trim().is_empty() {
+        return;
+    }
+    if let Some(tray) = app.try_state::<crate::tray::Tray<R>>() {
+        tray.set_labels(open, quit);
+    }
+}
+
+#[cfg(target_os = "macos")]
+const fn set_tray_labels<R: Runtime>(_app: &AppHandle<R>, _open: &str, _quit: &str) {}
+
+/// The unread count on the app icon. Windows has no number on a taskbar
+/// button, only an overlay image: a dot says there is something unread.
+#[cfg(not(windows))]
+fn set_unread_badge<R: Runtime>(w: &WebviewWindow<R>, unread: i64) {
+    if let Err(e) = w.set_badge_count((unread > 0).then_some(unread)) {
+        warn!(error = %e, "badge");
+    }
+}
+
+#[cfg(windows)]
+fn set_unread_badge<R: Runtime>(w: &WebviewWindow<R>, unread: i64) {
+    const SIZE: u32 = 16;
+    let overlay = (unread > 0).then(|| {
+        let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let (dx, dy) = (
+                    2 * i64::from(x) + 1 - i64::from(SIZE),
+                    2 * i64::from(y) + 1 - i64::from(SIZE),
+                );
+                let inside = dx * dx + dy * dy <= i64::from(SIZE) * i64::from(SIZE);
+                rgba.extend_from_slice(&[0xE0, 0x3A, 0x3A, if inside { 0xFF } else { 0x00 }]);
+            }
+        }
+        tauri::image::Image::new_owned(rgba, SIZE, SIZE)
+    });
+    if let Err(e) = w.set_overlay_icon(overlay) {
+        warn!(error = %e, "badge");
     }
 }
 
@@ -429,17 +636,21 @@ pub fn on_menu<R: Runtime>(app: &AppHandle<R>, id: &str) {
     }
 }
 
-/// Start at login. macOS: a per-user LaunchAgent that starts this executable
-/// with [`HIDDEN_ARG`]. A signed bundle should use `SMAppService` instead;
-/// that waits for S5.
+/// Start at login, with [`HIDDEN_ARG`]. macOS: a per-user LaunchAgent (a
+/// signed bundle should use `SMAppService` instead; that waits for S5).
+/// Windows: the per-user Run key. Linux: an XDG autostart entry.
 mod login_item {
-    use tauri::{AppHandle, Manager, Runtime};
+    #[cfg(not(windows))]
+    use tauri::Manager;
+    use tauri::{AppHandle, Runtime};
 
     #[cfg(target_os = "macos")]
     pub fn set<R: Runtime>(app: &AppHandle<R>, on: bool) -> Result<(), String> {
         let id = app.config().identifier.clone();
         let home = app.path().home_dir().map_err(|e| e.to_string())?;
-        let path = home.join("Library/LaunchAgents").join(format!("{id}.plist"));
+        let path = home
+            .join("Library/LaunchAgents")
+            .join(format!("{id}.plist"));
         if !on {
             return match std::fs::remove_file(&path) {
                 Ok(()) => Ok(()),
@@ -468,10 +679,67 @@ mod login_item {
         std::fs::write(&path, plist).map_err(|e| e.to_string())
     }
 
-    #[cfg(not(target_os = "macos"))]
-    pub fn set<R: Runtime>(_app: &AppHandle<R>, _on: bool) -> Result<(), String> {
-        Err("start at login is not built for this OS yet".into())
+    #[cfg(windows)]
+    pub fn set<R: Runtime>(_app: &AppHandle<R>, on: bool) -> Result<(), String> {
+        use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
+        use winreg::RegKey;
+
+        const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+        const VALUE: &str = "Lakko";
+        let run = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey_with_flags(RUN, KEY_SET_VALUE)
+            .map_err(|e| e.to_string())?;
+        if !on {
+            return match run.delete_value(VALUE) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.to_string()),
+            };
+        }
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let command = format!("\"{}\" {}", exe.display(), super::HIDDEN_ARG);
+        run.set_value(VALUE, &command).map_err(|e| e.to_string())
     }
+
+    /// An XDG autostart entry. An AppImage runs from a temporary mount, so its
+    /// own path is what has to start.
+    #[cfg(target_os = "linux")]
+    pub fn set<R: Runtime>(app: &AppHandle<R>, on: bool) -> Result<(), String> {
+        let id = app.config().identifier.clone();
+        let dir = app
+            .path()
+            .config_dir()
+            .map_err(|e| e.to_string())?
+            .join("autostart");
+        let path = dir.join(format!("{id}.desktop"));
+        if !on {
+            return match std::fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.to_string()),
+            };
+        }
+        let exe = match std::env::var_os("APPIMAGE") {
+            Some(path) => std::path::PathBuf::from(path),
+            None => std::env::current_exe().map_err(|e| e.to_string())?,
+        };
+        let entry = super::autostart_entry(&exe.to_string_lossy());
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::write(&path, entry).map_err(|e| e.to_string())
+    }
+}
+
+/// An autostart `.desktop` file; the path is quoted as its `Exec` key asks.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+fn autostart_entry(exe: &str) -> String {
+    let mut quoted = String::with_capacity(exe.len() + 2);
+    for c in exe.chars() {
+        if matches!(c, '"' | '\\' | '$' | '`') {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    format!("[Desktop Entry]\nType=Application\nName=Lakko\nExec=\"{quoted}\" {HIDDEN_ARG}\nX-GNOME-Autostart-enabled=true\n")
 }
 
 #[cfg(test)]
@@ -494,16 +762,50 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lakko-shell-test-{}", std::process::id()));
         let shell = Shell::load(dir.clone(), Notifier::new("test"));
         assert!(shell.saved_geometry().is_none());
-        shell.save_geometry(Geometry { x: -100, y: 40, width: 1100, height: 760 });
+        shell.save_geometry(Geometry {
+            x: -100,
+            y: 40,
+            width: 1100,
+            height: 760,
+        });
         let again = Shell::load(dir.clone(), Notifier::new("test"));
-        assert_eq!(again.saved_geometry(), Some(Geometry { x: -100, y: 40, width: 1100, height: 760 }));
+        assert_eq!(
+            again.saved_geometry(),
+            Some(Geometry {
+                x: -100,
+                y: 40,
+                width: 1100,
+                height: 760
+            })
+        );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn autostart_entry_quotes_the_path() {
+        let e = autostart_entry("/opt/My \"Apps\"/$lakko");
+        assert!(e.contains("Exec=\"/opt/My \\\"Apps\\\"/\\$lakko\" --hidden\n"));
+    }
+
+    #[test]
+    fn privacy_links_come_from_a_fixed_table() {
+        assert_eq!(privacy_link("anything else"), None);
+        assert_eq!(
+            privacy_link("microphone").is_some(),
+            cfg!(any(target_os = "macos", windows))
+        );
     }
 
     #[test]
     fn close_hides_unless_keep_running_is_off() {
         let dir = std::env::temp_dir().join(format!("lakko-shell-close-{}", std::process::id()));
         let shell = Shell::load(dir.clone(), Notifier::new("test"));
+        let expected_way_back = cfg!(target_os = "macos");
+        assert_eq!(
+            matches!(on_close_requested(&shell), CloseAction::Hide),
+            expected_way_back
+        );
+        shell.set_has_tray(true);
         assert!(matches!(on_close_requested(&shell), CloseAction::Hide));
         if let Ok(mut i) = shell.inner.lock() {
             i.settings.keep_running = false;

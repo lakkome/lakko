@@ -156,14 +156,18 @@ Both are stored on this device only.
 
 **Per OS** the first call asks the system for the microphone (and the camera
 for video): macOS shows its own prompt; Windows and Linux follow their privacy
-settings. When access is refused the prejoin screen says, in place of the
-preview:
+settings. A voice call has no screen before it ([`calls.md`](calls.md) section
+3.1), so the refusal is a dialog raised when the call is placed, accepted or
+joined:
 
 > **Lakko can't use your microphone.** Allow it in your system's privacy
 > settings, then try again.
-> [Open settings] [Try again]
+> [Cancel] [Open settings] [Try again]
 
-"Open settings" is shown only where the OS has a link to that page.
+The camera has the same dialog with its own title. "Open settings" is shown
+only where the OS has a link to that page (macOS, Windows). Cancel on the
+microphone does not place or accept a one-to-one call; a group call goes on,
+listening and watching. Cancel on the camera goes on as a voice call.
 
 ### 4.3 When messages arrive
 

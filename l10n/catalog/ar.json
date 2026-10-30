@@ -2678,6 +2678,18 @@
       "text": "الطرف الآخر",
       "status": "machine"
     },
+    "chat.pending.call_disabled": {
+      "text": "متاح بمجرد اتصال {name}.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "لم يردّ {name} بعد. يمكنك أن تطلب منه رابطًا جديدًا.",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "سيتلقى {name} رسائلك عندما يتصل تطبيقه بالإنترنت مجددًا.",
+      "status": "machine"
+    },
     "chat.photo.load_failed": {
       "text": "تعذّر تحميل الصورة",
       "status": "machine"
@@ -3786,6 +3798,18 @@
       "text": "مشاركة رابط الدعوة",
       "status": "machine"
     },
+    "contacts.add_back.action": {
+      "text": "إضافة",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "إضافة إلى جهات الاتصال",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "يعيد {name} إلى قائمة جهات الاتصال في هذا الحساب.",
+      "status": "machine"
+    },
     "contacts.detail.actions": {
       "text": "إجراءات جهة الاتصال",
       "status": "machine"
@@ -4000,6 +4024,54 @@
     },
     "contacts.safety.title": {
       "text": "التحقق من رقم الأمان",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "مسح رمز QR",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "هذا الرمز ليس رابط Lakko. جرّب رمزًا آخر.",
+      "status": "machine"
+    },
+    "desktop.capture.body": {
+      "text": "اسمح به في إعدادات الخصوصية في نظامك، ثم حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "لا يستطيع Lakko استخدام الكاميرا.",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "لا يستطيع Lakko استخدام الميكروفون.",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "فتح الإعدادات",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "إنهاء المكالمة والخروج",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "هل تريد إنهاء المكالمة والخروج؟",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "ستصلك الرسائل والمكالمات. للإيقاف، أنهِ التطبيق من أيقونة شريط النظام.",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "لا يزال Lakko قيد التشغيل.",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "فتح Lakko",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "إنهاء Lakko",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4422,12 +4494,12 @@
       "text": "تحتفظ أجهزتك الأخرى بدردشاتها وتحصل على المفاتيح الجديدة تلقائيًا.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "ما زالت مفاتيح المرور تسجّل دخولك. خيار «استعادة المفاتيح بمفتاح المرور هذا» متوقف إلى أن تشغّله مجددًا.",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "روابط الدعوة وروابط المكالمات التي أنشأتها سابقًا ستتوقف عن العمل. أنشئ روابط جديدة.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "ما زالت مفاتيح المرور تسجّل دخولك. خيار «استعادة المفاتيح بمفتاح المرور هذا» متوقف إلى أن تشغّله مجددًا.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -5806,6 +5878,74 @@
       "text": "لم يعد هذا الرابط صالحًا. اطلب رابطًا جديدًا من الشخص.",
       "status": "machine"
     },
+    "invite.contact.page.about": {
+      "text": "Lakko تطبيق مراسلة تُشفَّر فيه كل محادثة ومكالمة تشفيرًا تامًا بين الطرفين.",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "إضافة",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "تعذّرت إضافة {name}. تحقّق من اتصالك وحاول مرة أخرى.",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} موجود بالفعل في جهات اتصالك",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "تعذّر الوصول إلى {name}. تحقّق من اتصالك وحاول مرة أخرى.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "إنشاء حساب",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "اطلب من المرسل رابطًا جديدًا.",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "رابط الدعوة هذا لم يعد يعمل",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "تم",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "لدي حساب بالفعل",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "ليس الآن",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "فتح المحادثة",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "شاركه مع الشخص الذي تريد إضافته.",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "هذا رابط الدعوة الخاص بك",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "يدعوك {name} إلى Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "هل تريد إضافة {name} إلى جهات اتصالك؟",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "هذا الشخص",
+      "status": "machine"
+    },
     "invite.contact.page_title": {
       "text": "دعوة",
       "status": "machine"
@@ -5958,8 +6098,44 @@
       "text": "أُنشئ في {date}",
       "status": "machine"
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "المدة",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "عدد الأشخاص",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "حذف الرابط",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "من لديه الرابط بالفعل لن يتمكن من استخدامه.",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "هل تريد حذف هذا الرابط؟",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "تم حذف الرابط.",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "يستطيع أي شخص يفتح أحد روابطك أن يرسل إليك طلب اتصال إلى أن تنتهي صلاحية الرابط أو يُستنفد.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "تعديل الرابط",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "عند الحفظ يُنشأ رابط جديد ويتوقف الرابط القديم.",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "شروط الرابط",
       "status": "machine"
     },
     "invite.links.empty": {
@@ -5968,6 +6144,22 @@
     },
     "invite.links.error.copy": {
       "text": "تعذّر نسخ الرابط.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "أدخل مدة من ساعة واحدة إلى 365 يومًا.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "أدخل عدد أشخاص من 1 إلى {max}.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "تعذّر حذف الرابط. تحقّق من اتصالك وحاول مرة أخرى.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "تعذّر حفظ الرابط. تحقّق من اتصالك وحاول مرة أخرى.",
       "status": "machine"
     },
     "invite.links.error.load": {
@@ -6006,6 +6198,10 @@
       "text": "ينتهي بعد {count} د",
       "status": "machine"
     },
+    "invite.links.expires_option_custom": {
+      "text": "مخصص",
+      "status": "machine"
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, zero {بعد # يوم} one {بعد يوم واحد} two {بعد يومين} few {بعد # أيام} many {بعد # يومًا} other {بعد # يوم}}",
       "status": "machine"
@@ -6042,12 +6238,28 @@
       "text": "جديد",
       "status": "machine"
     },
+    "invite.links.qr_hint": {
+      "text": "يمكن لأي شخص يمسح هذا الرمز أن يرسل إليك طلب تواصل.",
+      "status": "machine"
+    },
     "invite.links.revoked": {
       "text": "تم إبطال الرابط.",
       "status": "machine"
     },
     "invite.links.revoking": {
       "text": "جارٍ الإبطال...",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "إظهار رمز QR",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "أيام",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "ساعات",
       "status": "machine"
     },
     "invite.links.unlimited_uses": {
@@ -6064,6 +6276,10 @@
     },
     "invite.links.uses_left": {
       "text": "{count, plural, zero {لم يتبقَّ أي استخدام} one {تبقّى استخدام واحد} two {تبقّى استخدامان} few {تبقّت # استخدامات} many {تبقّى # استخدامًا} other {تبقّى # استخدام}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "مخصص",
       "status": "machine"
     },
     "invite.links.uses_option_one": {
@@ -7246,6 +7462,54 @@
       "text": "كيف يحميك Lakko",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "إغلاق النافذة",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "الدردشات، الموجز، جهات الاتصال، المكالمات، الإعدادات",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "تعديل رسالتي الأخيرة (في حقل رسالة فارغ)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "إغلاق قائمة أو مربع حوار أو لوحة؛ الخروج من البحث",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "تبديل مجلد المحادثات",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "محادثة جديدة",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "المحادثة السابقة أو التالية",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "الخروج من Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "البحث في المحادثات والأشخاص",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "الإرسال أو بدء سطر جديد",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "الإعدادات",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "اختصارات لوحة المفاتيح",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "تم تحديث الترجمات {date}",
       "status": "machine"
@@ -7432,6 +7696,30 @@
     },
     "settings.data.title": {
       "text": "بياناتك",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "ستصلك الرسائل والمكالمات والنافذة مغلقة.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "مواصلة العمل عند إغلاق النافذة",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "كيف يعمل Lakko على هذا الكمبيوتر.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "فتح Lakko عند تسجيل الدخول إلى هذا الكمبيوتر",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "تعذّرت قراءة هذه الإعدادات. افتح الإعدادات مرة أخرى.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "تعذّر تغيير هذا الإعداد. حاول مرة أخرى.",
       "status": "machine"
     },
     "settings.devices.add.lede": {
@@ -8216,262 +8504,6 @@
     },
     "who_can_find_me.title": {
       "text": "من يمكنه العثور عليّ",
-      "status": "machine"
-    },
-    "invite.contact.page.title": {
-      "text": "هل تريد إضافة {name} إلى جهات اتصالك؟",
-      "status": "machine"
-    },
-    "invite.contact.page.add": {
-      "text": "إضافة",
-      "status": "machine"
-    },
-    "invite.contact.page.not_now": {
-      "text": "ليس الآن",
-      "status": "machine"
-    },
-    "invite.contact.page.already_title": {
-      "text": "{name} موجود بالفعل في جهات اتصالك",
-      "status": "machine"
-    },
-    "invite.contact.page.open_chat": {
-      "text": "فتح المحادثة",
-      "status": "machine"
-    },
-    "invite.contact.page.own_title": {
-      "text": "هذا رابط الدعوة الخاص بك",
-      "status": "machine"
-    },
-    "invite.contact.page.own_body": {
-      "text": "شاركه مع الشخص الذي تريد إضافته.",
-      "status": "machine"
-    },
-    "invite.contact.page.done": {
-      "text": "تم",
-      "status": "machine"
-    },
-    "invite.contact.page.add_failed": {
-      "text": "تعذّرت إضافة {name}. تحقّق من اتصالك وحاول مرة أخرى.",
-      "status": "machine"
-    },
-    "invite.contact.page.unnamed": {
-      "text": "هذا الشخص",
-      "status": "machine"
-    },
-    "chat.pending.waiting": {
-      "text": "سيتلقى {name} رسائلك عندما يتصل تطبيقه بالإنترنت مجددًا.",
-      "status": "machine"
-    },
-    "chat.pending.stale": {
-      "text": "لم يردّ {name} بعد. يمكنك أن تطلب منه رابطًا جديدًا.",
-      "status": "machine"
-    },
-    "chat.pending.call_disabled": {
-      "text": "متاح بمجرد اتصال {name}.",
-      "status": "machine"
-    },
-    "contacts.add_back.control": {
-      "text": "إضافة إلى جهات الاتصال",
-      "status": "machine"
-    },
-    "contacts.add_back.sub": {
-      "text": "يعيد {name} إلى قائمة جهات الاتصال في هذا الحساب.",
-      "status": "machine"
-    },
-    "contacts.add_back.action": {
-      "text": "إضافة",
-      "status": "machine"
-    },
-    "invite.contact.page.answer_failed": {
-      "text": "تعذّر الوصول إلى {name}. تحقّق من اتصالك وحاول مرة أخرى.",
-      "status": "machine"
-    },
-    "invite.links.show_qr": {
-      "text": "إظهار رمز QR",
-      "status": "machine"
-    },
-    "invite.links.qr_hint": {
-      "text": "يمكن لأي شخص يمسح هذا الرمز أن يرسل إليك طلب تواصل.",
-      "status": "machine"
-    },
-    "contacts.scan_qr": {
-      "text": "مسح رمز QR",
-      "status": "machine"
-    },
-    "contacts.scan_qr.not_a_link": {
-      "text": "هذا الرمز ليس رابط Lakko. جرّب رمزًا آخر.",
-      "status": "machine"
-    },
-    "desktop.quit_call.confirm": {
-      "text": "إنهاء المكالمة والخروج",
-      "status": "machine"
-    },
-    "desktop.quit_call.title": {
-      "text": "هل تريد إنهاء المكالمة والخروج؟",
-      "status": "machine"
-    },
-    "invite.links.expires_option_custom": {
-      "text": "مخصص",
-      "status": "machine"
-    },
-    "invite.links.uses_option_custom": {
-      "text": "مخصص",
-      "status": "machine"
-    },
-    "invite.links.custom_expiry_amount": {
-      "text": "المدة",
-      "status": "machine"
-    },
-    "invite.links.unit_hours": {
-      "text": "ساعات",
-      "status": "machine"
-    },
-    "invite.links.unit_days": {
-      "text": "أيام",
-      "status": "machine"
-    },
-    "invite.links.custom_uses_count": {
-      "text": "عدد الأشخاص",
-      "status": "machine"
-    },
-    "invite.links.error.custom_expiry": {
-      "text": "أدخل مدة من ساعة واحدة إلى 365 يومًا.",
-      "status": "machine"
-    },
-    "invite.links.error.custom_uses": {
-      "text": "أدخل عدد أشخاص من 1 إلى {max}.",
-      "status": "machine"
-    },
-    "invite.contact.page.signed_out_title": {
-      "text": "يدعوك {name} إلى Lakko",
-      "status": "machine"
-    },
-    "invite.contact.page.about": {
-      "text": "Lakko تطبيق مراسلة تُشفَّر فيه كل محادثة ومكالمة تشفيرًا تامًا بين الطرفين.",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "إنشاء حساب",
-      "status": "machine"
-    },
-    "invite.contact.page.have_account": {
-      "text": "لدي حساب بالفعل",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_title": {
-      "text": "رابط الدعوة هذا لم يعد يعمل",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "اطلب من المرسل رابطًا جديدًا.",
-      "status": "machine"
-    },
-    "invite.links.edit": {
-      "text": "تعديل الرابط",
-      "status": "machine"
-    },
-    "invite.links.edit_title": {
-      "text": "شروط الرابط",
-      "status": "machine"
-    },
-    "invite.links.edit_note": {
-      "text": "عند الحفظ يُنشأ رابط جديد ويتوقف الرابط القديم.",
-      "status": "machine"
-    },
-    "invite.links.delete": {
-      "text": "حذف الرابط",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_title": {
-      "text": "هل تريد حذف هذا الرابط؟",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_body": {
-      "text": "من لديه الرابط بالفعل لن يتمكن من استخدامه.",
-      "status": "machine"
-    },
-    "invite.links.deleted": {
-      "text": "تم حذف الرابط.",
-      "status": "machine"
-    },
-    "invite.links.error.delete": {
-      "text": "تعذّر حذف الرابط. تحقّق من اتصالك وحاول مرة أخرى.",
-      "status": "machine"
-    },
-    "invite.links.error.edit": {
-      "text": "تعذّر حفظ الرابط. تحقّق من اتصالك وحاول مرة أخرى.",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.close_window": {
-      "text": "إغلاق النافذة",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.destinations": {
-      "text": "الدردشات، الموجز، جهات الاتصال، المكالمات، الإعدادات",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.edit_last": {
-      "text": "تعديل رسالتي الأخيرة (في حقل رسالة فارغ)",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.escape": {
-      "text": "إغلاق قائمة أو مربع حوار أو لوحة؛ الخروج من البحث",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.folders": {
-      "text": "تبديل مجلد المحادثات",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.new_chat": {
-      "text": "محادثة جديدة",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.previous_next": {
-      "text": "المحادثة السابقة أو التالية",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.quit": {
-      "text": "الخروج من Lakko",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.search": {
-      "text": "البحث في المحادثات والأشخاص",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.send": {
-      "text": "الإرسال أو بدء سطر جديد",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.settings": {
-      "text": "الإعدادات",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.title": {
-      "text": "اختصارات لوحة المفاتيح",
-      "status": "machine"
-    },
-    "settings.desktop.keep_running.sub": {
-      "text": "ستصلك الرسائل والمكالمات والنافذة مغلقة.",
-      "status": "machine"
-    },
-    "settings.desktop.keep_running.title": {
-      "text": "مواصلة العمل عند إغلاق النافذة",
-      "status": "machine"
-    },
-    "settings.desktop.lede": {
-      "text": "كيف يعمل Lakko على هذا الكمبيوتر.",
-      "status": "machine"
-    },
-    "settings.desktop.open_at_login.title": {
-      "text": "فتح Lakko عند تسجيل الدخول إلى هذا الكمبيوتر",
-      "status": "machine"
-    },
-    "settings.desktop.read_failed": {
-      "text": "تعذّرت قراءة هذه الإعدادات. افتح الإعدادات مرة أخرى.",
-      "status": "machine"
-    },
-    "settings.desktop.save_failed": {
-      "text": "تعذّر تغيير هذا الإعداد. حاول مرة أخرى.",
       "status": "machine"
     }
   }

@@ -2678,6 +2678,18 @@
       "text": "طرف گفتگو",
       "status": "machine"
     },
+    "chat.pending.call_disabled": {
+      "text": "وقتی {name} وصل شود در دسترس است.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} هنوز پاسخ نداده است. می‌توانید از او پیوند تازه بخواهید.",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} پیام‌هایتان را وقتی برنامه‌اش دوباره آنلاین شود دریافت می‌کند.",
+      "status": "machine"
+    },
     "chat.photo.load_failed": {
       "text": "بارگیری عکس ممکن نشد",
       "status": "machine"
@@ -3786,6 +3798,18 @@
       "text": "اشتراک‌گذاری پیوند دعوت",
       "status": "machine"
     },
+    "contacts.add_back.action": {
+      "text": "افزودن",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "افزودن به مخاطبان",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "{name} را به فهرست مخاطبان این حساب برمی‌گرداند.",
+      "status": "machine"
+    },
     "contacts.detail.actions": {
       "text": "کارهای مخاطب",
       "status": "machine"
@@ -4000,6 +4024,54 @@
     },
     "contacts.safety.title": {
       "text": "تأیید شماره امنیتی",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "اسکن کد QR",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "این کد پیوند Lakko نیست. کد دیگری را امتحان کنید.",
+      "status": "machine"
+    },
+    "desktop.capture.body": {
+      "text": "آن را در تنظیمات حریم خصوصی سیستم مجاز کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko نمی‌تواند از دوربین شما استفاده کند.",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko نمی‌تواند از میکروفون شما استفاده کند.",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "باز کردن تنظیمات",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "پایان تماس و خروج",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "تماس پایان یابد و خارج شوید؟",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "پیام‌ها و تماس‌ها را دریافت می‌کنید. برای توقف، از نماد سینی سیستم خارج شوید.",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko همچنان در حال اجراست.",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "باز کردن Lakko",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "خروج از Lakko",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4422,12 +4494,12 @@
       "text": "دستگاه‌های دیگرتان گفتگوهایشان را نگه می‌دارند و کلیدهای جدید را خودشان می‌گیرند.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "کلیدهای عبورتان همچنان شما را وارد می‌کنند. «بازیابی کلیدها با این کلید عبور» خاموش می‌ماند تا دوباره روشنش کنید.",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "پیوندهای دعوت و پیوندهای تماسی که قبلاً ساخته‌اید دیگر کار نمی‌کنند. پیوندهای تازه بسازید.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "کلیدهای عبورتان همچنان شما را وارد می‌کنند. «بازیابی کلیدها با این کلید عبور» خاموش می‌ماند تا دوباره روشنش کنید.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -5806,6 +5878,74 @@
       "text": "این پیوند دیگر معتبر نیست. از آن شخص پیوند جدیدی بخواهید.",
       "status": "machine"
     },
+    "invite.contact.page.about": {
+      "text": "Lakko پیام‌رسانی است که هر گفتگو و تماس در آن رمزنگاری سرتاسری دارد.",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "افزودن",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "افزودن {name} ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} از قبل در مخاطبان شماست",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "ارتباط با {name} برقرار نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "ساخت حساب",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "از فرستنده بخواهید پیوند تازه‌ای بفرستد.",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "این پیوند دعوت دیگر کار نمی‌کند",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "تمام",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "از قبل حساب دارم",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "حالا نه",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "باز کردن گفتگو",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "آن را با کسی که می‌خواهید اضافه کنید به اشتراک بگذارید.",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "این پیوند دعوت خودتان است",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} شما را به Lakko دعوت می‌کند",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "{name} را به مخاطبانتان اضافه می‌کنید؟",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "این شخص",
+      "status": "machine"
+    },
     "invite.contact.page_title": {
       "text": "دعوت",
       "status": "machine"
@@ -5958,8 +6098,44 @@
       "text": "ساخته‌شده در {date}",
       "status": "machine"
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "مدت",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "تعداد افراد",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "حذف پیوند",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "کسی که آن را دارد دیگر نمی‌تواند از آن استفاده کند.",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "این پیوند حذف شود؟",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "پیوند حذف شد.",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "هر کسی یکی از پیوندهای شما را باز کند، تا وقتی پیوند منقضی نشده یا ظرفیتش تمام نشده، می‌تواند برایتان درخواست مخاطب بفرستد.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "ویرایش پیوند",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "با ذخیره، پیوند تازه‌ای ساخته می‌شود و پیوند قبلی کار نمی‌کند.",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "شرایط پیوند",
       "status": "machine"
     },
     "invite.links.empty": {
@@ -5968,6 +6144,22 @@
     },
     "invite.links.error.copy": {
       "text": "کپی پیوند ممکن نشد.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "مدتی بین ۱ ساعت تا ۳۶۵ روز وارد کنید.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "تعداد افراد را بین ۱ تا {max} وارد کنید.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "حذف پیوند ممکن نشد. اتصال را بررسی کنید و دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "ذخیرهٔ پیوند ممکن نشد. اتصال را بررسی کنید و دوباره امتحان کنید.",
       "status": "machine"
     },
     "invite.links.error.load": {
@@ -6006,6 +6198,10 @@
       "text": "انقضا تا {count} دقیقه",
       "status": "machine"
     },
+    "invite.links.expires_option_custom": {
+      "text": "سفارشی",
+      "status": "machine"
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, one {پس از # روز} other {پس از # روز}}",
       "status": "machine"
@@ -6042,12 +6238,28 @@
       "text": "جدید",
       "status": "machine"
     },
+    "invite.links.qr_hint": {
+      "text": "هر کسی این کد را اسکن کند می‌تواند برایتان درخواست مخاطب بفرستد.",
+      "status": "machine"
+    },
     "invite.links.revoked": {
       "text": "پیوند لغو شد.",
       "status": "machine"
     },
     "invite.links.revoking": {
       "text": "در حال لغو...",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "نمایش کد QR",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "روز",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "ساعت",
       "status": "machine"
     },
     "invite.links.unlimited_uses": {
@@ -6064,6 +6276,10 @@
     },
     "invite.links.uses_left": {
       "text": "{count, plural, one {# استفاده باقی مانده} other {# استفاده باقی مانده}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "سفارشی",
       "status": "machine"
     },
     "invite.links.uses_option_one": {
@@ -7246,6 +7462,54 @@
       "text": "Lakko چگونه از شما محافظت می‌کند",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "بستن پنجره",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "گفتگوها، فید، مخاطبان، تماس‌ها، تنظیمات",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "ویرایش آخرین پیام من (در کادر خالی پیام)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "بستن منو، کادر گفتگو یا برگه؛ خروج از جستجو",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "تغییر پوشه گفتگو",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "گفتگوی جدید",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "گفتگوی قبلی یا بعدی",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "خروج از Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "جستجوی گفتگوها و افراد",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "ارسال یا شروع خط جدید",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "تنظیمات",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "میان‌برهای صفحه‌کلید",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "ترجمه‌ها به‌روز شد {date}",
       "status": "machine"
@@ -7432,6 +7696,30 @@
     },
     "settings.data.title": {
       "text": "داده‌های شما",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "وقتی پنجره بسته است پیام‌ها و تماس‌ها دریافت می‌شوند.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "اجرا ماندن پس از بستن پنجره",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "نحوه اجرای Lakko در این رایانه.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "باز شدن Lakko هنگام ورود به این رایانه",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "خواندن این تنظیمات ممکن نشد. تنظیمات را دوباره باز کنید.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "تغییر این تنظیم ممکن نشد. دوباره تلاش کنید.",
       "status": "machine"
     },
     "settings.devices.add.lede": {
@@ -8216,262 +8504,6 @@
     },
     "who_can_find_me.title": {
       "text": "چه کسی می‌تواند مرا پیدا کند",
-      "status": "machine"
-    },
-    "invite.contact.page.title": {
-      "text": "{name} را به مخاطبانتان اضافه می‌کنید؟",
-      "status": "machine"
-    },
-    "invite.contact.page.add": {
-      "text": "افزودن",
-      "status": "machine"
-    },
-    "invite.contact.page.not_now": {
-      "text": "حالا نه",
-      "status": "machine"
-    },
-    "invite.contact.page.already_title": {
-      "text": "{name} از قبل در مخاطبان شماست",
-      "status": "machine"
-    },
-    "invite.contact.page.open_chat": {
-      "text": "باز کردن گفتگو",
-      "status": "machine"
-    },
-    "invite.contact.page.own_title": {
-      "text": "این پیوند دعوت خودتان است",
-      "status": "machine"
-    },
-    "invite.contact.page.own_body": {
-      "text": "آن را با کسی که می‌خواهید اضافه کنید به اشتراک بگذارید.",
-      "status": "machine"
-    },
-    "invite.contact.page.done": {
-      "text": "تمام",
-      "status": "machine"
-    },
-    "invite.contact.page.add_failed": {
-      "text": "افزودن {name} ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
-      "status": "machine"
-    },
-    "invite.contact.page.unnamed": {
-      "text": "این شخص",
-      "status": "machine"
-    },
-    "chat.pending.waiting": {
-      "text": "{name} پیام‌هایتان را وقتی برنامه‌اش دوباره آنلاین شود دریافت می‌کند.",
-      "status": "machine"
-    },
-    "chat.pending.stale": {
-      "text": "{name} هنوز پاسخ نداده است. می‌توانید از او پیوند تازه بخواهید.",
-      "status": "machine"
-    },
-    "chat.pending.call_disabled": {
-      "text": "وقتی {name} وصل شود در دسترس است.",
-      "status": "machine"
-    },
-    "contacts.add_back.control": {
-      "text": "افزودن به مخاطبان",
-      "status": "machine"
-    },
-    "contacts.add_back.sub": {
-      "text": "{name} را به فهرست مخاطبان این حساب برمی‌گرداند.",
-      "status": "machine"
-    },
-    "contacts.add_back.action": {
-      "text": "افزودن",
-      "status": "machine"
-    },
-    "invite.contact.page.answer_failed": {
-      "text": "ارتباط با {name} برقرار نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
-      "status": "machine"
-    },
-    "invite.links.show_qr": {
-      "text": "نمایش کد QR",
-      "status": "machine"
-    },
-    "invite.links.qr_hint": {
-      "text": "هر کسی این کد را اسکن کند می‌تواند برایتان درخواست مخاطب بفرستد.",
-      "status": "machine"
-    },
-    "contacts.scan_qr": {
-      "text": "اسکن کد QR",
-      "status": "machine"
-    },
-    "contacts.scan_qr.not_a_link": {
-      "text": "این کد پیوند Lakko نیست. کد دیگری را امتحان کنید.",
-      "status": "machine"
-    },
-    "desktop.quit_call.confirm": {
-      "text": "پایان تماس و خروج",
-      "status": "machine"
-    },
-    "desktop.quit_call.title": {
-      "text": "تماس پایان یابد و خارج شوید؟",
-      "status": "machine"
-    },
-    "invite.links.expires_option_custom": {
-      "text": "سفارشی",
-      "status": "machine"
-    },
-    "invite.links.uses_option_custom": {
-      "text": "سفارشی",
-      "status": "machine"
-    },
-    "invite.links.custom_expiry_amount": {
-      "text": "مدت",
-      "status": "machine"
-    },
-    "invite.links.unit_hours": {
-      "text": "ساعت",
-      "status": "machine"
-    },
-    "invite.links.unit_days": {
-      "text": "روز",
-      "status": "machine"
-    },
-    "invite.links.custom_uses_count": {
-      "text": "تعداد افراد",
-      "status": "machine"
-    },
-    "invite.links.error.custom_expiry": {
-      "text": "مدتی بین ۱ ساعت تا ۳۶۵ روز وارد کنید.",
-      "status": "machine"
-    },
-    "invite.links.error.custom_uses": {
-      "text": "تعداد افراد را بین ۱ تا {max} وارد کنید.",
-      "status": "machine"
-    },
-    "invite.contact.page.signed_out_title": {
-      "text": "{name} شما را به Lakko دعوت می‌کند",
-      "status": "machine"
-    },
-    "invite.contact.page.about": {
-      "text": "Lakko پیام‌رسانی است که هر گفتگو و تماس در آن رمزنگاری سرتاسری دارد.",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "ساخت حساب",
-      "status": "machine"
-    },
-    "invite.contact.page.have_account": {
-      "text": "از قبل حساب دارم",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_title": {
-      "text": "این پیوند دعوت دیگر کار نمی‌کند",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "از فرستنده بخواهید پیوند تازه‌ای بفرستد.",
-      "status": "machine"
-    },
-    "invite.links.edit": {
-      "text": "ویرایش پیوند",
-      "status": "machine"
-    },
-    "invite.links.edit_title": {
-      "text": "شرایط پیوند",
-      "status": "machine"
-    },
-    "invite.links.edit_note": {
-      "text": "با ذخیره، پیوند تازه‌ای ساخته می‌شود و پیوند قبلی کار نمی‌کند.",
-      "status": "machine"
-    },
-    "invite.links.delete": {
-      "text": "حذف پیوند",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_title": {
-      "text": "این پیوند حذف شود؟",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_body": {
-      "text": "کسی که آن را دارد دیگر نمی‌تواند از آن استفاده کند.",
-      "status": "machine"
-    },
-    "invite.links.deleted": {
-      "text": "پیوند حذف شد.",
-      "status": "machine"
-    },
-    "invite.links.error.delete": {
-      "text": "حذف پیوند ممکن نشد. اتصال را بررسی کنید و دوباره امتحان کنید.",
-      "status": "machine"
-    },
-    "invite.links.error.edit": {
-      "text": "ذخیرهٔ پیوند ممکن نشد. اتصال را بررسی کنید و دوباره امتحان کنید.",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.close_window": {
-      "text": "بستن پنجره",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.destinations": {
-      "text": "گفتگوها، فید، مخاطبان، تماس‌ها، تنظیمات",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.edit_last": {
-      "text": "ویرایش آخرین پیام من (در کادر خالی پیام)",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.escape": {
-      "text": "بستن منو، کادر گفتگو یا برگه؛ خروج از جستجو",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.folders": {
-      "text": "تغییر پوشه گفتگو",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.new_chat": {
-      "text": "گفتگوی جدید",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.previous_next": {
-      "text": "گفتگوی قبلی یا بعدی",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.quit": {
-      "text": "خروج از Lakko",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.search": {
-      "text": "جستجوی گفتگوها و افراد",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.send": {
-      "text": "ارسال یا شروع خط جدید",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.settings": {
-      "text": "تنظیمات",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.title": {
-      "text": "میان‌برهای صفحه‌کلید",
-      "status": "machine"
-    },
-    "settings.desktop.keep_running.sub": {
-      "text": "وقتی پنجره بسته است پیام‌ها و تماس‌ها دریافت می‌شوند.",
-      "status": "machine"
-    },
-    "settings.desktop.keep_running.title": {
-      "text": "اجرا ماندن پس از بستن پنجره",
-      "status": "machine"
-    },
-    "settings.desktop.lede": {
-      "text": "نحوه اجرای Lakko در این رایانه.",
-      "status": "machine"
-    },
-    "settings.desktop.open_at_login.title": {
-      "text": "باز شدن Lakko هنگام ورود به این رایانه",
-      "status": "machine"
-    },
-    "settings.desktop.read_failed": {
-      "text": "خواندن این تنظیمات ممکن نشد. تنظیمات را دوباره باز کنید.",
-      "status": "machine"
-    },
-    "settings.desktop.save_failed": {
-      "text": "تغییر این تنظیم ممکن نشد. دوباره تلاش کنید.",
       "status": "machine"
     }
   }

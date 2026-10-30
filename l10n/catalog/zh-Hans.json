@@ -2678,6 +2678,18 @@
       "text": "对方",
       "status": "machine"
     },
+    "chat.pending.call_disabled": {
+      "text": "{name} 连接后即可使用。",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} 尚未回复。你可以请对方发一个新链接。",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} 的应用下次联网时会收到你的消息。",
+      "status": "machine"
+    },
     "chat.photo.load_failed": {
       "text": "无法加载照片",
       "status": "machine"
@@ -3786,6 +3798,18 @@
       "text": "分享邀请链接",
       "status": "machine"
     },
+    "contacts.add_back.action": {
+      "text": "添加",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "添加到联系人",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "将 {name} 重新加入此账户的联系人列表。",
+      "status": "machine"
+    },
     "contacts.detail.actions": {
       "text": "联系人操作",
       "status": "machine"
@@ -4000,6 +4024,54 @@
     },
     "contacts.safety.title": {
       "text": "核对安全码",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "扫描二维码",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "这不是 Lakko 链接。请换一个二维码。",
+      "status": "machine"
+    },
+    "desktop.capture.body": {
+      "text": "请在系统隐私设置中允许，然后重试。",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko 无法使用你的摄像头。",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko 无法使用你的麦克风。",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "打开设置",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "结束通话并退出",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "结束通话并退出？",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "你仍会收到消息和通话。要停止，请从托盘图标退出。",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko 仍在运行。",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "打开 Lakko",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "退出 Lakko",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4422,12 +4494,12 @@
       "text": "你的其他设备会保留聊天，并自动获得新密钥。",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "你的通行密钥仍可用于登录。“使用此通行密钥恢复密钥”已关闭，直到你重新开启。",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "你之前创建的邀请链接和通话链接将失效。请创建新的链接。",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "你的通行密钥仍可用于登录。“使用此通行密钥恢复密钥”已关闭，直到你重新开启。",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -5806,6 +5878,74 @@
       "text": "此链接已失效。请让对方给你一个新链接。",
       "status": "machine"
     },
+    "invite.contact.page.about": {
+      "text": "Lakko 是一款每个聊天和通话都端到端加密的通讯应用。",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "添加",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "无法添加 {name}。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} 已在你的联系人中",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "无法联系 {name}。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "创建账号",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "请让发送者重新发一个。",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "此邀请链接已失效",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "完成",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "我已有账号",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "暂不",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "打开聊天",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "把它分享给你想添加的人。",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "这是你自己的邀请链接",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} 邀请你加入 Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "将 {name} 添加到联系人？",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "此人",
+      "status": "machine"
+    },
     "invite.contact.page_title": {
       "text": "邀请",
       "status": "machine"
@@ -5958,8 +6098,44 @@
       "text": "创建于 {date}",
       "status": "machine"
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "期限",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "人数",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "删除链接",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "已经拿到此链接的人将无法再使用它。",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "删除此链接？",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "链接已删除。",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "任何打开你链接的人都可以向你发送联系人请求，直到链接过期或次数用完。",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "编辑链接",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "保存后会生成新链接，旧链接将失效。",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "链接条件",
       "status": "machine"
     },
     "invite.links.empty": {
@@ -5968,6 +6144,22 @@
     },
     "invite.links.error.copy": {
       "text": "无法复制链接。",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "请输入 1 小时到 365 天之间的期限。",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "请输入 1 到 {max} 之间的人数。",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "无法删除链接。请检查网络后重试。",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "无法保存链接。请检查网络后重试。",
       "status": "machine"
     },
     "invite.links.error.load": {
@@ -6006,6 +6198,10 @@
       "text": "{count} 分钟后过期",
       "status": "machine"
     },
+    "invite.links.expires_option_custom": {
+      "text": "自定义",
+      "status": "machine"
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, other {# 天后}}",
       "status": "machine"
@@ -6042,12 +6238,28 @@
       "text": "新",
       "status": "machine"
     },
+    "invite.links.qr_hint": {
+      "text": "扫描此二维码的任何人都可以向你发送联系人请求。",
+      "status": "machine"
+    },
     "invite.links.revoked": {
       "text": "链接已撤销。",
       "status": "machine"
     },
     "invite.links.revoking": {
       "text": "正在撤销…",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "显示二维码",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "天",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "小时",
       "status": "machine"
     },
     "invite.links.unlimited_uses": {
@@ -6064,6 +6276,10 @@
     },
     "invite.links.uses_left": {
       "text": "{count, plural, other {剩余 # 次}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "自定义",
       "status": "machine"
     },
     "invite.links.uses_option_one": {
@@ -7246,6 +7462,54 @@
       "text": "Lakko 如何保护你",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "关闭窗口",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "聊天、动态、联系人、通话、设置",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "编辑我的最后一条消息（在空的消息框中）",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "关闭菜单、对话框或面板；退出搜索",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "切换聊天文件夹",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "新聊天",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "上一个或下一个对话",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "退出 Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "搜索对话和联系人",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "发送或换行",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "设置",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "键盘快捷键",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "翻译已更新 {date}",
       "status": "machine"
@@ -7432,6 +7696,30 @@
     },
     "settings.data.title": {
       "text": "你的数据",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "窗口关闭时仍会收到消息和通话。",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "关闭窗口后继续运行",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "Lakko 在这台电脑上的运行方式。",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "登录这台电脑时打开 Lakko",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "无法读取这些设置。请重新打开设置。",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "无法更改此设置。请重试。",
       "status": "machine"
     },
     "settings.devices.add.lede": {
@@ -8216,262 +8504,6 @@
     },
     "who_can_find_me.title": {
       "text": "谁可以找到我",
-      "status": "machine"
-    },
-    "invite.contact.page.title": {
-      "text": "将 {name} 添加到联系人？",
-      "status": "machine"
-    },
-    "invite.contact.page.add": {
-      "text": "添加",
-      "status": "machine"
-    },
-    "invite.contact.page.not_now": {
-      "text": "暂不",
-      "status": "machine"
-    },
-    "invite.contact.page.already_title": {
-      "text": "{name} 已在你的联系人中",
-      "status": "machine"
-    },
-    "invite.contact.page.open_chat": {
-      "text": "打开聊天",
-      "status": "machine"
-    },
-    "invite.contact.page.own_title": {
-      "text": "这是你自己的邀请链接",
-      "status": "machine"
-    },
-    "invite.contact.page.own_body": {
-      "text": "把它分享给你想添加的人。",
-      "status": "machine"
-    },
-    "invite.contact.page.done": {
-      "text": "完成",
-      "status": "machine"
-    },
-    "invite.contact.page.add_failed": {
-      "text": "无法添加 {name}。请检查网络连接后重试。",
-      "status": "machine"
-    },
-    "invite.contact.page.unnamed": {
-      "text": "此人",
-      "status": "machine"
-    },
-    "chat.pending.waiting": {
-      "text": "{name} 的应用下次联网时会收到你的消息。",
-      "status": "machine"
-    },
-    "chat.pending.stale": {
-      "text": "{name} 尚未回复。你可以请对方发一个新链接。",
-      "status": "machine"
-    },
-    "chat.pending.call_disabled": {
-      "text": "{name} 连接后即可使用。",
-      "status": "machine"
-    },
-    "contacts.add_back.control": {
-      "text": "添加到联系人",
-      "status": "machine"
-    },
-    "contacts.add_back.sub": {
-      "text": "将 {name} 重新加入此账户的联系人列表。",
-      "status": "machine"
-    },
-    "contacts.add_back.action": {
-      "text": "添加",
-      "status": "machine"
-    },
-    "invite.contact.page.answer_failed": {
-      "text": "无法联系 {name}。请检查网络连接后重试。",
-      "status": "machine"
-    },
-    "invite.links.show_qr": {
-      "text": "显示二维码",
-      "status": "machine"
-    },
-    "invite.links.qr_hint": {
-      "text": "扫描此二维码的任何人都可以向你发送联系人请求。",
-      "status": "machine"
-    },
-    "contacts.scan_qr": {
-      "text": "扫描二维码",
-      "status": "machine"
-    },
-    "contacts.scan_qr.not_a_link": {
-      "text": "这不是 Lakko 链接。请换一个二维码。",
-      "status": "machine"
-    },
-    "desktop.quit_call.confirm": {
-      "text": "结束通话并退出",
-      "status": "machine"
-    },
-    "desktop.quit_call.title": {
-      "text": "结束通话并退出？",
-      "status": "machine"
-    },
-    "invite.links.expires_option_custom": {
-      "text": "自定义",
-      "status": "machine"
-    },
-    "invite.links.uses_option_custom": {
-      "text": "自定义",
-      "status": "machine"
-    },
-    "invite.links.custom_expiry_amount": {
-      "text": "期限",
-      "status": "machine"
-    },
-    "invite.links.unit_hours": {
-      "text": "小时",
-      "status": "machine"
-    },
-    "invite.links.unit_days": {
-      "text": "天",
-      "status": "machine"
-    },
-    "invite.links.custom_uses_count": {
-      "text": "人数",
-      "status": "machine"
-    },
-    "invite.links.error.custom_expiry": {
-      "text": "请输入 1 小时到 365 天之间的期限。",
-      "status": "machine"
-    },
-    "invite.links.error.custom_uses": {
-      "text": "请输入 1 到 {max} 之间的人数。",
-      "status": "machine"
-    },
-    "invite.contact.page.signed_out_title": {
-      "text": "{name} 邀请你加入 Lakko",
-      "status": "machine"
-    },
-    "invite.contact.page.about": {
-      "text": "Lakko 是一款每个聊天和通话都端到端加密的通讯应用。",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "创建账号",
-      "status": "machine"
-    },
-    "invite.contact.page.have_account": {
-      "text": "我已有账号",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_title": {
-      "text": "此邀请链接已失效",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "请让发送者重新发一个。",
-      "status": "machine"
-    },
-    "invite.links.edit": {
-      "text": "编辑链接",
-      "status": "machine"
-    },
-    "invite.links.edit_title": {
-      "text": "链接条件",
-      "status": "machine"
-    },
-    "invite.links.edit_note": {
-      "text": "保存后会生成新链接，旧链接将失效。",
-      "status": "machine"
-    },
-    "invite.links.delete": {
-      "text": "删除链接",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_title": {
-      "text": "删除此链接？",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_body": {
-      "text": "已经拿到此链接的人将无法再使用它。",
-      "status": "machine"
-    },
-    "invite.links.deleted": {
-      "text": "链接已删除。",
-      "status": "machine"
-    },
-    "invite.links.error.delete": {
-      "text": "无法删除链接。请检查网络后重试。",
-      "status": "machine"
-    },
-    "invite.links.error.edit": {
-      "text": "无法保存链接。请检查网络后重试。",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.close_window": {
-      "text": "关闭窗口",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.destinations": {
-      "text": "聊天、动态、联系人、通话、设置",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.edit_last": {
-      "text": "编辑我的最后一条消息（在空的消息框中）",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.escape": {
-      "text": "关闭菜单、对话框或面板；退出搜索",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.folders": {
-      "text": "切换聊天文件夹",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.new_chat": {
-      "text": "新聊天",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.previous_next": {
-      "text": "上一个或下一个对话",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.quit": {
-      "text": "退出 Lakko",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.search": {
-      "text": "搜索对话和联系人",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.send": {
-      "text": "发送或换行",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.settings": {
-      "text": "设置",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.title": {
-      "text": "键盘快捷键",
-      "status": "machine"
-    },
-    "settings.desktop.keep_running.sub": {
-      "text": "窗口关闭时仍会收到消息和通话。",
-      "status": "machine"
-    },
-    "settings.desktop.keep_running.title": {
-      "text": "关闭窗口后继续运行",
-      "status": "machine"
-    },
-    "settings.desktop.lede": {
-      "text": "Lakko 在这台电脑上的运行方式。",
-      "status": "machine"
-    },
-    "settings.desktop.open_at_login.title": {
-      "text": "登录这台电脑时打开 Lakko",
-      "status": "machine"
-    },
-    "settings.desktop.read_failed": {
-      "text": "无法读取这些设置。请重新打开设置。",
-      "status": "machine"
-    },
-    "settings.desktop.save_failed": {
-      "text": "无法更改此设置。请重试。",
       "status": "machine"
     }
   }

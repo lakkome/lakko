@@ -37,6 +37,7 @@ vi.mock("../calls/CallHostContext", () => ({
     anyCallInProgress: () => callLive(),
     endCurrentCall,
     ringingCallIdHex: ringing,
+    ringingOfferedVideo: () => true,
     quietIncomingCall: () => null,
     activeGroupIdB64: () => "g-ann",
   }),
@@ -175,7 +176,33 @@ describe("DesktopBridge", () => {
     await settle();
     const notified = posts.filter((p) => p.url === "/__host/app/notify").map((p) => p.body);
     expect(notified).toHaveLength(1);
-    expect(notified[0]).toMatchObject({ tag: "call:c1", title: "ann", target: null });
+    expect(notified[0]).toMatchObject({
+      tag: "call:c1",
+      title: "ann",
+      target: null,
+      call: { callId: "c1", video: true },
+    });
+  });
+
+  it("takes the call notification back when the ring ends", async () => {
+    setRows([row("ann", 0)]);
+    renderUi(() => <DesktopBridge />);
+    await settle();
+    setRinging("c2");
+    await settle();
+    setRinging(null);
+    await settle();
+    const withdrawn = posts.filter((p) => p.url === "/__host/app/withdraw").map((p) => p.body);
+    expect(withdrawn).toEqual([{ tag: "call:c2" }]);
+  });
+
+  it("says once that Lakko is still running", async () => {
+    renderUi(() => <DesktopBridge />);
+    await settle();
+    hostEvent("still-running");
+    await settle();
+    const notified = posts.filter((p) => p.url === "/__host/app/notify").map((p) => p.body);
+    expect(notified).toMatchObject([{ tag: "still-running", target: null }]);
   });
 
   it("opens Settings for the menu item", async () => {

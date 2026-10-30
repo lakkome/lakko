@@ -14,7 +14,11 @@
  * - Raises the system notifications of `desktop.md` sections 4 and 4.1: a
  *   message when a conversation's unread count rises (rules in
  *   `desktop-notifications.ts`), a ringing call when the window is not in
- *   front; a click on one opens its conversation (`open-target`).
+ *   front, with Accept and Decline, taken back when the ring ends; a click on
+ *   one opens its conversation (`open-target`). A press of Accept or Decline
+ *   reaches `calls/CallActionListener.tsx`.
+ * - Says once that Lakko is still running when the window first hides on
+ *   Windows and Linux, and keeps the tray menu in the interface language.
  * - Turns `Mod+K` / `Mod+N` / `Alt+Up` / `Alt+Down` into commands for the
  *   conversation list (`platform/shortcuts.ts`), and `Mod+Shift+1..5` into
  *   the five destinations.
@@ -30,13 +34,15 @@ import { allChatsUnreadCount } from "../chat/folders/folder-view";
 import { t } from "../l10n";
 import { paths } from "../routes/paths";
 import { requestConfirm } from "../ui/confirm-dialog";
-import { callAlert, messageNotifications, type NotifyRow } from "./desktop-notifications";
+import { callAlert, callTag, messageNotifications, type NotifyRow } from "./desktop-notifications";
 import {
   onHostEvent,
   postHostState,
   requestHostAttention,
   requestHostQuit,
+  setHostTrayLabels,
   showHostNotification,
+  withdrawHostNotification,
 } from "./host";
 import { isDesktop } from "./index";
 import {
@@ -111,6 +117,7 @@ export function DesktopBridge(): JSX.Element {
     const ringing = callHost.ringingCallIdHex();
     const quiet = callHost.quietIncomingCall() !== null;
     if (ringing === null) {
+      if (alertedCall !== null) void withdrawHostNotification(callTag(alertedCall));
       alertedCall = null;
       return;
     }
@@ -125,11 +132,18 @@ export function DesktopBridge(): JSX.Element {
       focused: untrack(focused),
       callerTitle: callerRow?.title ?? t("call.notification.incoming"),
       incomingWord: t("call.notification.incoming"),
+      acceptWord: t("call.incoming.accept"),
+      declineWord: t("call.incoming.decline"),
+      video: untrack(() => callHost.ringingOfferedVideo()),
     });
     if (alert.kind === "none") return;
     alertedCall = ringing;
     if (alert.kind === "attention") void requestHostAttention();
     else void showHostNotification(alert.notification);
+  });
+
+  createEffect(() => {
+    void setHostTrayLabels({ open: t("desktop.tray.open"), quit: t("desktop.tray.quit") });
   });
 
   let asking = false;
@@ -167,6 +181,14 @@ export function DesktopBridge(): JSX.Element {
     const offTarget = onHostEvent("open-target", (target) => {
       if (target !== null) navigate(target);
     });
+    const offStillRunning = onHostEvent("still-running", () => {
+      void showHostNotification({
+        tag: "still-running",
+        title: t("desktop.still_running.title"),
+        body: t("desktop.still_running.body"),
+        target: null,
+      });
+    });
     const onFocus = (): void => { setFocused(true); };
     const onBlur = (): void => { setFocused(false); };
     window.addEventListener("focus", onFocus);
@@ -197,6 +219,7 @@ export function DesktopBridge(): JSX.Element {
       offQuit();
       offSettings();
       offTarget();
+      offStillRunning();
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("keydown", onKey);

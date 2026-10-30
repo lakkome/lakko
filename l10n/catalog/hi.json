@@ -2678,6 +2678,18 @@
       "text": "दूसरा व्यक्ति",
       "status": "machine"
     },
+    "chat.pending.call_disabled": {
+      "text": "{name} के जुड़ने पर उपलब्ध होगा।",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} ने अभी तक जवाब नहीं दिया है। आप उनसे नया लिंक माँग सकते हैं।",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} को आपके संदेश तब मिलेंगे जब उनका ऐप अगली बार ऑनलाइन होगा।",
+      "status": "machine"
+    },
     "chat.photo.load_failed": {
       "text": "फ़ोटो लोड नहीं हो सकी",
       "status": "machine"
@@ -3786,6 +3798,18 @@
       "text": "इनवाइट लिंक शेयर करें",
       "status": "machine"
     },
+    "contacts.add_back.action": {
+      "text": "जोड़ें",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "संपर्कों में जोड़ें",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "{name} को इस खाते की आपकी संपर्क सूची में वापस जोड़ता है।",
+      "status": "machine"
+    },
     "contacts.detail.actions": {
       "text": "संपर्क के विकल्प",
       "status": "machine"
@@ -4000,6 +4024,54 @@
     },
     "contacts.safety.title": {
       "text": "सुरक्षा नंबर की पुष्टि करें",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "QR कोड स्कैन करें",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "यह कोड Lakko लिंक नहीं है। कोई दूसरा कोड आज़माएँ।",
+      "status": "machine"
+    },
+    "desktop.capture.body": {
+      "text": "अपने सिस्टम की निजता सेटिंग में इसकी अनुमति दें, फिर दोबारा कोशिश करें।",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko आपके कैमरे का उपयोग नहीं कर सकता।",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko आपके माइक्रोफ़ोन का उपयोग नहीं कर सकता।",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "सेटिंग खोलें",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "कॉल खत्म करें और बाहर निकलें",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "कॉल खत्म करके बाहर निकलें?",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "आपको संदेश और कॉल मिलते रहेंगे। बंद करने के लिए ट्रे आइकन से बाहर निकलें।",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko अभी भी चल रहा है।",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "Lakko खोलें",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "Lakko बंद करें",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4422,12 +4494,12 @@
       "text": "आपके दूसरे डिवाइस अपनी चैट रखते हैं और नई कुंजियाँ अपने आप पा लेते हैं।",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "आपकी पासकी से अब भी साइन इन होता है। \"इस पासकी से कुंजियाँ रिस्टोर करें\" तब तक बंद रहता है जब तक आप इसे फिर से चालू नहीं करते।",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "आपके पहले बनाए गए आमंत्रण लिंक और कॉल लिंक काम करना बंद कर देंगे। नए बनाएँ।",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "आपकी पासकी से अब भी साइन इन होता है। \"इस पासकी से कुंजियाँ रिस्टोर करें\" तब तक बंद रहता है जब तक आप इसे फिर से चालू नहीं करते।",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -5806,6 +5878,74 @@
       "text": "यह लिंक अब मान्य नहीं है। उस व्यक्ति से नया लिंक माँगें।",
       "status": "machine"
     },
+    "invite.contact.page.about": {
+      "text": "Lakko एक मैसेंजर है जिसमें हर चैट और कॉल एंड-टू-एंड एन्क्रिप्टेड होती है।",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "जोड़ें",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "{name} को नहीं जोड़ा जा सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} पहले से आपके संपर्कों में हैं",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "{name} तक नहीं पहुँच सके। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "खाता बनाएँ",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "भेजने वाले से नया लिंक माँगें।",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "यह आमंत्रण लिंक अब काम नहीं करता",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "हो गया",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "मेरे पास पहले से खाता है",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "अभी नहीं",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "चैट खोलें",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "इसे उस व्यक्ति के साथ साझा करें जिसे आप जोड़ना चाहते हैं।",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "यह आपका अपना आमंत्रण लिंक है",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} आपको Lakko पर आमंत्रित कर रहे हैं",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "{name} को अपने संपर्कों में जोड़ें?",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "इस व्यक्ति",
+      "status": "machine"
+    },
     "invite.contact.page_title": {
       "text": "इनवाइट",
       "status": "machine"
@@ -5958,8 +6098,44 @@
       "text": "{date} को बनाया",
       "status": "machine"
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "अवधि",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "लोगों की संख्या",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "लिंक हटाएँ",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "जिसके पास यह पहले से है, वह इसका उपयोग नहीं कर पाएगा।",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "यह लिंक हटाएँ?",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "लिंक हटा दिया गया।",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "आपका कोई भी लिंक खोलने वाला व्यक्ति आपको संपर्क अनुरोध भेज सकता है, जब तक लिंक की समय-सीमा खत्म न हो जाए या उसके सभी इस्तेमाल पूरे न हो जाएँ।",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "लिंक बदलें",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "सहेजने पर नया लिंक बनता है। पुराना काम करना बंद कर देता है।",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "लिंक की शर्तें",
       "status": "machine"
     },
     "invite.links.empty": {
@@ -5968,6 +6144,22 @@
     },
     "invite.links.error.copy": {
       "text": "लिंक कॉपी नहीं हो सका।",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "1 घंटे से 365 दिन तक की अवधि डालें।",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "1 से {max} तक लोगों की संख्या डालें।",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "लिंक नहीं हटाया जा सका। कनेक्शन जाँचें और फिर कोशिश करें।",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "लिंक सहेजा नहीं जा सका। कनेक्शन जाँचें और फिर कोशिश करें।",
       "status": "machine"
     },
     "invite.links.error.load": {
@@ -6006,6 +6198,10 @@
       "text": "{count} मिनट में खत्म",
       "status": "machine"
     },
+    "invite.links.expires_option_custom": {
+      "text": "अपनी पसंद",
+      "status": "machine"
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, one {# दिन में} other {# दिनों में}}",
       "status": "machine"
@@ -6042,12 +6238,28 @@
       "text": "नया",
       "status": "machine"
     },
+    "invite.links.qr_hint": {
+      "text": "जो भी यह कोड स्कैन करेगा, वह आपको संपर्क अनुरोध भेज सकेगा।",
+      "status": "machine"
+    },
     "invite.links.revoked": {
       "text": "लिंक रद्द कर दिया गया।",
       "status": "machine"
     },
     "invite.links.revoking": {
       "text": "रद्द किया जा रहा है...",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "QR कोड दिखाएँ",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "दिन",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "घंटे",
       "status": "machine"
     },
     "invite.links.unlimited_uses": {
@@ -6064,6 +6276,10 @@
     },
     "invite.links.uses_left": {
       "text": "{count, plural, one {# इस्तेमाल बाकी} other {# इस्तेमाल बाकी}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "अपनी पसंद",
       "status": "machine"
     },
     "invite.links.uses_option_one": {
@@ -7246,6 +7462,54 @@
       "text": "Lakko आपकी सुरक्षा कैसे करता है",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "विंडो बंद करें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "चैट, फ़ीड, संपर्क, कॉल, सेटिंग्स",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "मेरा आखिरी संदेश संपादित करें (खाली संदेश फ़ील्ड में)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "मेनू, डायलॉग या शीट बंद करें; खोज से बाहर निकलें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "चैट फ़ोल्डर बदलें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "नई चैट",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "पिछली या अगली बातचीत",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Lakko से बाहर निकलें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "बातचीत और लोग खोजें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "भेजें या नई पंक्ति शुरू करें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "सेटिंग",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "कीबोर्ड शॉर्टकट",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "अनुवाद अपडेट किए गए {date}",
       "status": "machine"
@@ -7432,6 +7696,30 @@
     },
     "settings.data.title": {
       "text": "आपका डेटा",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "विंडो बंद होने पर भी आपको संदेश और कॉल मिलेंगे।",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "विंडो बंद होने पर भी चलता रहे",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "इस कंप्यूटर पर Lakko कैसे चलता है।",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "इस कंप्यूटर में साइन इन करने पर Lakko खोलें",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "ये सेटिंग पढ़ी नहीं जा सकीं। सेटिंग फिर से खोलें।",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "यह सेटिंग बदली नहीं जा सकी। फिर से कोशिश करें।",
       "status": "machine"
     },
     "settings.devices.add.lede": {
@@ -8216,262 +8504,6 @@
     },
     "who_can_find_me.title": {
       "text": "मुझे कौन ढूँढ सकता है",
-      "status": "machine"
-    },
-    "invite.contact.page.title": {
-      "text": "{name} को अपने संपर्कों में जोड़ें?",
-      "status": "machine"
-    },
-    "invite.contact.page.add": {
-      "text": "जोड़ें",
-      "status": "machine"
-    },
-    "invite.contact.page.not_now": {
-      "text": "अभी नहीं",
-      "status": "machine"
-    },
-    "invite.contact.page.already_title": {
-      "text": "{name} पहले से आपके संपर्कों में हैं",
-      "status": "machine"
-    },
-    "invite.contact.page.open_chat": {
-      "text": "चैट खोलें",
-      "status": "machine"
-    },
-    "invite.contact.page.own_title": {
-      "text": "यह आपका अपना आमंत्रण लिंक है",
-      "status": "machine"
-    },
-    "invite.contact.page.own_body": {
-      "text": "इसे उस व्यक्ति के साथ साझा करें जिसे आप जोड़ना चाहते हैं।",
-      "status": "machine"
-    },
-    "invite.contact.page.done": {
-      "text": "हो गया",
-      "status": "machine"
-    },
-    "invite.contact.page.add_failed": {
-      "text": "{name} को नहीं जोड़ा जा सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
-      "status": "machine"
-    },
-    "invite.contact.page.unnamed": {
-      "text": "इस व्यक्ति",
-      "status": "machine"
-    },
-    "chat.pending.waiting": {
-      "text": "{name} को आपके संदेश तब मिलेंगे जब उनका ऐप अगली बार ऑनलाइन होगा।",
-      "status": "machine"
-    },
-    "chat.pending.stale": {
-      "text": "{name} ने अभी तक जवाब नहीं दिया है। आप उनसे नया लिंक माँग सकते हैं।",
-      "status": "machine"
-    },
-    "chat.pending.call_disabled": {
-      "text": "{name} के जुड़ने पर उपलब्ध होगा।",
-      "status": "machine"
-    },
-    "contacts.add_back.control": {
-      "text": "संपर्कों में जोड़ें",
-      "status": "machine"
-    },
-    "contacts.add_back.sub": {
-      "text": "{name} को इस खाते की आपकी संपर्क सूची में वापस जोड़ता है।",
-      "status": "machine"
-    },
-    "contacts.add_back.action": {
-      "text": "जोड़ें",
-      "status": "machine"
-    },
-    "invite.contact.page.answer_failed": {
-      "text": "{name} तक नहीं पहुँच सके। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
-      "status": "machine"
-    },
-    "invite.links.show_qr": {
-      "text": "QR कोड दिखाएँ",
-      "status": "machine"
-    },
-    "invite.links.qr_hint": {
-      "text": "जो भी यह कोड स्कैन करेगा, वह आपको संपर्क अनुरोध भेज सकेगा।",
-      "status": "machine"
-    },
-    "contacts.scan_qr": {
-      "text": "QR कोड स्कैन करें",
-      "status": "machine"
-    },
-    "contacts.scan_qr.not_a_link": {
-      "text": "यह कोड Lakko लिंक नहीं है। कोई दूसरा कोड आज़माएँ।",
-      "status": "machine"
-    },
-    "desktop.quit_call.confirm": {
-      "text": "कॉल खत्म करें और बाहर निकलें",
-      "status": "machine"
-    },
-    "desktop.quit_call.title": {
-      "text": "कॉल खत्म करके बाहर निकलें?",
-      "status": "machine"
-    },
-    "invite.links.expires_option_custom": {
-      "text": "अपनी पसंद",
-      "status": "machine"
-    },
-    "invite.links.uses_option_custom": {
-      "text": "अपनी पसंद",
-      "status": "machine"
-    },
-    "invite.links.custom_expiry_amount": {
-      "text": "अवधि",
-      "status": "machine"
-    },
-    "invite.links.unit_hours": {
-      "text": "घंटे",
-      "status": "machine"
-    },
-    "invite.links.unit_days": {
-      "text": "दिन",
-      "status": "machine"
-    },
-    "invite.links.custom_uses_count": {
-      "text": "लोगों की संख्या",
-      "status": "machine"
-    },
-    "invite.links.error.custom_expiry": {
-      "text": "1 घंटे से 365 दिन तक की अवधि डालें।",
-      "status": "machine"
-    },
-    "invite.links.error.custom_uses": {
-      "text": "1 से {max} तक लोगों की संख्या डालें।",
-      "status": "machine"
-    },
-    "invite.contact.page.signed_out_title": {
-      "text": "{name} आपको Lakko पर आमंत्रित कर रहे हैं",
-      "status": "machine"
-    },
-    "invite.contact.page.about": {
-      "text": "Lakko एक मैसेंजर है जिसमें हर चैट और कॉल एंड-टू-एंड एन्क्रिप्टेड होती है।",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "खाता बनाएँ",
-      "status": "machine"
-    },
-    "invite.contact.page.have_account": {
-      "text": "मेरे पास पहले से खाता है",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_title": {
-      "text": "यह आमंत्रण लिंक अब काम नहीं करता",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "भेजने वाले से नया लिंक माँगें।",
-      "status": "machine"
-    },
-    "invite.links.edit": {
-      "text": "लिंक बदलें",
-      "status": "machine"
-    },
-    "invite.links.edit_title": {
-      "text": "लिंक की शर्तें",
-      "status": "machine"
-    },
-    "invite.links.edit_note": {
-      "text": "सहेजने पर नया लिंक बनता है। पुराना काम करना बंद कर देता है।",
-      "status": "machine"
-    },
-    "invite.links.delete": {
-      "text": "लिंक हटाएँ",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_title": {
-      "text": "यह लिंक हटाएँ?",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_body": {
-      "text": "जिसके पास यह पहले से है, वह इसका उपयोग नहीं कर पाएगा।",
-      "status": "machine"
-    },
-    "invite.links.deleted": {
-      "text": "लिंक हटा दिया गया।",
-      "status": "machine"
-    },
-    "invite.links.error.delete": {
-      "text": "लिंक नहीं हटाया जा सका। कनेक्शन जाँचें और फिर कोशिश करें।",
-      "status": "machine"
-    },
-    "invite.links.error.edit": {
-      "text": "लिंक सहेजा नहीं जा सका। कनेक्शन जाँचें और फिर कोशिश करें।",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.close_window": {
-      "text": "विंडो बंद करें",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.destinations": {
-      "text": "चैट, फ़ीड, संपर्क, कॉल, सेटिंग्स",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.edit_last": {
-      "text": "मेरा आखिरी संदेश संपादित करें (खाली संदेश फ़ील्ड में)",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.escape": {
-      "text": "मेनू, डायलॉग या शीट बंद करें; खोज से बाहर निकलें",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.folders": {
-      "text": "चैट फ़ोल्डर बदलें",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.new_chat": {
-      "text": "नई चैट",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.previous_next": {
-      "text": "पिछली या अगली बातचीत",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.quit": {
-      "text": "Lakko से बाहर निकलें",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.search": {
-      "text": "बातचीत और लोग खोजें",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.send": {
-      "text": "भेजें या नई पंक्ति शुरू करें",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.settings": {
-      "text": "सेटिंग",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.title": {
-      "text": "कीबोर्ड शॉर्टकट",
-      "status": "machine"
-    },
-    "settings.desktop.keep_running.sub": {
-      "text": "विंडो बंद होने पर भी आपको संदेश और कॉल मिलेंगे।",
-      "status": "machine"
-    },
-    "settings.desktop.keep_running.title": {
-      "text": "विंडो बंद होने पर भी चलता रहे",
-      "status": "machine"
-    },
-    "settings.desktop.lede": {
-      "text": "इस कंप्यूटर पर Lakko कैसे चलता है।",
-      "status": "machine"
-    },
-    "settings.desktop.open_at_login.title": {
-      "text": "इस कंप्यूटर में साइन इन करने पर Lakko खोलें",
-      "status": "machine"
-    },
-    "settings.desktop.read_failed": {
-      "text": "ये सेटिंग पढ़ी नहीं जा सकीं। सेटिंग फिर से खोलें।",
-      "status": "machine"
-    },
-    "settings.desktop.save_failed": {
-      "text": "यह सेटिंग बदली नहीं जा सकी। फिर से कोशिश करें।",
       "status": "machine"
     }
   }

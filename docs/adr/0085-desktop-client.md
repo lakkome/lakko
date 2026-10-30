@@ -9,8 +9,8 @@
   client's wasm inside the window (option A of section "Alternatives"). The
   five decisions of section 9 are the maintainer's too (2026-10-16). S3 is
   built on macOS (section 12, 2026-10-29), with system notifications not yet
-  seen on screen; S4 and S5 are not started, nor anything on Windows or
-  Linux.
+  seen on screen; the Windows and Linux host compiles and has never been run
+  (section 13, 2026-10-30); S4 and S5 are not started.
 - **Date:** 2026-10-16
 - **Amends:** [ADR-0002](0002-rust-core.md) (the desktop row of the
   per-platform UI table, and its open question "is Tauri 2.x mature enough").
@@ -394,13 +394,56 @@ hidden window for longer than two minutes.
   the executable inside it. Without a registered bundle the host logs that
   notifications are unavailable and the route answers
   `503 notifications-unsupported`.
-- **Not built:** withdrawing a delivered notification on macOS (the library
-  has no call for it, so the "A device was added" notification stays in
-  Notification Center after the warning is cleared); Accept / Decline on a
-  call notification; "Open system settings" when notifications are off; the
-  refusal screen of section 4.2; the tray, the "still running" notice and
-  start at login on Windows and Linux. Nothing of the notifications has been
-  seen on screen.
+- **Not built:** "Open system settings" when notifications are off. Nothing
+  of the notifications has been seen on screen. The rest of this list was
+  built on 2026-10-30, section 13.
+
+### 13. The rest of S3, Windows and Linux (2026-10-30)
+
+Nothing here has been run on Windows or Linux, or seen on screen on macOS.
+Compiled and clippy-checked in a Linux container for `x86_64-unknown-linux-gnu`
+and `x86_64-pc-windows-gnu` (the shipped Windows target is MSVC); host unit
+tests run on macOS and Linux.
+
+- **Withdrawing (`notify.rs`):** the host remembers what it delivered by tag.
+  macOS: `mac-notification-sys` hands out no identifier, so the notification is
+  found again by its title and text in `NSUserNotificationCenter` and removed
+  (`objc2-foundation`, safe bindings, no `unsafe` in the host). Two delivered
+  notifications with one title and text are removed together. Windows: a toast
+  tag plus `ToastNotificationManager.History`. Linux: `CloseNotification`. A
+  notification with a tag already delivered replaces it, on all three.
+- **Accept and Decline:** `call: {accept, decline, callId, video}` on
+  `POST notify`. A press reaches the page as `{kind: "call-action", ...}` and
+  enters `calls/CallActionListener.tsx` as a third source of the same intent,
+  so `decideCallAction` applies: only the call ringing with that id is
+  answered. Accept shows the window, Decline leaves it where it is. The ring's
+  end withdraws the notification. On macOS the buttons depend on the private
+  `_showsButtons` key the library sets; whether a banner shows them is not
+  verified. On Windows an Action Center click after the toast timed out does
+  nothing (no COM activator).
+- **The refusal screen (`platform/capture-gate.ts`):** `desktop.md` section 4.2
+  named a prejoin screen, which a voice call no longer has, so it is a dialog
+  raised by `captureGate` in `dial`, `accept` and `startGroupCall`. It probes
+  each wanted device with `getUserMedia`; only `not-allowed` stops. The browser
+  build skips it. "Open settings" uses a fixed table of OS links, nothing the
+  page sends reaches the command. Whether WKWebView sees a permission changed
+  in System Settings without a restart is not known.
+- **Windows and Linux:** a tray icon with "Open Lakko" and "Quit Lakko", the
+  labels sent by the page (`tray.rs`). A Linux with no StatusNotifier watcher
+  has no tray, and closing the window minimises it. "Lakko is still running"
+  once per computer. Start at login: the Run key, an XDG autostart entry (the
+  AppImage's own path when run from one). The unread count: an overlay dot on
+  Windows (the taskbar has no number; `desktop.md` section 2 said a number);
+  `set_badge_count` on Linux.
+- **The key store on Windows and Linux (`key_store.rs`):** it refused every
+  account before, so neither OS could sign in. Through the `keyring` crate:
+  Credential Manager, the Secret Service. Software stores, the exception of
+  decision 9.2. **The TPM path decision 9.2 names for Windows is not built**,
+  so a Windows computer with a TPM is software-backed too, which is below what
+  that decision says. For `lakko-security`.
+- **Packaging is S5:** `tauri.conf.json` has `bundle.active: false`, and a
+  Windows toast needs a Start menu shortcut carrying the app id, so toasts need
+  the installer.
 
 ## Alternatives
 

@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { callAlert, conversationTag, messageNotifications, type NotifyRow } from "./desktop-notifications";
+import { callAlert, callTag, conversationTag, messageNotifications, type NotifyRow } from "./desktop-notifications";
 import { isAppPath } from "./host";
 
 const row = (over: Partial<NotifyRow> = {}): NotifyRow => ({
@@ -79,12 +79,21 @@ describe("callAlert", () => {
     focused: false,
     callerTitle: "Ann",
     incomingWord: "Incoming call",
+    acceptWord: "Accept",
+    declineWord: "Decline",
+    video: true,
   };
 
   it("notifies once for a call ringing behind a hidden window", () => {
     expect(callAlert(base)).toEqual({
       kind: "notify",
-      notification: { tag: "call:c1", title: "Ann", body: "Incoming call", target: null },
+      notification: {
+        tag: callTag("c1"),
+        title: "Ann",
+        body: "Incoming call",
+        target: null,
+        call: { accept: "Accept", decline: "Decline", callId: "c1", video: true },
+      },
     });
     expect(callAlert({ ...base, alreadyAlerted: "c1" })).toEqual({ kind: "none" });
   });

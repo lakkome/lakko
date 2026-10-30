@@ -72,6 +72,11 @@ export function messageNotifications(
   return { next, notify };
 }
 
+/** Tag of a ringing call's notification: taken back when the ring ends. */
+export function callTag(callId: string): string {
+  return `call:${callId}`;
+}
+
 /** What a ringing call asks of the desktop. */
 export type CallAlert =
   | { readonly kind: "none" }
@@ -94,6 +99,10 @@ export function callAlert(input: {
   readonly focused: boolean;
   readonly callerTitle: string;
   readonly incomingWord: string;
+  readonly acceptWord: string;
+  readonly declineWord: string;
+  /** The caller offered video: Accept answers in kind. */
+  readonly video: boolean;
 }): CallAlert {
   const id = input.ringingCallId;
   if (id === null || input.quiet || id === input.alreadyAlerted) return { kind: "none" };
@@ -101,11 +110,12 @@ export function callAlert(input: {
   return {
     kind: "notify",
     notification: {
-      tag: `call:${id}`,
+      tag: callTag(id),
       title: input.callerTitle,
       body: input.incomingWord,
       // The call screen is what the window shows; opening it is enough.
       target: null,
+      call: { accept: input.acceptWord, decline: input.declineWord, callId: id, video: input.video },
     },
   };
 }

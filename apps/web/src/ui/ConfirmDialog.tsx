@@ -163,6 +163,25 @@ export const ConfirmDialog: Component = () => {
                 {open().request.cancelLabel}
               </button>
               </Show>
+              <Show when={open().request.extra}>
+                {(extra) => (
+                  <button
+                    type="button"
+                    onClick={() => extra().onPress()}
+                    style={{
+                      "font-size": "0.8rem",
+                      padding: "0.35rem 0.75rem",
+                      "border-radius": "var(--radius-sm)",
+                      border: "1px solid var(--surface-border)",
+                      background: "var(--surface-bg)",
+                      color: "var(--surface-fg)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {extra().label}
+                  </button>
+                )}
+              </Show>
               <button
                 ref={(el) => {
                   // A notice's only button takes the initial focus.

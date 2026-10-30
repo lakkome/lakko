@@ -4150,12 +4150,44 @@
       "text": "Это не ссылка Lakko. Попробуйте другой код.",
       "status": "machine"
     },
+    "desktop.capture.body": {
+      "text": "Разрешите доступ в настройках конфиденциальности системы и попробуйте снова.",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko не может использовать камеру.",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko не может использовать микрофон.",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "Открыть настройки",
+      "status": "machine"
+    },
     "desktop.quit_call.confirm": {
       "text": "Завершить звонок и выйти",
       "status": "machine"
     },
     "desktop.quit_call.title": {
       "text": "Завершить звонок и выйти?",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "Сообщения и звонки будут приходить. Чтобы остановить, выйдите через значок в трее.",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko продолжает работать.",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "Открыть Lakko",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "Выйти из Lakko",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {

@@ -16,8 +16,10 @@
 //! - a debug build falls back to keeping the key itself in the login
 //!   keychain, logged, so the spike runs unsigned.
 //!
-//! Other operating systems refuse until their store is built (S2 continues
-//! with Windows and Linux).
+//! Windows and Linux: the key sits in the operating system's software store
+//! (Credential Manager; the Secret Service), the case decision 9.2 records as
+//! an exception to invariant #7. The TPM path on Windows is not built. A Linux
+//! with no keyring service refuses; nothing falls back to a file.
 //!
 //! Item value layout: `tag(1) || payload`; tag `0x01` = Secure Enclave
 //! wrapped, `0x00` = the raw key (debug fallback only).
@@ -54,22 +56,62 @@ pub use other::{delete, load, save};
 
 #[cfg(not(target_os = "macos"))]
 mod other {
+    use keyring::{Entry, Error};
+    use zeroize::Zeroizing;
+
     use super::{Key, KeyStoreError};
 
-    pub fn save(_account: &str, _key: &Key) -> Result<(), KeyStoreError> {
-        Err(KeyStoreError::Unavailable("unsupported-os"))
+    const SERVICE: &str = "me.lakko.desktop.device-key";
+
+    /// No store at all is the refusal screen, never a file (`desktop.md`
+    /// section 1.1); anything else is a failed operation.
+    fn store_error(e: Error) -> KeyStoreError {
+        match e {
+            Error::NoStorageAccess(_) | Error::PlatformFailure(_) => {
+                KeyStoreError::Unavailable("no-key-store")
+            },
+            e => KeyStoreError::Failed(e.to_string()),
+        }
     }
-    pub fn load(_account: &str) -> Result<Option<Key>, KeyStoreError> {
-        Err(KeyStoreError::Unavailable("unsupported-os"))
+
+    fn entry(account: &str) -> Result<Entry, KeyStoreError> {
+        Entry::new(SERVICE, account).map_err(store_error)
     }
-    pub fn delete(_account: &str) -> Result<(), KeyStoreError> {
-        Err(KeyStoreError::Unavailable("unsupported-os"))
+
+    pub fn save(account: &str, key: &Key) -> Result<(), KeyStoreError> {
+        entry(account)?
+            .set_secret(key.as_slice())
+            .map_err(store_error)
+    }
+
+    pub fn load(account: &str) -> Result<Option<Key>, KeyStoreError> {
+        match entry(account)?.get_secret() {
+            Ok(bytes) => {
+                let bytes = Zeroizing::new(bytes);
+                let key: [u8; 32] = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| KeyStoreError::Failed("stored key has the wrong length".into()))?;
+                Ok(Some(Zeroizing::new(key)))
+            },
+            Err(Error::NoEntry) => Ok(None),
+            Err(e) => Err(store_error(e)),
+        }
+    }
+
+    pub fn delete(account: &str) -> Result<(), KeyStoreError> {
+        match entry(account)?.delete_credential() {
+            Ok(()) | Err(Error::NoEntry) => Ok(()),
+            Err(e) => Err(store_error(e)),
+        }
     }
 }
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use security_framework::item::{ItemClass, ItemSearchOptions, Location, Reference, SearchResult};
+    use security_framework::item::{
+        ItemClass, ItemSearchOptions, Location, Reference, SearchResult,
+    };
     use security_framework::key::{Algorithm, GenerateKeyOptions, KeyType, SecKey, Token};
     use security_framework::passwords::{
         delete_generic_password, get_generic_password, set_generic_password,
@@ -114,7 +156,10 @@ mod macos {
         match SecKey::new(&opts) {
             Ok(k) => Ok(Some(k)),
             Err(e) if e.code() == MISSING_ENTITLEMENT as isize => Ok(None),
-            Err(e) => Err(KeyStoreError::Failed(format!("secure enclave key: {}", e.code()))),
+            Err(e) => Err(KeyStoreError::Failed(format!(
+                "secure enclave key: {}",
+                e.code()
+            ))),
         }
     }
 
@@ -143,14 +188,14 @@ mod macos {
                 v.push(TAG_SE);
                 v.extend_from_slice(&wrapped);
                 v
-            }
+            },
             None => {
                 software_fallback_allowed()?;
                 let mut v = Zeroizing::new(Vec::with_capacity(33));
                 v.push(TAG_RAW);
                 v.extend_from_slice(key.as_ref());
                 v
-            }
+            },
         };
         set_generic_password(SERVICE, account, &value)
             .map_err(|e| KeyStoreError::Failed(format!("keychain write: {}", e.code())))
@@ -160,24 +205,29 @@ mod macos {
         let value = match get_generic_password(SERVICE, account) {
             Ok(v) => Zeroizing::new(v),
             Err(e) if e.code() == NOT_FOUND => return Ok(None),
-            Err(e) => return Err(KeyStoreError::Failed(format!("keychain read: {}", e.code()))),
+            Err(e) => {
+                return Err(KeyStoreError::Failed(format!(
+                    "keychain read: {}",
+                    e.code()
+                )))
+            },
         };
         let (tag, payload) = value
             .split_first()
             .ok_or_else(|| KeyStoreError::Failed("empty item".into()))?;
         let raw: Zeroizing<Vec<u8>> = match *tag {
             TAG_SE => {
-                let wrap = wrap_key()?
-                    .ok_or(KeyStoreError::Unavailable("hardware-key-unavailable"))?;
+                let wrap =
+                    wrap_key()?.ok_or(KeyStoreError::Unavailable("hardware-key-unavailable"))?;
                 Zeroizing::new(
                     wrap.decrypt_data(ALG, payload)
                         .map_err(|e| KeyStoreError::Failed(format!("unwrap: {}", e.code())))?,
                 )
-            }
+            },
             TAG_RAW => {
                 software_fallback_allowed()?;
                 Zeroizing::new(payload.to_vec())
-            }
+            },
             _ => return Err(KeyStoreError::Failed("unknown item tag".into())),
         };
         let mut key = Zeroizing::new([0u8; 32]);
@@ -192,7 +242,10 @@ mod macos {
         match delete_generic_password(SERVICE, account) {
             Ok(()) => Ok(()),
             Err(e) if e.code() == NOT_FOUND => Ok(()),
-            Err(e) => Err(KeyStoreError::Failed(format!("keychain delete: {}", e.code()))),
+            Err(e) => Err(KeyStoreError::Failed(format!(
+                "keychain delete: {}",
+                e.code()
+            ))),
         }
     }
 }

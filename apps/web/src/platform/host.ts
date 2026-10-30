@@ -19,7 +19,10 @@ export const HOST_APP_PATH = "/__host/app";
 export const HOST_EVENT = "lakko:host";
 
 /** What the host can tell the page. */
-export type HostEventKind = "quit-requested" | "open-settings" | "open-target";
+export type HostEventKind = "quit-requested" | "open-settings" | "open-target" | "still-running";
+
+/** The system page for one device (`docs/ux/desktop.md` section 4.2). */
+export type PrivacyPage = "microphone" | "camera";
 
 /** The desktop-only settings the host keeps on this computer. */
 export interface HostSettings {
@@ -142,6 +145,40 @@ export interface HostNotification {
   body: string;
   /** The app path a click opens; `null` only brings the window forward. */
   target: string | null;
+  /** Accept and Decline on a ringing call, where the OS has buttons. */
+  call?: HostCallButtons;
+}
+
+/** The buttons of a ringing call's notification. */
+export interface HostCallButtons {
+  accept: string;
+  decline: string;
+  /** Lowercase hex of the call id, handed back with the press. */
+  callId: string;
+  /** The caller offered video, handed back with the press. */
+  video: boolean;
+}
+
+/** A press of Accept or Decline. */
+export interface HostCallAction {
+  readonly action: "accept" | "decline";
+  readonly callId: string;
+  readonly video: boolean;
+}
+
+/** Subscribe to presses of Accept and Decline. Nothing outside the desktop app. */
+export function onHostCallAction(handler: (action: HostCallAction) => void): () => void {
+  if (!isDesktop()) return () => {};
+  const listener = (e: Event): void => {
+    const d = (e as CustomEvent<unknown>).detail as
+      | { kind?: unknown; action?: unknown; callId?: unknown; video?: unknown }
+      | null;
+    if (d === null || typeof d !== "object" || d.kind !== "call-action") return;
+    if ((d.action !== "accept" && d.action !== "decline") || typeof d.callId !== "string") return;
+    handler({ action: d.action, callId: d.callId, video: d.video === true });
+  };
+  window.addEventListener(HOST_EVENT, listener);
+  return () => window.removeEventListener(HOST_EVENT, listener);
 }
 
 /**
@@ -163,7 +200,7 @@ export async function showHostNotification(n: HostNotification): Promise<boolean
   }
 }
 
-/** Take a notification back where the OS can (not on macOS). Never throws. */
+/** Take a delivered notification back. Never throws. */
 export async function withdrawHostNotification(tag: string): Promise<void> {
   if (!isDesktop()) return;
   try {
@@ -174,6 +211,47 @@ export async function withdrawHostNotification(tag: string): Promise<void> {
     });
   } catch {
     // best-effort
+  }
+}
+
+/** The tray menu in the interface language (Windows, Linux). Never throws. */
+export async function setHostTrayLabels(labels: { open: string; quit: string }): Promise<void> {
+  if (!isDesktop()) return;
+  try {
+    await fetch(`${HOST_APP_PATH}/labels`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(labels),
+    });
+  } catch {
+    // The menu keeps its English labels.
+  }
+}
+
+/** Whether this OS has a link to its microphone and camera settings. */
+export async function hostCanOpenPrivacy(): Promise<boolean> {
+  if (!isDesktop()) return false;
+  try {
+    const res = await fetch(`${HOST_APP_PATH}/capabilities`, { method: "GET" });
+    if (!res.ok) return false;
+    const v = (await res.json()) as { privacySettings?: unknown };
+    return v.privacySettings === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Open the system page for a device. Never throws. */
+export async function openHostPrivacy(what: PrivacyPage): Promise<void> {
+  if (!isDesktop()) return;
+  try {
+    await fetch(`${HOST_APP_PATH}/open-privacy`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ what }),
+    });
+  } catch {
+    // The screen still says where to go.
   }
 }
 

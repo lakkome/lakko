@@ -2678,6 +2678,18 @@
       "text": "Співрозмовник",
       "status": "machine"
     },
+    "chat.pending.call_disabled": {
+      "text": "Буде доступно, коли {name} під'єднається.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} ще не відповів. Можна попросити нове посилання.",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} отримає ваші повідомлення, коли застосунок знову буде в мережі.",
+      "status": "machine"
+    },
     "chat.photo.load_failed": {
       "text": "Не вдалося завантажити фото",
       "status": "machine"
@@ -3786,6 +3798,18 @@
       "text": "Поділитися посиланням-запрошенням",
       "status": "machine"
     },
+    "contacts.add_back.action": {
+      "text": "Додати",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "Додати до контактів",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "Повертає {name} до списку контактів цього акаунта.",
+      "status": "machine"
+    },
     "contacts.detail.actions": {
       "text": "Дії з контактом",
       "status": "machine"
@@ -4000,6 +4024,54 @@
     },
     "contacts.safety.title": {
       "text": "Звірити код безпеки",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "Сканувати QR-код",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "Це не посилання Lakko. Спробуйте інший код.",
+      "status": "machine"
+    },
+    "desktop.capture.body": {
+      "text": "Дозвольте доступ у налаштуваннях конфіденційності системи й спробуйте ще раз.",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko не може використовувати камеру.",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko не може використовувати мікрофон.",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "Відкрити налаштування",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "Завершити дзвінок і вийти",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "Завершити дзвінок і вийти?",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "Повідомлення і дзвінки надходитимуть. Щоб зупинити, вийдіть через значок у треї.",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko продовжує працювати.",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "Відкрити Lakko",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "Вийти з Lakko",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4422,12 +4494,12 @@
       "text": "Інші ваші пристрої збережуть чати й самі отримають нові ключі.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "Ключі доступу, як і раніше, дають змогу увійти. Функцію «Відновлювати ключі цим ключем доступу» вимкнено, доки ви не ввімкнете її знову.",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "Посилання-запрошення та посилання на дзвінок, створені раніше, перестануть працювати. Створіть нові.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "Ключі доступу, як і раніше, дають змогу увійти. Функцію «Відновлювати ключі цим ключем доступу» вимкнено, доки ви не ввімкнете її знову.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -5806,6 +5878,74 @@
       "text": "Це посилання більше не дійсне. Попросіть людину надіслати нове.",
       "status": "machine"
     },
+    "invite.contact.page.about": {
+      "text": "Lakko — месенджер, у якому кожен чат і дзвінок захищені наскрізним шифруванням.",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "Додати",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "Не вдалося додати {name}. Перевірте з'єднання і спробуйте ще раз.",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} вже є у ваших контактах",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "Не вдалося зв’язатися з {name}. Перевірте з’єднання й спробуйте ще раз.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Створити акаунт",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Попросіть відправника надіслати нове.",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Посилання-запрошення більше не працює",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "Готово",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "У мене вже є акаунт",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "Не зараз",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "Відкрити чат",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "Надішліть його людині, яку хочете додати.",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "Це ваше власне посилання-запрошення",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} запрошує вас до Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "Додати {name} до контактів?",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "цю людину",
+      "status": "machine"
+    },
     "invite.contact.page_title": {
       "text": "Запрошення",
       "status": "machine"
@@ -5958,8 +6098,44 @@
       "text": "Створено {date}",
       "status": "machine"
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "Термін",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "Кількість людей",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "Видалити посилання",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Той, у кого воно вже є, більше не зможе ним скористатися.",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "Видалити це посилання?",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "Посилання видалено.",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "Будь-хто, хто відкриє одне з ваших посилань, може надіслати вам запит у контакти, доки посилання не мине або не буде вичерпане.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "Змінити посилання",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "Після збереження з'явиться нове посилання. Старе перестане працювати.",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "Умови посилання",
       "status": "machine"
     },
     "invite.links.empty": {
@@ -5968,6 +6144,22 @@
     },
     "invite.links.error.copy": {
       "text": "Не вдалося скопіювати посилання.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "Укажіть термін від 1 години до 365 днів.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "Укажіть кількість людей від 1 до {max}.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "Не вдалося видалити посилання. Перевірте з'єднання і спробуйте ще раз.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "Не вдалося зберегти посилання. Перевірте з'єднання і спробуйте ще раз.",
       "status": "machine"
     },
     "invite.links.error.load": {
@@ -6006,6 +6198,10 @@
       "text": "Мине через {count} хв",
       "status": "machine"
     },
+    "invite.links.expires_option_custom": {
+      "text": "Власний",
+      "status": "machine"
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, one {Через # день} few {Через # дні} many {Через # днів} other {Через # дня}}",
       "status": "machine"
@@ -6042,12 +6238,28 @@
       "text": "Нове",
       "status": "machine"
     },
+    "invite.links.qr_hint": {
+      "text": "Хто відсканує цей код, зможе надіслати вам запит у контакти.",
+      "status": "machine"
+    },
     "invite.links.revoked": {
       "text": "Посилання відкликано.",
       "status": "machine"
     },
     "invite.links.revoking": {
       "text": "Відкликання...",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "Показати QR-код",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "Дні",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "Години",
       "status": "machine"
     },
     "invite.links.unlimited_uses": {
@@ -6064,6 +6276,10 @@
     },
     "invite.links.uses_left": {
       "text": "{count, plural, one {Залишилося # використання} few {Залишилося # використання} many {Залишилося # використань} other {Залишилося # використання}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "Власний",
       "status": "machine"
     },
     "invite.links.uses_option_one": {
@@ -7246,6 +7462,54 @@
       "text": "Як Lakko вас захищає",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "Закрити вікно",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "Чати, Стрічка, Контакти, Дзвінки, Налаштування",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "Змінити останнє повідомлення (у порожньому полі)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "Закрити меню, діалог або панель; вийти з пошуку",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "Перемкнути папку чатів",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "Новий чат",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "Попередня або наступна розмова",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Вийти з Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "Пошук розмов і людей",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "Надіслати або почати новий рядок",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "Налаштування",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "Комбінації клавіш",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Переклади оновлено {date}",
       "status": "machine"
@@ -7432,6 +7696,30 @@
     },
     "settings.data.title": {
       "text": "Ваші дані",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "Повідомлення і дзвінки надходитимуть, поки вікно закрите.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "Працювати, коли вікно закрите",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "Як Lakko працює на цьому комп'ютері.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "Відкривати Lakko під час входу на цей комп'ютер",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "Не вдалося прочитати налаштування. Відкрийте Налаштування знову.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "Не вдалося змінити налаштування. Спробуйте ще раз.",
       "status": "machine"
     },
     "settings.devices.add.lede": {
@@ -8216,262 +8504,6 @@
     },
     "who_can_find_me.title": {
       "text": "Хто може мене знайти",
-      "status": "machine"
-    },
-    "invite.contact.page.title": {
-      "text": "Додати {name} до контактів?",
-      "status": "machine"
-    },
-    "invite.contact.page.add": {
-      "text": "Додати",
-      "status": "machine"
-    },
-    "invite.contact.page.not_now": {
-      "text": "Не зараз",
-      "status": "machine"
-    },
-    "invite.contact.page.already_title": {
-      "text": "{name} вже є у ваших контактах",
-      "status": "machine"
-    },
-    "invite.contact.page.open_chat": {
-      "text": "Відкрити чат",
-      "status": "machine"
-    },
-    "invite.contact.page.own_title": {
-      "text": "Це ваше власне посилання-запрошення",
-      "status": "machine"
-    },
-    "invite.contact.page.own_body": {
-      "text": "Надішліть його людині, яку хочете додати.",
-      "status": "machine"
-    },
-    "invite.contact.page.done": {
-      "text": "Готово",
-      "status": "machine"
-    },
-    "invite.contact.page.add_failed": {
-      "text": "Не вдалося додати {name}. Перевірте з'єднання і спробуйте ще раз.",
-      "status": "machine"
-    },
-    "invite.contact.page.unnamed": {
-      "text": "цю людину",
-      "status": "machine"
-    },
-    "chat.pending.waiting": {
-      "text": "{name} отримає ваші повідомлення, коли застосунок знову буде в мережі.",
-      "status": "machine"
-    },
-    "chat.pending.stale": {
-      "text": "{name} ще не відповів. Можна попросити нове посилання.",
-      "status": "machine"
-    },
-    "chat.pending.call_disabled": {
-      "text": "Буде доступно, коли {name} під'єднається.",
-      "status": "machine"
-    },
-    "contacts.add_back.control": {
-      "text": "Додати до контактів",
-      "status": "machine"
-    },
-    "contacts.add_back.sub": {
-      "text": "Повертає {name} до списку контактів цього акаунта.",
-      "status": "machine"
-    },
-    "contacts.add_back.action": {
-      "text": "Додати",
-      "status": "machine"
-    },
-    "invite.contact.page.answer_failed": {
-      "text": "Не вдалося зв’язатися з {name}. Перевірте з’єднання й спробуйте ще раз.",
-      "status": "machine"
-    },
-    "invite.links.show_qr": {
-      "text": "Показати QR-код",
-      "status": "machine"
-    },
-    "invite.links.qr_hint": {
-      "text": "Хто відсканує цей код, зможе надіслати вам запит у контакти.",
-      "status": "machine"
-    },
-    "contacts.scan_qr": {
-      "text": "Сканувати QR-код",
-      "status": "machine"
-    },
-    "contacts.scan_qr.not_a_link": {
-      "text": "Це не посилання Lakko. Спробуйте інший код.",
-      "status": "machine"
-    },
-    "desktop.quit_call.confirm": {
-      "text": "Завершити дзвінок і вийти",
-      "status": "machine"
-    },
-    "desktop.quit_call.title": {
-      "text": "Завершити дзвінок і вийти?",
-      "status": "machine"
-    },
-    "invite.links.expires_option_custom": {
-      "text": "Власний",
-      "status": "machine"
-    },
-    "invite.links.uses_option_custom": {
-      "text": "Власний",
-      "status": "machine"
-    },
-    "invite.links.custom_expiry_amount": {
-      "text": "Термін",
-      "status": "machine"
-    },
-    "invite.links.unit_hours": {
-      "text": "Години",
-      "status": "machine"
-    },
-    "invite.links.unit_days": {
-      "text": "Дні",
-      "status": "machine"
-    },
-    "invite.links.custom_uses_count": {
-      "text": "Кількість людей",
-      "status": "machine"
-    },
-    "invite.links.error.custom_expiry": {
-      "text": "Укажіть термін від 1 години до 365 днів.",
-      "status": "machine"
-    },
-    "invite.links.error.custom_uses": {
-      "text": "Укажіть кількість людей від 1 до {max}.",
-      "status": "machine"
-    },
-    "invite.contact.page.signed_out_title": {
-      "text": "{name} запрошує вас до Lakko",
-      "status": "machine"
-    },
-    "invite.contact.page.about": {
-      "text": "Lakko — месенджер, у якому кожен чат і дзвінок захищені наскрізним шифруванням.",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "Створити акаунт",
-      "status": "machine"
-    },
-    "invite.contact.page.have_account": {
-      "text": "У мене вже є акаунт",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_title": {
-      "text": "Посилання-запрошення більше не працює",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "Попросіть відправника надіслати нове.",
-      "status": "machine"
-    },
-    "invite.links.edit": {
-      "text": "Змінити посилання",
-      "status": "machine"
-    },
-    "invite.links.edit_title": {
-      "text": "Умови посилання",
-      "status": "machine"
-    },
-    "invite.links.edit_note": {
-      "text": "Після збереження з'явиться нове посилання. Старе перестане працювати.",
-      "status": "machine"
-    },
-    "invite.links.delete": {
-      "text": "Видалити посилання",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_title": {
-      "text": "Видалити це посилання?",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_body": {
-      "text": "Той, у кого воно вже є, більше не зможе ним скористатися.",
-      "status": "machine"
-    },
-    "invite.links.deleted": {
-      "text": "Посилання видалено.",
-      "status": "machine"
-    },
-    "invite.links.error.delete": {
-      "text": "Не вдалося видалити посилання. Перевірте з'єднання і спробуйте ще раз.",
-      "status": "machine"
-    },
-    "invite.links.error.edit": {
-      "text": "Не вдалося зберегти посилання. Перевірте з'єднання і спробуйте ще раз.",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.close_window": {
-      "text": "Закрити вікно",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.destinations": {
-      "text": "Чати, Стрічка, Контакти, Дзвінки, Налаштування",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.edit_last": {
-      "text": "Змінити останнє повідомлення (у порожньому полі)",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.escape": {
-      "text": "Закрити меню, діалог або панель; вийти з пошуку",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.folders": {
-      "text": "Перемкнути папку чатів",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.new_chat": {
-      "text": "Новий чат",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.previous_next": {
-      "text": "Попередня або наступна розмова",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.quit": {
-      "text": "Вийти з Lakko",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.search": {
-      "text": "Пошук розмов і людей",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.send": {
-      "text": "Надіслати або почати новий рядок",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.settings": {
-      "text": "Налаштування",
-      "status": "machine"
-    },
-    "settings.about.shortcuts.title": {
-      "text": "Комбінації клавіш",
-      "status": "machine"
-    },
-    "settings.desktop.keep_running.sub": {
-      "text": "Повідомлення і дзвінки надходитимуть, поки вікно закрите.",
-      "status": "machine"
-    },
-    "settings.desktop.keep_running.title": {
-      "text": "Працювати, коли вікно закрите",
-      "status": "machine"
-    },
-    "settings.desktop.lede": {
-      "text": "Як Lakko працює на цьому комп'ютері.",
-      "status": "machine"
-    },
-    "settings.desktop.open_at_login.title": {
-      "text": "Відкривати Lakko під час входу на цей комп'ютер",
-      "status": "machine"
-    },
-    "settings.desktop.read_failed": {
-      "text": "Не вдалося прочитати налаштування. Відкрийте Налаштування знову.",
-      "status": "machine"
-    },
-    "settings.desktop.save_failed": {
-      "text": "Не вдалося змінити налаштування. Спробуйте ще раз.",
       "status": "machine"
     }
   }

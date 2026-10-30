@@ -90,6 +90,7 @@ import {
 } from "solid-js";
 import { A } from "@solidjs/router";
 
+import { captureGate } from "../platform/capture-gate";
 import { cameraStartFailure } from "./capture-fallback";
 import { composeAndUploadCallInvite } from "./composer";
 import { rememberMintedLink } from "../contacts/minted-links";
@@ -281,6 +282,8 @@ export interface CallHostApi {
    * boundary around an attacker-influenceable input.
    */
   readonly ringingCallIdHex: Accessor<string | null>;
+  /** The ringing call was offered with video. */
+  readonly ringingOfferedVideo: Accessor<boolean>;
   /**
    * The muted conversation's call, offered quietly
    * (`docs/ux/calls.md` section 2.1.1), or `null`.
@@ -1361,9 +1364,14 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     }
   }
 
-  async function dial(askedGroupIdB64: string, withVideo: boolean): Promise<void> {
+  async function dial(askedGroupIdB64: string, askedVideo: boolean): Promise<void> {
     if (currentOccupant() !== null) return;
     if (groupEntry(askedGroupIdB64) === undefined) return;
+    // The refusal screen of the desktop; the gate can sit there for as long
+    // as the person takes, so the slot is read again after it.
+    const permits = await captureGate({ audio: true, video: askedVideo });
+    if (!permits.microphone || currentOccupant() !== null) return;
+    const withVideo = askedVideo && permits.camera;
     // ADR-0073 R.12 — never signal into a dead session: the call is placed
     // in the conversation's successor when this device holds one, and
     // otherwise does not start (the caller shows its ordinary
@@ -1416,9 +1424,14 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     }
   }
 
-  async function accept(withVideo: boolean): Promise<void> {
+  async function accept(askedVideo: boolean): Promise<void> {
     const call = activeCall;
     if (call === null) return;
+    const permits = await captureGate({ audio: true, video: askedVideo });
+    // Refused with the ring still on: the person can still decline, or come
+    // back to Accept. It may also have stopped ringing while the screen was up.
+    if (!permits.microphone || activeCall !== call || call.getState() !== "ringing") return;
+    const withVideo = askedVideo && permits.camera;
     if (withVideo) setVideoCall(true);
     await call.accept();
     // Opting into video on accept drives the same mid-call camera-on path the
@@ -1657,6 +1670,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    * (see `onGroupSessionState`); leaving is `leaveGroupCall`.
    */
   async function startGroupCall(opts: StartGroupCallOptions): Promise<GroupCallStartOutcome> {
+    // Before the latch below: a group call goes on whatever the answer is,
+    // since a person with no microphone can still listen and watch
+    // (`capture-fallback.ts`).
+    await captureGate({ audio: true, video: opts.withVideo });
     {
       // The slot is the latch: it is written below with no await in between,
       // so a double tap finds it taken.
@@ -2969,6 +2986,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     // time this reads `"ringing"` the call is there.
     ringingCallIdHex: () =>
       state() === "ringing" && activeCall !== null ? callIdHex(activeCall.callId) : null,
+    ringingOfferedVideo: remoteWantsVideo,
     // The clock is read here rather than kept in a signal: the sweep above is
     // what makes the surfaces disappear, and this is the guard that stops a
     // tick that has not landed yet from leaving a dead Accept on screen.

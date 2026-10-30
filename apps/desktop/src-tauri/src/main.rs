@@ -21,6 +21,8 @@ mod key_store;
 mod notify;
 mod probe;
 mod proxy;
+#[cfg(not(target_os = "macos"))]
+mod tray;
 
 use std::sync::Arc;
 
@@ -55,7 +57,7 @@ fn main() {
         Err(e) => {
             error!(error = %e, "invalid proxy configuration");
             std::process::exit(2);
-        }
+        },
     };
     let probe_mode = std::env::var("LAKKO_DESKTOP_PROBE").is_ok_and(|v| v == "1");
     let start_hidden = std::env::args().any(|a| a == app_shell::HIDDEN_ARG);
@@ -87,6 +89,10 @@ fn main() {
                 match app_shell::on_close_requested(&shell) {
                     CloseAction::Hide => {
                         let _ = w.hide();
+                        app_shell::after_hide(app, &shell);
+                    }
+                    CloseAction::Minimize => {
+                        let _ = w.minimize();
                     }
                     CloseAction::Quit => {
                         if app_shell::quit_may_proceed(app, &shell) {
@@ -102,6 +108,13 @@ fn main() {
             app.manage(Shell::load(dir, notifier));
             if let Some(menu) = app_shell::menu(app.handle())? {
                 app.set_menu(menu)?;
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let has_tray = tray::install(app.handle())?;
+                if let Some(shell) = app.try_state::<Shell>() {
+                    shell.set_has_tray(has_tray);
+                }
             }
 
             let start = if probe_mode { probe::PROBE_PATH } else { "/" };
@@ -145,10 +158,12 @@ fn main() {
         Err(e) => {
             error!(error = %e, "tauri build failed");
             std::process::exit(1);
-        }
+        },
     };
     app.run(|app, event| match event {
-        RunEvent::ExitRequested { code: None, api, .. } => {
+        RunEvent::ExitRequested {
+            code: None, api, ..
+        } => {
             if let Some(shell) = app.try_state::<Shell>() {
                 if let Some(w) = app.get_webview_window(MAIN) {
                     app_shell::remember_geometry(&w, &shell);
@@ -157,11 +172,11 @@ fn main() {
                     api.prevent_exit();
                 }
             }
-        }
+        },
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => app_shell::show_main(app),
         RunEvent::Exit => info!("exit"),
-        _ => {}
+        _ => {},
     });
     warn!("event loop returned");
 }
