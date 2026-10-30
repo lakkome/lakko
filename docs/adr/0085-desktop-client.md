@@ -10,7 +10,8 @@
   five decisions of section 9 are the maintainer's too (2026-10-16). S3 is
   built on macOS (section 12, 2026-10-29), with system notifications not yet
   seen on screen; the Windows and Linux host compiles and has never been run
-  (section 13, 2026-10-30); S4 and S5 are not started.
+  (section 13, 2026-10-30); S4 is built and the tunnel runs on the test stack (section 14, 2026-10-30), with
+  no call placed through it; S5 is not started.
 - **Date:** 2026-10-16
 - **Amends:** [ADR-0002](0002-rust-core.md) (the desktop row of the
   per-platform UI table, and its open question "is Tauri 2.x mature enough").
@@ -162,8 +163,9 @@ never keeps MLS state.
   (ADR-0026). Armed and the tunnel unavailable: the request fails, never goes
   direct (invariant #4).
 - The SFU signaling WebSocket cannot ride a URI scheme. In desktop mode
-  `calls/sfu-signaling-client.ts` opens it through a host command that returns
-  a channel (direct or, when armed, `tunneled_websocket`).
+  `calls/sfu-signaling-client.ts` opens it through the host when the setting
+  is on (`tunneled_websocket`, reached over the app scheme, section 14);
+  otherwise the page opens it itself.
 - Call media (WebRTC UDP) goes from the webview directly, as on the native
   clients, which do not tunnel media either.
 - **Links name the public origin, never the app scheme.** Every link the web
@@ -444,6 +446,90 @@ tests run on macOS and Linux.
 - **Packaging is S5:** `tauri.conf.json` has `bundle.active: false`, and a
   Windows toast needs a Start menu shortcut carrying the app id, so toasts need
   the installer.
+
+### 14. S4: anti-censorship and SFU signaling through the host (2026-10-30)
+
+`src/tunnel.rs`, `platform/host-socket.ts`, `AntiCensorshipCard` in
+`settings/DesktopSettings.tsx`.
+
+- **The setting on means never direct.** iOS and Android stay on the direct
+  path while the config is being fetched and when it could not be. The desktop
+  refuses instead (`503 tunnel-unavailable`): a person who turned this on did
+  so because a direct connection is what they cannot afford, and section 3
+  already said a failed tunnel does not go direct. It holds from the first
+  request: until the setting has been read from disk nothing leaves. The one
+  exception is a build with no pinned trust anchor, which cannot honour the
+  setting and says "Not available in this build".
+- **Build-time pin:** `LAKKO_DESKTOP_BOOTSTRAP_TRUST_ANCHOR` (standard base64),
+  `_DOH_DOMAIN`, `_CONFIG_PATH`. A debug build may read the config from
+  `LAKKO_DESKTOP_BOOTSTRAP_FILE`, still verified against the anchor; a release
+  build has no such path.
+- **A long-lived process outlives a config.** iOS and Android fetch it at boot.
+  The host fetches it again halfway through its life, and every 60 s after a
+  failure; a held config stays in use until it expires, then requests are
+  refused.
+- **The socket:** a channel out of a Tauri command would have been the only
+  IPC of its kind here, so the socket follows the rest of the host: the app
+  scheme, `POST /__host/tunnel/ws/open`, `send`, `close`, and a `recv` that
+  waits up to 25 s for frames. The page names no address: the host dials the
+  SFU it was configured with (`LAKKO_DESKTOP_SFU_URL`), so this is no relay.
+  Frames are sent one at a time, since two requests in flight may arrive in
+  either order.
+- **Call media stays direct**, as on the native clients (section 3).
+- `/discovery/locate` is not asked with the setting on (ADR-0080).
+- **Settings > Security**, not Settings > Data: the Data section no longer
+  exists.
+
+**Defects found in the shared core, fixed in `lakko-transport`, which reach
+iOS and Android too:**
+
+- REALITY and Shadowsocks-2022 never read the signed `remote`. They dialled
+  the endpoint they were handed, which every client passes as the API host and
+  port: the blocked address, where no obfuscated listener runs. `BootstrapDialer`
+  now pins each to its signed `remote`.
+- A dropped `recv` closed a Shadowsocks connection for good and could lose
+  bytes on WebTransport. Both the relay and `ByteStreamConnection` `select!`
+  `recv` against outbound data, so any tunnelled socket over Shadowsocks died
+  at its first send. `recv` now survives being dropped on both.
+- A body above 16 KiB could not cross Shadowsocks: one frame per request, and
+  an AEAD chunk per frame. Requests and socket writes are now cut into chunks.
+- A chunked response reached the caller undecoded.
+
+`tools/bootstrap-config` (`just gen-bootstrap-key`, `just sign-bootstrap-config`)
+is new: nothing could sign a config before.
+
+**Limits, same as the native clients:** a response above 8 MiB fails (the
+tunnel client's cap), so a large attachment cannot be fetched through the
+tunnel, and each request dials a tunnel of its own.
+
+**Deployed on the test stack** (`just deploy-test-obfs`,
+`infra/test-stack/deploy-obfs-proxy.sh`; the first time this service ran on any
+server): REALITY on 8444 and Shadowsocks-2022 on 8388, relaying to a
+loopback-only plain listener in the test vhost, the config signed on the
+developer's machine and served at `/bootstrap.json`. The script restarts nothing
+else and leaves the web client alone.
+
+**Verified:** host tests through a real Shadowsocks listener and the real
+`obfs-proxy` relay, for a request and for the socket; `lakko-transport` tests.
+From a Mac over the public internet, `live_every_transport_reaches_the_test_stack`
+fetched the config over DoH, verified it against the anchor, and through REALITY
+and through Shadowsocks alone got `200` from auth and `401` from the SFU for a
+made-up admission token, which is the SFU itself answering a socket that came
+through the tunnel. The app ran against a local `obfs-proxy` with about 1450
+requests through it, no failure, journal writes among them, then against the
+stack with the real pin: it armed over DoH and the server took 121 tunnels in
+two minutes (119 REALITY, 2 Shadowsocks), one per request.
+
+**Not done:** no call has been placed through the tunnel, so the exit criterion
+of S4 is half met. Nothing here ran on Windows or Linux. WebTransport has no
+listener configured; MASQUE stays unfit for this (ADR-0026).
+
+**Found running it:** through the tunnel every client reaches the server from
+`127.0.0.1`, so per-address limits count all tunnel users as one address. A real
+deployment needs those limits to treat the relay differently; not built. The
+discovery lookup answered `429` to this one client on the stack, whose env file
+does not carry the raised discovery limits, so that answer is not shown to come
+from the tunnel.
 
 ## Alternatives
 

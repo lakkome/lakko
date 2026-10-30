@@ -24,7 +24,7 @@ HERE="$REPO/infra/test-stack"
 DOMAIN="${LAKKO_TEST_DOMAIN:-test.lakko.me}"
 SSH_TARGET="${LAKKO_TEST_SSH:-root@$DOMAIN}"
 OUT="$REPO/target/test-stack"
-SERVICES=(auth ds storage discovery push-gw gif-proxy channels sfu)
+SERVICES=(auth ds storage discovery push-gw gif-proxy channels sfu obfs-proxy)
 
 # accept-new records the host key on first contact and still refuses a changed one.
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new)

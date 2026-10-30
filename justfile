@@ -505,7 +505,7 @@ dev-web:
 # bucket refills on a take and the device-link answer limit is off, as on the
 # test stack. A release build must not set either.
 build-desktop-web:
-    cd apps/web && VITE_LAKKO_PLATFORM=desktop VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT=off VITE_LAKKO_ANON_TOKEN_REFILL=on-demand npm run build
+    cd apps/web && VITE_LAKKO_PLATFORM=desktop VITE_LAKKO_SFU_URL="${VITE_LAKKO_SFU_URL:-wss://test.lakko.me/sfu}" VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT=off VITE_LAKKO_ANON_TOKEN_REFILL=on-demand npm run build
 
 # Build, sign and run the desktop app (macOS debug build).
 #
@@ -526,6 +526,14 @@ build-desktop-web:
 dev-desktop:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Anti-censorship pin of the test stack, when this machine deployed it
+    # (`just deploy-test-obfs`). Without it the build says the setting is not
+    # available and stays direct.
+    if [[ -f "$HOME/.lakko/test-stack/trust-anchor" ]]; then
+        export LAKKO_DESKTOP_BOOTSTRAP_TRUST_ANCHOR="$(cat "$HOME/.lakko/test-stack/trust-anchor")"
+        export LAKKO_DESKTOP_BOOTSTRAP_DOH_DOMAIN=test.lakko.me
+        export LAKKO_DESKTOP_BOOTSTRAP_CONFIG_PATH=/bootstrap.json
+    fi
     cd apps/desktop/src-tauri
     cargo build
     id=me.lakko.desktop.dev
@@ -1008,6 +1016,25 @@ mint-release-manifest latest min_supported:
     cargo run -q -p lakko-release-manifest-tool -- \
         mint --latest {{latest}} --min-supported {{min_supported}} \
         --key release-signing-key.seed --out release-manifest.bin
+
+# ADR-0026 - put the anti-censorship tunnel on the test stack: obfs-proxy
+# alone, no other service restarted, and a freshly signed bootstrap config.
+deploy-test-obfs:
+    infra/test-stack/deploy-obfs-proxy.sh
+
+# ADR-0026 - generate the bootstrap-signing keypair. Writes
+# bootstrap-signing-key.seed (mode 0600; keep OFFLINE, never commit) and prints
+# the base64 public key every client pins as its trust anchor.
+gen-bootstrap-key:
+    cargo run -q -p lakko-bootstrap-config-tool -- keygen
+
+# ADR-0026 - sign the bootstrap config clients fetch to arm anti-censorship,
+# from a JSON array of transport specs. Writes bootstrap.json.
+# Example: just sign-bootstrap-config transports.json 30
+sign-bootstrap-config transports ttl_days:
+    cargo run -q -p lakko-bootstrap-config-tool -- \
+        sign --transports {{transports}} --ttl-days {{ttl_days}} \
+        --key bootstrap-signing-key.seed --out bootstrap.json
 
 # ADR-0061 S6 — generate the dedicated translation-publisher keypair. Writes
 # translation-signing-key.seed (mode 0600; keep OFFLINE, never commit) and

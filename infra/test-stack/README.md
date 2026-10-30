@@ -175,3 +175,15 @@ opens the link in Safari. The app's entitlement already claims
 `applinks:test.lakko.me`, but a simulator build signed without a team embeds
 no entitlements at all, so this can only be checked on a device signed by that
 team.
+
+## Anti-censorship tunnel
+
+`just deploy-test-obfs` (with `LAKKO_TEST_SSH_KEY`) builds `services/obfs-proxy`,
+installs it as `lakko-test-obfs-proxy`, restarts only that unit and publishes a
+signed config at `https://test.lakko.me/bootstrap.json`. It does not touch the
+web client. Public ports: REALITY 8444/tcp, Shadowsocks-2022 8388/tcp. The relay
+reaches the test vhost on `127.0.0.1:8180`, a plain listener nothing outside the
+server can reach. Secrets are `LAKKO_OBFS_PROXY_*` in `/etc/lakko-test/lakko.env`;
+the signing seed stays on the machine that ran the script, in
+`~/.lakko/test-stack`, beside `trust-anchor`, which a client build pins. A config
+lives 30 days; run the script again to sign a new one.

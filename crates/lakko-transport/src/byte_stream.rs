@@ -37,7 +37,7 @@ const DUPLEX_BUFFER: usize = 64 * 1024;
 
 /// Max bytes pulled from the consumer per outbound frame. Kept well under
 /// [`MAX_FRAME_BYTES`] so a single read always fits one frame.
-const OUTBOUND_CHUNK: usize = 32 * 1024;
+const OUTBOUND_CHUNK: usize = crate::aead_stream::MAX_CHUNK;
 
 /// Depth of the outbound frame channel feeding the single task that owns the
 /// [`Connection`] (so it can `select!` between an inbound frame and an outbound

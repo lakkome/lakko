@@ -27,6 +27,7 @@ import { createSignal } from "solid-js";
 import { loadWasm } from "../wasm";
 import { DEFAULT_BASE_URL } from "../discovery/client";
 import { isDesktop } from "../platform";
+import { getHostTunnel, tunnelRoutesThroughHost } from "../platform/host";
 import {
   adoptPairingCard,
   cardGrowthDelayMs,
@@ -268,6 +269,9 @@ async function refreshCity(bound: string, nowMs: number): Promise<void> {
   if (locating !== null) return locating;
   locating = (async () => {
     try {
+      // ADR-0080: not asked under anti-censorship. The answer would be the
+      // tunnel's exit, and the request itself is not worth making.
+      if (isDesktop() && tunnelRoutesThroughHost(await getHostTunnel())) return;
       const answer = await fetchLocate();
       // No city this time; the card goes out without one.
       if (answer === null || account !== bound) return;

@@ -7,10 +7,18 @@
  * computer, and the keyboard shortcut list under About. Settings renders
  * neither outside the desktop app.
  */
-import { createSignal, For, onMount, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 
 import { t } from "../l10n";
-import { getHostSettings, setHostSettings, type HostSettings } from "../platform/host";
+import {
+  getHostSettings,
+  getHostTunnel,
+  setHostSettings,
+  setHostTunnel,
+  type HostSettings,
+  type HostTunnelPhase,
+  type HostTunnelState,
+} from "../platform/host";
 import { isMacPlatform, shortcutKeys } from "../platform/shortcuts";
 import { Icon, type IconName } from "../ui/icons";
 
@@ -35,6 +43,114 @@ const SWITCHES: ReadonlyArray<{
     subKey: null,
   },
 ];
+
+/** How often the state is read while the host is setting the tunnel up. */
+const ARMING_POLL_MS = 1000;
+
+/** The status line of each phase (`docs/ux/desktop.md` section 9). */
+export function tunnelStatusKeys(phase: HostTunnelPhase): { title: string; sub: string } {
+  switch (phase) {
+    case "disabled":
+      return { title: "common.off", sub: "settings.anti_censorship.status.direct" };
+    case "unconfigured":
+      return {
+        title: "settings.anti_censorship.status.unconfigured",
+        sub: "settings.anti_censorship.status.unconfigured.sub",
+      };
+    case "arming":
+      return { title: "common.connecting", sub: "settings.anti_censorship.status.connecting.sub" };
+    case "armed":
+      return {
+        title: "settings.anti_censorship.status.active",
+        sub: "settings.anti_censorship.status.active.sub",
+      };
+    case "unavailable":
+      return {
+        title: "settings.anti_censorship.status.unavailable",
+        sub: "settings.anti_censorship.status.unavailable.sub",
+      };
+  }
+}
+
+/** Settings > Security > Anti-censorship, on the desktop. */
+export function AntiCensorshipCard(): JSX.Element {
+  const [state, setState] = createSignal<HostTunnelState | null>(null);
+  const [busy, setBusy] = createSignal(false);
+  const [failed, setFailed] = createSignal(false);
+
+  const read = (): void => {
+    getHostTunnel()
+      .then(setState)
+      .catch(() => setFailed(true));
+  };
+  onMount(read);
+  createEffect(() => {
+    if (state()?.phase !== "arming") return;
+    const timer = setInterval(read, ARMING_POLL_MS);
+    onCleanup(() => clearInterval(timer));
+  });
+
+  async function toggle(): Promise<void> {
+    const cur = state();
+    if (cur === null || busy()) return;
+    setBusy(true);
+    setFailed(false);
+    try {
+      setState(await setHostTunnel(!cur.enabled));
+    } catch {
+      // The switch stays where it was: the host did not take the change.
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const status = (): { title: string; sub: string } | null => {
+    const cur = state();
+    return cur === null ? null : tunnelStatusKeys(cur.phase);
+  };
+
+  return (
+    <section class="lk-card">
+      <h2>{t("settings.anti_censorship.title")}</h2>
+      <div class="lk-card-row">
+        <span class="lk-card-row-icon">
+          <Icon name="shield" size={18} />
+        </span>
+        <div class="lk-card-row-body">
+          <span class="lk-card-row-title">{t("settings.anti_censorship.toggle")}</span>
+          <span class="lk-card-row-sub">{t("settings.anti_censorship.footer")}</span>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={state()?.enabled === true}
+          class="lk-card-row-action"
+          classList={{ primary: state()?.enabled === true }}
+          disabled={state() === null || busy()}
+          onClick={() => void toggle()}
+        >
+          {t(state()?.enabled === true ? "common.on" : "common.off")}
+        </button>
+      </div>
+      <Show when={status()}>
+        {(s) => (
+          <div class="lk-card-row" aria-live="polite">
+            <div class="lk-card-row-body">
+              <span class="lk-card-row-title">{t(s().title)}</span>
+              <span class="lk-card-row-sub">{t(s().sub)}</span>
+            </div>
+          </div>
+        )}
+      </Show>
+      <Show when={failed()}>
+        <p class="form-error" role="alert">
+          {t("settings.anti_censorship.status.unavailable.sub")}
+        </p>
+      </Show>
+    </section>
+  );
+}
 
 /** Settings > Notifications on the desktop. */
 export function DesktopNotificationsSection(): JSX.Element {

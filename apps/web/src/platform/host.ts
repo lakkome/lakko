@@ -14,6 +14,7 @@ import { isDesktop } from "./index";
 
 /** Path prefix of the host's app routes. */
 export const HOST_APP_PATH = "/__host/app";
+export const HOST_TUNNEL_PATH = "/__host/tunnel";
 
 /** The DOM event the host dispatches on `window`. */
 export const HOST_EVENT = "lakko:host";
@@ -56,6 +57,58 @@ function parseSettings(v: unknown): HostSettings {
 
 function requireDesktop(): void {
   if (!isDesktop()) throw new HostRequestError(0, "not the desktop app");
+}
+
+/** Anti-censorship as the host holds it (`docs/ux/desktop.md` section 9). */
+export type HostTunnelPhase = "disabled" | "unconfigured" | "arming" | "armed" | "unavailable";
+
+export interface HostTunnelState {
+  readonly enabled: boolean;
+  readonly phase: HostTunnelPhase;
+}
+
+const TUNNEL_PHASES: readonly HostTunnelPhase[] = [
+  "disabled",
+  "unconfigured",
+  "arming",
+  "armed",
+  "unavailable",
+];
+
+export function parseTunnelState(v: unknown): HostTunnelState {
+  const o = (typeof v === "object" && v !== null ? v : {}) as Record<string, unknown>;
+  const phase = TUNNEL_PHASES.find((p) => p === o.phase);
+  if (phase === undefined || typeof o.enabled !== "boolean") {
+    throw new HostRequestError(0, "bad tunnel state");
+  }
+  return { enabled: o.enabled, phase };
+}
+
+/**
+ * Whether Lakko's traffic must not leave the ordinary way. Only `unconfigured`
+ * keeps a switched-on setting from counting: that build has no way to honour
+ * it, and the settings screen says so.
+ */
+export function tunnelRoutesThroughHost(state: HostTunnelState): boolean {
+  return state.enabled && state.phase !== "unconfigured";
+}
+
+export async function getHostTunnel(): Promise<HostTunnelState> {
+  requireDesktop();
+  const res = await fetch(`${HOST_TUNNEL_PATH}/state`);
+  if (!res.ok) throw new HostRequestError(res.status, "tunnel state");
+  return parseTunnelState(await res.json());
+}
+
+export async function setHostTunnel(enabled: boolean): Promise<HostTunnelState> {
+  requireDesktop();
+  const res = await fetch(`${HOST_TUNNEL_PATH}/enabled`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) throw new HostRequestError(res.status, "tunnel setting");
+  return parseTunnelState(await res.json());
 }
 
 /**

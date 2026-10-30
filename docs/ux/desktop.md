@@ -252,9 +252,13 @@ app.
 
 ## 9. Anti-censorship
 
-Settings > Data > Anti-censorship works as on iOS and Android: when on, all of
-Lakko's traffic goes through the obfuscated connection. The browser cannot do
-this; the desktop app can. Same states and copy as the native clients.
+Settings > Security > Anti-censorship works as on iOS and Android: when on, all
+of Lakko's traffic goes through the obfuscated connection, call media excepted.
+The browser cannot do this; the desktop app can. Same states and copy as the
+native clients, with one difference: on the desktop the switch on means nothing
+goes out directly. While the connection is being set up, or when it could not
+be, requests fail until it works or the switch is turned off. A build made
+without the setting says so, and stays direct.
 
 ## 10. Signing out and forgetting this device
 

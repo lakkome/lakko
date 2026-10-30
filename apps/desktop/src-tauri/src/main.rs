@@ -21,6 +21,7 @@ mod key_store;
 mod notify;
 mod probe;
 mod proxy;
+mod tunnel;
 #[cfg(not(target_os = "macos"))]
 mod tray;
 
@@ -104,6 +105,7 @@ fn main() {
         })
         .setup(move |app| {
             let dir = app.path().app_config_dir()?;
+            setup_config.tunnel.start(dir.clone());
             let notifier = notify::Notifier::new(&app.config().identifier);
             app.manage(Shell::load(dir, notifier));
             if let Some(menu) = app_shell::menu(app.handle())? {

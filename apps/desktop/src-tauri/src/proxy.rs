@@ -14,6 +14,7 @@
 //! names, so it is not an open relay.
 
 use http::{header, HeaderMap, HeaderName, Method, Request, Response, StatusCode};
+use lakko_transport::BootstrapDialer;
 use tauri::{AppHandle, Runtime};
 use tracing::{debug, warn};
 
@@ -21,6 +22,7 @@ use std::sync::Arc;
 
 use tauri::Manager;
 
+use crate::tunnel::{self, Route, Tunnel};
 use crate::{app_shell, device_key, probe};
 
 /// The services the web client addresses as `/api/<service>/` (the dev
@@ -61,10 +63,13 @@ pub struct ProxyConfig {
     client: reqwest::Client,
     /// Device-key handles the page holds (`device_key.rs`).
     pub handles: Arc<device_key::Handles>,
+    /// Anti-censorship (`tunnel.rs`).
+    pub tunnel: Arc<Tunnel>,
 }
 
 impl ProxyConfig {
-    /// `LAKKO_DESKTOP_API_ORIGIN`, default `https://test.lakko.me`.
+    /// `LAKKO_DESKTOP_API_ORIGIN`, default `https://test.lakko.me`, and
+    /// `LAKKO_DESKTOP_SFU_URL`, default that origin's `/sfu`.
     pub fn from_env() -> Result<Self, String> {
         let raw = std::env::var("LAKKO_DESKTOP_API_ORIGIN")
             .unwrap_or_else(|_| "https://test.lakko.me".to_owned());
@@ -79,10 +84,17 @@ impl ProxyConfig {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("http client: {e}"))?;
+        let host = api_origin.host_str().ok_or("origin has no host")?.to_owned();
+        let port = api_origin.port_or_known_default().ok_or("origin has no port")?;
+        let sfu = std::env::var("LAKKO_DESKTOP_SFU_URL")
+            .unwrap_or_else(|_| format!("wss://{host}/sfu"));
+        let sfu = reqwest::Url::parse(&sfu).map_err(|e| format!("bad sfu url: {e}"))?;
+        let tunnel = Tunnel::new(tunnel::Origin { host, port }, &sfu)?;
         Ok(Self {
             api_origin,
             client,
             handles: Arc::new(device_key::Handles::default()),
+            tunnel: Arc::new(tunnel),
         })
     }
 }
@@ -100,6 +112,9 @@ pub async fn handle<R: Runtime>(
     }
     if path.starts_with(probe::PROBE_PATH) {
         return probe::handle(request).await;
+    }
+    if path.starts_with(tunnel::PATH) {
+        return tunnel::handle(&config.tunnel, request).await;
     }
     if path.starts_with(app_shell::PATH) {
         return match app.try_state::<app_shell::Shell>() {
@@ -128,6 +143,11 @@ fn api_service(path: &str) -> Option<&'static str> {
 }
 
 async fn forward(config: &ProxyConfig, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
+    match config.tunnel.route() {
+        Route::Direct => {}
+        Route::Refused => return tunnel::refused(),
+        Route::Tunnel(dialer) => return forward_tunnelled(config, &dialer, request).await,
+    }
     let (parts, body) = request.into_parts();
     let mut url = config.api_origin.clone();
     url.set_path(parts.uri.path());
@@ -172,6 +192,48 @@ async fn forward(config: &ProxyConfig, request: Request<Vec<u8>>) -> Response<Ve
     response
         .body(bytes)
         .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "response"))
+}
+
+async fn forward_tunnelled(
+    config: &ProxyConfig,
+    dialer: &BootstrapDialer,
+    request: Request<Vec<u8>>,
+) -> Response<Vec<u8>> {
+    let (parts, body) = request.into_parts();
+    let path = parts
+        .uri
+        .path_and_query()
+        .map_or_else(|| parts.uri.path().to_owned(), ToString::to_string);
+    let mut headers = Vec::with_capacity(parts.headers.len());
+    for (name, value) in &parts.headers {
+        if DROP_REQUEST_HEADERS.contains(name) {
+            continue;
+        }
+        let Ok(value) = value.to_str() else {
+            return plain(StatusCode::BAD_REQUEST, "header");
+        };
+        headers.push((name.to_string(), value.to_owned()));
+    }
+    let answer = config
+        .tunnel
+        .request(dialer, parts.method.to_string(), path, headers, body)
+        .await;
+    let upstream = match answer {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "tunnelled request failed");
+            return tunnel::refused();
+        }
+    };
+    let mut response = Response::builder().status(upstream.status);
+    for (name, value) in &upstream.headers {
+        if !DROP_RESPONSE_HEADERS.iter().any(|h| h.as_str() == name) {
+            response = response.header(name, value);
+        }
+    }
+    response
+        .body(upstream.body)
+        .unwrap_or_else(|_| plain(StatusCode::BAD_GATEWAY, "response"))
 }
 
 fn asset<R: Runtime>(app: &AppHandle<R>, path: &str) -> Response<Vec<u8>> {

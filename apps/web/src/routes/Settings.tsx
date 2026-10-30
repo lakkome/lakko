@@ -40,7 +40,11 @@ import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { ChatFoldersSection } from "../chat/folders/ChatFoldersSection";
 import { paths } from "./paths";
 import { isDesktop } from "../platform";
-import { DesktopNotificationsSection, KeyboardShortcutsCard } from "../settings/DesktopSettings";
+import {
+  AntiCensorshipCard,
+  DesktopNotificationsSection,
+  KeyboardShortcutsCard,
+} from "../settings/DesktopSettings";
 import { sectionsForBuild, showsShortcutList } from "../settings/desktop-only";
 import { addedNotice, badgeVisible } from "../devices/added-notice";
 import { DevicesAttention, devicesNeedAttention } from "../devices/DeviceAddedNotice";
@@ -286,6 +290,9 @@ function SecuritySection(): JSX.Element {
       <PasswordCard />
       <PasskeysSection />
       <ChannelsIShareCard />
+      <Show when={isDesktop()}>
+        <AntiCensorshipCard />
+      </Show>
       <section class="lk-card">
         <h2>{t("settings.security.devices_and_recovery")}</h2>
         <div class="lk-card-row">
