@@ -99,6 +99,25 @@ final class ProfileRequester {
         await request(groupIdHex: groupIdHex, joinedJustNow: false)
     }
 
+    /// ADR-0060 section 4, "A device that holds nothing asks": this device
+    /// holds no offer and no bundle from the other person of this one-to-one.
+    /// The answer also sends them again. Nobody needs to be unnamed. With no
+    /// `contact` grant it asks by the rule's interval; with one, every
+    /// ``ReachRules/introductionsAskWithGrantMinMs``. Both read and write the
+    /// stamp every request shares.
+    @discardableResult
+    func noteIntroductionsMissing(groupIdHex: String, holdsContactGrant: Bool) async -> Outcome {
+        guard ports.canSend(groupIdHex) else { return .cannotAsk }
+        guard holdsContactGrant else {
+            return await ask(groupIdHex: groupIdHex, joinedJustNow: false, unnamed: 1)
+        }
+        let now = ports.nowMs()
+        guard ReachRules.asksWithContactGrant(
+            lastRequestedAtMs: ports.lastRequestedAtMs(groupIdHex), nowMs: now
+        ) else { return .notDue }
+        return await publish(groupIdHex: groupIdHex, now: now)
+    }
+
     private func request(groupIdHex: String, joinedJustNow: Bool) async -> Outcome {
         guard ports.canSend(groupIdHex) else { return .cannotAsk }
         // A join asks regardless of the count, so a torn roster read must not
@@ -111,6 +130,10 @@ final class ProfileRequester {
         } else {
             return .cannotAsk
         }
+        return await ask(groupIdHex: groupIdHex, joinedJustNow: joinedJustNow, unnamed: unnamed)
+    }
+
+    private func ask(groupIdHex: String, joinedJustNow: Bool, unnamed: Int) async -> Outcome {
         let now = ports.nowMs()
         guard ports.rule(
             joinedJustNow,
@@ -118,6 +141,10 @@ final class ProfileRequester {
             ports.lastRequestedAtMs(groupIdHex),
             now
         ) else { return .notDue }
+        return await publish(groupIdHex: groupIdHex, now: now)
+    }
+
+    private func publish(groupIdHex: String, now: UInt64) async -> Outcome {
         do {
             try await ports.send(groupIdHex)
         } catch {

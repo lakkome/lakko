@@ -65,14 +65,18 @@ use lakko_ui_rules::speaking::{
     SPEAKING_LEVEL, SPEAKING_LEVEL_MAX, SPEAKING_LEVEL_MIN,
 };
 use lakko_ui_rules::visibility::{
-    choose_mode as rust_choose_mode, exclude_scope_under_all as rust_exclude_scope_under_all,
+    choose_mode as rust_choose_mode, exclude_contact_under_all as rust_exclude_contact_under_all,
+    exclude_scope_under_all as rust_exclude_scope_under_all,
+    set_contact_chosen as rust_set_contact_chosen, set_contacts_form as rust_set_contacts_form,
     set_contacts_of_contacts as rust_set_contacts_of_contacts, set_groups as rust_set_groups,
     set_groups_form as rust_set_groups_form, set_scope_chosen as rust_set_scope_chosen,
 };
 use wasm_bindgen::prelude::*;
 
-use crate::scoped_discovery::{GroupsForm, Refusal, ScopeId, VisibilityMode, VisibilitySetting};
-use lakko_contacts::visibility::ScopeId as RustScopeId;
+use crate::scoped_discovery::{
+    flat_contact_ids, ContactsForm, GroupsForm, Refusal, ScopeId, VisibilityMode, VisibilitySetting,
+};
+use lakko_contacts::visibility::{contact_account_id, ScopeId as RustScopeId};
 
 /// Which screen a conversation row opens.
 ///
@@ -384,6 +388,7 @@ impl From<RustInfoTarget> for InfoTarget {
 pub struct PersonInfoCapabilities {
     membership_ended: bool,
     is_contact: bool,
+    contacts_of_contacts_on: bool,
 }
 
 #[wasm_bindgen]
@@ -392,12 +397,20 @@ impl PersonInfoCapabilities {
     /// over (ADR-0045 UX 6.2). `isContact`: the person is on this device's
     /// contact list - `false` only for a person the viewer removed, whose
     /// one-to-one remains, and whose card then offers `add-contact`.
+    /// `contactsOfContactsOn`: Contacts of my contacts is on in "Who can find
+    /// me", under either form; left out it reads `false`, and the card has
+    /// no `their-contacts-can-find-me` row.
     #[wasm_bindgen(constructor)]
     #[must_use]
-    pub fn new(membership_ended: bool, is_contact: bool) -> Self {
+    pub fn new(
+        membership_ended: bool,
+        is_contact: bool,
+        contacts_of_contacts_on: Option<bool>,
+    ) -> Self {
         Self {
             membership_ended,
             is_contact,
+            contacts_of_contacts_on: contacts_of_contacts_on.unwrap_or(false),
         }
     }
 
@@ -406,6 +419,13 @@ impl PersonInfoCapabilities {
     #[must_use]
     pub fn is_contact(&self) -> bool {
         self.is_contact
+    }
+
+    /// Contacts of my contacts is on in "Who can find me".
+    #[wasm_bindgen(getter, js_name = contactsOfContactsOn)]
+    #[must_use]
+    pub fn contacts_of_contacts_on(&self) -> bool {
+        self.contacts_of_contacts_on
     }
 
     /// This device's membership in the conversation is over.
@@ -569,6 +589,7 @@ pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<String> {
     rust_person_info_sections(RustPersonInfoCapabilities {
         membership_ended: caps.membership_ended,
         is_contact: caps.is_contact,
+        contacts_of_contacts_on: caps.contacts_of_contacts_on,
     })
     .into_iter()
     .map(|s| s.name().to_string())
@@ -799,6 +820,71 @@ pub fn set_groups_visible(setting: &VisibilitySetting, on: bool) -> VisibilitySe
 #[must_use]
 pub fn set_groups_form(setting: &VisibilitySetting, form: GroupsForm) -> VisibilitySetting {
     VisibilitySetting::from_rust(rust_set_groups_form(setting.rust(), form.into()))
+}
+
+/// All my contacts, or only the chosen ones. No effect unless part 2.1 is
+/// on.
+#[wasm_bindgen(js_name = setContactsForm)]
+#[must_use]
+pub fn set_contacts_form(setting: &VisibilitySetting, form: ContactsForm) -> VisibilitySetting {
+    VisibilitySetting::from_rust(rust_set_contacts_form(setting.rust(), form.into()))
+}
+
+fn exclude_contact_under_all_inner(
+    setting: &VisibilitySetting,
+    all_contact_ids: &[u8],
+    excluded: &[u8],
+) -> Result<VisibilitySetting, Refusal> {
+    let all = flat_contact_ids(all_contact_ids)?;
+    let excluded = contact_account_id(excluded)?;
+    Ok(VisibilitySetting::from_rust(
+        rust_exclude_contact_under_all(setting.rust(), &all, &excluded)?,
+    ))
+}
+
+/// Exclude one contact while "all" is on: the form becomes "only the ones I
+/// choose" with every other contact in `allContactIds` (concatenated 16-byte
+/// account ids) chosen.
+///
+/// # Errors
+///
+/// Throws an `Error` with `visibilityError` `contactIdLength` /
+/// `tooManyChosenContacts`.
+#[wasm_bindgen(js_name = excludeContactUnderAll)]
+pub fn exclude_contact_under_all(
+    setting: &VisibilitySetting,
+    all_contact_ids: &[u8],
+    excluded: &[u8],
+) -> Result<VisibilitySetting, JsValue> {
+    exclude_contact_under_all_inner(setting, all_contact_ids, excluded).map_err(Refusal::into_js)
+}
+
+fn set_contact_chosen_inner(
+    setting: &VisibilitySetting,
+    account_id: &[u8],
+    on: bool,
+) -> Result<VisibilitySetting, Refusal> {
+    let id = contact_account_id(account_id)?;
+    Ok(VisibilitySetting::from_rust(rust_set_contact_chosen(
+        setting.rust(),
+        &id,
+        on,
+    )?))
+}
+
+/// Choose or unchoose one contact in the chosen list.
+///
+/// # Errors
+///
+/// Throws an `Error` with `visibilityError` `contactIdLength` /
+/// `tooManyChosenContacts`.
+#[wasm_bindgen(js_name = setContactChosen)]
+pub fn set_contact_chosen(
+    setting: &VisibilitySetting,
+    account_id: &[u8],
+    on: bool,
+) -> Result<VisibilitySetting, JsValue> {
+    set_contact_chosen_inner(setting, account_id, on).map_err(Refusal::into_js)
 }
 
 fn exclude_scope_under_all_inner(
@@ -2028,6 +2114,43 @@ mod tests {
         .is_err());
     }
 
+    #[test]
+    fn contact_transitions_cross_the_boundary_intact() {
+        use crate::scoped_discovery::{allows_contact, default_visibility_setting};
+        let s = default_visibility_setting();
+        let chosen = set_contacts_form(&s, ContactsForm::Chosen);
+        assert_eq!(chosen.contacts_form(), ContactsForm::Chosen);
+        // The memory of the form crosses too.
+        let nobody = choose_visibility_mode(&chosen, VisibilityMode::Nobody);
+        let back = choose_visibility_mode(&nobody, VisibilityMode::Some);
+        assert_eq!(back.contacts_form(), ContactsForm::Chosen);
+
+        let all = [[1u8; 16], [2u8; 16]].concat();
+        let excluded = exclude_contact_under_all(&s, &all, &[2; 16]).unwrap();
+        assert_eq!(excluded.contacts_form(), ContactsForm::Chosen);
+        assert_eq!(excluded.chosen_contacts(), vec![1u8; 16]);
+        assert!(!allows_contact(&excluded, &[2; 16]));
+        let more = set_contact_chosen(&excluded, &[3; 16], true).unwrap();
+        assert_eq!(more.chosen_contacts(), [[1u8; 16], [3u8; 16]].concat());
+        assert_eq!(
+            set_contact_chosen(&more, &[1; 16], false)
+                .unwrap()
+                .chosen_contacts(),
+            vec![3u8; 16]
+        );
+        for refused in [
+            set_contact_chosen_inner(&s, &[1; 15], true),
+            exclude_contact_under_all_inner(&s, &[1; 17], &[1; 16]),
+            exclude_contact_under_all_inner(&s, &all, &[]),
+        ] {
+            let e = refused.unwrap_err();
+            assert_eq!(
+                (e.property, e.code.as_str()),
+                ("visibilityError", "contactIdLength")
+            );
+        }
+    }
+
     fn row(id: &str, kind: ConversationKind, at: Option<i64>) -> ConversationRow {
         ConversationRow::new(
             id.to_string(),
@@ -2052,10 +2175,16 @@ mod tests {
 
     #[test]
     fn the_sections_cross_the_boundary_as_the_names_web_already_uses() {
-        let ended = person_info_sections(PersonInfoCapabilities::new(true, true));
+        let ended = person_info_sections(PersonInfoCapabilities::new(true, true, None));
         assert!(ended.contains(&"delete-chat".to_string()));
         assert!(!ended.contains(&"call".to_string()));
-        let removed = person_info_sections(PersonInfoCapabilities::new(false, false));
+        let removed = person_info_sections(PersonInfoCapabilities::new(false, false, Some(true)));
+        assert!(!removed.iter().any(|s| s == "their-contacts-can-find-me"));
+        assert!(
+            person_info_sections(PersonInfoCapabilities::new(false, true, Some(true)))
+                .iter()
+                .any(|s| s == "their-contacts-can-find-me")
+        );
         assert!(removed.contains(&"add-contact".to_string()));
         assert!(!removed.contains(&"remove-contact".to_string()));
         assert!(

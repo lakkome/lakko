@@ -92,7 +92,7 @@ import { conversationWithContact } from "../contacts/contact-conversation";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { foundOneToOneWith } from "../contacts/found-one-to-one";
-import { acceptContactRequest } from "../contacts/accept-request";
+import { acceptContactRequest, acceptKeepsRequest } from "../contacts/accept-request";
 import {
   loadPendingContacts,
   pendingContacts,
@@ -188,10 +188,12 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     const account = accountIdB64();
     if (account === null) return [];
     const acceptedHexes = new Set<string>();
+    const acceptedKeys = new Set<string>();
     for (const c of accepted()) {
+      acceptedKeys.add(c.signaturePubkeyB64);
       if (c.accountIdHex !== undefined) acceptedHexes.add(c.accountIdHex);
     }
-    return waitingSentRequests(loadSentRequests(account), acceptedHexes);
+    return waitingSentRequests(loadSentRequests(account), acceptedHexes, acceptedKeys);
   });
   function onDismissSent(record: SentRequestRecord): void {
     const account = accountIdB64();
@@ -213,11 +215,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     contact: AcceptedContact,
     peerAccountId: Uint8Array,
     peerPubkey: Uint8Array,
-    replyGrantB64: string | null = null,
   ): Promise<string> {
-    // ADR-0060 — accepting a request writes the 1:1 Welcome with the
-    // requester's `reply` grant; a contact we message later is reached with
-    // the grants we keep for them.
     const founded = await foundOneToOneWith({
       client: props.client,
       identity: requireIdentity(),
@@ -226,36 +224,52 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       contact,
       peerAccountId,
       peerPubkey,
-      replyGrantB64,
     });
     setAccepted(founded.accepted);
     return paths.chat(base64UrlEncodeNoPad(founded.conversation.group.groupId));
   }
 
+  /** The requests an Accept is running for, and those whose last Accept
+   *  failed: they stay listed, with a line, and Accept works again. */
+  const [accepting, setAccepting] = createSignal<ReadonlySet<number>>(new Set());
+  const [acceptFailed, setAcceptFailed] = createSignal<ReadonlySet<number>>(new Set());
+  const withId = (ids: ReadonlySet<number>, id: number): ReadonlySet<number> => new Set(ids).add(id);
+  const withoutId = (ids: ReadonlySet<number>, id: number): ReadonlySet<number> => {
+    const next = new Set(ids);
+    next.delete(id);
+    return next;
+  };
+
   async function onAccept(req: IncomingContactRequest): Promise<void> {
-    mailbox.removePending(req.messageId);
+    const account = accountIdB64();
+    if (account === null || accepting().has(req.messageId)) return;
     setAcceptError(null);
-    // The one accept path (`contacts/accept-request.ts`), shared with the
-    // device's own accept of a request through a live invite link
-    // (ADR-0079): contact first, then the 1:1 Welcome, then the ack.
-    const outcome = await acceptContactRequest(
-      { client: props.client, identity: requireIdentity(), chats, profiles },
-      req,
-    );
-    setAccepted(outcome.accepted);
-    if (outcome.legacy) {
-      setAcceptError(() => t("contacts.accept.error.old_version"));
-      return;
-    }
-    if (outcome.chatError !== null) {
-      // Don't unwind the acceptance; just surface the error.
-      setAcceptError(
-        contactsErrorText(
-          outcome.chatError,
-          "contacts.error.start_chat",
-          memberNameOf(profiles.resolve(req.fromPubkey)),
-        ),
+    setAccepting((ids) => withId(ids, req.messageId));
+    setAcceptFailed((ids) => withoutId(ids, req.messageId));
+    try {
+      // The one way a person's Accept runs (`contacts/accept-request.ts`).
+      const outcome = await acceptContactRequest(
+        {
+          client: props.client,
+          identity: requireIdentity(),
+          accountIdB64: account,
+          chats: {
+            add: (g) => chats.add(g),
+            persistHeld: () => chats.persistSnapshotDurable(account),
+          },
+          profiles,
+        },
+        req,
       );
+      setAccepted(outcome.accepted);
+      if (acceptKeepsRequest(outcome)) {
+        setAcceptFailed((ids) => withId(ids, req.messageId));
+        return;
+      }
+      mailbox.removePending(req.messageId);
+      if (outcome.status === "legacy") setAcceptError(() => t("contacts.accept.error.old_version"));
+    } finally {
+      setAccepting((ids) => withoutId(ids, req.messageId));
     }
   }
 
@@ -607,6 +621,8 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
         pendingBusy={mailbox.busy}
         error={() => acceptError() ?? mailbox.error()}
         onAccept={(req) => void onAccept(req)}
+        accepting={(req) => accepting().has(req.messageId)}
+        acceptFailed={(req) => acceptFailed().has(req.messageId)}
         onDecline={onDecline}
         sent={sent}
         onDismissSent={onDismissSent}

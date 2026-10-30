@@ -55,7 +55,7 @@ const NOBODY: KnownPerson = {
   contactFallbackName: null,
   verifiedUsername: null,
   isContact: false,
-  keptGrantWireB64: null,
+  keptGrantWires: [],
 };
 
 /** A public record as the person publishes it: over their name term and

@@ -7,7 +7,9 @@
  * `sweepWelcomesOwed`). A Welcome is kept owed when no reach grant this
  * account holds opens the addressee's closed mailbox; it is retried at the
  * tail of every poll of its group, and, through this, as soon as a new grant
- * arrives, for every group that owes one.
+ * or committer-delegation envelope arrives, for every group that owes one (a
+ * proposer re-sends its envelope while its Add waits, and the delegations a
+ * committer held may have expired by the time it merged).
  */
 
 /** The outbox fields the check reads. */
@@ -31,4 +33,15 @@ export async function groupsOwingWelcomes(
     }
   }
   return out;
+}
+
+/** Sweep each group that owes a Welcome, in order; `sweep` runs the owed step. */
+export async function retryOwedWelcomes(
+  groupIdsB64: readonly string[],
+  loadUnacked: (groupIdB64: string) => Promise<readonly OwedWelcomeEntry[]>,
+  sweep: (groupIdB64: string) => Promise<unknown>,
+): Promise<void> {
+  for (const groupIdB64 of await groupsOwingWelcomes(groupIdsB64, loadUnacked)) {
+    await sweep(groupIdB64);
+  }
 }

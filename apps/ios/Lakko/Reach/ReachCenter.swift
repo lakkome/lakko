@@ -138,6 +138,9 @@ public final class ReachCenter: ObservableObject {
             ownPredecessorKeys: OwnAccountKeys.predecessorPublicKeys(accountIdB64: accountIdB64))
     }
     private var predecessorObserver: NSObjectProtocol?
+    /// What the committer-delegation code reads the time from. Tests inject
+    /// their own.
+    var clockMs: @MainActor () -> UInt64 = { ReachCenter.nowMs() }
     /// This account's own predecessor keys with the Ed25519 seed of each
     /// (newest first): what signs a delegated write a proposer addressed to
     /// an old key of this account. The default reads the predecessor slot;
@@ -285,6 +288,9 @@ public final class ReachCenter: ObservableObject {
         ownMailbox = MailboxTarget.own(accountIdentity: accountIdentity)
         bindingCache = [:]
         record = persistence.load(accountIdB64: accountIdB64) ?? ReachRecord()
+        heldEnvelopes = (record.keptEnvelopes ?? []).compactMap(Self.heldEnvelope(from:))
+        pruneHeldEnvelopes()
+        record.keptEnvelopes = heldEnvelopes.isEmpty ? nil : heldEnvelopes.map(\.row)
         if let b64 = record.settingEnvelopeB64, let bytes = Data(base64Encoded: b64),
            let decoded = try? decodeVisibilityEnvelope(plaintext: bytes) {
             setting = decoded
@@ -375,8 +381,7 @@ public final class ReachCenter: ObservableObject {
         bindingCache = [:]
         keyResolver = AccountKeyResolver()
         record = ReachRecord()
-        delegations = [:]
-        openEnvelopes = [:]
+        heldEnvelopes = []
         reachState = FfiReachState(entries: [], updatedAtMs: 0)
         setting = defaultVisibilitySetting()
         status = .applied
@@ -1164,16 +1169,74 @@ public final class ReachCenter: ObservableObject {
 
     // MARK: - Committer delegations (ADR-0060 section 6)
 
-    /// Newest delegation envelope per (sender key resolved at receipt, added
-    /// account key). In memory only: a delegation lives at most 24 hours and
-    /// its proposer re-sends while its proposal is pending.
-    private var delegations: [String: FfiCommitterDelegationEnvelope] = [:]
+    /// One kept committer-delegation envelope, decoded from its durable row.
+    private struct HeldEnvelope {
+        let row: ReachRecord.KeptEnvelope
+        let envelope: FfiCommitterDelegationEnvelope
+        /// When the last of its delegations stops being honoured. `nil` for an
+        /// envelope with no delegation: it names a binding, which does not
+        /// expire.
+        let expiresAtMs: UInt64?
+
+        var isOpen: Bool { envelope.delegations.isEmpty }
+
+        func sameSlot(as other: HeldEnvelope) -> Bool {
+            row.groupIdHex == other.row.groupIdHex
+                && row.senderKeyB64 == other.row.senderKeyB64
+                && envelope.addedAccountKey == other.envelope.addedAccountKey
+        }
+    }
+
+    /// The envelopes received in this account's groups, newest per (group,
+    /// sender key resolved at receipt, added account key), oldest first. The
+    /// decoded form of ``ReachRecord/keptEnvelopes``: a committer that
+    /// restarts still holds them, and a Welcome it owes can still be written.
+    private var heldEnvelopes: [HeldEnvelope] = []
+
+    /// At most this many envelopes are kept, the oldest dropped first: a
+    /// proposer re-sends a signed one while its Add waits. Chosen, not
+    /// measured.
+    static let maxKeptEnvelopes = 128
+
+    private static func heldEnvelope(from row: ReachRecord.KeptEnvelope) -> HeldEnvelope? {
+        guard let wire = Data(base64Encoded: row.envelopeB64),
+              let envelope = try? decodeCommitterDelegationEnvelope(plaintext: wire),
+              let checked = try? checkCommitterDelegations(envelope: envelope) else { return nil }
+        return HeldEnvelope(row: row, envelope: envelope, expiresAtMs: checked.map(\.expiresAtMs).max())
+    }
+
+    /// Drop what expired, then the oldest over the cap.
+    private func pruneHeldEnvelopes() {
+        let now = clockMs()
+        heldEnvelopes.removeAll { held in held.expiresAtMs.map { $0 <= now } ?? false }
+        if heldEnvelopes.count > Self.maxKeptEnvelopes {
+            heldEnvelopes.removeFirst(heldEnvelopes.count - Self.maxKeptEnvelopes)
+        }
+    }
+
+    private func storeHeldEnvelopes() {
+        record.keptEnvelopes = heldEnvelopes.isEmpty ? nil : heldEnvelopes.map(\.row)
+        persist()
+    }
+
+    /// The kept envelopes that carry delegations, newest first.
+    private var signedEnvelopes: [HeldEnvelope] {
+        heldEnvelopes.reversed().filter { !$0.isOpen }
+    }
+
+    /// The kept envelopes with no delegation received in `groupIdHex`
+    /// (lower-case), newest first.
+    private func openEnvelopes(inGroup group: String) -> [HeldEnvelope] {
+        heldEnvelopes.reversed().filter { $0.isOpen && $0.row.groupIdHex == group }
+    }
 
     /// Keep a committer-delegation envelope received in a group from the
     /// member whose account key was resolved at receipt. Refused unless every
     /// delegation in it checks (`checkCommitterDelegations`, which also
     /// verifies the added person's mailbox binding against
-    /// `addedAccountKey`).
+    /// `addedAccountKey`). Kept durably, and every envelope, a re-sent one
+    /// included, retries a Welcome owed to the person: the one it replaces may
+    /// have expired.
     ///
     /// ADR-0060 section 6, "An add of a person found by search" — an
     /// envelope with NO delegation names a person the proposer found in
@@ -1181,33 +1244,33 @@ public final class ReachCenter: ObservableObject {
     /// given, it is dropped), its binding verified under the added account
     /// key, and lets a sweep of that group write that person's Welcome to
     /// that mailbox without a proof (``openWelcomeTarget(ofPerson:groupIdHex:)``).
-    /// The newest envelope per (sender, added person) wins, whichever kind.
+    /// The newest envelope per (group, sender, added person) wins, whichever
+    /// kind.
     public func keepDelegation(
         _ envelope: FfiCommitterDelegationEnvelope, fromAccountKeyB64: String?, groupIdHex: String? = nil
     ) {
         guard let sender = fromAccountKeyB64,
-              (try? checkCommitterDelegations(envelope: envelope)) != nil else { return }
-        let added = envelope.addedAccountKey.base64EncodedString()
-        let pair = sender + "|" + added
+              let checked = try? checkCommitterDelegations(envelope: envelope),
+              let wire = try? composeCommitterDelegationEnvelope(envelope: envelope) else { return }
         if envelope.delegations.isEmpty {
-            guard let groupIdHex,
+            guard groupIdHex != nil,
                   target(binding: envelope.addedMailboxBinding, accountKey: envelope.addedAccountKey) != nil
             else { return }
-            delegations[pair] = nil
-            openEnvelopes[groupIdHex.lowercased() + "|" + pair] = envelope
-        } else {
-            delegations[pair] = envelope
-            openEnvelopes = openEnvelopes.filter { !$0.key.hasSuffix("|" + pair) }
         }
-        onGrantKept?(added)
+        let held = HeldEnvelope(
+            row: ReachRecord.KeptEnvelope(
+                groupIdHex: groupIdHex?.lowercased() ?? "", senderKeyB64: sender,
+                envelopeB64: wire.base64EncodedString(), storedAtMs: clockMs()),
+            envelope: envelope,
+            expiresAtMs: checked.map(\.expiresAtMs).max())
+        heldEnvelopes.removeAll { $0.sameSlot(as: held) }
+        heldEnvelopes.append(held)
+        pruneHeldEnvelopes()
+        storeHeldEnvelopes()
+        onGrantKept?(envelope.addedAccountKey.base64EncodedString())
     }
 
     // MARK: - A person found in Everyone (ADR-0060 section 6)
-
-    /// Kept committer-delegation envelopes with no delegation, by
-    /// `group | sender | added`. In memory only, like the delegations: the
-    /// proposer's own device keeps its durable record (``ReachRecord/openAdds``).
-    private var openEnvelopes: [String: FfiCommitterDelegationEnvelope] = [:]
 
     /// At most this many ``ReachRecord/openAdds`` are kept, the oldest
     /// dropped first. Chosen, not measured.
@@ -1254,8 +1317,9 @@ public final class ReachCenter: ObservableObject {
         guard !keyResolver.isOwn(person), person != ownAccountKey else { return nil }
         let current = keyResolver.current(of: person)
         let group = groupIdHex.lowercased()
-        for (key, envelope) in openEnvelopes.sorted(by: { $0.key < $1.key })
-        where key.hasPrefix(group + "|") && keyResolver.current(of: envelope.addedAccountKey) == current {
+        for held in openEnvelopes(inGroup: group)
+        where keyResolver.current(of: held.envelope.addedAccountKey) == current {
+            let envelope = held.envelope
             if let verified = target(binding: envelope.addedMailboxBinding, accountKey: envelope.addedAccountKey) {
                 return verified
             }
@@ -1274,8 +1338,7 @@ public final class ReachCenter: ObservableObject {
     /// by a mailbox: the open target whose address it is.
     public func openWelcomeTarget(forMailbox address: Data, groupIdHex: String) -> MailboxTarget? {
         let group = groupIdHex.lowercased()
-        var people: [Data] = openEnvelopes.filter { $0.key.hasPrefix(group + "|") }
-            .sorted(by: { $0.key < $1.key }).map(\.value.addedAccountKey)
+        var people: [Data] = openEnvelopes(inGroup: group).map(\.envelope.addedAccountKey)
         people += (record.openAdds ?? []).filter { $0.groupIdHex == group }
             .compactMap { Data(base64Encoded: $0.accountKeyB64) }
         for person in people {
@@ -1291,9 +1354,12 @@ public final class ReachCenter: ObservableObject {
     public func dropOpenAdd(groupIdHex: String, person: Data) {
         let current = keyResolver.current(of: person)
         let group = groupIdHex.lowercased()
-        openEnvelopes = openEnvelopes.filter { key, envelope in
-            !(key.hasPrefix(group + "|") && keyResolver.current(of: envelope.addedAccountKey) == current)
+        let heldBefore = heldEnvelopes.count
+        heldEnvelopes.removeAll { held in
+            held.isOpen && held.row.groupIdHex == group
+                && keyResolver.current(of: held.envelope.addedAccountKey) == current
         }
+        if heldEnvelopes.count != heldBefore { storeHeldEnvelopes() }
         guard let adds = record.openAdds else { return }
         let kept = adds.filter { add in
             guard add.groupIdHex == group, let key = Data(base64Encoded: add.accountKeyB64) else { return true }
@@ -1335,7 +1401,7 @@ public final class ReachCenter: ObservableObject {
     /// The people (current keys) delegations are kept for.
     private func delegatedPeople() -> [Data] {
         var seen = Set<Data>()
-        return delegations.values.map { keyResolver.current(of: $0.addedAccountKey) }
+        return signedEnvelopes.map { keyResolver.current(of: $0.envelope.addedAccountKey) }
             .filter { seen.insert($0).inserted }
     }
 
@@ -1343,7 +1409,7 @@ public final class ReachCenter: ObservableObject {
     /// verified against the added account key the envelope carries.
     private func delegationTargets(ofPerson person: Data) -> [MailboxTarget] {
         var out: [MailboxTarget] = []
-        for envelope in delegations.values
+        for envelope in signedEnvelopes.map(\.envelope)
         where keyResolver.current(of: envelope.addedAccountKey) == person {
             guard let verified = target(
                 binding: envelope.addedMailboxBinding, accountKey: envelope.addedAccountKey),
@@ -1355,7 +1421,9 @@ public final class ReachCenter: ObservableObject {
 
     /// The delegated write authorisation for a Welcome to `address`: a kept
     /// envelope whose added person's mailbox it is that names this account,
-    /// signed with this account's own seed (the key the delegation names).
+    /// signed with this account's own seed (the key the delegation names). The
+    /// newest envelope first; an expired one is never offered (the DS would
+    /// refuse it and the Welcome would wait on it).
     ///
     /// ADR-0074 section 3.5a — a proposer that has not observed this
     /// account's own rotation names the OLD account key: the delegation is
@@ -1364,7 +1432,9 @@ public final class ReachCenter: ObservableObject {
     private func delegatedAuth(toMailbox address: Data) -> DsMailboxWriteAuth? {
         guard let own = ownAccountKey, let seed = accountSeed, let accountIdB64 else { return nil }
         let ownKeys = [(key: own, seed: seed)] + ownPredecessorSigningSeeds(accountIdB64)
-        for envelope in delegations.values {
+        let now = clockMs()
+        for held in signedEnvelopes where (held.expiresAtMs ?? 0) > now {
+            let envelope = held.envelope
             guard target(binding: envelope.addedMailboxBinding, accountKey: envelope.addedAccountKey)?
                 .address == address else { continue }
             if let signer = ReachRules.delegationSigner(ownKeys: ownKeys, header: { key in
@@ -1376,14 +1446,37 @@ public final class ReachCenter: ObservableObject {
         return nil
     }
 
-    /// The proposer's side: one delegation per committer candidate (the owner
-    /// and each admin, by account key, at most 16), each signed with the grant
-    /// this device holds for the added person, as a committer-delegation
-    /// envelope ready to send in the group. `nil` when no grant is held for
-    /// them (nothing to delegate) or there is no candidate.
+    /// The committer candidates one envelope can name, from `accountKeys`
+    /// (the owner, then the admins): each by its current key, the key it signs
+    /// the delegated write with, without repeats and at most
+    /// `maxCommitterDelegations()` of them. What an envelope is composed for
+    /// and what the re-send rule compares it with, so a candidate past the cap
+    /// never counts as uncovered.
+    public func delegationCandidates(_ accountKeys: [Data]) -> [Data] {
+        var seen = Set<Data>()
+        let unique = accountKeys.map { keyResolver.current(of: $0) }.filter { seen.insert($0).inserted }
+        return Array(unique.prefix(Int(maxCommitterDelegations())))
+    }
+
+    /// ``composeDelegationEnvelope(addedAccountKey:candidateAccountKeys:groupIdHex:)``'s
+    /// envelope alone.
     public func composeDelegations(
         addedAccountKey: Data, candidateAccountKeys: [Data], groupIdHex: String?
     ) -> Data? {
+        composeDelegationEnvelope(
+            addedAccountKey: addedAccountKey, candidateAccountKeys: candidateAccountKeys,
+            groupIdHex: groupIdHex)?.wire
+    }
+
+    /// The proposer's side: one delegation per committer candidate (the owner
+    /// and each admin, by account key, at most 16), each signed with the grant
+    /// this device holds for the added person, as a committer-delegation
+    /// envelope ready to send in the group, with the candidates it names.
+    /// `nil` when no grant is held for them (nothing to delegate) or there is
+    /// no candidate; nothing is signed then.
+    public func composeDelegationEnvelope(
+        addedAccountKey: Data, candidateAccountKeys: [Data], groupIdHex: String?
+    ) -> (wire: Data, covered: [Data])? {
         // ADR-0074 section 3.5a rule 1 / ADR-0078 — the delegation is for
         // the mailbox the best grant held for the added person names; the
         // envelope carries that grant's binding and the account key it
@@ -1393,12 +1486,10 @@ public final class ReachCenter: ObservableObject {
         let person = keyResolver.current(of: addedAccountKey)
         guard let best = grantMailboxes(ofPerson: person, groupIdHex: groupIdHex).first,
               let issuer = best.seeds.first else { return nil }
-        let expires = Self.nowMs() + ReachRules.delegationLifetimeMs
+        let expires = clockMs() + ReachRules.delegationLifetimeMs
         var blobs: [Data] = []
-        var seen = Set<Data>()
-        for candidate in candidateAccountKeys.map({ keyResolver.current(of: $0) })
-        where seen.insert(candidate).inserted {
-            guard blobs.count < Int(maxCommitterDelegations()) else { break }
+        var covered: [Data] = []
+        for candidate in delegationCandidates(candidateAccountKeys) {
             var nonce = Data(count: 16)
             guard nonce.withUnsafeMutableBytes({
                 SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!)
@@ -1407,13 +1498,15 @@ public final class ReachCenter: ObservableObject {
                 issuerSeed: issuer, mailbox: best.target.address, delegatePk: candidate,
                 expiresAtMs: expires, nonce: nonce) else { continue }
             blobs.append(blob)
+            covered.append(candidate)
         }
-        guard !blobs.isEmpty else { return nil }
-        return try? composeCommitterDelegationEnvelope(
-            envelope: FfiCommitterDelegationEnvelope(
-                addedAccountKey: best.target.accountKey,
-                addedMailboxBinding: best.target.binding,
-                delegations: blobs))
+        guard !blobs.isEmpty,
+              let wire = try? composeCommitterDelegationEnvelope(
+                  envelope: FfiCommitterDelegationEnvelope(
+                      addedAccountKey: best.target.accountKey,
+                      addedMailboxBinding: best.target.binding,
+                      delegations: blobs)) else { return nil }
+        return (wire, covered)
     }
 
     /// The account keys (b64) this device holds any grant for.
@@ -1422,10 +1515,45 @@ public final class ReachCenter: ObservableObject {
     }
 
     /// The seed of the best grant held for the person with account key `key`
-    /// (b64): what a proposer signs committer delegations with, and what local
-    /// people search offers a request under.
+    /// (b64): what a proposer signs committer delegations with.
     public func heldSeed(forAccountKeyB64 key: String, groupIdHex: String?) -> Data? {
         heldMailbox(forAccountKeyB64: key, groupIdHex: groupIdHex)?.seed
+    }
+
+    /// How an answer to a contact request reaches the person who sent it
+    /// (``ReachRules/answerGrants(from:)``): one plan per verified mailbox, in
+    /// the order the grants are tried. Empty when neither a `reply` nor a
+    /// `contact` grant is held: nothing else may carry the answer, and nothing
+    /// is written.
+    public func answerPlans(toRequester accountKey: Data) -> [MailboxWritePlan] {
+        let person = keyResolver.current(of: accountKey)
+        let keys = keyResolver.allKeys(of: person)
+        var plans: [MailboxWritePlan] = []
+        for grant in ReachRules.answerGrants(from: heldForPerson(person)) {
+            guard let seed = grant.seed, let target = target(of: grant, personKeys: keys) else { continue }
+            let auth = DsMailboxWriteAuth(reachSeed: seed)
+            if let index = plans.firstIndex(where: { $0.target == target }) {
+                plans[index] = MailboxWritePlan(target: target, candidates: plans[index].candidates + [auth])
+            } else {
+                plans.append(MailboxWritePlan(target: target, candidates: [auth]))
+            }
+        }
+        return plans
+    }
+
+    /// `docs/ux/who-can-find-me.md` section 6.1 — every grant a search may
+    /// offer the person with account key `key` (b64) under, in the order they
+    /// are tried (``ReachRules/searchGrants(from:)``), each with the VERIFIED
+    /// mailbox it writes to. A grant whose binding does not verify is left
+    /// out. SECRET.
+    public func searchGrants(forAccountKeyB64 key: String) -> [KeptGrant] {
+        guard let accountKey = Data(base64Encoded: key) else { return [] }
+        let person = keyResolver.current(of: accountKey)
+        let keys = keyResolver.allKeys(of: person)
+        return ReachRules.searchGrants(from: heldForPerson(person)).compactMap { grant in
+            guard let seed = grant.seed, let target = target(of: grant, personKeys: keys) else { return nil }
+            return KeptGrant(seed: seed, mailbox: target)
+        }
     }
 
     /// ADR-0078 — the best grant held for the person with account key `key`
@@ -1582,6 +1710,8 @@ public final class ReachCenter: ObservableObject {
 
     // MARK: - Contacts of contacts: this account's own record (section 4)
 
+    private static let termRateLimitWaitNs: UInt64 = 8_000_000_000
+
     /// This account's introduction record at the current `fof` version and
     /// name, or `nil` while contacts of contacts may not find it. Cached: every
     /// term costs one OPRF evaluation (one lookup token), so it is recomposed
@@ -1606,11 +1736,40 @@ public final class ReachCenter: ObservableObject {
         let cert = username == nil ? nil : ownUsernameCertificate
         // The record is sealed under the OPRF outputs; they never leave the
         // device (ADR-0060 section 5).
-        var termOutputs: [Data] = []
+        // Each OPRF evaluation costs an anonymous token, so an output is kept
+        // as soon as it is known: a failed build resumes where it stopped and
+        // a changed input re-evaluates only its new terms (web and Android
+        // keep theirs the same way). Without this every attempt spent a token
+        // per term, and the retries ran through the account's daily quota.
+        var evaluators: [(key: String, evaluate: () async throws -> Data)] = []
+        if let username {
+            evaluators.append(("u:\(username)", { try await discovery.usernameOprf(username).output }))
+        }
+        for term in nameSearchTerms(displayName: own.displayName ?? "") {
+            evaluators.append(("n:\(term)", { try await discovery.nameTermOprf(term).output }))
+        }
+        let missing = ReachRules.termsToEvaluate(
+            cached: Set((record.introductionTermOutputsB64 ?? [:]).keys), terms: evaluators.map(\.key))
         do {
-            if let username { termOutputs.append(try await discovery.usernameOprf(username).output) }
-            for term in nameSearchTerms(displayName: own.displayName ?? "") {
-                termOutputs.append(try await discovery.nameTermOprf(term).output)
+            for entry in evaluators where missing.contains(entry.key) {
+                let output: Data
+                do {
+                    output = try await entry.evaluate()
+                } catch DiscoveryClientError.rateLimited {
+                    // A long name has more terms than the server's burst, and
+                    // the build runs only on an event, so it waits here once
+                    // rather than until something next happens. Chosen, not
+                    // measured: the bucket refills about one per second.
+                    try await Task.sleep(nanoseconds: Self.termRateLimitWaitNs)
+                    output = try await entry.evaluate()
+                }
+                // The account changed while the term was being evaluated:
+                // its output is not kept in the next account's reach record.
+                guard self.accountIdB64 == accountIdB64 else { return nil }
+                var kept = record.introductionTermOutputsB64 ?? [:]
+                kept[entry.key] = output.base64EncodedString()
+                record.introductionTermOutputsB64 = kept
+                persist()
             }
         } catch {
             NSLog("ADR-0060: introduction terms not evaluated: \(error)")
@@ -1620,7 +1779,10 @@ public final class ReachCenter: ObservableObject {
         // record is neither cached in the next account's reach record nor
         // handed to a caller that would send it.
         guard self.accountIdB64 == accountIdB64 else { return nil }
-        guard !termOutputs.isEmpty else { return nil }
+        let termOutputs = evaluators.compactMap { entry in
+            record.introductionTermOutputsB64?[entry.key].flatMap { Data(base64Encoded: $0) }
+        }
+        guard !termOutputs.isEmpty, termOutputs.count == evaluators.count else { return nil }
         let payload = FfiIntroductionPayload(
             identityPk: identityPk, accountId: accountId, displayName: own.displayName,
             username: username, usernameCertificate: cert, mailboxBinding: binding, fof: fof)
@@ -1658,6 +1820,37 @@ public final class ReachCenter: ObservableObject {
         sent[groupIdHex] = digest
         record.bundleSentDigest = sent
         persist()
+    }
+
+    /// ADR-0060 section 4, "A device that holds nothing asks" — what this
+    /// device holds from the person `key` (b64), under any of their keys.
+    public func heldIntroductions(fromAccountKeyB64 key: String) -> ReachRules.HeldIntroductions {
+        let keys = personKeysB64(key)
+        let contact = ReachRules.className(.contact)
+        return ReachRules.HeldIntroductions(
+            offer: keys.contains { record.offers[$0] != nil },
+            bundle: keys.contains { record.bundles[$0] != nil },
+            contactGrant: heldForPerson(b64: key).contains { $0.classRaw == contact })
+    }
+
+    /// An ask arrived in `groupIdHex`: forget that conversation, and only
+    /// that one, in the two sent records, so the next publication run sends
+    /// the offer and the bundle again. Returns whether it did
+    /// (``ReachRules/resetsIntroductions(isOneToOneWithAsker:lastResetAtMs:nowMs:)``).
+    @discardableResult
+    public func noteIntroductionsAsked(
+        groupIdHex: String, isOneToOneWithAsker: Bool, nowMs: UInt64
+    ) -> Bool {
+        guard isActive, ReachRules.resetsIntroductions(
+            isOneToOneWithAsker: isOneToOneWithAsker,
+            lastResetAtMs: record.introductionsResetAtMs?[groupIdHex], nowMs: nowMs) else { return false }
+        record.introductionsSentDigest[groupIdHex] = nil
+        record.bundleSentDigest?[groupIdHex] = nil
+        var resets = record.introductionsResetAtMs ?? [:]
+        resets[groupIdHex] = nowMs
+        record.introductionsResetAtMs = resets
+        persist()
+        return true
     }
 
     // MARK: - Internals

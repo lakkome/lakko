@@ -108,6 +108,11 @@ pub enum InfoSection {
     /// conversation (`docs/ux/conversation-info.md` section 2.1). Local, sends
     /// nothing. Appended last for the same reason as [`Self::ChannelMembers`].
     AddContact,
+    /// `Their contacts can find me`, the per-contact switch of "Who can find
+    /// me" (`docs/ux/who-can-find-me.md` section 5.1), shown only while
+    /// Contacts of my contacts is on. Appended last for the same reason as
+    /// [`Self::ChannelMembers`].
+    TheirContactsCanFindMe,
 }
 
 impl InfoSection {
@@ -168,6 +173,7 @@ impl InfoSection {
             Self::Unsubscribe => "unsubscribe",
             Self::ChannelMembers => "channel-members",
             Self::AddContact => "add-contact",
+            Self::TheirContactsCanFindMe => "their-contacts-can-find-me",
         }
     }
 }
@@ -188,6 +194,10 @@ pub struct PersonInfoCapabilities {
     /// contact, and it offers [`InfoSection::AddContact`] in place of the
     /// rename and remove blocks, which need a contact row to act on.
     pub is_contact: bool,
+    /// Contacts of my contacts is on in "Who can find me"
+    /// (`docs/ux/who-can-find-me.md` section 5.1), under either form. The
+    /// client reads it from the setting, so this crate never does.
+    pub contacts_of_contacts_on: bool,
 }
 
 /// What the viewer may do in a group.
@@ -268,6 +278,11 @@ pub const fn info_target(kind: crate::conversation::ConversationKind) -> InfoTar
 /// number, your name for them - is unaffected: the conversation ended, they
 /// did not.
 ///
+/// [`InfoSection::TheirContactsCanFindMe`] is about a contact and about a
+/// setting, so it needs both: when the setting does not include contacts of
+/// contacts the row is absent rather than dead, and a person who is not a
+/// contact has no list to be on.
+///
 /// Nothing in the result is ever [`InfoSection::group_only`]. That is the
 /// whole point of the split, and it is asserted rather than described.
 #[must_use]
@@ -286,6 +301,9 @@ pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<InfoSection> {
     sections.push(InfoSection::Message);
     sections.push(InfoSection::SafetyNumber);
     if caps.is_contact {
+        if caps.contacts_of_contacts_on {
+            sections.push(InfoSection::TheirContactsCanFindMe);
+        }
         sections.push(InfoSection::RenameContact);
         sections.push(InfoSection::RemoveContact);
     } else {
@@ -374,6 +392,7 @@ mod tests {
         PersonInfoCapabilities {
             membership_ended: ended,
             is_contact: true,
+            contacts_of_contacts_on: false,
         }
     }
 
@@ -381,6 +400,7 @@ mod tests {
         PersonInfoCapabilities {
             membership_ended: ended,
             is_contact: false,
+            contacts_of_contacts_on: false,
         }
     }
 
@@ -457,6 +477,47 @@ mod tests {
         }
         assert!(person_info_sections(removed_person(false)).contains(&InfoSection::Call));
         assert!(!person_info_sections(person(false)).contains(&InfoSection::AddContact));
+    }
+
+    /// The switch needs the setting to include contacts of contacts AND the
+    /// person to be a contact, under either state of the conversation: what
+    /// ends is the conversation, not the person.
+    #[test]
+    fn the_per_contact_switch_follows_the_setting_and_the_contact_row() {
+        for &membership_ended in &[false, true] {
+            for &is_contact in &[false, true] {
+                for &contacts_of_contacts_on in &[false, true] {
+                    let sections = person_info_sections(PersonInfoCapabilities {
+                        membership_ended,
+                        is_contact,
+                        contacts_of_contacts_on,
+                    });
+                    assert_eq!(
+                        sections.contains(&InfoSection::TheirContactsCanFindMe),
+                        is_contact && contacts_of_contacts_on,
+                        "{sections:?}"
+                    );
+                    assert!(!sections.iter().any(|s| s.group_only()), "{sections:?}");
+                }
+            }
+        }
+    }
+
+    /// `docs/ux/conversation-info.md` section 2.1 puts it straight after the
+    /// safety number and before the contact's own actions.
+    #[test]
+    fn the_per_contact_switch_sits_after_the_safety_number() {
+        let sections = person_info_sections(PersonInfoCapabilities {
+            membership_ended: false,
+            is_contact: true,
+            contacts_of_contacts_on: true,
+        });
+        let at = |wanted| sections.iter().position(|s| *s == wanted).unwrap();
+        assert_eq!(
+            at(InfoSection::TheirContactsCanFindMe),
+            at(InfoSection::SafetyNumber) + 1
+        );
+        assert!(at(InfoSection::TheirContactsCanFindMe) < at(InfoSection::RenameContact));
     }
 
     /// One card wherever it was opened from: `Message` is always there, and
@@ -745,6 +806,7 @@ mod tests {
             InfoSection::Unsubscribe,
             InfoSection::ChannelMembers,
             InfoSection::AddContact,
+            InfoSection::TheirContactsCanFindMe,
         ];
         let mut names: Vec<&str> = all.iter().map(|s| s.name()).collect();
         names.sort_unstable();
@@ -765,6 +827,7 @@ mod tests {
             InfoSection::RenameContact,
             InfoSection::RemoveContact,
             InfoSection::AddContact,
+            InfoSection::TheirContactsCanFindMe,
             InfoSection::DeleteChat,
         ] {
             assert!(!s.group_only(), "{s:?}");

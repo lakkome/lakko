@@ -1925,6 +1925,9 @@ private fun SessionRoot(
         return
     }
 
+    val contactsForBadge by contactsRepository.state.collectAsState()
+    val requestsWaiting = me.lakko.app.contacts.waitingRequestCount(contactsForBadge.pending)
+
     Scaffold(
         // Each screen pads by its own Scaffold; the shell contributes only the
         // tab bar (whose height is consumed below so a screen's Scaffold does
@@ -1939,10 +1942,19 @@ private fun SessionRoot(
                             selected = selected,
                             onClick = { navController.navigateToTab(tab.route) },
                             icon = {
-                                Icon(
-                                    imageVector = if (selected) tab.selectedIcon else tab.icon,
-                                    contentDescription = me.lakko.app.l10n.t(tab.labelKey),
-                                )
+                                val waiting = if (tab.route == Routes.CONTACTS) requestsWaiting else 0
+                                androidx.compose.material3.BadgedBox(
+                                    badge = {
+                                        if (waiting > 0) {
+                                            me.lakko.app.ui.chat.UnreadBadge(count = waiting, muted = false)
+                                        }
+                                    },
+                                ) {
+                                    Icon(
+                                        imageVector = if (selected) tab.selectedIcon else tab.icon,
+                                        contentDescription = me.lakko.app.l10n.t(tab.labelKey),
+                                    )
+                                }
                             },
                             label = { Text(me.lakko.app.l10n.t(tab.labelKey)) },
                         )

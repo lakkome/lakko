@@ -93,6 +93,12 @@ public class ReachManager internal constructor(
     private val ownPredecessorKeys: (ownerAccountIdB64: String) -> List<Pair<ByteArray, ByteArray>> = { emptyList() },
     /** ADR-0078 - the binding check and sealing of mailbox rows. */
     private val mailboxCrypto: MailboxCrypto = NativeMailboxCrypto,
+    /** The added account key a committer-delegation envelope names; a throw
+     *  drops the envelope. A test injects a fake (the host JVM loads no
+     *  native library). */
+    private val delegationAddedKey: (envelope: ByteArray) -> ByteArray = {
+        uniffi.lakko_ffi_uniffi.decodeCommitterDelegationEnvelope(it).addedAccountKey
+    },
 ) {
     /**
      * ADR-0073 R.4 - the account and generation behind [ownerKey] when this
@@ -268,6 +274,28 @@ public class ReachManager internal constructor(
         doc = ReachDoc()
         mutableVisibility.value = null
         mutableStatus.value = ReachApplyStatus.APPLIED
+    }
+
+    /** A session with no native identity behind it, for the host suite. */
+    internal fun bindForTest(accountIdB64: String, accountKey: ByteArray) {
+        binding.set(
+            Binding(
+                accountIdB64 = accountIdB64,
+                accountSeed = ByteArray(32),
+                accountKey = accountKey,
+                mailbox = ByteArray(32),
+                mailboxPk = ByteArray(32),
+                mailboxBinding = ByteArray(97),
+                mailboxSigner = object : DsJournalSigner {
+                    override val epoch: ULong = 0uL
+                    override val verifyingKey: ByteArray = ByteArray(32)
+                    override fun sign(method: String, path: String, query: String, body: ByteArray): String =
+                        error("no signer in a test session")
+                    override fun mailboxClaimBody(): String = error("no signer in a test session")
+                },
+            ),
+        )
+        doc = store.load(accountIdB64)
     }
 
     /** The bound account's signature public key, or `null`. */
@@ -1281,19 +1309,15 @@ public class ReachManager internal constructor(
     }
 
     /**
-     * The widest grant held for [ownerKey] as its wire, or `null` (web
-     * `bestGrantFor`): `contact`, else a `group`, else a `channel`. A bare
-     * `member` key is never one: a co-member the person hides from holds it
-     * (UX section 6.2). SECRET.
+     * Every grant held for [ownerKey] that a contact request may use, as
+     * wires, in the order they are tried ([contactRequestGrantsInOrder]). A
+     * bare `member` key is never one: a co-member the person hides from holds
+     * it (UX section 6.2). SECRET.
      */
-    public fun bestHeldGrantWire(ownerKey: ByteArray): ByteArray? {
-        val held = heldFor(ownerKey)
-        for (kind in listOf(ReachKind.CONTACT, ReachKind.GROUP, ReachKind.CHANNEL)) {
-            val pick = held.filter { it.first.kind == kind }.minByOrNull { it.first.scopeHex } ?: continue
-            return runCatching { uniffi.lakko_ffi_uniffi.encodeReachGrant(pick.second) }.getOrNull()
+    public fun heldGrantWiresInOrder(ownerKey: ByteArray): List<ByteArray> =
+        contactRequestGrantsInOrder(heldFor(ownerKey)).mapNotNull { grant ->
+            runCatching { uniffi.lakko_ffi_uniffi.encodeReachGrant(grant) }.getOrNull()
         }
-        return null
-    }
 
     /** Drop every grant held for [ownerKey] (a contact removed). */
     public fun forgetHeld(ownerKey: ByteArray) {
@@ -1350,18 +1374,21 @@ public class ReachManager internal constructor(
     }
 
     /**
-     * ADR-0078 - where a write of [purpose] to [ownerKey] goes: the first
-     * held grant that verifies ([reachAuthFor]), else a proofless write to
-     * the mailbox key a held binding names ([mailboxPkFor]; it spends one
-     * `mailbox-write` token), else `null` (no mailbox known: nothing is
-     * written).
+     * ADR-0078 - where a write of [purpose] to [ownerKey] may go, in turn:
+     * [first] (a grant or binding the caller holds for this write), each held
+     * grant that verifies, and a proofless write to the mailbox key a held
+     * binding names ([mailboxPkFor]; it spends one `mailbox-write` token), the
+     * last only when nothing before it yielded a destination.
      */
-    public fun writeDestFor(
+    public fun writeDestCandidates(
         ownerKey: ByteArray,
         purpose: WritePurpose,
-        groupHex: String? = null,
-    ): MailboxDest? =
-        reachAuthFor(ownerKey, purpose, groupHex) ?: mailboxPkFor(ownerKey)?.let { MailboxDest(it, null) }
+        first: MailboxDest? = null,
+    ): List<() -> MailboxDest?> {
+        val grants = reachAuthCandidates(ownerKey, purpose)
+        val all = if (first == null) grants else listOf<() -> MailboxDest?>({ first }) + grants
+        return withProoflessLast(all) { mailboxPkFor(ownerKey)?.let { MailboxDest(it, null) } }
+    }
 
     /**
      * Every authorisation this device holds for a write of [purpose] into
@@ -1494,6 +1521,23 @@ public class ReachManager internal constructor(
     public fun introductionBundleWires(): List<ByteArray> =
         doc.introBundles.toSortedMap().values.mapNotNull { reachUnhex(it.bundleHex) }
 
+    /** What the kept document holds, counts only, for the search log line. */
+    public fun storedCounts(): String =
+        "held=${doc.held.size} offers=${doc.introOffers.size} bundles=${doc.introBundles.size} " +
+            "own_offer=${doc.ownOffer != null} offer_sent=${doc.offerSentTo.size} " +
+            "bundle_sent=${doc.bundleSentTo.size} joined=${doc.joinedGroups.size}"
+
+    /** What this device holds from the person known by [accountKey]
+     *  (ADR-0060 section 4, whether it asks for introductions). */
+    internal fun introductionsHeldFrom(accountKey: ByteArray): IntroductionsHeld {
+        val keys = personKeys(accountKey)
+        return IntroductionsHeld(
+            offer = keys.any { it in doc.introOffers },
+            bundle = keys.any { it in doc.introBundles },
+            contactGrant = holdsHeld(accountKey, ReachKind.CONTACT, ""),
+        )
+    }
+
     /** Every record the contacts offered, hex, ordered by contact key. */
     public fun offeredIntroductionRecordsHex(): List<String> = doc.introOffers.toSortedMap().values.toList()
 
@@ -1503,6 +1547,7 @@ public class ReachManager internal constructor(
         ownOffer = doc.ownOffer,
         offerSentTo = doc.offerSentTo,
         bundleSentTo = doc.bundleSentTo,
+        reopenedAtMs = doc.introReopenedAtMs,
     )
 
     /** Persist the publication state after a step. */
@@ -1515,6 +1560,7 @@ public class ReachManager internal constructor(
                 ownOffer = state.ownOffer,
                 offerSentTo = state.offerSentTo,
                 bundleSentTo = state.bundleSentTo,
+                introReopenedAtMs = state.reopenedAtMs,
             )
             store.save(b.accountIdB64, doc)
         }
@@ -1557,15 +1603,15 @@ public class ReachManager internal constructor(
      *  group, the sender resolved at receipt (C-68). */
     public fun keepDelegation(groupHex: String, senderKey: ByteArray, envelope: ByteArray) {
         val b = binding.get() ?: return
-        val decoded = try {
-            uniffi.lakko_ffi_uniffi.decodeCommitterDelegationEnvelope(envelope)
+        val addedAccountKey = try {
+            delegationAddedKey(envelope)
         } catch (_: Throwable) {
             return
         }
         val entry = StoredDelegation(
             groupHex = groupHex.lowercase(),
             senderKeyHex = reachHex(senderKey),
-            addedAccountKeyHex = reachHex(decoded.addedAccountKey),
+            addedAccountKeyHex = reachHex(addedAccountKey),
             envelopeHex = reachHex(envelope),
         )
         scope.launch {
@@ -1579,7 +1625,10 @@ public class ReachManager internal constructor(
                 )
                 store.save(b.accountIdB64, doc)
             }
-            notifyGrantHeld(mailboxAccountKey(decoded.addedAccountKey))
+            // A re-sent envelope is what a committer that merged the commit
+            // and owes the Welcome waits for: its last delegation may have
+            // expired (ADR-0060 section 6).
+            notifyGrantHeld(mailboxAccountKey(addedAccountKey))
         }
     }
 
@@ -1634,6 +1683,15 @@ public class ReachManager internal constructor(
         }
     }
 
+    /** What [composeDelegations] made. */
+    public class ComposedDelegations(
+        /** The envelope plaintext. */
+        public val envelope: ByteArray,
+        /** Whether it carries delegations; one with none names a binding,
+         *  which does not expire. */
+        public val signed: Boolean,
+    )
+
     /**
      * The committer-delegation envelope this device sends next to an Add it
      * proposed for [addedAccountKey] in [groupHex] (ADR-0060 section 6): one
@@ -1656,7 +1714,7 @@ public class ReachManager internal constructor(
         groupHex: String? = null,
         ttlMs: Long = DELEGATION_TTL_MS,
         nowMs: Long = System.currentTimeMillis(),
-    ): ByteArray? {
+    ): ComposedDelegations? {
         // ADR-0074 3.5a rule 1: the delegation opens the added person's
         // CURRENT mailbox, and is signed to each candidate's current key
         // (the key that candidate's device signs the write with).
@@ -1679,23 +1737,25 @@ public class ReachManager internal constructor(
                 uniffi.lakko_ffi_uniffi.signDelegationBlob(grant.seed, mailbox, mailboxAccountKey(candidate), expires, nonce)
             }
             if (blobs.isEmpty()) return null
-            return uniffi.lakko_ffi_uniffi.composeCommitterDelegationEnvelope(
+            val envelope = uniffi.lakko_ffi_uniffi.composeCommitterDelegationEnvelope(
                 uniffi.lakko_ffi_uniffi.FfiCommitterDelegationEnvelope(
                     addedAccountKey = addedAccountKey,
                     addedMailboxBinding = grant.binding,
                     delegations = blobs,
                 ),
             )
+            return ComposedDelegations(envelope, signed = true)
         }
         val group = groupHex ?: return null
         val binding = ownOpenBindingFor(group, addedAccountKey) ?: return null
-        return uniffi.lakko_ffi_uniffi.composeCommitterDelegationEnvelope(
+        val envelope = uniffi.lakko_ffi_uniffi.composeCommitterDelegationEnvelope(
             uniffi.lakko_ffi_uniffi.FfiCommitterDelegationEnvelope(
                 addedAccountKey = addedAccountKey,
                 addedMailboxBinding = binding,
                 delegations = emptyList(),
             ),
         )
+        return ComposedDelegations(envelope, signed = false)
     }
 
     // -----------------------------------------------------------------

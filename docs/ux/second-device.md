@@ -37,6 +37,13 @@ The ADR-0049 "Your identity is restored" block stays removed.
 The old device shows nothing extra during pairing beyond naming the device
 it adds (section 2.1). The fan-out runs on the journal and needs no screen.
 
+**History is not news (decided 2026-10-30).** Seen live: on a new device every
+message that came with the history lit an unread badge on its chat. A message
+that came with the history at pairing is never unread on the device that
+received it, whatever the read position the account's other devices hold; only
+what arrives after it counts. This is local to the device: it sends no read
+receipt and moves no read position of the account.
+
 ### 2.1 Naming the device being added (2026-10-29)
 
 Seen live: after scanning a code the signed-in device asked "Link this
@@ -108,6 +115,11 @@ shape people know from other messengers' "active sessions".
 A device whose card has not arrived yet (it was added before this change, or
 its card is still on the way) shows its platform icon, "Device" and the date
 it was added, until the card arrives.
+
+**The list follows the account (2026-10-30).** A device that joins or leaves
+appears or goes from an open Devices screen at once, on every route, without
+leaving the screen. Seen live: after the code route the new device showed only
+after going away and coming back.
 
 **This device never waits for a card.** Its row is built from what the
 device knows about itself (the same fields it would put in its card), so it

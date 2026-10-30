@@ -38,8 +38,12 @@ export interface RowView {
 }
 
 /** What a row shows for its state; `canAdd` is whether it offers Add contact
- *  at all (`canAddContact`). */
+ *  at all (`canAddContact`). A refused row keeps its sentence after the
+ *  refusal took the offer away (`reach-verdicts.ts`). */
 export function rowView(state: RowSendState, canAdd: boolean): RowView {
+  if (state === "refused") {
+    return { add: "hidden", sent: false, message: { error: true, text: REQUEST_REFUSED } };
+  }
   if (!canAdd) return { add: "hidden", sent: false, message: null };
   switch (state) {
     case "idle":
@@ -48,8 +52,6 @@ export function rowView(state: RowSendState, canAdd: boolean): RowView {
       return { add: "disabled", sent: false, message: null };
     case "sent":
       return { add: "hidden", sent: true, message: null };
-    case "refused":
-      return { add: "hidden", sent: false, message: { error: true, text: REQUEST_REFUSED } };
     case "failed":
       return { add: "shown", sent: false, message: { error: true, text: REQUEST_FAILED } };
   }

@@ -30,7 +30,9 @@ import { canAddContact, toHex, type PersonResult } from "./people";
 
 export type SendOutcome =
   | { readonly kind: "sent" }
-  | { readonly kind: "refused" }
+  /** `byReachCheck`: the DS reach check said no, so the kept grant no longer
+   *  reaches them (`reach-verdicts.ts`). */
+  | { readonly kind: "refused"; readonly byReachCheck?: boolean }
   /** `message` renders the failure in the current language. */
   | { readonly kind: "failed"; readonly message: () => string };
 
@@ -78,7 +80,9 @@ export async function sendFoundRequest(person: PersonResult, deps: SendDeps): Pr
   try {
     const key = base64Decode(person.keyB64);
     if (person.reach === "grant") {
-      if (grant === null || !(await deps.reachCheck(key, grant))) return { kind: "refused" };
+      if (grant === null || !(await deps.reachCheck(key, grant))) {
+        return { kind: "refused", byReachCheck: true };
+      }
     }
     if (person.reach === "open" && person.username !== null) {
       await deps.sendByUsername(person.username, NO_INTRO, grant);

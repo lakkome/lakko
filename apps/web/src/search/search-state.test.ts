@@ -17,6 +17,7 @@ import {
   SEARCH_OUT_OF_SEARCHES,
   foldSearch,
   legOutcomeOf,
+  peopleLineOf,
   searchStateMessage,
 } from "./search-state";
 
@@ -85,5 +86,17 @@ describe("searchStateMessage", () => {
     expect(searchStateMessage({ kind: "searching" })).toBeNull();
     expect(searchStateMessage({ kind: "found" })).toBeNull();
     expect(searchStateMessage({ kind: "idle" })).toBeNull();
+  });
+});
+
+describe("peopleLineOf", () => {
+  it("says not found only when no person row stands under People", () => {
+    expect(peopleLineOf({ kind: "not-found" }, 0)).toBe(SEARCH_NOT_FOUND());
+    expect(peopleLineOf({ kind: "not-found" }, 1)).toBeNull();
+  });
+
+  it("still says the search failed over a row", () => {
+    expect(peopleLineOf({ kind: "failed" }, 1)).toBe(SEARCH_FAILED());
+    expect(peopleLineOf({ kind: "allowance-used" }, 1)).toBe(SEARCH_OUT_OF_SEARCHES());
   });
 });

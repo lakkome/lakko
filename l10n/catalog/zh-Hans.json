@@ -31,7 +31,7 @@
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "开源。无需手机号。",
+      "text": "按你的方式交流。无需手机号码。",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -2670,6 +2670,18 @@
       "text": "对方",
       "status": "machine"
     },
+    "chat.pending.call_disabled": {
+      "text": "{name} 连接后即可使用。",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} 尚未回复。你可以请对方发一个新链接。",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} 的应用下次联网时会收到你的消息。",
+      "status": "machine"
+    },
     "chat.photo.load_failed": {
       "text": "无法加载照片",
       "status": "machine"
@@ -3778,6 +3790,18 @@
       "text": "分享邀请链接",
       "status": "machine"
     },
+    "contacts.add_back.action": {
+      "text": "添加",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "添加到联系人",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "将 {name} 重新加入此账户的联系人列表。",
+      "status": "machine"
+    },
     "contacts.detail.actions": {
       "text": "联系人操作",
       "status": "machine"
@@ -3950,6 +3974,10 @@
       "text": "接受",
       "status": "machine"
     },
+    "contacts.request.accept_failed": {
+      "text": "无法接受。请重试。",
+      "status": "machine"
+    },
     "contacts.request.decline": {
       "text": "拒绝",
       "status": "machine"
@@ -3992,6 +4020,14 @@
     },
     "contacts.safety.title": {
       "text": "核对安全码",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "扫描二维码",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "这不是 Lakko 链接。请换一个二维码。",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4418,12 +4454,12 @@
       "text": "你的其他设备会保留聊天，并自动获得新密钥。",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "你的通行密钥仍可用于登录。“使用此通行密钥恢复密钥”已关闭，直到你重新开启。",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "你之前创建的邀请链接和通话链接将失效。请创建新的链接。",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "你的通行密钥仍可用于登录。“使用此通行密钥恢复密钥”已关闭，直到你重新开启。",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -5802,6 +5838,74 @@
       "text": "此链接已失效。请让对方给你一个新链接。",
       "status": "machine"
     },
+    "invite.contact.page.about": {
+      "text": "Lakko 是一款每个聊天和通话都端到端加密的通讯应用。",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "添加",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "无法添加 {name}。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} 已在你的联系人中",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "无法联系 {name}。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "创建账号",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "请让发送者重新发一个。",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "此邀请链接已失效",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "完成",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "我已有账号",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "暂不",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "打开聊天",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "把它分享给你想添加的人。",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "这是你自己的邀请链接",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} 邀请你加入 Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "将 {name} 添加到联系人？",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "此人",
+      "status": "machine"
+    },
     "invite.contact.page_title": {
       "text": "邀请",
       "status": "machine"
@@ -5954,8 +6058,44 @@
       "text": "创建于 {date}",
       "status": "machine"
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "期限",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "人数",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "删除链接",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "已经拿到此链接的人将无法再使用它。",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "删除此链接？",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "链接已删除。",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "任何打开你链接的人都可以向你发送联系人请求，直到链接过期或次数用完。",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "编辑链接",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "保存后会生成新链接，旧链接将失效。",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "链接条件",
       "status": "machine"
     },
     "invite.links.empty": {
@@ -5964,6 +6104,22 @@
     },
     "invite.links.error.copy": {
       "text": "无法复制链接。",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "请输入 1 小时到 365 天之间的期限。",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "请输入 1 到 {max} 之间的人数。",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "无法删除链接。请检查网络后重试。",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "无法保存链接。请检查网络后重试。",
       "status": "machine"
     },
     "invite.links.error.load": {
@@ -6002,6 +6158,10 @@
       "text": "{count} 分钟后过期",
       "status": "machine"
     },
+    "invite.links.expires_option_custom": {
+      "text": "自定义",
+      "status": "machine"
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, other {# 天后}}",
       "status": "machine"
@@ -6038,12 +6198,28 @@
       "text": "新",
       "status": "machine"
     },
+    "invite.links.qr_hint": {
+      "text": "扫描此二维码的任何人都可以向你发送联系人请求。",
+      "status": "machine"
+    },
     "invite.links.revoked": {
       "text": "链接已撤销。",
       "status": "machine"
     },
     "invite.links.revoking": {
       "text": "正在撤销…",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "显示二维码",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "天",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "小时",
       "status": "machine"
     },
     "invite.links.unlimited_uses": {
@@ -6060,6 +6236,10 @@
     },
     "invite.links.uses_left": {
       "text": "{count, plural, other {剩余 # 次}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "自定义",
       "status": "machine"
     },
     "invite.links.uses_option_one": {
@@ -8086,6 +8266,22 @@
       "text": "正在应用",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "我的所有联系人",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "仅我选择的联系人",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "仅你选择的人的联系人（{chosen}/{total}）。",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "现在仅限你选择的联系人。可在{privacy}中更改。",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "我的联系人的联系人",
       "status": "machine"
@@ -8132,6 +8328,14 @@
     },
     "who_can_find_me.list.choose": {
       "text": "选择群组和频道",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "你还没有联系人。",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "搜索联系人",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -8198,184 +8402,12 @@
       "text": "将在你重新联网后应用。",
       "status": "machine"
     },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "此联系人的联系人可以找到我",
+      "status": "machine"
+    },
     "who_can_find_me.title": {
       "text": "谁可以找到我",
-      "status": "machine"
-    },
-    "invite.contact.page.title": {
-      "text": "将 {name} 添加到联系人？",
-      "status": "machine"
-    },
-    "invite.contact.page.add": {
-      "text": "添加",
-      "status": "machine"
-    },
-    "invite.contact.page.not_now": {
-      "text": "暂不",
-      "status": "machine"
-    },
-    "invite.contact.page.already_title": {
-      "text": "{name} 已在你的联系人中",
-      "status": "machine"
-    },
-    "invite.contact.page.open_chat": {
-      "text": "打开聊天",
-      "status": "machine"
-    },
-    "invite.contact.page.own_title": {
-      "text": "这是你自己的邀请链接",
-      "status": "machine"
-    },
-    "invite.contact.page.own_body": {
-      "text": "把它分享给你想添加的人。",
-      "status": "machine"
-    },
-    "invite.contact.page.done": {
-      "text": "完成",
-      "status": "machine"
-    },
-    "invite.contact.page.add_failed": {
-      "text": "无法添加 {name}。请检查网络连接后重试。",
-      "status": "machine"
-    },
-    "invite.contact.page.unnamed": {
-      "text": "此人",
-      "status": "machine"
-    },
-    "chat.pending.waiting": {
-      "text": "{name} 的应用下次联网时会收到你的消息。",
-      "status": "machine"
-    },
-    "chat.pending.stale": {
-      "text": "{name} 尚未回复。你可以请对方发一个新链接。",
-      "status": "machine"
-    },
-    "chat.pending.call_disabled": {
-      "text": "{name} 连接后即可使用。",
-      "status": "machine"
-    },
-    "contacts.add_back.control": {
-      "text": "添加到联系人",
-      "status": "machine"
-    },
-    "contacts.add_back.sub": {
-      "text": "将 {name} 重新加入此账户的联系人列表。",
-      "status": "machine"
-    },
-    "contacts.add_back.action": {
-      "text": "添加",
-      "status": "machine"
-    },
-    "invite.contact.page.answer_failed": {
-      "text": "无法联系 {name}。请检查网络连接后重试。",
-      "status": "machine"
-    },
-    "invite.links.show_qr": {
-      "text": "显示二维码",
-      "status": "machine"
-    },
-    "invite.links.qr_hint": {
-      "text": "扫描此二维码的任何人都可以向你发送联系人请求。",
-      "status": "machine"
-    },
-    "contacts.scan_qr": {
-      "text": "扫描二维码",
-      "status": "machine"
-    },
-    "contacts.scan_qr.not_a_link": {
-      "text": "这不是 Lakko 链接。请换一个二维码。",
-      "status": "machine"
-    },
-    "invite.links.expires_option_custom": {
-      "text": "自定义",
-      "status": "machine"
-    },
-    "invite.links.uses_option_custom": {
-      "text": "自定义",
-      "status": "machine"
-    },
-    "invite.links.custom_expiry_amount": {
-      "text": "期限",
-      "status": "machine"
-    },
-    "invite.links.unit_hours": {
-      "text": "小时",
-      "status": "machine"
-    },
-    "invite.links.unit_days": {
-      "text": "天",
-      "status": "machine"
-    },
-    "invite.links.custom_uses_count": {
-      "text": "人数",
-      "status": "machine"
-    },
-    "invite.links.error.custom_expiry": {
-      "text": "请输入 1 小时到 365 天之间的期限。",
-      "status": "machine"
-    },
-    "invite.links.error.custom_uses": {
-      "text": "请输入 1 到 {max} 之间的人数。",
-      "status": "machine"
-    },
-    "invite.contact.page.signed_out_title": {
-      "text": "{name} 邀请你加入 Lakko",
-      "status": "machine"
-    },
-    "invite.contact.page.about": {
-      "text": "Lakko 是一款每个聊天和通话都端到端加密的通讯应用。",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "创建账号",
-      "status": "machine"
-    },
-    "invite.contact.page.have_account": {
-      "text": "我已有账号",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_title": {
-      "text": "此邀请链接已失效",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "请让发送者重新发一个。",
-      "status": "machine"
-    },
-    "invite.links.edit": {
-      "text": "编辑链接",
-      "status": "machine"
-    },
-    "invite.links.edit_title": {
-      "text": "链接条件",
-      "status": "machine"
-    },
-    "invite.links.edit_note": {
-      "text": "保存后会生成新链接，旧链接将失效。",
-      "status": "machine"
-    },
-    "invite.links.delete": {
-      "text": "删除链接",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_title": {
-      "text": "删除此链接？",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_body": {
-      "text": "已经拿到此链接的人将无法再使用它。",
-      "status": "machine"
-    },
-    "invite.links.deleted": {
-      "text": "链接已删除。",
-      "status": "machine"
-    },
-    "invite.links.error.delete": {
-      "text": "无法删除链接。请检查网络后重试。",
-      "status": "machine"
-    },
-    "invite.links.error.edit": {
-      "text": "无法保存链接。请检查网络后重试。",
       "status": "machine"
     }
   }

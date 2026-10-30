@@ -31,7 +31,7 @@
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "קוד פתוח. לא נדרש מספר טלפון.",
+      "text": "תקשורת בדרך שלכם. בלי צורך במספר טלפון.",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -2670,6 +2670,18 @@
       "text": "הצד השני",
       "status": "machine"
     },
+    "chat.pending.call_disabled": {
+      "text": "יהיה זמין כש־{name} יתחבר.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} עדיין לא ענה. אפשר לבקש ממנו קישור חדש.",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} יקבל את ההודעות שלך כשהאפליקציה שלו תתחבר שוב.",
+      "status": "machine"
+    },
     "chat.photo.load_failed": {
       "text": "לא ניתן היה לטעון את התמונה",
       "status": "machine"
@@ -3778,6 +3790,18 @@
       "text": "שיתוף קישור הזמנה",
       "status": "machine"
     },
+    "contacts.add_back.action": {
+      "text": "הוספה",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "הוספה לאנשי הקשר",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "מחזיר את {name} לרשימת אנשי הקשר בחשבון הזה.",
+      "status": "machine"
+    },
     "contacts.detail.actions": {
       "text": "פעולות על איש הקשר",
       "status": "machine"
@@ -3950,6 +3974,10 @@
       "text": "אישור",
       "status": "machine"
     },
+    "contacts.request.accept_failed": {
+      "text": "לא ניתן היה לאשר. נסו שוב.",
+      "status": "machine"
+    },
     "contacts.request.decline": {
       "text": "דחייה",
       "status": "machine"
@@ -3992,6 +4020,14 @@
     },
     "contacts.safety.title": {
       "text": "אימות מספר הבטיחות",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "סריקת קוד QR",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "הקוד הזה אינו קישור של Lakko. נסו קוד אחר.",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4418,12 +4454,12 @@
       "text": "המכשירים האחרים שלכם שומרים על הצ׳אטים שלהם ומקבלים את המפתחות החדשים בעצמם.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "מפתחות הגישה שלכם עדיין מחברים אתכם. האפשרות \"שחזור מפתחות עם מפתח הגישה הזה\" כבויה עד שתפעילו אותה שוב.",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "קישורי ההזמנה וקישורי השיחה שיצרת קודם יפסיקו לפעול. יש ליצור חדשים.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "מפתחות הגישה שלכם עדיין מחברים אתכם. האפשרות \"שחזור מפתחות עם מפתח הגישה הזה\" כבויה עד שתפעילו אותה שוב.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -5802,6 +5838,74 @@
       "text": "הקישור הזה כבר לא תקף. בקשו מהאדם קישור חדש.",
       "status": "machine"
     },
+    "invite.contact.page.about": {
+      "text": "Lakko היא אפליקציית מסרים שבה כל צ'אט ושיחה מוצפנים מקצה לקצה.",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "הוספה",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "לא ניתן היה להוסיף את {name}. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} כבר באנשי הקשר שלך",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "לא ניתן היה להגיע אל {name}. כדאי לבדוק את החיבור ולנסות שוב.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "יצירת חשבון",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "אפשר לבקש מהשולח/ת קישור חדש.",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "קישור ההזמנה הזה כבר לא עובד",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "סיום",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "כבר יש לי חשבון",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "לא עכשיו",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "פתיחת צ׳אט",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "שתפו אותו עם האדם שתרצו להוסיף.",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "זה קישור ההזמנה שלך",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} מזמין/ה אותך ל-Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "להוסיף את {name} לאנשי הקשר שלך?",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "האדם הזה",
+      "status": "machine"
+    },
     "invite.contact.page_title": {
       "text": "הזמנה",
       "status": "machine"
@@ -5954,8 +6058,44 @@
       "text": "נוצר ב-{date}",
       "status": "machine"
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "תקופה",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "מספר אנשים",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "מחיקת קישור",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "מי שכבר קיבל אותו לא יוכל להשתמש בו.",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "למחוק את הקישור הזה?",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "הקישור נמחק.",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "כל מי שפותח אחד מהקישורים שלכם יכול לשלוח לכם בקשת קשר עד שתוקף הקישור יפוג או שהשימושים בו ינוצלו.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "עריכת קישור",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "השמירה יוצרת קישור חדש. הקישור הישן יפסיק לעבוד.",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "תנאי הקישור",
       "status": "machine"
     },
     "invite.links.empty": {
@@ -5964,6 +6104,22 @@
     },
     "invite.links.error.copy": {
       "text": "לא ניתן היה להעתיק את הקישור.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "יש להזין תקופה משעה אחת עד 365 ימים.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "יש להזין מספר אנשים מ-1 עד {max}.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "לא ניתן למחוק את הקישור. יש לבדוק את החיבור ולנסות שוב.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "לא ניתן לשמור את הקישור. יש לבדוק את החיבור ולנסות שוב.",
       "status": "machine"
     },
     "invite.links.error.load": {
@@ -6002,6 +6158,10 @@
       "text": "פג בעוד {count} דק׳",
       "status": "machine"
     },
+    "invite.links.expires_option_custom": {
+      "text": "מותאם אישית",
+      "status": "machine"
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, one {בעוד יום} two {בעוד יומיים} other {בעוד # ימים}}",
       "status": "machine"
@@ -6038,12 +6198,28 @@
       "text": "חדש",
       "status": "machine"
     },
+    "invite.links.qr_hint": {
+      "text": "כל מי שסורק את הקוד הזה יכול לשלוח לך בקשת קשר.",
+      "status": "machine"
+    },
     "invite.links.revoked": {
       "text": "הקישור בוטל.",
       "status": "machine"
     },
     "invite.links.revoking": {
       "text": "מבטלים...",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "הצגת קוד QR",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "ימים",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "שעות",
       "status": "machine"
     },
     "invite.links.unlimited_uses": {
@@ -6060,6 +6236,10 @@
     },
     "invite.links.uses_left": {
       "text": "{count, plural, one {נשאר שימוש אחד} two {נשארו שני שימושים} other {נשארו # שימושים}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "מותאם אישית",
       "status": "machine"
     },
     "invite.links.uses_option_one": {
@@ -8086,6 +8266,22 @@
       "text": "מחילים",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "כל אנשי הקשר שלי",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "רק אלה שאבחר",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "רק אנשי הקשר של האנשים שבחרת ({chosen} מתוך {total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "עכשיו רק אנשי הקשר שבחרת. אפשר לשנות ב{privacy}.",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "אנשי הקשר של אנשי הקשר שלי",
       "status": "machine"
@@ -8132,6 +8328,14 @@
     },
     "who_can_find_me.list.choose": {
       "text": "בחירת קבוצות וערוצים",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "עדיין אין לך אנשי קשר.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "חיפוש אנשי קשר",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -8198,184 +8402,12 @@
       "text": "יוחל כשתחזרו להיות מחוברים.",
       "status": "machine"
     },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "אנשי הקשר שלהם יכולים למצוא אותי",
+      "status": "machine"
+    },
     "who_can_find_me.title": {
       "text": "מי יכול למצוא אותי",
-      "status": "machine"
-    },
-    "invite.contact.page.title": {
-      "text": "להוסיף את {name} לאנשי הקשר שלך?",
-      "status": "machine"
-    },
-    "invite.contact.page.add": {
-      "text": "הוספה",
-      "status": "machine"
-    },
-    "invite.contact.page.not_now": {
-      "text": "לא עכשיו",
-      "status": "machine"
-    },
-    "invite.contact.page.already_title": {
-      "text": "{name} כבר באנשי הקשר שלך",
-      "status": "machine"
-    },
-    "invite.contact.page.open_chat": {
-      "text": "פתיחת צ׳אט",
-      "status": "machine"
-    },
-    "invite.contact.page.own_title": {
-      "text": "זה קישור ההזמנה שלך",
-      "status": "machine"
-    },
-    "invite.contact.page.own_body": {
-      "text": "שתפו אותו עם האדם שתרצו להוסיף.",
-      "status": "machine"
-    },
-    "invite.contact.page.done": {
-      "text": "סיום",
-      "status": "machine"
-    },
-    "invite.contact.page.add_failed": {
-      "text": "לא ניתן היה להוסיף את {name}. בדקו את החיבור ונסו שוב.",
-      "status": "machine"
-    },
-    "invite.contact.page.unnamed": {
-      "text": "האדם הזה",
-      "status": "machine"
-    },
-    "chat.pending.waiting": {
-      "text": "{name} יקבל את ההודעות שלך כשהאפליקציה שלו תתחבר שוב.",
-      "status": "machine"
-    },
-    "chat.pending.stale": {
-      "text": "{name} עדיין לא ענה. אפשר לבקש ממנו קישור חדש.",
-      "status": "machine"
-    },
-    "chat.pending.call_disabled": {
-      "text": "יהיה זמין כש־{name} יתחבר.",
-      "status": "machine"
-    },
-    "contacts.add_back.control": {
-      "text": "הוספה לאנשי הקשר",
-      "status": "machine"
-    },
-    "contacts.add_back.sub": {
-      "text": "מחזיר את {name} לרשימת אנשי הקשר בחשבון הזה.",
-      "status": "machine"
-    },
-    "contacts.add_back.action": {
-      "text": "הוספה",
-      "status": "machine"
-    },
-    "invite.contact.page.answer_failed": {
-      "text": "לא ניתן היה להגיע אל {name}. כדאי לבדוק את החיבור ולנסות שוב.",
-      "status": "machine"
-    },
-    "invite.links.show_qr": {
-      "text": "הצגת קוד QR",
-      "status": "machine"
-    },
-    "invite.links.qr_hint": {
-      "text": "כל מי שסורק את הקוד הזה יכול לשלוח לך בקשת קשר.",
-      "status": "machine"
-    },
-    "contacts.scan_qr": {
-      "text": "סריקת קוד QR",
-      "status": "machine"
-    },
-    "contacts.scan_qr.not_a_link": {
-      "text": "הקוד הזה אינו קישור של Lakko. נסו קוד אחר.",
-      "status": "machine"
-    },
-    "invite.links.expires_option_custom": {
-      "text": "מותאם אישית",
-      "status": "machine"
-    },
-    "invite.links.uses_option_custom": {
-      "text": "מותאם אישית",
-      "status": "machine"
-    },
-    "invite.links.custom_expiry_amount": {
-      "text": "תקופה",
-      "status": "machine"
-    },
-    "invite.links.unit_hours": {
-      "text": "שעות",
-      "status": "machine"
-    },
-    "invite.links.unit_days": {
-      "text": "ימים",
-      "status": "machine"
-    },
-    "invite.links.custom_uses_count": {
-      "text": "מספר אנשים",
-      "status": "machine"
-    },
-    "invite.links.error.custom_expiry": {
-      "text": "יש להזין תקופה משעה אחת עד 365 ימים.",
-      "status": "machine"
-    },
-    "invite.links.error.custom_uses": {
-      "text": "יש להזין מספר אנשים מ-1 עד {max}.",
-      "status": "machine"
-    },
-    "invite.contact.page.signed_out_title": {
-      "text": "{name} מזמין/ה אותך ל-Lakko",
-      "status": "machine"
-    },
-    "invite.contact.page.about": {
-      "text": "Lakko היא אפליקציית מסרים שבה כל צ'אט ושיחה מוצפנים מקצה לקצה.",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "יצירת חשבון",
-      "status": "machine"
-    },
-    "invite.contact.page.have_account": {
-      "text": "כבר יש לי חשבון",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_title": {
-      "text": "קישור ההזמנה הזה כבר לא עובד",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "אפשר לבקש מהשולח/ת קישור חדש.",
-      "status": "machine"
-    },
-    "invite.links.edit": {
-      "text": "עריכת קישור",
-      "status": "machine"
-    },
-    "invite.links.edit_title": {
-      "text": "תנאי הקישור",
-      "status": "machine"
-    },
-    "invite.links.edit_note": {
-      "text": "השמירה יוצרת קישור חדש. הקישור הישן יפסיק לעבוד.",
-      "status": "machine"
-    },
-    "invite.links.delete": {
-      "text": "מחיקת קישור",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_title": {
-      "text": "למחוק את הקישור הזה?",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_body": {
-      "text": "מי שכבר קיבל אותו לא יוכל להשתמש בו.",
-      "status": "machine"
-    },
-    "invite.links.deleted": {
-      "text": "הקישור נמחק.",
-      "status": "machine"
-    },
-    "invite.links.error.delete": {
-      "text": "לא ניתן למחוק את הקישור. יש לבדוק את החיבור ולנסות שוב.",
-      "status": "machine"
-    },
-    "invite.links.error.edit": {
-      "text": "לא ניתן לשמור את הקישור. יש לבדוק את החיבור ולנסות שוב.",
       "status": "machine"
     }
   }

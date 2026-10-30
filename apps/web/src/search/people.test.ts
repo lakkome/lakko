@@ -38,7 +38,7 @@ const cand = (over: Partial<LocalCandidate> & { keyHex: string }): LocalCandidat
   verifiedUsername: null,
   isContact: false,
   accountIdHex: "11".repeat(16),
-  keptGrantWireB64: null,
+  keptGrantWires: [],
   ...over,
 });
 
@@ -114,7 +114,7 @@ describe("localPeople", () => {
 
   it("lists a member who lets this account find them, with Add contact", () => {
     const [r] = localPeople(
-      [cand({ keyHex: "aa", keptGrantWireB64: "GRANT", verifiedUsername: "anna" })],
+      [cand({ keyHex: "aa", keptGrantWires: ["GRANT"], verifiedUsername: "anna" })],
       "web",
       normalize,
       null,
@@ -137,7 +137,7 @@ describe("localPeople", () => {
 
   it("finds a findable member by username too", () => {
     const found = localPeople(
-      [cand({ keyHex: "aa", name: "Someone", verifiedUsername: "anna", keptGrantWireB64: "G" })],
+      [cand({ keyHex: "aa", name: "Someone", verifiedUsername: "anna", keptGrantWires: ["G"] })],
       "@ann",
       normalize,
       null,
@@ -212,6 +212,24 @@ describe("mergePeople", () => {
       null,
     );
     expect(merged[0]).toMatchObject({ name: "a1b2 c3d4", nameIsFallback: true });
+  });
+
+  it("with equal reach, a grant that passed a check beats one nobody asked about", () => {
+    const stale = person({ keyHex: "aa", reach: "grant", grantWireB64: "STALE" });
+    const live = person({ keyHex: "aa", reach: "grant", grantWireB64: "LIVE", grantChecked: true });
+    expect(mergePeople([[stale], [live]], null)[0]).toMatchObject({ grantWireB64: "LIVE", grantChecked: true });
+    expect(mergePeople([[live], [stale]], null)[0]).toMatchObject({ grantWireB64: "LIVE", grantChecked: true });
+  });
+
+  it("of two checked grants keeps the first", () => {
+    const merged = mergePeople(
+      [
+        [person({ keyHex: "aa", reach: "grant", grantWireB64: "ONE", grantChecked: true })],
+        [person({ keyHex: "aa", reach: "grant", grantWireB64: "TWO", grantChecked: true })],
+      ],
+      null,
+    );
+    expect(merged[0]?.grantWireB64).toBe("ONE");
   });
 
   it("drops the viewer and keeps first-seen order", () => {

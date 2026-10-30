@@ -955,7 +955,11 @@ internal fun rowPreview(
  *     composing. `null` when the chat has no cursor.
  *   - the local count of incoming messages this device's polls applied while
  *     the chat was not on screen ([ChatThread.localUnread]). Without it a chat
- *     with no cursor never showed a badge, whatever arrived. */
+ *     with no cursor never showed a badge, whatever arrived.
+ *
+ *  A row the pairing history brought is never unread here, with a cursor or
+ *  without one ([me.lakko.app.chat.rowInPairingHistory]; the local count leaves
+ *  those rows out as they arrive). */
 internal fun unreadCount(thread: ChatThread, cursor: ReadCursorState?): Int {
     // ADR-0063 section 5 — a message the feed showed is read, whether or not
     // the chat was opened: its id sits in `feedSeen` or under the feed's own
@@ -970,6 +974,7 @@ internal fun unreadCount(thread: ChatThread, cursor: ReadCursorState?): Int {
         val position = me.lakko.app.chat.decodeReadPosition(c.upToMessageId) ?: return@let 0
         thread.messages.count { m ->
             m.direction != Direction.Outgoing &&
+                !me.lakko.app.chat.rowInPairingHistory(thread, m) &&
                 me.lakko.app.chat.rowPastReadPosition(thread, m, position) &&
                 // The feed's own marks are the head group's ids.
                 (m.isHistory || (m.messageId !in thread.feedSeen && (feedThrough == null || m.messageId > feedThrough)))
@@ -1394,7 +1399,7 @@ internal fun ConversationRowBody(row: ConversationListRow, modifier: Modifier = 
 }
 
 @Composable
-private fun UnreadBadge(count: Int, muted: Boolean) {
+internal fun UnreadBadge(count: Int, muted: Boolean) {
     val label = if (count > 99) t("chats.row.unread_overflow") else count.toString()
     Box(
         contentAlignment = Alignment.Center,

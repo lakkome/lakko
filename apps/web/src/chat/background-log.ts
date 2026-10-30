@@ -89,7 +89,8 @@ export function appendToGroupSlot(
  * The chat view's write: its own rows, plus any stored row NEWER than the
  * newest row the view holds (the background receive wrote it after the view
  * last looked). The cursor is the maximum of both; `lastViewedMessageId` —
- * everything the open view holds counts as seen — only ever moves forward.
+ * everything the open view holds counts as seen — only ever moves forward. The
+ * history floor is not the view's to change.
  */
 export function mergeForegroundSlot(
   slot: PersistedGroup | undefined,
@@ -120,6 +121,48 @@ export function mergeForegroundSlot(
     messages: [...foreground.messages, ...newerStored.sort(compareById)],
     ...(lastViewed === undefined ? {} : { lastViewedMessageId: lastViewed }),
     ...(feedSeen.length === 0 ? {} : { feedSeen }),
+    ...(slot?.syncedThroughMessageId === undefined
+      ? {}
+      : { syncedThroughMessageId: slot.syncedThroughMessageId }),
+  };
+}
+
+/**
+ * A pairing history bundle's write for one group: add the rows the slot does
+ * not hold (the stored row wins a shared id), keep the slot sorted by id, and
+ * raise the history floor to `bundleNewest`, the highest id in the bundle for
+ * this group, kept rows or not. Everything else in the slot is preserved: the
+ * bundle knows nothing of what this device has shown.
+ *
+ * A bundle can arrive after the same messages came over the journal, so the
+ * floor covers rows already stored as well as the ones added here. A message
+ * above it counts normally (docs/ux/second-device.md section 2).
+ */
+export function fileHistoryRows(
+  slot: PersistedGroup | undefined,
+  rows: readonly PersistedMessage[],
+  bundleNewest: bigint | null,
+): { readonly slot: PersistedGroup; readonly added: number } {
+  const existing = slot?.messages ?? [];
+  const have = new Set(existing.map((m) => m.messageId));
+  const merged = [...existing];
+  let added = 0;
+  for (const m of rows) {
+    if (have.has(m.messageId)) continue;
+    have.add(m.messageId);
+    merged.push(m);
+    added += 1;
+  }
+  merged.sort(compareById);
+  const floor = maxBigintString(slot?.syncedThroughMessageId, bundleNewest);
+  return {
+    slot: {
+      ...(slot ?? {}),
+      cursor: slot?.cursor ?? "0",
+      messages: merged,
+      ...(floor === undefined ? {} : { syncedThroughMessageId: floor }),
+    },
+    added,
   };
 }
 
@@ -242,6 +285,10 @@ export interface ChatListSummary {
  * opened showed no badge however many messages the background receive filed
  * into it. With neither position known, every incoming row is unread — which
  * is exactly true for a chat this device has never displayed.
+ *
+ * A row at or below the history floor (`syncedThroughMessageId`) is never
+ * unread, whatever those positions say: it came with the pairing history, and
+ * history is not news (docs/ux/second-device.md section 2).
  */
 export function summarizeGroupSlot(
   slot: PersistedGroup | undefined,
@@ -259,11 +306,14 @@ export function summarizeGroupSlot(
   }
   // ADR-0063 section 5 - a message the feed showed is not unread.
   const feedSeen = new Set(slot?.feedSeen ?? []);
+  const floor = maxBigintString(slot?.syncedThroughMessageId, null);
+  const historyThrough = floor === undefined ? null : BigInt(floor);
   let unread = 0;
   for (const m of messages) {
     if (m.direction !== "incoming") continue;
     const id = idOf(m);
     if (id === null) continue;
+    if (historyThrough !== null && id <= historyThrough) continue;
     if ((readUpTo === null || id > readUpTo) && !feedSeen.has(m.messageId)) {
       unread += 1;
       if (unread >= 100) break;

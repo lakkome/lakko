@@ -23,7 +23,7 @@ vi.mock("../profile/ProfileContext", () => ({
 
 import { ContactListPane, type AddMode } from "./ContactListPane";
 
-function mount(): { onAdd: ReturnType<typeof vi.fn> } {
+function mount(over: Partial<Parameters<typeof ContactListPane>[0]> = {}): { onAdd: ReturnType<typeof vi.fn> } {
   const onAdd = vi.fn<(mode: AddMode) => void>();
   const [filter, setFilter] = createSignal("");
   renderUi(() => (
@@ -44,10 +44,41 @@ function mount(): { onAdd: ReturnType<typeof vi.fn> } {
       contacts={() => []}
       selectedKey={() => null}
       onSelect={() => {}}
+      {...over}
     />
   ));
   return { onAdd };
 }
+
+describe("an incoming request", () => {
+  const request = {
+    messageId: 7,
+    fromPubkey: new Uint8Array(32).fill(1),
+    intro: null,
+    createdAt: "2026-10-30T10:00:00Z",
+  } as never;
+
+  it("stays listed after a failed Accept, with the line, and Accept works again", () => {
+    const onAccept = vi.fn();
+    mount({ pending: () => [request], onAccept, acceptFailed: () => true });
+    expect(document.body.textContent).toContain(t("contacts.request.accept_failed"));
+    const accept = all<HTMLButtonElement>("button").find(
+      (b) => b.textContent?.trim() === t("contacts.request.accept"),
+    );
+    expect(accept?.disabled).toBe(false);
+    accept!.click();
+    expect(onAccept).toHaveBeenCalledTimes(1);
+  });
+
+  it("has no line until an Accept failed, and no second Accept while one runs", () => {
+    mount({ pending: () => [request], accepting: () => true });
+    expect(document.body.textContent).not.toContain(t("contacts.request.accept_failed"));
+    const accept = all<HTMLButtonElement>("button").find(
+      (b) => b.textContent?.trim() === t("contacts.request.accept"),
+    );
+    expect(accept?.disabled).toBe(true);
+  });
+});
 
 describe("Contacts list pane: one search field (UX 6.1)", () => {
   it("offers Share invite link and no Add by username form", () => {

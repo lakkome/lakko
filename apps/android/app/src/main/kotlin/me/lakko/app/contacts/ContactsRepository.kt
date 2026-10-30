@@ -548,7 +548,7 @@ public class ContactsRepository(
                     senderProfile = ownProfileForWire(secrets.accountId),
                     mintReply = { key -> reach()?.mintReply(key) },
                     reachFor = { key ->
-                        reach()?.writeDestFor(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST)
+                        reach()?.writeDestCandidates(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST).orEmpty()
                     },
                 )
             }
@@ -1358,7 +1358,7 @@ public class ContactsRepository(
                 // the request leaves, and the grant that lets it in.
                 mintReply = { key -> reach()?.mintReply(key) },
                 reachFor = { key ->
-                    reach()?.writeDestFor(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST)
+                    reach()?.writeDestCandidates(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST).orEmpty()
                 },
             )
             // The request left; the "sent" row is the sending account's.
@@ -1409,14 +1409,16 @@ public class ContactsRepository(
                 senderProfile = ownProfileForWire(secrets.accountId),
                 mintReply = { key -> reach()?.mintReply(key) },
                 reachFor = { key ->
-                    foundRequestDest(
+                    val found = foundRequestDest(
                         grantWire = grantWire,
                         mailboxBinding = mailboxBinding,
                         recipientKey = reach()?.mailboxAccountKey(key) ?: key,
                         crypto = mailboxCrypto,
                         authOf = { seed -> me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(seed)) },
                         decodeGrant = { uniffi.lakko_ffi_uniffi.decodeReachGrant(it) },
-                    ) ?: reach()?.writeDestFor(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST)
+                    )
+                    reach()?.writeDestCandidates(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST, first = found)
+                        ?: listOfNotNull(found?.let { held -> { held } })
                 },
             )
             if (bound.isCurrent) recordSent(result.recipientUsername, result, introMessage)
@@ -1463,10 +1465,11 @@ public class ContactsRepository(
                 introMessage = introMessage,
                 senderProfile = ownProfileForWire(secrets.accountId),
                 replyGrant = replyGrant,
-                reach = explicit ?: reach()?.writeDestFor(
+                reachCandidates = reach()?.writeDestCandidates(
                     recipientSignaturePubkey,
                     me.lakko.app.reach.WritePurpose.CONTACT_REQUEST,
-                ),
+                    first = explicit,
+                ) ?: listOfNotNull(explicit?.let { held -> { held } }),
             )
             // The Sent list shows `@username`; a person found by name alone
             // has none to show there.
@@ -1662,6 +1665,7 @@ public class ContactsRepository(
                     // `joinGroupFromWelcome` republishes this device's
                     // KeyPackage after every attempt, success or failure.
                     var joinFailure: InboxError? = null
+                    val answeredBy = HashSet<String>()
                     for (welcome in welcomes) {
                         if (!bound.isCurrent) return@useClientWith
                         if (chatRepo != null) {
@@ -1672,6 +1676,7 @@ public class ContactsRepository(
                                 // that person.
                                 chatRepo.oneToOnePeerKey(joinedHex)?.let { peer ->
                                     reach()?.retireRepliesTo(peer)
+                                    answeredBy += base64Encode(peer)
                                 }
                                 // ADR-0079 section 5 — a one-to-one with a
                                 // person added through their link: what was
@@ -1741,7 +1746,9 @@ public class ContactsRepository(
                         dropped = merged.dropped
                         state.copy(
                             accepted = applied.accepted,
-                            sent = applied.sent,
+                            // A Welcome from the person asked answers the
+                            // request; the ack may never come.
+                            sent = withoutSentAnsweredBy(applied.sent, answeredBy),
                             pending = withoutAcceptedSenders(merged.pending, applied.accepted),
                             // Never backwards: a stale batch cannot re-arm a
                             // re-fetch of rows this device already handled.
@@ -1780,7 +1787,7 @@ public class ContactsRepository(
                     if (acceptedChanged) persistAccepted()
                     if (newIncoming.isNotEmpty() || acceptedChanged) persistInboxPending()
                     // An answered request leaves the durable Sent list.
-                    if (acks.isNotEmpty()) persistSent()
+                    if (acks.isNotEmpty() || answeredBy.isNotEmpty()) persistSent()
                     persistInboxCursor()
                 }
                 // ADR-0079 — a pending contact whose one-to-one exists already,
@@ -1789,6 +1796,7 @@ public class ContactsRepository(
                 handOverJoinedPendingContacts()
                 revokeLinksRevokedElsewhere()
                 decideLinkRequests()
+                retryOwedAccepts()
             } catch (e: ContactsError) {
                 // Background long-polls surface failures on the `lastError`
                 // slot too — the UI renders one plain sentence, never the
@@ -1842,6 +1850,121 @@ public class ContactsRepository(
         persistInboxPending()
     }
 
+    /** One accept at a time: the retry of an owed one must not run beside the
+     *  first attempt, which holds the same record. */
+    private val acceptMutex = kotlinx.coroutines.sync.Mutex()
+
+    /**
+     * Accept the pending request [messageId] ([runAccept]): the chat exists,
+     * and its Welcome was delivered or is owed; or nothing stands and the
+     * request stays listed. Never throws (a cancellation is let through).
+     */
+    public suspend fun acceptRequest(messageId: Long): AcceptOutcome {
+        bindAccountIfSignedIn()
+        val request = mutableState.value.pending.firstOrNull { it.messageId == messageId }
+            ?: return AcceptOutcome.DONE
+        val accountB64 = boundAccountB64 ?: return AcceptOutcome.FAILED
+        return acceptMutex.withLock { answerRequest(request, accountB64) }
+    }
+
+    private suspend fun answerRequest(request: IncomingContactRequest, accountB64: String): AcceptOutcome {
+        val chat = chatRepo
+        val fromAccountId = request.fromAccountId
+        if (chat == null || fromAccountId == null) {
+            Log.w(TAG, "accept failed: no-chat-or-account")
+            return AcceptOutcome.FAILED
+        }
+        val key = LinkClaims.hex(request.fromPubkey)
+        val claims = linkClaimRecord(accountB64)
+        return runAccept(
+            object : AcceptDeps {
+                override suspend fun answerable(): Boolean = answerReachable(request)
+
+                override fun noteFailure(reason: String) {
+                    Log.w(TAG, "accept failed: $reason")
+                }
+
+                override fun founded(): LinkClaims.Founded? = claims.owedAccept(key)
+
+                override fun note(): LinkClaims.HeldNote? = null
+
+                override suspend fun prepare(): LinkClaims.Founded =
+                    chat.prepareLinkOneToOne(fromAccountId, request.fromPubkey)
+
+                override fun record(founded: LinkClaims.Founded): Boolean {
+                    val recorded = claims.setOwedAccept(key, founded)
+                    if (!recorded && claims.owedAccept(key) == null) chat.abandonPreparedOneToOne(founded.groupIdHex)
+                    return recorded
+                }
+
+                // The person pressed Accept on this device: no other device
+                // of the account is answering, so there is nothing to tell them.
+                override suspend fun postNote(founded: LinkClaims.Founded): Boolean = true
+
+                override suspend fun hold(founded: LinkClaims.Founded): Boolean {
+                    if (!chat.holdLinkOneToOne(founded.groupIdHex)) return false
+                    // The contact and its chat stand from here, whatever
+                    // becomes of the Welcome.
+                    acceptContactRequest(request.messageId, groupIdHex = founded.groupIdHex)
+                    return true
+                }
+
+                override suspend fun deliver(founded: LinkClaims.Founded) {
+                    chat.deliverLinkWelcome(founded, fromAccountId)
+                }
+
+                override suspend fun forward(note: LinkClaims.HeldNote): String? = null
+
+                override suspend fun finish(groupIdHex: String?) {
+                    try {
+                        sendContactAck(request)
+                    } catch (e: Throwable) {
+                        me.lakko.app.rethrowIfCancelled(e)
+                        // The Welcome is the answer; a requester that already
+                        // joined has retired the reply key this would need.
+                        Log.w(TAG, "accept: ack not sent")
+                    }
+                    claims.forgetOwedAccept(key)
+                }
+            },
+        )
+    }
+
+    /** Whether a grant the answer may use opens the requester's mailbox. */
+    private suspend fun answerReachable(request: IncomingContactRequest): Boolean {
+        val secrets = authRepo.identitySecrets.value ?: return false
+        val candidates = reach()
+            ?.reachAuthCandidates(request.fromPubkey, me.lakko.app.reach.WritePurpose.REPLY)
+            .orEmpty()
+        return useClientWith(secrets) { client, _ ->
+            me.lakko.app.reach.anyCandidateOpens(candidates) { dest: MailboxDest -> client.checkReach(dest) }
+        }
+    }
+
+    /** Carry on every accept whose Welcome is owed: the inbox pass, so at
+     *  launch and after every poll. */
+    private suspend fun retryOwedAccepts() {
+        val accountB64 = boundAccountB64 ?: return
+        val claims = linkClaimRecord(accountB64)
+        val owed = claims.owedAcceptKeys()
+        if (owed.isEmpty() || !acceptMutex.tryLock()) return
+        try {
+            for (key in owed) {
+                val state = mutableState.value
+                val request = (state.accepted.map { it.request } + state.pending)
+                    .firstOrNull { LinkClaims.hex(it.fromPubkey) == key }
+                if (request == null) {
+                    // Removed or declined meanwhile: nobody is waiting on it.
+                    claims.forgetOwedAccept(key)
+                    continue
+                }
+                answerRequest(request, accountB64)
+            }
+        } finally {
+            acceptMutex.unlock()
+        }
+    }
+
     /**
      * Set (or clear, when blank) the user-chosen display name for an
      * accepted contact (ADR-0021 follow-up). A blank name reverts the UI +
@@ -1870,11 +1993,9 @@ public class ContactsRepository(
      * inbox so their UI flips from "pending" to "accepted"
      * without waiting on the Welcome arrival (Phase 1.9b1).
      *
-     * Best-effort: called from the view-model's
-     * `onAcceptClicked` after the local state mutation; a network
-     * failure here is logged at the orchestration layer and the
-     * local "accepted" state stands on its own (the user already
-     * trusted the peer).
+     * Written after the Welcome, under the request's reply grant, then a held
+     * `contact` grant, and nothing else: with neither it throws [NoAnswerGrant].
+     * The caller treats it as best effort: the Welcome is the answer.
      */
     public suspend fun sendContactAck(
         request: IncomingContactRequest,
@@ -1889,38 +2010,29 @@ public class ContactsRepository(
         return useClientWith(secrets) { client, sender ->
             // ADR-0074 3.5a rule 6 - a refused ack re-checks the requester's
             // address once. Each attempt re-resolves the mailbox (inside the
-            // client) and tries every grant held for the person in turn: the
-            // reply key first, and one kept beside a newer grant.
+            // client) and tries the reply key, then a contact key, each one
+            // kept beside a newer grant included.
             me.lakko.app.reach.writeRecheckingAddress(
                 write = {
                     val candidates = reach()
                         ?.reachAuthCandidates(request.fromPubkey, me.lakko.app.reach.WritePurpose.REPLY)
                         .orEmpty()
-                    val send: suspend (MailboxDest?) -> PublishedAck = { dest ->
+                    val send: suspend (MailboxDest) -> PublishedAck = { dest ->
                         client.sendContactAck(
                             accepterSigningSeed = sender.signingSeed,
                             accepterAccountId = secrets.accountId,
                             accepterX25519Pubkey = sender.x25519Pubkey,
                             originalRequest = request,
                             // ADR-0060 §6 — the requester's reply key opens their
-                            // mailbox. ADR-0078 — with no grant accepted, a
-                            // proofless write to the mailbox a held binding
-                            // names, else nothing (the client refuses `null`).
-                            reach = dest ?: reach()?.mailboxPkFor(request.fromPubkey)?.let { MailboxDest(it, null) },
+                            // mailbox.
+                            reach = dest,
                         )
                     }
-                    when (
-                        val outcome = me.lakko.app.reach.firstAcceptedWrite(
-                            candidates,
-                            { dest: MailboxDest -> send(dest) },
-                            ::isMailboxRefusal,
-                        )
-                    ) {
+                    when (val outcome = me.lakko.app.reach.firstAcceptedWrite(candidates, send, ::isMailboxRefusal)) {
                         is me.lakko.app.reach.SignedWriteOutcome.Written -> outcome.result
-                        is me.lakko.app.reach.SignedWriteOutcome.Exhausted ->
-                            // Every grant refused: that refusal. None held:
-                            // unsigned, which an open mailbox takes.
-                            outcome.lastRefusal?.let { throw it } ?: send(null)
+                        // Never unsigned: a closed mailbox would drop it and
+                        // the answer would read as sent.
+                        is me.lakko.app.reach.SignedWriteOutcome.Exhausted -> throw outcome.lastRefusal ?: NoAnswerGrant()
                     }
                 },
                 isRefusal = ::isMailboxRefusal,
@@ -2022,6 +2134,20 @@ public class ContactsRepository(
         // Persisted so the decline holds across a relaunch: the cursor is
         // already past the row, and the row is no longer in the saved list.
         persistInboxPending()
+    }
+
+    /**
+     * Contacts > Sent, **Dismiss**: the person leaves this device's outgoing
+     * list, with what it kept to send the request again. Nothing is sent: a
+     * decline never reaches the requester, so this is how a request that will
+     * not be answered goes away, and search can offer the person again.
+     */
+    public fun dismissSentRequest(request: SentContactRequest) {
+        bindAccountIfSignedIn()
+        mutableState.update { state ->
+            state.copy(sent = withoutSentTo(state.sent, request.recipientAccountIdB64))
+        }
+        persistSent()
     }
 
     // ---- ADR-0079: the invite page (B) and the pending contact --------------

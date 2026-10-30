@@ -12,7 +12,9 @@ import {
   sortIncomingRequests,
   upsertSentRequest,
   waitingSentRequests,
+  contactsBadge,
 } from "./contact-list-model";
+import { badgeText } from "../feed/feed-marks";
 
 describe("letterOf", () => {
   it("takes the first letter, upper-cased, ignoring a leading @", () => {
@@ -94,5 +96,29 @@ describe("sent requests", () => {
       "bob",
       "anna",
     ]);
+  });
+});
+
+describe("the row under Sent", () => {
+  const record = { recipientUsername: "bo", recipientAccountIdHex: "aa", sentAtMs: 1, recipientKeyB64: "KEY" };
+
+  it("goes when the person is a contact by account id", () => {
+    expect(waitingSentRequests([record], new Set(["aa"]))).toEqual([]);
+  });
+
+  it("goes when a Welcome made them a contact before their profile named the account", () => {
+    expect(waitingSentRequests([record], new Set(), new Set(["KEY"]))).toEqual([]);
+  });
+
+  it("stays while they are not", () => {
+    expect(waitingSentRequests([record], new Set(["bb"]), new Set(["OTHER"]))).toEqual([record]);
+  });
+});
+
+describe("the Contacts badge", () => {
+  it("shows nothing at zero, and the Chats badge's text otherwise", () => {
+    expect(contactsBadge(0)).toBeNull();
+    expect(contactsBadge(5)).toBe(badgeText(5));
+    expect(contactsBadge(100)).toBe(badgeText(100));
   });
 });

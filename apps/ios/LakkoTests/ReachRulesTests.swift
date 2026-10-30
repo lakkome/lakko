@@ -25,8 +25,9 @@ final class ReachRulesTests: XCTestCase {
         chosen: [FfiScopeId] = []
     ) -> FfiVisibilitySetting {
         FfiVisibilitySetting(
-            mode: mode, contactsOfContacts: fof, groups: groups, chosen: chosen,
-            lastContactsOfContacts: false, lastGroups: nil, updatedAtMs: 1)
+            mode: mode, contactsOfContacts: fof, contactsForm: .all, chosenContacts: [],
+            groups: groups, chosen: chosen, lastContactsOfContacts: false, lastGroups: nil,
+            updatedAtMs: 1)
     }
 
     private func desired(_ setting: FfiVisibilitySetting, links: [LinkReach] = [],
@@ -213,6 +214,219 @@ final class ReachRulesTests: XCTestCase {
             ReachRules.writeSeed(from: [reply, member, contact], groupIdHex: "aa"), contact.seed)
         XCTAssertEqual(ReachRules.writeSeed(from: [reply], groupIdHex: nil), reply.seed)
         XCTAssertNil(ReachRules.writeSeed(from: [], groupIdHex: "aa"))
+    }
+
+    // MARK: - Answering a contact request
+
+    /// The reply grant, then a contact grant, and nothing else.
+    func testAnAnswerUsesTheReplyGrantThenAContactGrantAndNothingElse() throws {
+        func held(_ cls: FfiReachClass, scope: String?, at: UInt64) throws -> ReachRules.HeldGrant {
+            ReachRules.HeldGrant(grant: try grant(cls), scopeHex: scope, storedAtMs: at)
+        }
+        let group = try held(.group, scope: "aa", at: 9)
+        let member = try held(.member, scope: "aa", at: 8)
+        let channel = try held(.channel, scope: "cc", at: 7)
+        let fof = try held(.fof, scope: nil, at: 6)
+        let contact = try held(.contact, scope: nil, at: 5)
+        let reply = try held(.reply, scope: nil, at: 1)
+        XCTAssertEqual(
+            ReachRules.answerGrants(from: [group, member, channel, fof, contact, reply]),
+            [reply, contact])
+        XCTAssertTrue(ReachRules.answerGrants(from: [group, member, channel, fof]).isEmpty)
+    }
+
+    func testAGrantARotationDisplacedAnswersLast() throws {
+        var old = ReachRules.HeldGrant(grant: try grant(.reply), scopeHex: nil, storedAtMs: 5)
+        old.superseded = true
+        let contact = ReachRules.HeldGrant(grant: try grant(.contact), scopeHex: nil, storedAtMs: 1)
+        XCTAssertEqual(ReachRules.answerGrants(from: [old, contact]), [contact, old])
+    }
+
+    private func answerCenter() throws -> (ReachCenter, String) {
+        let (c, _) = try introductionCenter()
+        return (c, peerIdentity.signaturePublicKey().base64EncodedString())
+    }
+
+    /// Seen live: a key from a group the person left sits first in the write
+    /// order, and the accept never reached the person.
+    func testAStaleGroupKeyIsNeverTriedOnAnAnswer() throws {
+        let (c, person) = try answerCenter()
+        let key = peerIdentity.signaturePublicKey()
+        XCTAssertTrue(c.keep(try grant(.group), carrier: .groupProfile, fromAccountKeyB64: person, scopeHex: "aa"))
+        XCTAssertTrue(c.keep(try grant(.member), carrier: .groupProfile, fromAccountKeyB64: person, scopeHex: "aa"))
+        XCTAssertTrue(c.keep(try grant(.reply), carrier: .request, fromAccountKeyB64: person, scopeHex: nil))
+
+        XCTAssertEqual(
+            c.writePlan(toAccountKey: key)?.candidates.first?.reachSeed, try grant(.member).seed,
+            "the general order puts the stale key first")
+
+        let plans = c.answerPlans(toRequester: key)
+        XCTAssertEqual(plans.count, 1)
+        XCTAssertEqual(plans.first?.candidates.map(\.reachSeed), [try grant(.reply).seed])
+        XCTAssertEqual(plans.first?.target, try MailboxTarget.verified(grant: try grant(.reply), accountKey: key))
+    }
+
+    func testAContactGrantFollowsTheReplyGrantOnAnAnswer() throws {
+        let (c, person) = try answerCenter()
+        let key = peerIdentity.signaturePublicKey()
+        XCTAssertTrue(c.keep(
+            try grant(.contact), carrier: .oneToOneProfile(fromOtherParticipant: true),
+            fromAccountKeyB64: person, scopeHex: nil))
+        XCTAssertTrue(c.keep(try grant(.reply), carrier: .request, fromAccountKeyB64: person, scopeHex: nil))
+        XCTAssertEqual(
+            c.answerPlans(toRequester: key).flatMap(\.candidates).map(\.reachSeed),
+            [try grant(.reply).seed, try grant(.contact).seed])
+    }
+
+    func testWithOnlyAGroupKeyThereIsNoAnswer() throws {
+        let (c, person) = try answerCenter()
+        XCTAssertTrue(c.keep(try grant(.group), carrier: .groupProfile, fromAccountKeyB64: person, scopeHex: "aa"))
+        XCTAssertTrue(c.answerPlans(toRequester: peerIdentity.signaturePublicKey()).isEmpty)
+    }
+
+    // MARK: - A device that holds nothing asks (ADR-0060 section 4)
+
+    func testOnlyAOneToOneWithNoOfferAndNoBundleAsks() {
+        let nothing = ReachRules.HeldIntroductions(offer: false, bundle: false, contactGrant: false)
+        XCTAssertTrue(ReachRules.asksForIntroductions(isOneToOne: true, held: nothing))
+        XCTAssertFalse(ReachRules.asksForIntroductions(isOneToOne: false, held: nothing), "a group")
+        for held in [
+            ReachRules.HeldIntroductions(offer: true, bundle: false, contactGrant: false),
+            ReachRules.HeldIntroductions(offer: false, bundle: true, contactGrant: false),
+            ReachRules.HeldIntroductions(offer: true, bundle: true, contactGrant: true),
+        ] {
+            XCTAssertFalse(ReachRules.asksForIntroductions(isOneToOne: true, held: held))
+        }
+        XCTAssertTrue(
+            ReachRules.asksForIntroductions(
+                isOneToOne: true,
+                held: ReachRules.HeldIntroductions(offer: false, bundle: false, contactGrant: true)),
+            "a contact grant does not stop the ask")
+    }
+
+    func testWithAContactGrantItAsksFirstThenEverySevenDays() {
+        let week = ReachRules.introductionsAskWithGrantMinMs
+        XCTAssertEqual(week, 604_800_000)
+        XCTAssertTrue(ReachRules.asksWithContactGrant(lastRequestedAtMs: nil, nowMs: 5), "the first ask")
+        XCTAssertFalse(ReachRules.asksWithContactGrant(lastRequestedAtMs: 1_000, nowMs: 1_000 + week - 1))
+        XCTAssertTrue(ReachRules.asksWithContactGrant(lastRequestedAtMs: 1_000, nowMs: 1_000 + week))
+        XCTAssertFalse(
+            ReachRules.asksWithContactGrant(lastRequestedAtMs: 1_000, nowMs: 999),
+            "a clock that went backwards reads as recent")
+    }
+
+    func testAnAskResetsOnlyFromTheOtherParticipantOnceAnHour() {
+        let hour = ReachRules.introductionsResendMinMs
+        XCTAssertEqual(hour, 3_600_000)
+        XCTAssertTrue(ReachRules.resetsIntroductions(isOneToOneWithAsker: true, lastResetAtMs: nil, nowMs: 5))
+        XCTAssertFalse(
+            ReachRules.resetsIntroductions(isOneToOneWithAsker: false, lastResetAtMs: nil, nowMs: 5),
+            "a group, or this account's own device")
+        XCTAssertFalse(ReachRules.resetsIntroductions(
+            isOneToOneWithAsker: true, lastResetAtMs: 1_000, nowMs: 1_000 + hour - 1))
+        XCTAssertTrue(ReachRules.resetsIntroductions(
+            isOneToOneWithAsker: true, lastResetAtMs: 1_000, nowMs: 1_000 + hour))
+        XCTAssertFalse(
+            ReachRules.resetsIntroductions(isOneToOneWithAsker: true, lastResetAtMs: 1_000, nowMs: 999),
+            "a clock that went backwards reads as recent")
+    }
+
+    private func introductionCenter() throws -> (ReachCenter, InMemoryReachPersistence) {
+        let persistence = InMemoryReachPersistence()
+        let c = ReachCenter(persistence: persistence, ds: FakeReachDs())
+        c.keyResolverProvider = { _, own in AccountKeyResolver(ownCurrentKey: own) }
+        c.ownPredecessorSigningSeeds = { _ in [] }
+        c.activate(
+            accountIdB64: "introductions",
+            accountIdentity: try Identity.fromSeed(seed: Data(repeating: 0x40, count: 32)))
+        return (c, persistence)
+    }
+
+    /// The reset forgets one conversation in both sent records, and only
+    /// that one, and only once an hour.
+    func testTheResetForgetsOnlyThatConversation() throws {
+        let (c, persistence) = try introductionCenter()
+        for group in ["aa", "bb"] {
+            c.markOfferSent(groupIdHex: group, key: "offer")
+            c.markBundleSent(groupIdHex: group, digest: "bundle")
+        }
+        let now: UInt64 = 10_000_000
+
+        XCTAssertFalse(c.noteIntroductionsAsked(groupIdHex: "aa", isOneToOneWithAsker: false, nowMs: now))
+        XCTAssertFalse(c.offerNeedsSending(groupIdHex: "aa", key: "offer"))
+
+        XCTAssertTrue(c.noteIntroductionsAsked(groupIdHex: "aa", isOneToOneWithAsker: true, nowMs: now))
+        XCTAssertTrue(c.offerNeedsSending(groupIdHex: "aa", key: "offer"))
+        XCTAssertTrue(c.bundleNeedsSending(groupIdHex: "aa", digest: "bundle"))
+        XCTAssertFalse(c.offerNeedsSending(groupIdHex: "bb", key: "offer"))
+        XCTAssertFalse(c.bundleNeedsSending(groupIdHex: "bb", digest: "bundle"))
+        XCTAssertEqual(persistence.load(accountIdB64: "introductions")?.introductionsResetAtMs?["aa"], now)
+
+        // Sent again; a second ask within the hour leaves that alone.
+        c.markOfferSent(groupIdHex: "aa", key: "offer")
+        XCTAssertFalse(c.noteIntroductionsAsked(
+            groupIdHex: "aa", isOneToOneWithAsker: true, nowMs: now + ReachRules.introductionsResendMinMs - 1))
+        XCTAssertFalse(c.offerNeedsSending(groupIdHex: "aa", key: "offer"))
+        XCTAssertTrue(c.noteIntroductionsAsked(groupIdHex: "bb", isOneToOneWithAsker: true, nowMs: now),
+                      "the hour is per conversation")
+    }
+
+    func testWhatIsHeldFromAPersonIsReadByPerson() throws {
+        let (c, _) = try introductionCenter()
+        let person = peerIdentity.signaturePublicKey().base64EncodedString()
+        XCTAssertEqual(
+            c.heldIntroductions(fromAccountKeyB64: person),
+            ReachRules.HeldIntroductions(offer: false, bundle: false, contactGrant: false))
+
+        XCTAssertTrue(c.keep(
+            try grant(.contact), carrier: .oneToOneProfile(fromOtherParticipant: true),
+            fromAccountKeyB64: person, scopeHex: nil))
+        XCTAssertTrue(c.heldIntroductions(fromAccountKeyB64: person).contactGrant)
+
+        c.storeBundle(
+            FfiIntroductionsBundle(updatedAtMs: 1, records: []), fromAccountKeyB64: person)
+        XCTAssertEqual(
+            c.heldIntroductions(fromAccountKeyB64: person),
+            ReachRules.HeldIntroductions(offer: false, bundle: true, contactGrant: true))
+
+        c.storeOffer(Data([1]), fromAccountKeyB64: person)
+        XCTAssertTrue(c.heldIntroductions(fromAccountKeyB64: person).offer)
+        let other = Data(repeating: 0x42, count: 32).base64EncodedString()
+        XCTAssertFalse(c.heldIntroductions(fromAccountKeyB64: other).offer, "one person's only")
+    }
+
+    /// UX section 6.1 — a search tries every grant in turn: contact, each
+    /// group, each channel, the found one; never a member's or a reply's.
+    func testTheSearchGrantsAreOrderedAndNeverAMemberOrAReply() throws {
+        func held(_ cls: FfiReachClass, version: UInt32, scope: String?, at: UInt64) throws -> ReachRules.HeldGrant {
+            ReachRules.HeldGrant(grant: try grant(cls, version: version), scopeHex: scope, storedAtMs: at)
+        }
+        let fof = try held(.fof, version: 1, scope: nil, at: 9)
+        let channel = try held(.channel, version: 1, scope: "cc", at: 8)
+        let olderGroup = try held(.group, version: 1, scope: "aa", at: 1)
+        let newerGroup = try held(.group, version: 2, scope: "bb", at: 2)
+        let contact = try held(.contact, version: 1, scope: nil, at: 0)
+        let member = try held(.member, version: 1, scope: "aa", at: 10)
+        let reply = try held(.reply, version: 1, scope: nil, at: 11)
+        XCTAssertEqual(
+            ReachRules.searchGrants(from: [fof, member, channel, olderGroup, reply, newerGroup, contact]),
+            [contact, newerGroup, olderGroup, channel, fof])
+        XCTAssertTrue(ReachRules.searchGrants(from: [member, reply]).isEmpty)
+    }
+
+    /// One key per class per account (ADR-0078 section 9): two groups carry
+    /// the same seed, which is asked about once.
+    func testTheSearchGrantsAskAboutOneSeedOnce() throws {
+        let one = ReachRules.HeldGrant(grant: try grant(.group), scopeHex: "aa", storedAtMs: 1)
+        let two = ReachRules.HeldGrant(grant: try grant(.group), scopeHex: "bb", storedAtMs: 2)
+        XCTAssertEqual(ReachRules.searchGrants(from: [one, two]), [two])
+    }
+
+    func testASupersededGrantIsTriedAfterEveryCurrentOne() throws {
+        var old = ReachRules.HeldGrant(grant: try grant(.contact), scopeHex: nil, storedAtMs: 5)
+        old.superseded = true
+        let channel = ReachRules.HeldGrant(grant: try grant(.channel), scopeHex: "cc", storedAtMs: 1)
+        XCTAssertEqual(ReachRules.searchGrants(from: [old, channel]), [channel, old])
     }
 
     /// A replayed older version never displaces the newer grant of one scope.
@@ -592,5 +806,12 @@ extension ReachRulesTests {
                               fromAccountKeyB64: other.base64EncodedString(), scopeHex: "aa"))
         XCTAssertTrue(fired.isEmpty)
         XCTAssertNil(c.writePlan(toAccountKey: other))
+    }
+
+    func testOnlyTermsNotYetKeptAreEvaluated() {
+        XCTAssertEqual(
+            ReachRules.termsToEvaluate(cached: ["u:vgi", "n:val"], terms: ["u:vgi", "n:val", "n:gon", "n:gon"]),
+            ["n:gon"])
+        XCTAssertTrue(ReachRules.termsToEvaluate(cached: ["n:val"], terms: ["n:val"]).isEmpty)
     }
 }

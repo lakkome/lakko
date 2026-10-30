@@ -506,6 +506,26 @@ public final class PendingRequestStore {
         defaults.set(raw, forKey: key)
     }
 
+    /// ADR-0060 section 6 — note the committer envelope just published for the
+    /// Add of the person `personKeyB64`, on that Add's intent. No intent, no
+    /// note: the Add landed or stopped while the envelope was on its way, and
+    /// the record goes with the intent.
+    public func recordCommitterEnvelope(
+        accountIdB64: String, groupIdB64: String, personKeyB64: String,
+        _ sent: SentCommitterEnvelope
+    ) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        let key = intentStoreKey(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
+        let slot = MembershipIntent.addSlot(personKeyB64: personKeyB64)
+        guard var raw = defaults.dictionary(forKey: key),
+              let row = raw[slot] as? [String: Any],
+              var intent = MembershipIntent(plist: row) else { return }
+        intent.lastEnvelope = sent
+        raw[slot] = intent.plist
+        defaults.set(raw, forKey: key)
+    }
+
     /// Forget the intent in `slot` — it landed, its subject left, or the
     /// re-request stopped.
     public func removeIntent(accountIdB64: String, groupIdB64: String, slot: String) {
@@ -574,18 +594,26 @@ public struct MembershipIntent: Equatable {
     public var request: Request
     /// The group epoch the request was proposed at.
     public var epoch: UInt64
+    /// ADR-0060 section 6 — for an add, the last committer envelope this
+    /// device published for the person. A re-request replaces the intent, and
+    /// with it this: the fresh proposal gets a fresh envelope.
+    public var lastEnvelope: SentCommitterEnvelope?
 
-    public init(request: Request, epoch: UInt64) {
+    public init(request: Request, epoch: UInt64, lastEnvelope: SentCommitterEnvelope? = nil) {
         self.request = request
         self.epoch = epoch
+        self.lastEnvelope = lastEnvelope
     }
+
+    /// The slot of an add of the person `personKeyB64`.
+    public static func addSlot(personKeyB64: String) -> String { "add:\(personKeyB64)" }
 
     /// One slot per subject and kind. Promote and demote of one member share a
     /// slot (the latest of them is the intent); every transfer shares one
     /// (there is one owner slot to move); leaving has one.
     public var slot: String {
         switch request {
-        case .add(let person, _, _): return "add:\(person)"
+        case .add(let person, _, _): return Self.addSlot(personKeyB64: person)
         case .approveJoin(let joiner): return "approve-join:\(joiner)"
         case .remove(let person): return "remove:\(person)"
         case .setAdmin(let person, _): return "role:\(person)"
@@ -598,6 +626,7 @@ public struct MembershipIntent: Equatable {
 
     var plist: [String: Any] {
         var out: [String: Any] = ["epoch": NSNumber(value: epoch)]
+        if let lastEnvelope { out["envelope"] = lastEnvelope.plist }
         switch request {
         case .add(let person, let account, let leaves):
             out["kind"] = "add"
@@ -661,7 +690,9 @@ public struct MembershipIntent: Equatable {
         case "device-remove": request = .ownDeviceRemove(deviceKeyB64: subject)
         default: return nil
         }
-        self.init(request: request, epoch: epoch)
+        self.init(
+            request: request, epoch: epoch,
+            lastEnvelope: (plist["envelope"] as? [String: Any]).flatMap(SentCommitterEnvelope.init(plist:)))
     }
 }
 

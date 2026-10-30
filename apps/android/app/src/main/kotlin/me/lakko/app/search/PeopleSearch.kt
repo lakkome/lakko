@@ -58,7 +58,6 @@ public data class KnownPerson(
     val name: String?,
     val verifiedUsername: String?,
     val isContact: Boolean,
-    val keptGrantWireB64: String?,
     /** What a CONTACT is shown as when nothing better is known (the
      *  fingerprint, or a verified username); `null` for anyone else. Loses
      *  to a held [name] AND to a name found by the search. */
@@ -146,7 +145,23 @@ public interface PeopleSearchDeps {
     public fun legOutcomeOf(error: Throwable): LegOutcome
 
     public val ownKeyHex: String?
+
+    /** One network search finished. Counts only: this is the one line that
+     *  tells a dropped result from no result at all. */
+    public fun noteSearch(counts: SearchCounts) {}
 }
+
+/** What one network search did, as numbers. Never a name, key, query or grant. */
+public data class SearchCounts(
+    /** Introduction records opened with this search's probes. */
+    val recordsOpened: Int,
+    /** Of those, the ones the text matches. */
+    val keptAfterMatch: Int,
+    /** Results the reach check refused. */
+    val refusedByReachCheck: Int,
+    /** People in the final result. */
+    val people: Int,
+)
 
 /** What one search came back with. */
 public data class PeopleSearchOutcome(
@@ -362,6 +377,8 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
     // ---- contacts of contacts ----------------------------------------
     val byIntroduction = mutableListOf<PersonResult>()
     var introFailed = false
+    var recordsOpened = 0
+    var keptAfterMatch = 0
     val probeList = synchronized(probes) { probes.toList() }
     if (probeList.isNotEmpty()) {
         val opened = try {
@@ -371,6 +388,7 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
         } catch (_: Throwable) {
             emptyList()
         }
+        recordsOpened = opened.size
         var extraChecks = 0
         for (intro in opened) {
             val matches = when (intro.via) {
@@ -378,6 +396,7 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
                 ProbeVia.TERM -> intro.displayName != null && deps.nameMatches(intro.displayName, query)
             }
             if (!matches) continue
+            keptAfterMatch += 1
             // The record is the introduced person's own claim: its account id
             // must be the account the identity bundle publishes this key for,
             // or a record could pair its author's key with someone else's
@@ -430,6 +449,7 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
     val merged = mergePeople(listOf(byUsername, byName, byIntroduction), deps.ownKeyHex)
     val people = mutableListOf<PersonResult>()
     var checkFailed = false
+    var refusedByReachCheck = 0
     for (p in merged) {
         if (p.reach != PersonReach.GRANT) {
             people += p
@@ -438,7 +458,11 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
         val grant = p.grantWireB64 ?: continue
         try {
             val pk = java.util.Base64.getDecoder().decode(p.keyB64)
-            if (deps.reachCheck(pk, grant)) people += p
+            if (deps.reachCheck(pk, grant)) {
+                people += p.copy(grantChecked = true)
+            } else {
+                refusedByReachCheck += 1
+            }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (_: Throwable) {
@@ -448,5 +472,6 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
     val allLegs = synchronized(legs) { legs.toMutableList() }
     if (checkFailed || introFailed) allLegs += LegOutcome.FAILED
     val found = people.size + (if (channel == null) 0 else 1)
+    deps.noteSearch(SearchCounts(recordsOpened, keptAfterMatch, refusedByReachCheck, people.size))
     PeopleSearchOutcome(people, channel, foldSearch(found, allLegs))
 }

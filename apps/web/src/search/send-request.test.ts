@@ -57,7 +57,7 @@ describe("sendFoundRequest", () => {
 
   it("is Request refused, and sends nothing, when the person changed who can find them", async () => {
     const d = deps({ reachCheck: vi.fn(async () => false) });
-    expect(await sendFoundRequest(found(), d)).toEqual({ kind: "refused" });
+    expect(await sendFoundRequest(found(), d)).toEqual({ kind: "refused", byReachCheck: true });
     expect(d.sendToBundle).not.toHaveBeenCalled();
     expect(d.sendByUsername).not.toHaveBeenCalled();
   });

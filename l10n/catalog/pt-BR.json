@@ -31,7 +31,7 @@
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "Código aberto. Não precisa de número de telefone.",
+      "text": "Comunicação do seu jeito. Sem precisar de número de telefone.",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -2670,6 +2670,18 @@
       "text": "Contato",
       "status": "machine"
     },
+    "chat.pending.call_disabled": {
+      "text": "Disponível quando {name} se conectar.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} ainda não respondeu. Você pode pedir um novo link.",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} vai receber suas mensagens quando o app estiver on-line de novo.",
+      "status": "machine"
+    },
     "chat.photo.load_failed": {
       "text": "Não foi possível carregar a foto",
       "status": "machine"
@@ -3778,6 +3790,18 @@
       "text": "Compartilhar link de convite",
       "status": "machine"
     },
+    "contacts.add_back.action": {
+      "text": "Adicionar",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "Adicionar aos contatos",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "Coloca {name} de volta na sua lista de contatos desta conta.",
+      "status": "machine"
+    },
     "contacts.detail.actions": {
       "text": "Ações do contato",
       "status": "machine"
@@ -3950,6 +3974,10 @@
       "text": "Aceitar",
       "status": "machine"
     },
+    "contacts.request.accept_failed": {
+      "text": "Não foi possível aceitar. Tente novamente.",
+      "status": "machine"
+    },
     "contacts.request.decline": {
       "text": "Recusar",
       "status": "machine"
@@ -3992,6 +4020,14 @@
     },
     "contacts.safety.title": {
       "text": "Verificar número de segurança",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "Escanear QR code",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "Este código não é um link do Lakko. Tente outro código.",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4418,12 +4454,12 @@
       "text": "Seus outros dispositivos mantêm as conversas e recebem as novas chaves sozinhos.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "Suas chaves de acesso continuam permitindo entrar. \"Restaurar chaves com esta chave de acesso\" fica desativado até você ativar de novo.",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "Os links de convite e de chamada que você criou antes deixam de funcionar. Crie novos.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "Suas chaves de acesso continuam permitindo entrar. \"Restaurar chaves com esta chave de acesso\" fica desativado até você ativar de novo.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -5802,6 +5838,74 @@
       "text": "Este link não é mais válido. Peça um novo à pessoa.",
       "status": "machine"
     },
+    "invite.contact.page.about": {
+      "text": "O Lakko é um mensageiro em que cada conversa e chamada tem criptografia de ponta a ponta.",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "Adicionar",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "Não foi possível adicionar {name}. Verifique sua conexão e tente de novo.",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} já está nos seus contatos",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "Não foi possível falar com {name}. Verifique sua conexão e tente de novo.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Criar uma conta",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Peça um novo a quem o enviou.",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Este link de convite não funciona mais",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "Concluído",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "Já tenho uma conta",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "Agora não",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "Abrir conversa",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "Compartilhe com a pessoa que você quer adicionar.",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "Este é o seu próprio link de convite",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} convida você para o Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "Adicionar {name} aos seus contatos?",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "esta pessoa",
+      "status": "machine"
+    },
     "invite.contact.page_title": {
       "text": "Convite",
       "status": "machine"
@@ -5954,8 +6058,44 @@
       "text": "Criado em {date}",
       "status": "machine"
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "Período",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "Número de pessoas",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "Excluir link",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Quem já tiver o link não poderá mais usá-lo.",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "Excluir este link?",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "Link excluído.",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "Qualquer pessoa que abrir um dos seus links pode enviar um pedido de contato até ele expirar ou ser totalmente usado.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "Editar link",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "Ao salvar, um novo link é criado. O antigo deixa de funcionar.",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "Condições do link",
       "status": "machine"
     },
     "invite.links.empty": {
@@ -5964,6 +6104,22 @@
     },
     "invite.links.error.copy": {
       "text": "Não foi possível copiar o link.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "Informe um período de 1 hora a 365 dias.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "Informe um número de pessoas de 1 a {max}.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "Não foi possível excluir o link. Verifique sua conexão e tente novamente.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "Não foi possível salvar o link. Verifique sua conexão e tente novamente.",
       "status": "machine"
     },
     "invite.links.error.load": {
@@ -6002,6 +6158,10 @@
       "text": "Expira em {count} min",
       "status": "machine"
     },
+    "invite.links.expires_option_custom": {
+      "text": "Personalizado",
+      "status": "machine"
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, one {Em # dia} other {Em # dias}}",
       "status": "machine"
@@ -6038,12 +6198,28 @@
       "text": "Novo",
       "status": "machine"
     },
+    "invite.links.qr_hint": {
+      "text": "Quem escanear este código poderá enviar a você um pedido de contato.",
+      "status": "machine"
+    },
     "invite.links.revoked": {
       "text": "Link revogado.",
       "status": "machine"
     },
     "invite.links.revoking": {
       "text": "Revogando...",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "Mostrar QR code",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "Dias",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "Horas",
       "status": "machine"
     },
     "invite.links.unlimited_uses": {
@@ -6060,6 +6236,10 @@
     },
     "invite.links.uses_left": {
       "text": "{count, plural, one {# uso restante} other {# usos restantes}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "Personalizado",
       "status": "machine"
     },
     "invite.links.uses_option_one": {
@@ -8086,6 +8266,22 @@
       "text": "Aplicando",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "Todos os meus contatos",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "Só os que eu escolher",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "Só os contatos das pessoas que você escolher ({chosen} de {total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "Agora só os contatos que você escolher. Altere em {privacy}.",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "Contatos dos meus contatos",
       "status": "machine"
@@ -8132,6 +8328,14 @@
     },
     "who_can_find_me.list.choose": {
       "text": "Escolha grupos e canais",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "Você ainda não tem contatos.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "Buscar contatos",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -8198,184 +8402,12 @@
       "text": "Será aplicado quando você estiver on-line de novo.",
       "status": "machine"
     },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "Os contatos dessa pessoa podem me encontrar",
+      "status": "machine"
+    },
     "who_can_find_me.title": {
       "text": "Quem pode me encontrar",
-      "status": "machine"
-    },
-    "invite.contact.page.title": {
-      "text": "Adicionar {name} aos seus contatos?",
-      "status": "machine"
-    },
-    "invite.contact.page.add": {
-      "text": "Adicionar",
-      "status": "machine"
-    },
-    "invite.contact.page.not_now": {
-      "text": "Agora não",
-      "status": "machine"
-    },
-    "invite.contact.page.already_title": {
-      "text": "{name} já está nos seus contatos",
-      "status": "machine"
-    },
-    "invite.contact.page.open_chat": {
-      "text": "Abrir conversa",
-      "status": "machine"
-    },
-    "invite.contact.page.own_title": {
-      "text": "Este é o seu próprio link de convite",
-      "status": "machine"
-    },
-    "invite.contact.page.own_body": {
-      "text": "Compartilhe com a pessoa que você quer adicionar.",
-      "status": "machine"
-    },
-    "invite.contact.page.done": {
-      "text": "Concluído",
-      "status": "machine"
-    },
-    "invite.contact.page.add_failed": {
-      "text": "Não foi possível adicionar {name}. Verifique sua conexão e tente de novo.",
-      "status": "machine"
-    },
-    "invite.contact.page.unnamed": {
-      "text": "esta pessoa",
-      "status": "machine"
-    },
-    "chat.pending.waiting": {
-      "text": "{name} vai receber suas mensagens quando o app estiver on-line de novo.",
-      "status": "machine"
-    },
-    "chat.pending.stale": {
-      "text": "{name} ainda não respondeu. Você pode pedir um novo link.",
-      "status": "machine"
-    },
-    "chat.pending.call_disabled": {
-      "text": "Disponível quando {name} se conectar.",
-      "status": "machine"
-    },
-    "contacts.add_back.control": {
-      "text": "Adicionar aos contatos",
-      "status": "machine"
-    },
-    "contacts.add_back.sub": {
-      "text": "Coloca {name} de volta na sua lista de contatos desta conta.",
-      "status": "machine"
-    },
-    "contacts.add_back.action": {
-      "text": "Adicionar",
-      "status": "machine"
-    },
-    "invite.contact.page.answer_failed": {
-      "text": "Não foi possível falar com {name}. Verifique sua conexão e tente de novo.",
-      "status": "machine"
-    },
-    "invite.links.show_qr": {
-      "text": "Mostrar QR code",
-      "status": "machine"
-    },
-    "invite.links.qr_hint": {
-      "text": "Quem escanear este código poderá enviar a você um pedido de contato.",
-      "status": "machine"
-    },
-    "contacts.scan_qr": {
-      "text": "Escanear QR code",
-      "status": "machine"
-    },
-    "contacts.scan_qr.not_a_link": {
-      "text": "Este código não é um link do Lakko. Tente outro código.",
-      "status": "machine"
-    },
-    "invite.links.expires_option_custom": {
-      "text": "Personalizado",
-      "status": "machine"
-    },
-    "invite.links.uses_option_custom": {
-      "text": "Personalizado",
-      "status": "machine"
-    },
-    "invite.links.custom_expiry_amount": {
-      "text": "Período",
-      "status": "machine"
-    },
-    "invite.links.unit_hours": {
-      "text": "Horas",
-      "status": "machine"
-    },
-    "invite.links.unit_days": {
-      "text": "Dias",
-      "status": "machine"
-    },
-    "invite.links.custom_uses_count": {
-      "text": "Número de pessoas",
-      "status": "machine"
-    },
-    "invite.links.error.custom_expiry": {
-      "text": "Informe um período de 1 hora a 365 dias.",
-      "status": "machine"
-    },
-    "invite.links.error.custom_uses": {
-      "text": "Informe um número de pessoas de 1 a {max}.",
-      "status": "machine"
-    },
-    "invite.contact.page.signed_out_title": {
-      "text": "{name} convida você para o Lakko",
-      "status": "machine"
-    },
-    "invite.contact.page.about": {
-      "text": "O Lakko é um mensageiro em que cada conversa e chamada tem criptografia de ponta a ponta.",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "Criar uma conta",
-      "status": "machine"
-    },
-    "invite.contact.page.have_account": {
-      "text": "Já tenho uma conta",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_title": {
-      "text": "Este link de convite não funciona mais",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "Peça um novo a quem o enviou.",
-      "status": "machine"
-    },
-    "invite.links.edit": {
-      "text": "Editar link",
-      "status": "machine"
-    },
-    "invite.links.edit_title": {
-      "text": "Condições do link",
-      "status": "machine"
-    },
-    "invite.links.edit_note": {
-      "text": "Ao salvar, um novo link é criado. O antigo deixa de funcionar.",
-      "status": "machine"
-    },
-    "invite.links.delete": {
-      "text": "Excluir link",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_title": {
-      "text": "Excluir este link?",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_body": {
-      "text": "Quem já tiver o link não poderá mais usá-lo.",
-      "status": "machine"
-    },
-    "invite.links.deleted": {
-      "text": "Link excluído.",
-      "status": "machine"
-    },
-    "invite.links.error.delete": {
-      "text": "Não foi possível excluir o link. Verifique sua conexão e tente novamente.",
-      "status": "machine"
-    },
-    "invite.links.error.edit": {
-      "text": "Não foi possível salvar o link. Verifique sua conexão e tente novamente.",
       "status": "machine"
     }
   }

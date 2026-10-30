@@ -47,8 +47,8 @@ struct PeopleSearchSection: View {
     var body: some View {
         let rows = model.rows(showsLocalContacts: showsLocalContacts)
         let channel = includesChannels ? model.answer?.channel : nil
-        let state = model.networkState(includesChannels: includesChannels)
-        let message = state?.message
+        let message = model.peopleMessage(
+            includesChannels: includesChannels, showsLocalContacts: showsLocalContacts)
         let showsHeading = model.searching || !rows.network.isEmpty || channel != nil || message != nil
         VStack(alignment: .leading, spacing: 10) {
             if let emptyText, !model.asksNetwork,
@@ -133,7 +133,7 @@ private struct FoundPersonRow: View {
                         .font(.subheadline)
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
-                if person.canAddContact, let message = state.message {
+                if let message = state.message(canAddContact: person.canAddContact) {
                     Text(message)
                         .font(.footnote)
                         .foregroundStyle(state == .refused ? Color.lakkoTextMuted : Color.lakkoDanger)

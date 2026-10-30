@@ -31,7 +31,7 @@
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "Açık kaynak. Telefon numarası gerekmez.",
+      "text": "İletişim sizin tarzınızda. Telefon numarası gerekmez.",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -2670,6 +2670,18 @@
       "text": "Karşı taraf",
       "status": "machine"
     },
+    "chat.pending.call_disabled": {
+      "text": "{name} bağlandığında kullanılabilir.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} henüz yanıt vermedi. Yeni bir bağlantı isteyebilirsiniz.",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name}, uygulaması tekrar çevrimiçi olduğunda mesajlarınızı alacak.",
+      "status": "machine"
+    },
     "chat.photo.load_failed": {
       "text": "Fotoğraf yüklenemedi",
       "status": "machine"
@@ -3778,6 +3790,18 @@
       "text": "Davet bağlantısını paylaş",
       "status": "machine"
     },
+    "contacts.add_back.action": {
+      "text": "Ekle",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "Kişilere ekle",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "{name} kişisini bu hesaptaki kişi listenize geri ekler.",
+      "status": "machine"
+    },
     "contacts.detail.actions": {
       "text": "Kişi işlemleri",
       "status": "machine"
@@ -3950,6 +3974,10 @@
       "text": "Kabul et",
       "status": "machine"
     },
+    "contacts.request.accept_failed": {
+      "text": "Kabul edilemedi. Yeniden deneyin.",
+      "status": "machine"
+    },
     "contacts.request.decline": {
       "text": "Reddet",
       "status": "machine"
@@ -3992,6 +4020,14 @@
     },
     "contacts.safety.title": {
       "text": "Güvenlik numarasını doğrula",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "QR kodu tara",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "Bu kod bir Lakko bağlantısı değil. Başka bir kod deneyin.",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4418,12 +4454,12 @@
       "text": "Diğer cihazlarınız sohbetlerini korur ve yeni anahtarları kendiliğinden alır.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "Geçiş anahtarlarınız giriş yapmanızı sağlamaya devam eder. \"Anahtarları bu geçiş anahtarıyla geri yükle\" seçeneği, siz yeniden açana kadar kapalıdır.",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "Daha önce oluşturduğunuz davet ve arama bağlantıları artık çalışmaz. Yenilerini oluşturun.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "Geçiş anahtarlarınız giriş yapmanızı sağlamaya devam eder. \"Anahtarları bu geçiş anahtarıyla geri yükle\" seçeneği, siz yeniden açana kadar kapalıdır.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -5802,6 +5838,74 @@
       "text": "Bu bağlantı artık geçerli değil. Kişiden yenisini isteyin.",
       "status": "machine"
     },
+    "invite.contact.page.about": {
+      "text": "Lakko, her sohbetin ve aramanın uçtan uca şifrelendiği bir mesajlaşma uygulamasıdır.",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "Ekle",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "{name} eklenemedi. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} zaten kişilerinizde",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "{name} ile bağlantı kurulamadı. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Hesap oluştur",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Gönderen kişiden yenisini isteyin.",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Bu davet bağlantısı artık çalışmıyor",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "Tamam",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "Zaten bir hesabım var",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "Şimdi değil",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "Sohbeti aç",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "Eklemek istediğiniz kişiyle paylaşın.",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "Bu sizin kendi davet bağlantınız",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} sizi Lakko'ya davet ediyor",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "{name} kişilerinize eklensin mi?",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "bu kişi",
+      "status": "machine"
+    },
     "invite.contact.page_title": {
       "text": "Davet",
       "status": "machine"
@@ -5954,8 +6058,44 @@
       "text": "Oluşturulma: {date}",
       "status": "machine"
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "Süre",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "Kişi sayısı",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "Bağlantıyı sil",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Bağlantıya zaten sahip olan kişi artık onu kullanamaz.",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "Bu bağlantı silinsin mi?",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "Bağlantı silindi.",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "Bağlantılarınızdan birini açan herkes, bağlantının süresi dolana veya kullanım hakkı bitene kadar size kişi isteği gönderebilir.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "Bağlantıyı düzenle",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "Kaydettiğinizde yeni bir bağlantı oluşur. Eskisi çalışmaz.",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "Bağlantı koşulları",
       "status": "machine"
     },
     "invite.links.empty": {
@@ -5964,6 +6104,22 @@
     },
     "invite.links.error.copy": {
       "text": "Bağlantı kopyalanamadı.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "1 saat ile 365 gün arasında bir süre girin.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "1 ile {max} arasında bir kişi sayısı girin.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "Bağlantı silinemedi. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "Bağlantı kaydedilemedi. Bağlantınızı kontrol edip tekrar deneyin.",
       "status": "machine"
     },
     "invite.links.error.load": {
@@ -6002,6 +6158,10 @@
       "text": "{count} dk kaldı",
       "status": "machine"
     },
+    "invite.links.expires_option_custom": {
+      "text": "Özel",
+      "status": "machine"
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, one {# gün içinde} other {# gün içinde}}",
       "status": "machine"
@@ -6038,12 +6198,28 @@
       "text": "Yeni",
       "status": "machine"
     },
+    "invite.links.qr_hint": {
+      "text": "Bu kodu tarayan herkes size kişi isteği gönderebilir.",
+      "status": "machine"
+    },
     "invite.links.revoked": {
       "text": "Bağlantı iptal edildi.",
       "status": "machine"
     },
     "invite.links.revoking": {
       "text": "İptal ediliyor...",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "QR kodunu göster",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "Gün",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "Saat",
       "status": "machine"
     },
     "invite.links.unlimited_uses": {
@@ -6060,6 +6236,10 @@
     },
     "invite.links.uses_left": {
       "text": "{count, plural, one {# kullanım kaldı} other {# kullanım kaldı}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "Özel",
       "status": "machine"
     },
     "invite.links.uses_option_one": {
@@ -8086,6 +8266,22 @@
       "text": "Uygulanıyor",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "Tüm kişilerim",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "Yalnızca seçtiklerim",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "Yalnızca seçtiğiniz kişilerin kişileri ({chosen}/{total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "Artık yalnızca seçtiğiniz kişiler. {privacy} bölümünden değiştirin.",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "Kişilerimin kişileri",
       "status": "machine"
@@ -8132,6 +8328,14 @@
     },
     "who_can_find_me.list.choose": {
       "text": "Grupları ve kanalları seç",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "Henüz kişiniz yok.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "Kişilerde ara",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -8198,184 +8402,12 @@
       "text": "Yeniden çevrimiçi olduğunuzda uygulanacak.",
       "status": "machine"
     },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "Bu kişinin kişileri beni bulabilir",
+      "status": "machine"
+    },
     "who_can_find_me.title": {
       "text": "Beni kimler bulabilir",
-      "status": "machine"
-    },
-    "invite.contact.page.title": {
-      "text": "{name} kişilerinize eklensin mi?",
-      "status": "machine"
-    },
-    "invite.contact.page.add": {
-      "text": "Ekle",
-      "status": "machine"
-    },
-    "invite.contact.page.not_now": {
-      "text": "Şimdi değil",
-      "status": "machine"
-    },
-    "invite.contact.page.already_title": {
-      "text": "{name} zaten kişilerinizde",
-      "status": "machine"
-    },
-    "invite.contact.page.open_chat": {
-      "text": "Sohbeti aç",
-      "status": "machine"
-    },
-    "invite.contact.page.own_title": {
-      "text": "Bu sizin kendi davet bağlantınız",
-      "status": "machine"
-    },
-    "invite.contact.page.own_body": {
-      "text": "Eklemek istediğiniz kişiyle paylaşın.",
-      "status": "machine"
-    },
-    "invite.contact.page.done": {
-      "text": "Tamam",
-      "status": "machine"
-    },
-    "invite.contact.page.add_failed": {
-      "text": "{name} eklenemedi. Bağlantınızı kontrol edip tekrar deneyin.",
-      "status": "machine"
-    },
-    "invite.contact.page.unnamed": {
-      "text": "bu kişi",
-      "status": "machine"
-    },
-    "chat.pending.waiting": {
-      "text": "{name}, uygulaması tekrar çevrimiçi olduğunda mesajlarınızı alacak.",
-      "status": "machine"
-    },
-    "chat.pending.stale": {
-      "text": "{name} henüz yanıt vermedi. Yeni bir bağlantı isteyebilirsiniz.",
-      "status": "machine"
-    },
-    "chat.pending.call_disabled": {
-      "text": "{name} bağlandığında kullanılabilir.",
-      "status": "machine"
-    },
-    "contacts.add_back.control": {
-      "text": "Kişilere ekle",
-      "status": "machine"
-    },
-    "contacts.add_back.sub": {
-      "text": "{name} kişisini bu hesaptaki kişi listenize geri ekler.",
-      "status": "machine"
-    },
-    "contacts.add_back.action": {
-      "text": "Ekle",
-      "status": "machine"
-    },
-    "invite.contact.page.answer_failed": {
-      "text": "{name} ile bağlantı kurulamadı. Bağlantınızı kontrol edip tekrar deneyin.",
-      "status": "machine"
-    },
-    "invite.links.show_qr": {
-      "text": "QR kodunu göster",
-      "status": "machine"
-    },
-    "invite.links.qr_hint": {
-      "text": "Bu kodu tarayan herkes size kişi isteği gönderebilir.",
-      "status": "machine"
-    },
-    "contacts.scan_qr": {
-      "text": "QR kodu tara",
-      "status": "machine"
-    },
-    "contacts.scan_qr.not_a_link": {
-      "text": "Bu kod bir Lakko bağlantısı değil. Başka bir kod deneyin.",
-      "status": "machine"
-    },
-    "invite.links.expires_option_custom": {
-      "text": "Özel",
-      "status": "machine"
-    },
-    "invite.links.uses_option_custom": {
-      "text": "Özel",
-      "status": "machine"
-    },
-    "invite.links.custom_expiry_amount": {
-      "text": "Süre",
-      "status": "machine"
-    },
-    "invite.links.unit_hours": {
-      "text": "Saat",
-      "status": "machine"
-    },
-    "invite.links.unit_days": {
-      "text": "Gün",
-      "status": "machine"
-    },
-    "invite.links.custom_uses_count": {
-      "text": "Kişi sayısı",
-      "status": "machine"
-    },
-    "invite.links.error.custom_expiry": {
-      "text": "1 saat ile 365 gün arasında bir süre girin.",
-      "status": "machine"
-    },
-    "invite.links.error.custom_uses": {
-      "text": "1 ile {max} arasında bir kişi sayısı girin.",
-      "status": "machine"
-    },
-    "invite.contact.page.signed_out_title": {
-      "text": "{name} sizi Lakko'ya davet ediyor",
-      "status": "machine"
-    },
-    "invite.contact.page.about": {
-      "text": "Lakko, her sohbetin ve aramanın uçtan uca şifrelendiği bir mesajlaşma uygulamasıdır.",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "Hesap oluştur",
-      "status": "machine"
-    },
-    "invite.contact.page.have_account": {
-      "text": "Zaten bir hesabım var",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_title": {
-      "text": "Bu davet bağlantısı artık çalışmıyor",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "Gönderen kişiden yenisini isteyin.",
-      "status": "machine"
-    },
-    "invite.links.edit": {
-      "text": "Bağlantıyı düzenle",
-      "status": "machine"
-    },
-    "invite.links.edit_title": {
-      "text": "Bağlantı koşulları",
-      "status": "machine"
-    },
-    "invite.links.edit_note": {
-      "text": "Kaydettiğinizde yeni bir bağlantı oluşur. Eskisi çalışmaz.",
-      "status": "machine"
-    },
-    "invite.links.delete": {
-      "text": "Bağlantıyı sil",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_title": {
-      "text": "Bu bağlantı silinsin mi?",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_body": {
-      "text": "Bağlantıya zaten sahip olan kişi artık onu kullanamaz.",
-      "status": "machine"
-    },
-    "invite.links.deleted": {
-      "text": "Bağlantı silindi.",
-      "status": "machine"
-    },
-    "invite.links.error.delete": {
-      "text": "Bağlantı silinemedi. Bağlantınızı kontrol edip tekrar deneyin.",
-      "status": "machine"
-    },
-    "invite.links.error.edit": {
-      "text": "Bağlantı kaydedilemedi. Bağlantınızı kontrol edip tekrar deneyin.",
       "status": "machine"
     }
   }

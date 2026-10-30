@@ -34,8 +34,14 @@ describe("a found person's row after Add contact (UX 6.1)", () => {
   });
 
   it("offers nothing on a row that cannot be added (a contact, a hidden person)", () => {
-    for (const s of ["idle", "sending", "sent", "refused", "failed"] as const) {
+    for (const s of ["idle", "sending", "sent", "failed"] as const) {
       expect(rowView(s, false)).toEqual({ add: "hidden", sent: false, message: null });
     }
+  });
+
+  it("keeps the refusal sentence after the refusal took the offer away", () => {
+    const v = rowView("refused", false);
+    expect(v.add).toBe("hidden");
+    expect(v.message?.text()).toBe(REQUEST_REFUSED());
   });
 });

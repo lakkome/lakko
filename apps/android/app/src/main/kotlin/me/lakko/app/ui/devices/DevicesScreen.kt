@@ -891,6 +891,19 @@ internal fun deviceRowLabel(isSelf: Boolean, index: Int): UiText =
         UiText("settings.devices.device_n", texts = mapOf("number" to (index + 1).toString()))
     }
 
+/** Runs [reload] on every change of the account's device list while this is
+ *  composed and the screen is started. Not on opening: the screen reads the
+ *  list then itself. A change during a reload restarts it. */
+@Composable
+internal fun ReloadOnRosterChange(reload: suspend () -> Unit) {
+    val revision by me.lakko.app.devices.DeviceRosterChanges.revision.collectAsStateWithLifecycle()
+    val atOpen = remember { revision }
+    val latest by androidx.compose.runtime.rememberUpdatedState(reload)
+    LaunchedEffect(revision) {
+        if (revision != atOpen) latest()
+    }
+}
+
 @Composable
 private fun DevicesList(
     authRepository: AuthRepository,
@@ -946,6 +959,32 @@ private fun DevicesList(
         } catch (cause: Throwable) {
             Log.w(TAG, "WARN device list failed: ${cause.javaClass.simpleName}")
             state = DevicesListUi.Error(UiText("settings.devices.error.load"))
+        }
+    }
+
+    // UX section 3 - the list follows the account: a device that joined or left
+    // while this screen is open, on any route. In place, with no spinner, and
+    // a read that fails keeps the rows on screen.
+    ReloadOnRosterChange {
+        val read = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val list = DeviceRemoval.listDevices(
+                    context = context,
+                    accountIdBytes = accountIdBytes,
+                    accountIdB64 = accountIdB64,
+                )
+                val active = runner()
+                Triple(list, active?.pendingDeviceIds().orEmpty(), active?.waitingOnPersonDeviceIds().orEmpty())
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                Log.w(TAG, "WARN device list not re-read: ${cause.javaClass.simpleName}")
+                null
+            }
+        }
+        if (read != null) {
+            pending = read.second
+            waitingOnPerson = read.third
+            state = DevicesListUi.Ready(read.first.devices)
         }
     }
 

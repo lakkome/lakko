@@ -755,6 +755,25 @@ export interface OwnRequestRecord {
    * "is it still pending?" be answered for a person add.
    */
   readonly deviceKeysB64?: readonly string[];
+  /**
+   * `add` only — what this device last posted as the committer-delegation
+   * envelope for this add (ADR-0060 section 6). It lives on the record so it
+   * ends with the request: the add landing or being dropped forgets it, and it
+   * goes with the rest of the records on `Delete this chat` and on a wipe.
+   */
+  readonly envelope?: CommitterEnvelopeSend;
+}
+
+/** The last committer-delegation envelope a proposer posted for one add, the
+ *  inputs of the core's `committerEnvelopeDue` rule. */
+export interface CommitterEnvelopeSend {
+  /** When it was published, unix milliseconds. */
+  readonly sentAtMs: number;
+  /** Whether it carried delegations (false: an open envelope, for a person
+   *  whose mailbox is open, which names a binding and never ages). */
+  readonly signed: boolean;
+  /** The committer candidates it covered, account keys in lower-case hex. */
+  readonly coveredHex: readonly string[];
 }
 
 const OWN_REQUESTS_PREFIX = "lakko.own-requests.v1";
@@ -801,6 +820,21 @@ function parseOwnRequest(v: unknown): OwnRequest | null {
   }
 }
 
+/** Validate a stored send. Anything malformed reads as absent, so the envelope
+ *  is due: one extra message rather than an add left without one. */
+function parseEnvelopeSend(v: unknown): CommitterEnvelopeSend | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const r = v as Record<string, unknown>;
+  if (typeof r.sentAtMs !== "number" || !Number.isSafeInteger(r.sentAtMs) || r.sentAtMs < 0) {
+    return undefined;
+  }
+  if (typeof r.signed !== "boolean" || !Array.isArray(r.coveredHex)) return undefined;
+  if (!r.coveredHex.every((k) => typeof k === "string" && /^[0-9a-f]{64}$/.test(k))) {
+    return undefined;
+  }
+  return { sentAtMs: r.sentAtMs, signed: r.signed, coveredHex: r.coveredHex as string[] };
+}
+
 /** Read every recorded own request for one group. Never throws. */
 export function loadOwnRequests(
   accountIdB64: string,
@@ -820,10 +854,12 @@ export function loadOwnRequests(
       const deviceKeys = Array.isArray(rec.deviceKeysB64)
         ? rec.deviceKeysB64.filter(isString)
         : undefined;
+      const envelope = parseEnvelopeSend(rec.envelope);
       out.set(ownRequestKey(request), {
         request,
         epoch: rec.epoch,
         ...(deviceKeys === undefined ? {} : { deviceKeysB64: deviceKeys }),
+        ...(envelope === undefined ? {} : { envelope }),
       });
     }
   } catch {
@@ -859,7 +895,9 @@ function saveOwnRequests(
  * Called by `contacts/client.ts` after every proposal it publishes. A later
  * record for the same {@link ownRequestKey} replaces the earlier one, which is
  * what re-stamps the epoch after a re-request and what lets a newer role-change
- * intent supersede an older one.
+ * intent supersede an older one. The record of the last committer envelope is
+ * kept across that: it is about the person, not about one proposal, and the
+ * delegations it sent are as good for the re-proposed Add.
  */
 export function recordOwnRequest(
   accountIdB64: string,
@@ -869,13 +907,35 @@ export function recordOwnRequest(
   deviceKeysB64?: readonly string[],
 ): void {
   const records = loadOwnRequests(accountIdB64, groupIdB64);
-  records.set(ownRequestKey(request), {
+  const key = ownRequestKey(request);
+  const envelope = records.get(key)?.envelope;
+  records.set(key, {
     request,
     epoch: epoch.toString(),
     ...(deviceKeysB64 === undefined || deviceKeysB64.length === 0
       ? {}
       : { deviceKeysB64: [...deviceKeysB64] }),
+    ...(envelope === undefined ? {} : { envelope }),
   });
+  saveOwnRequests(accountIdB64, groupIdB64, records);
+}
+
+/**
+ * Note the committer envelope just published for the add of `subjectKeyB64`
+ * (ADR-0060 section 6). Called only after the publish succeeded. No record, no
+ * note: the add already landed or was dropped, and nothing will re-send.
+ */
+export function noteCommitterEnvelopeSent(
+  accountIdB64: string,
+  groupIdB64: string,
+  subjectKeyB64: string,
+  send: CommitterEnvelopeSend,
+): void {
+  const key = retryKey({ kind: "add", subjectKeyB64, subjectAccountIdB64: "" });
+  const records = loadOwnRequests(accountIdB64, groupIdB64);
+  const existing = records.get(key);
+  if (existing === undefined) return;
+  records.set(key, { ...existing, envelope: send });
   saveOwnRequests(accountIdB64, groupIdB64, records);
 }
 
@@ -1015,6 +1075,18 @@ function intentPending(record: OwnRequestRecord, snapshot: IntentSnapshot): bool
     default:
       return alreadyWaiting(request, snapshot);
   }
+}
+
+/**
+ * Is this recorded add still waiting to land? Its person is not in the roster
+ * and the live pending set holds it; a commit that dropped it is the superseded
+ * re-request's to deal with, not a reason to keep writing to the group. A torn
+ * read claims nothing.
+ */
+export function ownAddIsPending(record: OwnRequestRecord, snapshot: IntentSnapshot): boolean {
+  if (record.request.kind !== "add") return false;
+  if (snapshot.membershipEnded || snapshot.roster === null) return false;
+  return !intentLanded(record, snapshot) && intentPending(record, snapshot);
 }
 
 /**

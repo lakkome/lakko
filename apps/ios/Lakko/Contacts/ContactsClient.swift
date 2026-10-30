@@ -1094,11 +1094,13 @@ public final class ContactsClient {
             // device reach the recipient (a link grant, a search result's
             // grant, a co-member's); unsigned (a `mailbox-write` token) only
             // for an Everyone mailbox.
-            publish = try await ds.publishMailbox(
-                pseudonym: plan.target.address,
-                payload: row,
-                writeAuth: plan.auth
-            )
+            publish = try await RefusedMailboxWrite.tryingCandidates(plan.candidates) { auth in
+                try await ds.publishMailbox(
+                    pseudonym: plan.target.address,
+                    payload: row,
+                    writeAuth: auth
+                )
+            }
         } catch {
             if case .http(401, _, _)? = error as? DsClientError {
                 throw ContactsError.requestRefused
@@ -1158,11 +1160,13 @@ public final class ContactsClient {
         do {
             // ADR-0060 section 6 — written with the requester's `reply` grant.
             let row = try plan.target.seal(kind: .contactAck, body: wireBytes)
-            publish = try await ds.publishMailbox(
-                pseudonym: plan.target.address,
-                payload: row,
-                writeAuth: plan.auth
-            )
+            publish = try await RefusedMailboxWrite.tryingCandidates(plan.candidates) { auth in
+                try await ds.publishMailbox(
+                    pseudonym: plan.target.address,
+                    payload: row,
+                    writeAuth: auth
+                )
+            }
         } catch {
             throw ContactsError.wrap(error)
         }
@@ -1197,7 +1201,9 @@ public final class ContactsClient {
         }
         do {
             let row = try plan.target.seal(kind: .linkRefusal, body: wire)
-            _ = try await ds.publishMailbox(pseudonym: plan.target.address, payload: row, writeAuth: plan.auth)
+            _ = try await RefusedMailboxWrite.tryingCandidates(plan.candidates) { auth in
+                try await ds.publishMailbox(pseudonym: plan.target.address, payload: row, writeAuth: auth)
+            }
         } catch {
             throw ContactsError.wrap(error)
         }

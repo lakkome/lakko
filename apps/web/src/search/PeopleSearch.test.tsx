@@ -16,16 +16,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { all, present, renderUi } from "../test/ui";
 import { t } from "../l10n";
-import type { PersonResult } from "./people";
+import type { LocalCandidate, PersonResult } from "./people";
 import type { PeopleSearchOutcome } from "./people-search";
 import type { SendOutcome } from "./send-request";
 
-const { searchPeople, sendFoundRequest, recordSentRequest } = vi.hoisted(() => ({
+const { searchPeople, sendFoundRequest, recordSentRequest, reachCheck, held } = vi.hoisted(() => ({
   searchPeople: vi.fn<(query: string) => Promise<PeopleSearchOutcome>>(),
   sendFoundRequest: vi.fn<(person: PersonResult) => Promise<SendOutcome>>(),
   recordSentRequest: vi.fn(),
+  reachCheck: vi.fn<(key: Uint8Array, wire: string) => Promise<boolean>>(),
+  held: { candidates: [] as LocalCandidate[] },
 }));
 
+vi.mock("@solidjs/router", () => ({ A: (p: { children: unknown }) => p.children }));
 vi.mock("../auth/AuthContext", () => ({
   useAuth: () => ({ identitySecrets: () => null, state: () => ({ kind: "anonymous" }) }),
 }));
@@ -52,7 +55,8 @@ vi.mock("../wasm", () => ({
 vi.mock("./wiring", async () => {
   const { fallbackNormalize } = await import("./people");
   return {
-    localCandidates: () => [],
+    localCandidates: () => held.candidates,
+    reachCheckWith: (key: Uint8Array, wire: string) => reachCheck(key, wire),
     normalizerOf: () => fallbackNormalize,
     canonicalUsernameOf: (_w: unknown, typed: string) => {
       const bare = typed.replace(/^@+/, "");
@@ -104,6 +108,8 @@ beforeEach(() => {
   searchPeople.mockReset();
   sendFoundRequest.mockReset();
   recordSentRequest.mockReset();
+  reachCheck.mockReset();
+  held.candidates = [];
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -199,5 +205,138 @@ describe("PeopleSearch (UX 6.1)", () => {
     await flush();
     expect(document.body.textContent).toContain(t("search.people.request_refused"));
     expect(buttonsLabelled(t("search.people.add_contact"))).toHaveLength(0);
+  });
+
+  describe("a kept grant is checked before it is offered", () => {
+    const kept = (keyHex: string, over: Partial<LocalCandidate> = {}): LocalCandidate => ({
+      keyB64: "AAAA",
+      keyHex,
+      name: "Bob Lind",
+      verifiedUsername: "boblind",
+      isContact: false,
+      accountIdHex: "0102",
+      keptGrantWires: ["STALE", "LIVE"],
+      ...over,
+    });
+    const addButtons = () => buttonsLabelled(t("search.people.add_contact"));
+
+    it("shows the name alone until a grant passes, then offers Add contact with it", async () => {
+      held.candidates = [kept("b1")];
+      let answerLive: (ok: boolean) => void = () => {};
+      reachCheck.mockImplementation(async (_key, wire) => {
+        if (wire === "STALE") return false;
+        return new Promise((resolve) => {
+          answerLive = resolve;
+        });
+      });
+      sendFoundRequest.mockResolvedValue({ kind: "sent" });
+      const type = mount();
+      await flush();
+      type("bo");
+      await flush();
+      expect(document.body.textContent).toContain("Bob Lind");
+      expect(document.body.textContent).not.toContain("@boblind");
+      expect(addButtons()).toHaveLength(0);
+
+      answerLive(true);
+      await flush();
+      expect(document.body.textContent).toContain("@boblind");
+      addButtons()[0]!.click();
+      await flush();
+      expect(sendFoundRequest.mock.calls[0]?.[0]).toMatchObject({ grantWireB64: "LIVE", grantChecked: true });
+    });
+
+    it("runs one check per person however much is typed", async () => {
+      held.candidates = [kept("b2", { keptGrantWires: ["ONE"] })];
+      reachCheck.mockResolvedValue(true);
+      const type = mount();
+      await flush();
+      type("b");
+      type("bo");
+      await flush();
+      type("bob");
+      await flush();
+      expect(reachCheck).toHaveBeenCalledTimes(1);
+    });
+
+    it("leaves a name, no button and no match by username when every grant is refused", async () => {
+      held.candidates = [kept("b3")];
+      reachCheck.mockResolvedValue(false);
+      const type = mount();
+      await flush();
+      type("bob");
+      await flush();
+      expect(reachCheck).toHaveBeenCalledTimes(2);
+      expect(document.body.textContent).toContain("Bob Lind");
+      expect(document.body.textContent).not.toContain("@boblind");
+      expect(addButtons()).toHaveLength(0);
+
+      type("boblind");
+      await flush();
+      expect(document.body.textContent).not.toContain("Bob Lind");
+    });
+
+    it("a check that throws changes nothing: the row is as it was, and the next text asks again", async () => {
+      held.candidates = [kept("b4")];
+      reachCheck.mockRejectedValue(new Error("offline"));
+      const type = mount();
+      await flush();
+      type("bo");
+      await flush();
+      expect(document.body.textContent).toContain("@boblind");
+      expect(addButtons()).toHaveLength(1);
+      expect(reachCheck).toHaveBeenCalledTimes(1);
+
+      type("bob");
+      await flush();
+      expect(reachCheck).toHaveBeenCalledTimes(2);
+    });
+
+    it("never checks a contact, who shows at once", async () => {
+      held.candidates = [kept("b5", { isContact: true })];
+      const type = mount();
+      await flush();
+      type("bo");
+      await flush();
+      expect(reachCheck).not.toHaveBeenCalled();
+      expect(document.body.textContent).toContain("@boblind");
+      expect(document.body.textContent).toContain(t("common.open"));
+    });
+
+    it("a send the reach check refused keeps the sentence and loses the button and the username", async () => {
+      held.candidates = [kept("b6", { keptGrantWires: ["ONE"] })];
+      reachCheck.mockResolvedValue(true);
+      sendFoundRequest.mockResolvedValue({ kind: "refused", byReachCheck: true });
+      const type = mount();
+      await flush();
+      type("bo");
+      await flush();
+      addButtons()[0]!.click();
+      await flush();
+      expect(document.body.textContent).toContain(t("search.people.request_refused"));
+      expect(addButtons()).toHaveLength(0);
+      expect(document.body.textContent).not.toContain("@boblind");
+    });
+
+    it("says No one found only when no person stands under People", async () => {
+      held.candidates = [kept("b7")];
+      reachCheck.mockResolvedValue(false);
+      searchPeople.mockResolvedValue({ people: [], channel: null, state: { kind: "not-found" } });
+      const type = mount();
+      await flush();
+      type("bob");
+      await flush();
+      vi.advanceTimersByTime(500);
+      await flush();
+      expect(document.body.textContent).toContain("Bob Lind");
+      expect(document.body.textContent).not.toContain(t("search.people.not_found"));
+
+      type("zed");
+      await flush();
+      vi.advanceTimersByTime(500);
+      await flush();
+      expect(document.body.textContent).not.toContain("Bob Lind");
+      expect(document.body.textContent).toContain(t("search.people.not_found"));
+    });
   });
 });

@@ -5,11 +5,11 @@
  * Found the one-to-one conversation with a contact and link it back to the
  * contact record (ADR-0021 follow-up).
  *
- * One function, three callers that must do the same four things in the same
- * order: Contacts on Accept, Contacts on `Message` for a contact with no
- * conversation yet, and the call screen's `Invite contacts` when the invited
- * contact has never been written to from this device
- * (`docs/ux/call-links.md` section 3).
+ * One function, two callers that must do the same four things in the same
+ * order: Contacts on `Message` for a contact with no conversation yet, and
+ * the call screen's `Invite contacts` when the invited contact has never been
+ * written to from this device (`docs/ux/call-links.md` section 3). Accepting a
+ * request has its own path (`accept-request.ts`).
  */
 
 import type { IdentitySecrets } from "../auth/AuthContext";
@@ -27,10 +27,6 @@ export async function foundOneToOneWith(deps: {
   readonly contact: AcceptedContact;
   readonly peerAccountId: Uint8Array;
   readonly peerPubkey: Uint8Array;
-  /** ADR-0060 — the requester's `reply` grant when this accepts their
-   *  contact request; `null` for a contact reached with the grants this
-   *  device keeps for them. */
-  readonly replyGrantB64?: string | null;
 }): Promise<{ readonly conversation: ActiveGroup; readonly accepted: AcceptedContact[] }> {
   // ADR-0062 — a contact's conversation is a one-to-one for good.
   const result = await deps.client.startGroupWith(
@@ -38,7 +34,6 @@ export async function foundOneToOneWith(deps: {
     deps.peerAccountId,
     deps.peerPubkey,
     "chat",
-    { replyGrantB64: deps.replyGrantB64 ?? null },
   );
   // ADR-0048 — a 1x1 chat is labelled by the resolver (the peer's name);
   // this label is only the fallback.

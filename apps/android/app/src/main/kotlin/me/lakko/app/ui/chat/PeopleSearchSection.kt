@@ -21,6 +21,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -32,15 +33,18 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
+import me.lakko.app.search.OutgoingRequests
 import me.lakko.app.search.PeopleSearchService
 import me.lakko.app.search.PeopleSearchSession
 import me.lakko.app.search.PeopleSearchState
 import me.lakko.app.search.PersonResult
 import me.lakko.app.search.RowAction
 import me.lakko.app.search.RowSendState
+import me.lakko.app.search.keptGrantsToCheck
 import me.lakko.app.search.mergePeople
+import me.lakko.app.search.peopleSectionMessage
 import me.lakko.app.search.personRowView
-import me.lakko.app.search.searchStateMessage
+import me.lakko.app.search.rowSendState
 import me.lakko.app.ui.components.LakkoAvatar
 
 /**
@@ -54,7 +58,9 @@ import me.lakko.app.ui.components.LakkoAvatar
  * A row shows avatar, name and a verified `@username`, and never WHY the
  * person was found. Its control: a contact shows **Open**; someone who lets
  * this account find them shows **Add contact**, which sends the request at
- * once, with no introduction; anyone else shows their name only.
+ * once, with no introduction; anyone else shows their name only. A grant this
+ * device merely kept is offered only after the Delivery Service answered for
+ * it: until then the row is the name alone.
  */
 @Composable
 internal fun PeopleSearchSection(
@@ -74,9 +80,19 @@ internal fun PeopleSearchSection(
 ) {
     val context = LocalContext.current
     val profileVersion by me.lakko.app.profile.ProfileDirectory.get(context).version.collectAsState()
+    val contactsState by service.contactsState.collectAsState()
+    val outgoing = remember(contactsState.sent) { OutgoingRequests.of(contactsState.sent) }
+    LaunchedEffect(outgoing) { session.onOutgoing(outgoing) }
     val ownKeyHex = remember(profileVersion) { service.ownKeyHex() }
-    val local = remember(query, profileVersion) {
-        if (query.isBlank()) emptyList() else runCatching { service.local(query) }.getOrDefault(emptyList())
+    val candidates = remember(query, profileVersion, contactsState.accepted) {
+        if (query.isBlank()) emptyList() else runCatching { service.localCandidates() }.getOrDefault(emptyList())
+    }
+    val grantChecks by session.keptGrantChecks.collectAsState()
+    val local = remember(query, candidates, grantChecks) {
+        runCatching { service.local(query, candidates, grantChecks) }.getOrDefault(emptyList())
+    }
+    LaunchedEffect(query, candidates) {
+        session.checkKeptGrants(keptGrantsToCheck(candidates, query, service.normalize, ownKeyHex))
     }
     val view by session.view.collectAsState()
     val sends by session.sendStates.collectAsState()
@@ -103,7 +119,7 @@ internal fun PeopleSearchSection(
         for (person in people) {
             PersonRow(
                 person = person,
-                send = sends[person.keyHex],
+                send = rowSendState(person, sends[person.keyHex], outgoing),
                 onAdd = { session.add(person) },
                 onOpenContact = onOpenContact,
             )
@@ -114,7 +130,7 @@ internal fun PeopleSearchSection(
                 onClick = { onOpenChannel(channel.idHex, channel.handle) },
             )
         }
-        searchStateMessage(state)?.let {
+        peopleSectionMessage(state, people.size)?.let {
             Text(
                 it.text(),
                 style = MaterialTheme.typography.bodySmall,

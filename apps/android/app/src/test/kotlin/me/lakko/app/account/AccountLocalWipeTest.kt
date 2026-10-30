@@ -349,6 +349,11 @@ class AccountLocalWipeTest {
         KnownGroupsStore(context).add(acct, group)
         SharedPrefsBeaconObservationStore(context).save(acct, group, mapOf("key" to 1L))
         SharedPrefsPendingRequestStore(context).save(acct, group, mapOf("ref" to RequestObservation(atMs = 1L, own = true)))
+        me.lakko.app.chat.SharedPrefsSentCommitterEnvelopeStore(context).save(
+            acct,
+            group,
+            mapOf("key" to me.lakko.app.chat.SentCommitterEnvelope("key", listOf("device"), sentAtMs = 1L, signed = true)),
+        )
         SharedPrefsUnappliedRequestStore(context).save(acct, group, mapOf("join:ref" to UnappliedRow(UnappliedKind.JOIN_APPROVE, "ref")))
         SharedPrefsLastObservedOwnerStore(context).save(acct, group, "owner")
         SharedPrefsLeaveRecordStore(context).save(acct, group, 5L)
@@ -565,6 +570,7 @@ class AccountLocalWipeTest {
             "me.lakko.session.v1", "lakko.backup.auto", "lakko-group-calls", "me.lakko.ds.co-published",
             "lakko-committer-beacons", "lakko-conversation-kind", "lakko-readmission-removed", "lakko-group-names",
             "me.lakko.known-groups.v1", "lakko-leave-requested", "lakko-last-observed-owner", "lakko-pending-requests",
+            "lakko-sent-committer-envelopes",
             "lakko-pins", "lakko-read-watermarks", "lakko-unapplied-requests", "lakko-accepted-contacts",
             "lakko-contacts-inbox", "me.lakko.devicegroup.founding", "lakko-device-link", "lakko-pairing-known-groups",
             "lakko-device-sync-pending", "lakko-media-prefs", "lakko-own-profile", "lakko-peer-profiles",
@@ -580,6 +586,7 @@ class AccountLocalWipeTest {
         val PREFS_SEEDED_PER_ACCOUNT = setOf(
             "lakko.backup.auto", "lakko.backup.restore", "me.lakko.devicegroup.founding", "lakko-pairing-known-groups", "lakko-device-link",
             "lakko-readmission-removed", "me.lakko.known-groups.v1", "lakko-committer-beacons", "lakko-pending-requests",
+            "lakko-sent-committer-envelopes",
             "lakko-unapplied-requests", "lakko-last-observed-owner", "lakko-leave-requested", "lakko-group-names",
             "lakko-pins", "lakko-read-watermarks", "lakko-group-calls", "lakko-peer-profiles", "lakko-own-profile",
             "lakko-profile-requests", "lakko-accepted-contacts", "lakko-contacts-inbox", "me.lakko.ds.co-published",

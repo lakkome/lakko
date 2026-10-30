@@ -32,6 +32,7 @@ class PeopleSearchTest {
         val nameLookups = mutableListOf<ByteArray>()
         val reachChecks = mutableListOf<String>()
         val verifiedWith = mutableListOf<ByteArray>()
+        val counts = mutableListOf<SearchCounts>()
     }
 
     /** A configurable fake. Everything the test does not set answers
@@ -86,7 +87,7 @@ class PeopleSearchTest {
             return bundleKeys[searchHex(accountId)]
         }
 
-        override fun known(keyB64: String): KnownPerson = known[keyB64] ?: KnownPerson(null, null, false, null)
+        override fun known(keyB64: String): KnownPerson = known[keyB64] ?: KnownPerson(null, null, false)
 
         override suspend fun openIntroductions(probes: List<IntroductionProbe>): List<OpenedIntroduction> =
             introductions.filter { i -> probes.any { it.via == i.via } }
@@ -105,6 +106,10 @@ class PeopleSearchTest {
         override fun legOutcomeOf(error: Throwable): LegOutcome = LegOutcome.FAILED
 
         override val ownKeyHex: String? = null
+
+        override fun noteSearch(counts: SearchCounts) {
+            rec.counts += counts
+        }
     }
 
     @Test
@@ -168,7 +173,7 @@ class PeopleSearchTest {
         val fake = Fake(
             nameHits = listOf(LookupHit(aliceAccount, null)),
             bundleKeys = mapOf(searchHex(aliceAccount) to aliceKey),
-            known = mapOf(searchKeyB64(aliceKey) to KnownPerson("Anna Weber", null, false, null)),
+            known = mapOf(searchKeyB64(aliceKey) to KnownPerson("Anna Weber", null, false)),
         )
         assertEquals("Anna Weber", searchPeople("anna", fake).people.single().name)
     }
@@ -184,7 +189,6 @@ class PeopleSearchTest {
                     name = null,
                     verifiedUsername = null,
                     isContact = true,
-                    keptGrantWireB64 = null,
                     fallbackName = "a1a1 a1a1",
                 ),
             ),
@@ -201,7 +205,7 @@ class PeopleSearchTest {
             bundleKeys = mapOf(searchHex(aliceAccount) to aliceKey),
             opened = mapOf("rec|out:n:anna" to OpenedPublicRecord(aliceKey, aliceAccount, "Anna Weber")),
             known = mapOf(
-                searchKeyB64(aliceKey) to KnownPerson("Anna from work", null, true, null, fallbackName = null),
+                searchKeyB64(aliceKey) to KnownPerson("Anna from work", null, true, fallbackName = null),
             ),
         )
         assertEquals("Anna from work", searchPeople("anna", fake).people.single().name)
@@ -209,11 +213,11 @@ class PeopleSearchTest {
 
     @Test
     fun `the label rule - held name, then the found name, then a contact's fingerprint`() {
-        val contactByFingerprint = KnownPerson(null, null, true, null, fallbackName = "a1a1 a1a1")
+        val contactByFingerprint = KnownPerson(null, null, true, fallbackName = "a1a1 a1a1")
         assertEquals("Anna Weber", resultName(contactByFingerprint, "Anna Weber"))
         assertEquals("a1a1 a1a1", resultName(contactByFingerprint, null))
-        assertEquals("Anna", resultName(KnownPerson("Anna", null, true, null, "a1a1 a1a1"), "Anna Weber"))
-        assertNull(resultName(KnownPerson(null, null, false, null), null))
+        assertEquals("Anna", resultName(KnownPerson("Anna", null, true, "a1a1 a1a1"), "Anna Weber"))
+        assertNull(resultName(KnownPerson(null, null, false), null))
     }
 
     @Test
@@ -258,6 +262,21 @@ class PeopleSearchTest {
         assertEquals(PersonReach.GRANT, p.reach)
         assertEquals(Base64.getEncoder().encodeToString("fof".toByteArray()), p.grantWireB64)
         assertEquals(listOf(p.grantWireB64), fake.rec.reachChecks)
+        assertTrue("the grant passed a check", p.grantChecked)
+    }
+
+    @Test
+    fun `a search reports counts of what it did`() = runTest {
+        val fake = Fake(
+            bundleKeys = mapOf(searchHex(aliceAccount) to aliceKey),
+            introductions = listOf(intro(ProbeVia.TERM), intro(ProbeVia.TERM, name = "Bob Other")),
+            reachAnswer = false,
+        )
+        searchPeople("anna", fake)
+        assertEquals(
+            listOf(SearchCounts(recordsOpened = 2, keptAfterMatch = 1, refusedByReachCheck = 1, people = 0)),
+            fake.rec.counts,
+        )
     }
 
     @Test

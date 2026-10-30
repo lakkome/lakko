@@ -59,10 +59,10 @@ import {
   sleepCancellable,
 } from "../ds/long-poll-loop";
 import { isOneToOne, useProfiles } from "../profile/ProfileContext";
-import { intakeScopedEnvelope } from "../reach/scoped-intake";
+import { intakeScopedEnvelope, noteIntroductionsAsk } from "../reach/scoped-intake";
 import { onReceivedGrantsChanged } from "../reach/reach-service";
 import { loadUnacked } from "./commit-outbox";
-import { groupsOwingWelcomes } from "./owed-welcomes";
+import { retryOwedWelcomes } from "./owed-welcomes";
 import { observeMembership } from "../profile/membership-baseline";
 import { isOwnKeyB64 } from "../profile/own-key";
 import {
@@ -544,11 +544,20 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // land, and before this a proposal in a chat nobody had open waited until
     // somebody opened it. Cheap when nothing is pending; never awaited by the
     // poll's own error path — a sweep failure is not a poll failure.
+    //
+    // ADR-0060 section 6 - last, a proposer's committer envelope for an Add
+    // still waiting, after the sweep so an Add this device just landed sends
+    // nothing. A failed sweep does not stop it.
     void rerequestSupersededFor(entry)
       .then(() => sweepGroup(entry))
       .catch((err: unknown) => {
         // eslint-disable-next-line no-console
         console.warn("background receive: tail sweep failed", err);
+      })
+      .then(() => (current() ? resendCommitterEnvelopesFor(entry) : undefined))
+      .catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("background receive: committer envelope re-send failed", err);
       });
     // ADR-0050 section 2.4 — the scheduled re-admission check, bounded per
     // chat; see `device-readmission.ts`.
@@ -1399,6 +1408,22 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   }
 
   /**
+   * ADR-0060 section 6 — the background half of the committer envelope
+   * re-send (`reach/committer-envelope.ts`); the chat view runs the same pass
+   * for the group it has open.
+   */
+  async function resendCommitterEnvelopesFor(entry: ActiveGroup): Promise<void> {
+    const secrets = auth.identitySecrets();
+    if (secrets === null) return;
+    if (coordinator.isForeground(entry.groupIdB64)) return;
+    await contacts.resendCommitterEnvelopes(
+      secrets,
+      entry.group,
+      readIsActive(entry.group) === false,
+    );
+  }
+
+  /**
    * ADR-0050 section 2.4 — re-check the device lists of the accounts in
    * `entry` against its roster: propose an Add for a listed device with no
    * leaf (a restored phone, a pairing whose fan-out was cut short), and — for
@@ -1931,6 +1956,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         if (r.senderKey === undefined) continue;
         if (own !== null && isOwnKeyB64(own, r.senderKey)) continue;
         profiles.requested(groupIdB64);
+        // ADR-0060 section 4 - the same request is how a device that missed
+        // this account's introductions asks for them again.
+        noteIntroductionsAsk(groupIdB64, r.senderKey);
         break;
       }
     }
@@ -2356,20 +2384,19 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   });
 
   // ADR-0050 section 2.5a item 7 - a Welcome kept owed because no grant
-  // reached its addressee's mailbox is retried when a grant arrives, not only
-  // at the next poll of its group: `sweepGroup` runs the sweep's owed-Welcome
-  // step (or asks an open chat view to poll, which does).
+  // reached its addressee's mailbox is retried when a grant or a proposer's
+  // re-sent committer envelope arrives, not only at the next poll of its
+  // group: `sweepGroup` runs the sweep's owed-Welcome step (or asks an open
+  // chat view to poll, which does).
   const unsubscribeGrants = onReceivedGrantsChanged(() => {
-    void (async () => {
-      const owing = await groupsOwingWelcomes(
-        chats.groups().map((g) => g.groupIdB64),
-        (g) => loadUnacked(g),
-      );
-      for (const groupIdB64 of owing) {
+    void retryOwedWelcomes(
+      chats.groups().map((g) => g.groupIdB64),
+      (g) => loadUnacked(g),
+      async (groupIdB64) => {
         const entry = chats.get(groupIdB64);
         if (entry !== undefined) await sweepGroup(entry);
-      }
-    })().catch((err: unknown) => {
+      },
+    ).catch((err: unknown) => {
       // eslint-disable-next-line no-console
       console.warn("background receive: owed Welcome retry failed", err);
     });

@@ -263,6 +263,15 @@ export interface PersistedGroup {
    * gaps. See `feed/feed-seen.ts`.
    */
   readonly feedSeen?: readonly string[];
+  /**
+   * docs/ux/second-device.md section 2, "History is not news": the highest DS
+   * id that came with a pairing history bundle (stringified), the higher of
+   * every bundle filed. A row at or below it is never unread on this device,
+   * whatever the read positions say. Local: it moves no read position of the
+   * account and sends no read receipt, and it is not `lastViewedMessageId`,
+   * which says what the person saw. See `background-log.ts`.
+   */
+  readonly syncedThroughMessageId?: string;
 }
 
 /** Wire shape of the encrypted blob, post-decrypt + JSON-parse. */

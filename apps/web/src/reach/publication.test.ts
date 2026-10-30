@@ -107,8 +107,13 @@ describe("which scoped envelopes a conversation keeps", () => {
   it("drops DeviceGroup-only kinds, our own and unattributed envelopes", () => {
     for (const k of ["visibility", "reach-state", "registrar-seed"] as const) {
       expect(keepsScopedEnvelope(k, base)).toBe(false);
+      expect(keepsScopedEnvelope(k, { ...base, fromSelf: true })).toBe(false);
     }
-    expect(keepsScopedEnvelope("committer-delegation", { ...base, fromSelf: true })).toBe(false);
+    expect(keepsScopedEnvelope("introduction-offer", { ...base, fromSelf: true })).toBe(false);
+    expect(keepsScopedEnvelope("introductions", { ...base, fromSelf: true })).toBe(false);
     expect(keepsScopedEnvelope("committer-delegation", { ...base, senderResolved: false })).toBe(false);
+  });
+  it("keeps a committer envelope from this account's other device", () => {
+    expect(keepsScopedEnvelope("committer-delegation", { ...base, fromSelf: true, oneToOne: false })).toBe(true);
   });
 });

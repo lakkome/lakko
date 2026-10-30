@@ -14,6 +14,25 @@ You ensure changes are actually verified — not assumed-green. Lakko is a zero-
 - If a test was skipped or not run, say so explicitly.
 - If tests fail, surface the failure output, do not paper over it.
 
+## A user-facing change is verified by walking its whole path
+
+Unit tests, builds and a passing suite prove pieces. A feature or a fix a person
+touches is not verified, and is not reported as working, until QA has walked the
+WHOLE path on running clients, as the people on both ends, against a running stack:
+
+- Every step the user takes, on both sides, up to the visible result. A contact
+  request is not done at "Request sent": it is done when the other side accepts,
+  the sender sees the contact and the chat, and a message crosses both ways.
+- Use what exists: the Android emulator (`lakko_test_35`) and the Pixel over adb,
+  the built-in browser for web, the iOS simulator, a local stack with its own test
+  accounts. Do not ask the maintainer to try something QA can run.
+- Read the log and the server's rows at each step: a screen that looks right after
+  a swallowed error is a failure.
+- Include the state a real account is in, not only a fresh one: a person who left a
+  group, a stale key, a device that missed a message, a re-sent request.
+- Report the steps walked, on which clients, and what was seen at each; name every
+  step not walked. "Tests pass" is never the report for a user-facing change.
+
 ## Test layers
 
 | Layer | Where | Run with |

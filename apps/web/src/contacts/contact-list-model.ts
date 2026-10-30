@@ -8,6 +8,8 @@
  * waiting for an answer. No Solid, no storage, no wasm; tested in
  * `contact-list-model.test.ts`.
  */
+import { badgeText } from "../feed/feed-marks";
+
 
 /** The group every label that does not start with a letter falls into. */
 export const OTHER_LETTER = "#";
@@ -109,12 +111,25 @@ export function upsertSentRequest(
 }
 
 /** The sent requests still waiting: those whose recipient is not yet in the
- *  accepted list, newest first. */
+ *  accepted list, newest first. The list is matched on the account id and on
+ *  the key: a row a Welcome made before the person's profile arrived names
+ *  the key alone. */
 export function waitingSentRequests(
   sent: readonly SentRequestRecord[],
   acceptedAccountIdHexes: ReadonlySet<string>,
+  acceptedKeysB64: ReadonlySet<string> = new Set(),
 ): SentRequestRecord[] {
   return sent
-    .filter((r) => !acceptedAccountIdHexes.has(r.recipientAccountIdHex))
+    .filter(
+      (r) =>
+        !acceptedAccountIdHexes.has(r.recipientAccountIdHex) &&
+        !(r.recipientKeyB64 !== undefined && acceptedKeysB64.has(r.recipientKeyB64)),
+    )
     .sort((a, b) => b.sentAtMs - a.sentAtMs);
+}
+
+/** What the Contacts item of the rail shows for the requests waiting: the
+ *  Chats badge's text, or nothing at zero. */
+export function contactsBadge(waiting: number): string | null {
+  return waiting > 0 ? badgeText(waiting) : null;
 }

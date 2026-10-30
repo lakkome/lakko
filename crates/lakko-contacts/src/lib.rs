@@ -319,10 +319,11 @@ pub use username::{
 pub use visibility::{
     compose_reach_state, compose_visibility, decode_reach_state, decode_visibility,
     merge_reach_state, reach_state_is_newer, try_unwrap_reach_state, try_unwrap_visibility,
-    visibility_is_newer, GroupsForm, ReachState, ReachStateEntry, ReachStateMerge, ScopeId,
-    ScopeKind, VisibilityError, VisibilityMode, VisibilitySetting, MAX_CHOSEN_SCOPES,
-    MAX_REACH_STATE_ENTRIES, MAX_REACH_STATE_ENVELOPE_LEN, MAX_SCOPE_ID_LEN,
-    MAX_VISIBILITY_ENVELOPE_LEN, REACH_STATE_ENVELOPE_DOMAIN_V1, VISIBILITY_ENVELOPE_DOMAIN_V1,
+    visibility_is_newer, ContactsForm, GroupsForm, ReachState, ReachStateEntry, ReachStateMerge,
+    ScopeId, ScopeKind, VisibilityError, VisibilityMode, VisibilitySetting, CONTACT_ACCOUNT_ID_LEN,
+    MAX_CHOSEN_CONTACTS, MAX_CHOSEN_SCOPES, MAX_REACH_STATE_ENTRIES, MAX_REACH_STATE_ENVELOPE_LEN,
+    MAX_SCOPE_ID_LEN, MAX_VISIBILITY_ENVELOPE_LEN, REACH_STATE_ENVELOPE_DOMAIN_V1,
+    VISIBILITY_ENVELOPE_DOMAIN_V1,
 };
 
 /// Entry points for the fuzz harnesses in `crates/lakko-contacts/fuzz`.

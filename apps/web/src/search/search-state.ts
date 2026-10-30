@@ -62,6 +62,13 @@ export function foldSearch(foundCount: number, legs: readonly LegOutcome[]): Peo
   return { kind: "not-found" };
 }
 
+/** The line under People for a state with `personRows` rows standing there:
+ *  "not found" would contradict a row, so it is said only over none. */
+export function peopleLineOf(state: PeopleSearchState, personRows: number): string | null {
+  if (state.kind === "not-found" && personRows > 0) return null;
+  return searchStateMessage(state);
+}
+
 /** The line under the row for a state; `null` when the state says nothing
  *  in words (idle, searching - the spinner says it - and found). */
 export function searchStateMessage(state: PeopleSearchState): string | null {

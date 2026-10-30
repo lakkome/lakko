@@ -31,7 +31,7 @@
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "ओपन सोर्स। फ़ोन नंबर की ज़रूरत नहीं।",
+      "text": "बातचीत आपके तरीके से। फ़ोन नंबर की ज़रूरत नहीं।",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -2670,6 +2670,18 @@
       "text": "दूसरा व्यक्ति",
       "status": "machine"
     },
+    "chat.pending.call_disabled": {
+      "text": "{name} के जुड़ने पर उपलब्ध होगा।",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} ने अभी तक जवाब नहीं दिया है। आप उनसे नया लिंक माँग सकते हैं।",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} को आपके संदेश तब मिलेंगे जब उनका ऐप अगली बार ऑनलाइन होगा।",
+      "status": "machine"
+    },
     "chat.photo.load_failed": {
       "text": "फ़ोटो लोड नहीं हो सकी",
       "status": "machine"
@@ -3778,6 +3790,18 @@
       "text": "इनवाइट लिंक शेयर करें",
       "status": "machine"
     },
+    "contacts.add_back.action": {
+      "text": "जोड़ें",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "संपर्कों में जोड़ें",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "{name} को इस खाते की आपकी संपर्क सूची में वापस जोड़ता है।",
+      "status": "machine"
+    },
     "contacts.detail.actions": {
       "text": "संपर्क के विकल्प",
       "status": "machine"
@@ -3950,6 +3974,10 @@
       "text": "स्वीकार करें",
       "status": "machine"
     },
+    "contacts.request.accept_failed": {
+      "text": "स्वीकार नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
     "contacts.request.decline": {
       "text": "अस्वीकार करें",
       "status": "machine"
@@ -3992,6 +4020,14 @@
     },
     "contacts.safety.title": {
       "text": "सुरक्षा नंबर की पुष्टि करें",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "QR कोड स्कैन करें",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "यह कोड Lakko लिंक नहीं है। कोई दूसरा कोड आज़माएँ।",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4418,12 +4454,12 @@
       "text": "आपके दूसरे डिवाइस अपनी चैट रखते हैं और नई कुंजियाँ अपने आप पा लेते हैं।",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "आपकी पासकी से अब भी साइन इन होता है। \"इस पासकी से कुंजियाँ रिस्टोर करें\" तब तक बंद रहता है जब तक आप इसे फिर से चालू नहीं करते।",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "आपके पहले बनाए गए आमंत्रण लिंक और कॉल लिंक काम करना बंद कर देंगे। नए बनाएँ।",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "आपकी पासकी से अब भी साइन इन होता है। \"इस पासकी से कुंजियाँ रिस्टोर करें\" तब तक बंद रहता है जब तक आप इसे फिर से चालू नहीं करते।",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -5802,6 +5838,74 @@
       "text": "यह लिंक अब मान्य नहीं है। उस व्यक्ति से नया लिंक माँगें।",
       "status": "machine"
     },
+    "invite.contact.page.about": {
+      "text": "Lakko एक मैसेंजर है जिसमें हर चैट और कॉल एंड-टू-एंड एन्क्रिप्टेड होती है।",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "जोड़ें",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "{name} को नहीं जोड़ा जा सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} पहले से आपके संपर्कों में हैं",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "{name} तक नहीं पहुँच सके। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "खाता बनाएँ",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "भेजने वाले से नया लिंक माँगें।",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "यह आमंत्रण लिंक अब काम नहीं करता",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "हो गया",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "मेरे पास पहले से खाता है",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "अभी नहीं",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "चैट खोलें",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "इसे उस व्यक्ति के साथ साझा करें जिसे आप जोड़ना चाहते हैं।",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "यह आपका अपना आमंत्रण लिंक है",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} आपको Lakko पर आमंत्रित कर रहे हैं",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "{name} को अपने संपर्कों में जोड़ें?",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "इस व्यक्ति",
+      "status": "machine"
+    },
     "invite.contact.page_title": {
       "text": "इनवाइट",
       "status": "machine"
@@ -5954,8 +6058,44 @@
       "text": "{date} को बनाया",
       "status": "machine"
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "अवधि",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "लोगों की संख्या",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "लिंक हटाएँ",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "जिसके पास यह पहले से है, वह इसका उपयोग नहीं कर पाएगा।",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "यह लिंक हटाएँ?",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "लिंक हटा दिया गया।",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "आपका कोई भी लिंक खोलने वाला व्यक्ति आपको संपर्क अनुरोध भेज सकता है, जब तक लिंक की समय-सीमा खत्म न हो जाए या उसके सभी इस्तेमाल पूरे न हो जाएँ।",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "लिंक बदलें",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "सहेजने पर नया लिंक बनता है। पुराना काम करना बंद कर देता है।",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "लिंक की शर्तें",
       "status": "machine"
     },
     "invite.links.empty": {
@@ -5964,6 +6104,22 @@
     },
     "invite.links.error.copy": {
       "text": "लिंक कॉपी नहीं हो सका।",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "1 घंटे से 365 दिन तक की अवधि डालें।",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "1 से {max} तक लोगों की संख्या डालें।",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "लिंक नहीं हटाया जा सका। कनेक्शन जाँचें और फिर कोशिश करें।",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "लिंक सहेजा नहीं जा सका। कनेक्शन जाँचें और फिर कोशिश करें।",
       "status": "machine"
     },
     "invite.links.error.load": {
@@ -6002,6 +6158,10 @@
       "text": "{count} मिनट में खत्म",
       "status": "machine"
     },
+    "invite.links.expires_option_custom": {
+      "text": "अपनी पसंद",
+      "status": "machine"
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, one {# दिन में} other {# दिनों में}}",
       "status": "machine"
@@ -6038,12 +6198,28 @@
       "text": "नया",
       "status": "machine"
     },
+    "invite.links.qr_hint": {
+      "text": "जो भी यह कोड स्कैन करेगा, वह आपको संपर्क अनुरोध भेज सकेगा।",
+      "status": "machine"
+    },
     "invite.links.revoked": {
       "text": "लिंक रद्द कर दिया गया।",
       "status": "machine"
     },
     "invite.links.revoking": {
       "text": "रद्द किया जा रहा है...",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "QR कोड दिखाएँ",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "दिन",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "घंटे",
       "status": "machine"
     },
     "invite.links.unlimited_uses": {
@@ -6060,6 +6236,10 @@
     },
     "invite.links.uses_left": {
       "text": "{count, plural, one {# इस्तेमाल बाकी} other {# इस्तेमाल बाकी}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "अपनी पसंद",
       "status": "machine"
     },
     "invite.links.uses_option_one": {
@@ -8086,6 +8266,22 @@
       "text": "लागू किया जा रहा है",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "मेरे सभी संपर्क",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "केवल जिन्हें मैं चुनूँ",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "केवल आपके चुने हुए लोगों के संपर्क ({chosen} / {total})।",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "अब केवल आपके चुने हुए संपर्क। {privacy} में बदलें।",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "मेरे संपर्कों के संपर्क",
       "status": "machine"
@@ -8132,6 +8328,14 @@
     },
     "who_can_find_me.list.choose": {
       "text": "ग्रुप और चैनल चुनें",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "आपके अभी कोई संपर्क नहीं हैं।",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "संपर्क खोजें",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -8198,184 +8402,12 @@
       "text": "आपके फिर से ऑनलाइन होने पर लागू होगा।",
       "status": "machine"
     },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "इनके संपर्क मुझे ढूँढ सकते हैं",
+      "status": "machine"
+    },
     "who_can_find_me.title": {
       "text": "मुझे कौन ढूँढ सकता है",
-      "status": "machine"
-    },
-    "invite.contact.page.title": {
-      "text": "{name} को अपने संपर्कों में जोड़ें?",
-      "status": "machine"
-    },
-    "invite.contact.page.add": {
-      "text": "जोड़ें",
-      "status": "machine"
-    },
-    "invite.contact.page.not_now": {
-      "text": "अभी नहीं",
-      "status": "machine"
-    },
-    "invite.contact.page.already_title": {
-      "text": "{name} पहले से आपके संपर्कों में हैं",
-      "status": "machine"
-    },
-    "invite.contact.page.open_chat": {
-      "text": "चैट खोलें",
-      "status": "machine"
-    },
-    "invite.contact.page.own_title": {
-      "text": "यह आपका अपना आमंत्रण लिंक है",
-      "status": "machine"
-    },
-    "invite.contact.page.own_body": {
-      "text": "इसे उस व्यक्ति के साथ साझा करें जिसे आप जोड़ना चाहते हैं।",
-      "status": "machine"
-    },
-    "invite.contact.page.done": {
-      "text": "हो गया",
-      "status": "machine"
-    },
-    "invite.contact.page.add_failed": {
-      "text": "{name} को नहीं जोड़ा जा सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
-      "status": "machine"
-    },
-    "invite.contact.page.unnamed": {
-      "text": "इस व्यक्ति",
-      "status": "machine"
-    },
-    "chat.pending.waiting": {
-      "text": "{name} को आपके संदेश तब मिलेंगे जब उनका ऐप अगली बार ऑनलाइन होगा।",
-      "status": "machine"
-    },
-    "chat.pending.stale": {
-      "text": "{name} ने अभी तक जवाब नहीं दिया है। आप उनसे नया लिंक माँग सकते हैं।",
-      "status": "machine"
-    },
-    "chat.pending.call_disabled": {
-      "text": "{name} के जुड़ने पर उपलब्ध होगा।",
-      "status": "machine"
-    },
-    "contacts.add_back.control": {
-      "text": "संपर्कों में जोड़ें",
-      "status": "machine"
-    },
-    "contacts.add_back.sub": {
-      "text": "{name} को इस खाते की आपकी संपर्क सूची में वापस जोड़ता है।",
-      "status": "machine"
-    },
-    "contacts.add_back.action": {
-      "text": "जोड़ें",
-      "status": "machine"
-    },
-    "invite.contact.page.answer_failed": {
-      "text": "{name} तक नहीं पहुँच सके। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
-      "status": "machine"
-    },
-    "invite.links.show_qr": {
-      "text": "QR कोड दिखाएँ",
-      "status": "machine"
-    },
-    "invite.links.qr_hint": {
-      "text": "जो भी यह कोड स्कैन करेगा, वह आपको संपर्क अनुरोध भेज सकेगा।",
-      "status": "machine"
-    },
-    "contacts.scan_qr": {
-      "text": "QR कोड स्कैन करें",
-      "status": "machine"
-    },
-    "contacts.scan_qr.not_a_link": {
-      "text": "यह कोड Lakko लिंक नहीं है। कोई दूसरा कोड आज़माएँ।",
-      "status": "machine"
-    },
-    "invite.links.expires_option_custom": {
-      "text": "अपनी पसंद",
-      "status": "machine"
-    },
-    "invite.links.uses_option_custom": {
-      "text": "अपनी पसंद",
-      "status": "machine"
-    },
-    "invite.links.custom_expiry_amount": {
-      "text": "अवधि",
-      "status": "machine"
-    },
-    "invite.links.unit_hours": {
-      "text": "घंटे",
-      "status": "machine"
-    },
-    "invite.links.unit_days": {
-      "text": "दिन",
-      "status": "machine"
-    },
-    "invite.links.custom_uses_count": {
-      "text": "लोगों की संख्या",
-      "status": "machine"
-    },
-    "invite.links.error.custom_expiry": {
-      "text": "1 घंटे से 365 दिन तक की अवधि डालें।",
-      "status": "machine"
-    },
-    "invite.links.error.custom_uses": {
-      "text": "1 से {max} तक लोगों की संख्या डालें।",
-      "status": "machine"
-    },
-    "invite.contact.page.signed_out_title": {
-      "text": "{name} आपको Lakko पर आमंत्रित कर रहे हैं",
-      "status": "machine"
-    },
-    "invite.contact.page.about": {
-      "text": "Lakko एक मैसेंजर है जिसमें हर चैट और कॉल एंड-टू-एंड एन्क्रिप्टेड होती है।",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "खाता बनाएँ",
-      "status": "machine"
-    },
-    "invite.contact.page.have_account": {
-      "text": "मेरे पास पहले से खाता है",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_title": {
-      "text": "यह आमंत्रण लिंक अब काम नहीं करता",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "भेजने वाले से नया लिंक माँगें।",
-      "status": "machine"
-    },
-    "invite.links.edit": {
-      "text": "लिंक बदलें",
-      "status": "machine"
-    },
-    "invite.links.edit_title": {
-      "text": "लिंक की शर्तें",
-      "status": "machine"
-    },
-    "invite.links.edit_note": {
-      "text": "सहेजने पर नया लिंक बनता है। पुराना काम करना बंद कर देता है।",
-      "status": "machine"
-    },
-    "invite.links.delete": {
-      "text": "लिंक हटाएँ",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_title": {
-      "text": "यह लिंक हटाएँ?",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_body": {
-      "text": "जिसके पास यह पहले से है, वह इसका उपयोग नहीं कर पाएगा।",
-      "status": "machine"
-    },
-    "invite.links.deleted": {
-      "text": "लिंक हटा दिया गया।",
-      "status": "machine"
-    },
-    "invite.links.error.delete": {
-      "text": "लिंक नहीं हटाया जा सका। कनेक्शन जाँचें और फिर कोशिश करें।",
-      "status": "machine"
-    },
-    "invite.links.error.edit": {
-      "text": "लिंक सहेजा नहीं जा सका। कनेक्शन जाँचें और फिर कोशिश करें।",
       "status": "machine"
     }
   }

@@ -217,8 +217,9 @@ public enum class WritePurpose {
     /** A contact request: the person must have let this device find them. */
     CONTACT_REQUEST,
 
-    /** A reply to their own request (the 1:1 Welcome after an accept, the
-     *  ContactAck): their `reply` key first. */
+    /** The answer to their own request (the Welcome of an accept, the
+     *  ContactAck): their `reply` key, then a `contact` key, and nothing else.
+     *  A group key has nothing to do with answering a request. */
     REPLY,
 
     /** A Welcome into a group ([groupHex]). */
@@ -232,7 +233,7 @@ public enum class WritePurpose {
  *
  * - A contact request never uses `member`: a co-member the person hides from
  *   holds it, and it authorises only Welcomes (the ADR's residual).
- * - A reply prefers the person's `reply` key, then `contact`.
+ * - A reply is the person's `reply` key, then `contact`, and nothing else.
  * - A Welcome prefers `reply`, `contact`, then `member` of THAT group (the
  *   ADR-0050 re-admission of the person's new device), then anything that
  *   says the person lets this device find them.
@@ -282,6 +283,49 @@ public fun orderedWriteGrants(
     val out = LinkedHashSet<HeldGrantRef>()
     for (candidate in order) out.addAll(candidate())
     return out.toList()
+}
+
+/**
+ * The grants a contact request may use, out of [held], in the order they are
+ * tried: contact, each group, each channel, the found one. One class and
+ * scope may be held under several keys; each is listed, in [held]'s order.
+ */
+public fun <G> contactRequestGrantsInOrder(held: List<Pair<HeldGrantRef, G>>): List<G> =
+    orderedWriteGrants(held.map { it.first }, WritePurpose.CONTACT_REQUEST)
+        .flatMap { ref -> held.filter { it.first == ref }.map { it.second } }
+
+/**
+ * [grants] in order, then [proofless], which is asked only when no grant
+ * yielded an authorisation: a proofless write to a closed mailbox is answered
+ * as stored and dropped, so after a refused grant it would report a lost write
+ * as sent.
+ */
+public fun <A> withProoflessLast(grants: List<() -> A?>, proofless: () -> A?): List<() -> A?> {
+    var yielded = false
+    val tracked: List<() -> A?> = grants.map { grant ->
+        val tracking: () -> A? = {
+            val auth = grant()
+            if (auth != null) yielded = true
+            auth
+        }
+        tracking
+    }
+    val last: () -> A? = { if (yielded) null else proofless() }
+    return tracked + listOf(last)
+}
+
+/** Whether one of [candidates] passes [check], asked in order. A throw means
+ *  the question could not be asked and propagates. */
+public suspend fun <A> anyCandidateOpens(candidates: List<() -> A?>, check: suspend (A) -> Boolean): Boolean {
+    for (candidate in candidates) {
+        val auth = try {
+            candidate()
+        } catch (_: Throwable) {
+            null
+        } ?: continue
+        if (check(auth)) return true
+    }
+    return false
 }
 
 /** What [firstAcceptedWrite] ended with. */

@@ -5,7 +5,8 @@
 //!
 //! It travels over the owner's DeviceGroup, so a compromised own device or
 //! a corrupt journal row can craft it. Asserted: no panic, whatever decodes
-//! passes the canonical-form rule, and round-trip stability.
+//! passes the canonical-form rule, round-trip stability, and that a chosen
+//! contact is allowed exactly when the part as a whole is.
 
 #![no_main]
 
@@ -26,6 +27,13 @@ fuzz_target!(|data: &[u8]| {
         "the encoding must be canonical"
     );
     assert_eq!(decode_visibility(&recomposed).expect("round trip"), setting);
+    for id in &setting.chosen_contacts {
+        assert_eq!(
+            setting.allows_contact(id),
+            setting.allows_contacts_of_contacts(),
+            "a chosen contact follows the part"
+        );
+    }
     assert!(!visibility_is_newer(
         setting.updated_at_ms,
         setting.updated_at_ms

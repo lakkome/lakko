@@ -338,6 +338,18 @@ a:focus-visible {
   line-height: 14px;
   text-decoration: none;
 }
+.lk-rail a.lk-rail-item {
+  position: relative;
+}
+.lk-rail-badge {
+  position: absolute;
+  top: 2px;
+  right: 6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  font-size: 11px;
+}
 .lk-rail a.lk-rail-item:hover {
   background: var(--surface-hover);
   color: var(--surface-fg);

@@ -298,6 +298,15 @@ public data class PersistedGroup(
     /** ADR-0063 section 5 — the feed's contiguous-seen watermark, `null`
      *  when the feed has marked nothing contiguous yet. */
     val feedSeenThrough: Long? = null,
+    /**
+     * `docs/ux/second-device.md` section 2, "History is not news": the highest
+     * message id of this group the pairing history bundle carried. A row at
+     * or below it is never unread on this device, whatever read position the
+     * account's other devices hold. Local: it sends no read receipt and no
+     * read cursor. `null` when no bundle brought this group. Every writer of
+     * the log must carry it through.
+     */
+    val syncedThroughMessageId: Long? = null,
 )
 
 /**

@@ -16,9 +16,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use crate::scoped_discovery::{FfiGroupsForm, FfiScopeId, FfiVisibilityMode, FfiVisibilitySetting};
+use crate::scoped_discovery::{
+    FfiContactsForm, FfiGroupsForm, FfiScopeId, FfiVisibilityMode, FfiVisibilitySetting,
+};
 use crate::FfiError;
-use lakko_contacts::visibility::{ScopeId as RustScopeId, VisibilitySetting as RustSetting};
+use lakko_contacts::visibility::{
+    contact_account_id, ScopeId as RustScopeId, VisibilityError, VisibilitySetting as RustSetting,
+    CONTACT_ACCOUNT_ID_LEN,
+};
 use lakko_ui_rules::av_align::{
     av_align_capability as rust_av_align_capability, AvAlign as RustAvAlign,
     AvAudioPlan as RustAvAudioPlan, AvAudioReading as RustAvAudioReading,
@@ -74,7 +79,9 @@ use lakko_ui_rules::speaking::{
     SPEAKING_LEVEL, SPEAKING_LEVEL_MAX, SPEAKING_LEVEL_MIN,
 };
 use lakko_ui_rules::visibility::{
-    choose_mode as rust_choose_mode, exclude_scope_under_all as rust_exclude_scope_under_all,
+    choose_mode as rust_choose_mode, exclude_contact_under_all as rust_exclude_contact_under_all,
+    exclude_scope_under_all as rust_exclude_scope_under_all,
+    set_contact_chosen as rust_set_contact_chosen, set_contacts_form as rust_set_contacts_form,
     set_contacts_of_contacts as rust_set_contacts_of_contacts, set_groups as rust_set_groups,
     set_groups_form as rust_set_groups_form, set_scope_chosen as rust_set_scope_chosen,
 };
@@ -334,6 +341,10 @@ pub enum InfoSection {
     /// sends nothing (UX `conversation-info.md` 2.1). Appended last: uniffi
     /// decodes by ordinal.
     AddContact,
+    /// `Their contacts can find me`, the per-contact switch of "Who can find
+    /// me" (UX `who-can-find-me.md` 5.1). Appended last: uniffi decodes by
+    /// ordinal.
+    TheirContactsCanFindMe,
 }
 
 impl From<RustInfoSection> for InfoSection {
@@ -360,6 +371,7 @@ impl From<RustInfoSection> for InfoSection {
             RustInfoSection::Unsubscribe => Self::Unsubscribe,
             RustInfoSection::ChannelMembers => Self::ChannelMembers,
             RustInfoSection::AddContact => Self::AddContact,
+            RustInfoSection::TheirContactsCanFindMe => Self::TheirContactsCanFindMe,
         }
     }
 }
@@ -372,6 +384,10 @@ pub struct PersonInfoCapabilities {
     /// The person is on this device's contact list. `false` only for a
     /// person the viewer removed, whose one-to-one remains.
     pub is_contact: bool,
+    /// Contacts of my contacts is on in "Who can find me" (UX
+    /// `who-can-find-me.md` 5.1), under either form.
+    #[uniffi(default = false)]
+    pub contacts_of_contacts_on: bool,
 }
 
 impl From<PersonInfoCapabilities> for RustPersonInfoCapabilities {
@@ -379,6 +395,7 @@ impl From<PersonInfoCapabilities> for RustPersonInfoCapabilities {
         Self {
             membership_ended: c.membership_ended,
             is_contact: c.is_contact,
+            contacts_of_contacts_on: c.contacts_of_contacts_on,
         }
     }
 }
@@ -680,6 +697,57 @@ pub fn set_groups_visible(setting: FfiVisibilitySetting, on: bool) -> FfiVisibil
 #[must_use]
 pub fn set_groups_form(setting: FfiVisibilitySetting, form: FfiGroupsForm) -> FfiVisibilitySetting {
     rust_set_groups_form(&setting.into(), form.into()).into()
+}
+
+/// All my contacts, or only the chosen ones. No effect unless part 2.1 is
+/// on.
+#[uniffi::export]
+#[must_use]
+pub fn set_contacts_form(
+    setting: FfiVisibilitySetting,
+    form: FfiContactsForm,
+) -> FfiVisibilitySetting {
+    rust_set_contacts_form(&setting.into(), form.into()).into()
+}
+
+fn contact_id(id: &[u8]) -> Result<[u8; CONTACT_ACCOUNT_ID_LEN], FfiError> {
+    Ok(contact_account_id(id)?)
+}
+
+/// Exclude one contact while "all" is on: the form becomes "only the ones I
+/// choose" with every other contact in `all_contact_ids` chosen.
+///
+/// # Errors
+///
+/// [`FfiError::Visibility`] `contactIdLength` / `tooManyChosenContacts`.
+#[uniffi::export]
+pub fn exclude_contact_under_all(
+    setting: FfiVisibilitySetting,
+    all_contact_ids: Vec<Vec<u8>>,
+    excluded: Vec<u8>,
+) -> Result<FfiVisibilitySetting, FfiError> {
+    let all = all_contact_ids
+        .iter()
+        .map(|id| contact_account_id(id))
+        .collect::<Result<Vec<_>, VisibilityError>>()?;
+    let excluded = contact_id(&excluded)?;
+    let s: RustSetting = setting.into();
+    Ok(rust_exclude_contact_under_all(&s, &all, &excluded)?.into())
+}
+
+/// Choose or unchoose one contact in the chosen list.
+///
+/// # Errors
+///
+/// [`FfiError::Visibility`] `contactIdLength` / `tooManyChosenContacts`.
+#[uniffi::export]
+pub fn set_contact_chosen(
+    setting: FfiVisibilitySetting,
+    account_id: Vec<u8>,
+    on: bool,
+) -> Result<FfiVisibilitySetting, FfiError> {
+    let id = contact_id(&account_id)?;
+    Ok(rust_set_contact_chosen(&setting.into(), &id, on)?.into())
 }
 
 /// Exclude one group or channel while "all" is on: the form becomes "only
@@ -1838,6 +1906,42 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn contact_transitions_cross_the_boundary_intact() {
+        use crate::scoped_discovery::{allows_contact, default_visibility_setting};
+        let s = default_visibility_setting();
+        let id = |b: u8| vec![b; 16];
+        let chosen = set_contacts_form(s.clone(), FfiContactsForm::Chosen);
+        assert_eq!(chosen.contacts_form, FfiContactsForm::Chosen);
+        // The memory of the form crosses too.
+        let nobody = choose_visibility_mode(chosen, FfiVisibilityMode::Nobody);
+        let back = choose_visibility_mode(nobody, FfiVisibilityMode::Some);
+        assert_eq!(back.contacts_form, FfiContactsForm::Chosen);
+
+        let excluded = exclude_contact_under_all(s.clone(), vec![id(1), id(2)], id(2)).unwrap();
+        assert_eq!(excluded.contacts_form, FfiContactsForm::Chosen);
+        assert_eq!(excluded.chosen_contacts, vec![id(1)]);
+        assert!(!allows_contact(excluded.clone(), id(2)));
+        let more = set_contact_chosen(excluded, id(3), true).unwrap();
+        assert_eq!(more.chosen_contacts, vec![id(1), id(3)]);
+        assert_eq!(
+            set_contact_chosen(more, id(1), false)
+                .unwrap()
+                .chosen_contacts,
+            vec![id(3)]
+        );
+        for refused in [
+            set_contact_chosen(s.clone(), vec![1; 15], true),
+            exclude_contact_under_all(s.clone(), vec![vec![1; 17]], id(1)),
+            exclude_contact_under_all(s, vec![id(1)], vec![]),
+        ] {
+            assert!(
+                matches!(&refused, Err(FfiError::Visibility(m)) if m.starts_with("contactIdLength")),
+                "{refused:?}"
+            );
+        }
+    }
+
     fn row(id: &str, kind: ConversationKind, at: Option<i64>) -> ConversationRow {
         ConversationRow {
             id: id.to_string(),
@@ -1898,15 +2002,24 @@ mod tests {
         let ended = person_info_sections(PersonInfoCapabilities {
             membership_ended: true,
             is_contact: true,
+            contacts_of_contacts_on: false,
         });
         assert!(ended.contains(&InfoSection::DeleteChat));
         assert!(!ended.contains(&InfoSection::Call));
         let removed = person_info_sections(PersonInfoCapabilities {
             membership_ended: false,
             is_contact: false,
+            contacts_of_contacts_on: true,
         });
         assert!(removed.contains(&InfoSection::AddContact));
         assert!(!removed.contains(&InfoSection::RemoveContact));
+        assert!(!removed.contains(&InfoSection::TheirContactsCanFindMe));
+        assert!(person_info_sections(PersonInfoCapabilities {
+            membership_ended: false,
+            is_contact: true,
+            contacts_of_contacts_on: true,
+        })
+        .contains(&InfoSection::TheirContactsCanFindMe));
         assert!(channel_info_sections(ChannelInfoCapabilities {
             is_publisher: false,
             is_subscriber: true,

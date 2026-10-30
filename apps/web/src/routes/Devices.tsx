@@ -39,6 +39,8 @@ import { useChats } from "../chat/ChatContext";
 import { ownKeysB64Of } from "../profile/own-key";
 import { deviceIdB64Url } from "../auth/session-device";
 import { useDeviceRemoval } from "../devices/removal-runtime";
+import { reloadWhenRosterChanges } from "../devices/roster-reload";
+import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { removalRowState } from "../devices/removal";
 import { REMOVE_DEVICE_COPY, ROTATE_COPY, revokeFailureLine } from "../devices/removal-copy";
 import { ModalLayer } from "../ui/ModalLayer";
@@ -326,6 +328,7 @@ function DevicesListView(props: {
   // ADR-0074 section 2.3: removing a device is one operation with an owed
   // record (`devices/removal.ts`); the sheet below starts it.
   const removal = useDeviceRemoval();
+  const sync = useDeviceGroupSync();
   type State =
     | { kind: "loading" }
     | { kind: "ready"; devices: readonly DeviceListItem[] }
@@ -425,12 +428,19 @@ function DevicesListView(props: {
   /** The owed step waits on the person's passkey (`Finish removing`). */
   const needsPerson = (device: DeviceListItem): boolean => rowState(device) === "needs-person";
 
-  async function load(): Promise<void> {
-    setState({ kind: "loading" });
+  // The roster can move while a read is running: only the newest read lands.
+  let loadRun = 0;
+  /** Read the list. `quiet`: a list already on screen stays there meanwhile,
+   *  and stays if the read fails (the person asked for nothing). */
+  async function load(options: { readonly quiet?: boolean } = {}): Promise<void> {
+    const run = ++loadRun;
+    const quiet = options.quiet === true && state().kind === "ready";
+    if (!quiet) setState({ kind: "loading" });
     try {
       const deviceKey = await getDeviceKey(props.accountIdB64);
+      if (run !== loadRun) return;
       if (deviceKey === null) {
-        setState({ kind: "error", message: noDeviceKey });
+        if (!quiet) setState({ kind: "error", message: noDeviceKey });
         return;
       }
       const list = await listDevices({
@@ -438,9 +448,12 @@ function DevicesListView(props: {
         accountIdB64: props.accountIdB64,
         deviceKey,
       });
+      if (run !== loadRun) return;
       setState({ kind: "ready", devices: list.devices });
     } catch (err) {
-      setState({ kind: "error", message: failureText(err, "settings.devices.error.load") });
+      if (run !== loadRun) return;
+      const message = failureText(err, "settings.devices.error.load");
+      if (!quiet) setState({ kind: "error", message });
     }
   }
 
@@ -756,6 +769,10 @@ function DevicesListView(props: {
       { defer: true },
     ),
   );
+  // Any commit that changed the account's devices, made here on any route (the
+  // code route's prompt lives in the app shell) or received: the list follows
+  // the roster (docs/ux/second-device.md section 3).
+  reloadWhenRosterChanges(sync.deviceRoster, () => void load({ quiet: true }));
   // A record that finished elsewhere (the whole-session runtime) removes a
   // row: read the list again when the set of records changes.
   createEffect(

@@ -33,7 +33,7 @@
       "security_critical": true
     },
     "auth.brand.foot": {
-      "text": "Open source. No phone number required.",
+      "text": "Communication your way. No phone number required.",
       "comment": "Small line at the bottom of the brand panel."
     },
     "auth.brand.tagline": {
@@ -4155,6 +4155,10 @@
       "comment": "Button that accepts an incoming contact request (the person becomes a trusted contact).",
       "security_critical": true
     },
+    "contacts.request.accept_failed": {
+      "text": "Couldn't accept. Try again.",
+      "comment": "Shown under an incoming contact request when accepting it failed and nothing happened; the request stays and Accept works again."
+    },
     "contacts.request.decline": {
       "text": "Decline",
       "comment": "Button that declines an incoming contact request."
@@ -4203,6 +4207,14 @@
       "text": "Verify safety number",
       "comment": "Title of the card on a contact's page that shows the safety number to compare.",
       "security_critical": true
+    },
+    "contacts.scan_qr": {
+      "text": "Scan QR code",
+      "comment": "Contacts action: opens the camera to scan a Lakko link shown as a QR code, such as someone's invite link."
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "This code is not a Lakko link. Try another code.",
+      "comment": "Shown on the scanner when the scanned QR code is not a Lakko invite, group or call link."
     },
     "device_link.code.enter_six_digits": {
       "text": "Enter the six digits your other device shows.",
@@ -6148,6 +6160,10 @@
       "text": "This link is no longer valid. Ask the person for a new one.",
       "comment": "Contact invite page: the link was revoked or expired since the page loaded."
     },
+    "invite.contact.page.about": {
+      "text": "Lakko is a messenger where every chat and call is end-to-end encrypted.",
+      "comment": "One line under the inviter on the contact invite page for a visitor who is not signed in, saying what Lakko is."
+    },
     "invite.contact.page.add": {
       "text": "Add",
       "comment": "Primary button on the contact invite page: makes the inviter a contact."
@@ -6164,9 +6180,25 @@
       "text": "Could not reach {name}. Check your connection and try again.",
       "comment": "Line under Open chat on the invite page of a person already in the contacts, when the answer to the link could not be sent for a network reason. {name} as in the heading."
     },
+    "invite.contact.page.create_account": {
+      "text": "Create an account",
+      "comment": "Primary button on the contact invite page for a visitor who is not signed in."
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Ask the person who sent it for a new one.",
+      "comment": "Line under 'This invite link no longer works'."
+    },
+    "invite.contact.page.dead_title": {
+      "text": "This invite link no longer works",
+      "comment": "Contact invite page, visitor not signed in, when the link was revoked, expired, used up, is unknown or is damaged. The inviter's name is not shown."
+    },
     "invite.contact.page.done": {
       "text": "Done",
       "comment": "Button that closes the contact invite page."
+    },
+    "invite.contact.page.have_account": {
+      "text": "I already have an account",
+      "comment": "Secondary button on the contact invite page for a visitor who is not signed in: goes to sign-in."
     },
     "invite.contact.page.not_now": {
       "text": "Not now",
@@ -6183,6 +6215,10 @@
     "invite.contact.page.own_title": {
       "text": "This is your own invite link",
       "comment": "Contact invite page opened by the person who made the link."
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} invites you to Lakko",
+      "comment": "Title of the contact invite page for a visitor who is not signed in. {name} is the inviter's display name, else @username, else the invite.contact.page.unnamed text."
     },
     "invite.contact.page.title": {
       "text": "Add {name} to your contacts?",
@@ -6351,10 +6387,46 @@
       "text": "Created {date}",
       "comment": "One of the facts under a link in your list of invite links. {date} is a short date and time formatted for the interface language, such as \"16 Sep, 14:32\"."
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "Period",
+      "comment": "Number field shown when Expires is Custom: how many hours or days the link works."
+    },
+    "invite.links.custom_uses_count": {
+      "text": "Number of people",
+      "comment": "Number field shown when Uses is Custom: how many people may use the link."
+    },
+    "invite.links.delete": {
+      "text": "Delete link",
+      "comment": "Accessible name of the trash button on an invite link."
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Anyone who already has it will no longer be able to use it.",
+      "comment": "Body of the confirmation before deleting an invite link that was copied or used."
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "Delete this link?",
+      "comment": "Confirmation before deleting an invite link that was copied or used."
+    },
+    "invite.links.deleted": {
+      "text": "Link deleted.",
+      "comment": "Notice after an invite link was deleted."
+    },
     "invite.links.desc": {
       "text": "Anyone who opens one of your links can send you a contact request until it expires or is used up.",
       "comment": "Description of the invite links card: a link lets whoever holds it reach you, so it should be shared with care.",
       "security_critical": true
+    },
+    "invite.links.edit": {
+      "text": "Edit link",
+      "comment": "Accessible name of the pencil button on an invite link nobody can hold yet (never copied, never used): opens its terms."
+    },
+    "invite.links.edit_note": {
+      "text": "Saving makes a new link. The old one stops working.",
+      "comment": "One line on the invite link terms form."
+    },
+    "invite.links.edit_title": {
+      "text": "Link terms",
+      "comment": "Heading of the form that changes an invite link's label, expiry and number of people. Saving makes a new link and removes the old one."
     },
     "invite.links.empty": {
       "text": "No active links.",
@@ -6363,6 +6435,22 @@
     "invite.links.error.copy": {
       "text": "Could not copy the link.",
       "comment": "Copying an invite link to the clipboard failed."
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "Enter a period from 1 hour to 365 days.",
+      "comment": "Shown under the custom period of a new invite link when the value is out of range."
+    },
+    "invite.links.error.custom_uses": {
+      "text": "Enter a number of people from 1 to {max}.",
+      "comment": "Shown under the custom number of people of a new invite link when the value is out of range. {max} is the largest allowed number, formatted for the interface language."
+    },
+    "invite.links.error.delete": {
+      "text": "Could not delete the link. Check your connection and try again.",
+      "comment": "Shown when deleting an invite link failed."
+    },
+    "invite.links.error.edit": {
+      "text": "Could not save the link. Check your connection and try again.",
+      "comment": "Shown when saving new terms for an invite link failed; the old link still works."
     },
     "invite.links.error.load": {
       "text": "Could not load your invite links. Try again.",
@@ -6400,6 +6488,10 @@
       "text": "Expires in {count}m",
       "comment": "Compact fact under an invite link in your list; {count} is whole minutes. Keep it short."
     },
+    "invite.links.expires_option_custom": {
+      "text": "Custom",
+      "comment": "Option of the Expires field of the new-invite-link form: opens a number field and a unit choice."
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, one {In # day} other {In # days}}",
       "comment": "Option of the Expires field."
@@ -6436,6 +6528,10 @@
       "text": "New",
       "comment": "Small badge on the invite link you just created, in your list of invite links."
     },
+    "invite.links.qr_hint": {
+      "text": "Whoever scans this code can send you a contact request.",
+      "comment": "Under the QR code of an invite link."
+    },
     "invite.links.revoked": {
       "text": "Link revoked.",
       "comment": "An invite link was withdrawn."
@@ -6443,6 +6539,18 @@
     "invite.links.revoking": {
       "text": "Revoking...",
       "comment": "An invite link is being revoked."
+    },
+    "invite.links.show_qr": {
+      "text": "Show QR code",
+      "comment": "Button on a link in your list of invite links: shows the link as a QR code to scan."
+    },
+    "invite.links.unit_days": {
+      "text": "Days",
+      "comment": "Unit choice beside the custom period of a new invite link."
+    },
+    "invite.links.unit_hours": {
+      "text": "Hours",
+      "comment": "Unit choice beside the custom period of a new invite link."
     },
     "invite.links.unlimited_uses": {
       "text": "Unlimited uses",
@@ -6459,6 +6567,10 @@
     "invite.links.uses_left": {
       "text": "{count, plural, one {# use left} other {# uses left}}",
       "comment": "One of the facts under a link in your list of invite links."
+    },
+    "invite.links.uses_option_custom": {
+      "text": "Custom",
+      "comment": "Option of the Uses field of the new-invite-link form: opens a number field."
     },
     "invite.links.uses_option_one": {
       "text": "One person",
@@ -8858,6 +8970,26 @@
       "text": "Applying",
       "comment": "Accessible name of the small spinner beside Who can find me while a change is being applied."
     },
+    "who_can_find_me.contacts.all": {
+      "text": "All my contacts",
+      "comment": "Choice under Contacts of my contacts: the contacts of every contact count.",
+      "security_critical": true
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "Only the ones I choose",
+      "comment": "Choice under Contacts of my contacts: only the contacts of the people switched on in the list count. Also the title of that list.",
+      "security_critical": true
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "Only the contacts of the people you choose ({chosen} of {total}).",
+      "comment": "Line under Contacts of my contacts when only chosen contacts count. {chosen} is how many are on, {total} how many contacts the person has.",
+      "security_critical": true
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "Now only the contacts you choose. Change in {privacy}.",
+      "comment": "Shown once after turning off Their contacts can find me while all contacts counted: the setting switched to chosen ones. {privacy} is a link to Settings > Privacy and reads Privacy.",
+      "security_critical": true
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "Contacts of my contacts",
       "comment": "Switch under Some people: people the person's contacts have added can find them.",
@@ -8915,6 +9047,14 @@
     "who_can_find_me.list.choose": {
       "text": "Choose groups and channels",
       "comment": "iOS row under 'Only the ones I choose' in Settings > Privacy > Who can find me; opens the list of groups and channels to switch on one by one."
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "You have no contacts yet.",
+      "comment": "Shown in the list of contacts for Who can find me when the person has none."
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "Search contacts",
+      "comment": "Placeholder and accessible name of the search field in the contacts list of Who can find me."
     },
     "who_can_find_me.list.empty": {
       "text": "You're not in any groups or channels yet.",
@@ -8989,118 +9129,15 @@
       "text": "Will apply when you're back online.",
       "comment": "Status line on Who can find me when a change was made offline."
     },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "Their contacts can find me",
+      "comment": "Switch on a contact's screen: people this contact has added can find the person by username or name.",
+      "security_critical": true
+    },
     "who_can_find_me.title": {
       "text": "Who can find me",
       "comment": "Title of the Settings > Privacy screen that decides who can find the person by username or name and ask to be their contact.",
       "security_critical": true
-    },
-    "invite.links.show_qr": {
-      "text": "Show QR code",
-      "comment": "Button on a link in your list of invite links: shows the link as a QR code to scan."
-    },
-    "invite.links.qr_hint": {
-      "text": "Whoever scans this code can send you a contact request.",
-      "comment": "Under the QR code of an invite link."
-    },
-    "contacts.scan_qr": {
-      "text": "Scan QR code",
-      "comment": "Contacts action: opens the camera to scan a Lakko link shown as a QR code, such as someone's invite link."
-    },
-    "contacts.scan_qr.not_a_link": {
-      "text": "This code is not a Lakko link. Try another code.",
-      "comment": "Shown on the scanner when the scanned QR code is not a Lakko invite, group or call link."
-    },
-    "invite.links.expires_option_custom": {
-      "text": "Custom",
-      "comment": "Option of the Expires field of the new-invite-link form: opens a number field and a unit choice."
-    },
-    "invite.links.uses_option_custom": {
-      "text": "Custom",
-      "comment": "Option of the Uses field of the new-invite-link form: opens a number field."
-    },
-    "invite.links.custom_expiry_amount": {
-      "text": "Period",
-      "comment": "Number field shown when Expires is Custom: how many hours or days the link works."
-    },
-    "invite.links.unit_hours": {
-      "text": "Hours",
-      "comment": "Unit choice beside the custom period of a new invite link."
-    },
-    "invite.links.unit_days": {
-      "text": "Days",
-      "comment": "Unit choice beside the custom period of a new invite link."
-    },
-    "invite.links.custom_uses_count": {
-      "text": "Number of people",
-      "comment": "Number field shown when Uses is Custom: how many people may use the link."
-    },
-    "invite.links.error.custom_expiry": {
-      "text": "Enter a period from 1 hour to 365 days.",
-      "comment": "Shown under the custom period of a new invite link when the value is out of range."
-    },
-    "invite.links.error.custom_uses": {
-      "text": "Enter a number of people from 1 to {max}.",
-      "comment": "Shown under the custom number of people of a new invite link when the value is out of range. {max} is the largest allowed number, formatted for the interface language."
-    },
-    "invite.contact.page.signed_out_title": {
-      "text": "{name} invites you to Lakko",
-      "comment": "Title of the contact invite page for a visitor who is not signed in. {name} is the inviter's display name, else @username, else the invite.contact.page.unnamed text."
-    },
-    "invite.contact.page.about": {
-      "text": "Lakko is a messenger where every chat and call is end-to-end encrypted.",
-      "comment": "One line under the inviter on the contact invite page for a visitor who is not signed in, saying what Lakko is."
-    },
-    "invite.contact.page.create_account": {
-      "text": "Create an account",
-      "comment": "Primary button on the contact invite page for a visitor who is not signed in."
-    },
-    "invite.contact.page.have_account": {
-      "text": "I already have an account",
-      "comment": "Secondary button on the contact invite page for a visitor who is not signed in: goes to sign-in."
-    },
-    "invite.contact.page.dead_title": {
-      "text": "This invite link no longer works",
-      "comment": "Contact invite page, visitor not signed in, when the link was revoked, expired, used up, is unknown or is damaged. The inviter's name is not shown."
-    },
-    "invite.contact.page.dead_body": {
-      "text": "Ask the person who sent it for a new one.",
-      "comment": "Line under 'This invite link no longer works'."
-    },
-    "invite.links.edit": {
-      "text": "Edit link",
-      "comment": "Accessible name of the pencil button on an invite link nobody can hold yet (never copied, never used): opens its terms."
-    },
-    "invite.links.edit_title": {
-      "text": "Link terms",
-      "comment": "Heading of the form that changes an invite link's label, expiry and number of people. Saving makes a new link and removes the old one."
-    },
-    "invite.links.edit_note": {
-      "text": "Saving makes a new link. The old one stops working.",
-      "comment": "One line on the invite link terms form."
-    },
-    "invite.links.delete": {
-      "text": "Delete link",
-      "comment": "Accessible name of the trash button on an invite link."
-    },
-    "invite.links.delete_confirm_title": {
-      "text": "Delete this link?",
-      "comment": "Confirmation before deleting an invite link that was copied or used."
-    },
-    "invite.links.delete_confirm_body": {
-      "text": "Anyone who already has it will no longer be able to use it.",
-      "comment": "Body of the confirmation before deleting an invite link that was copied or used."
-    },
-    "invite.links.deleted": {
-      "text": "Link deleted.",
-      "comment": "Notice after an invite link was deleted."
-    },
-    "invite.links.error.delete": {
-      "text": "Could not delete the link. Check your connection and try again.",
-      "comment": "Shown when deleting an invite link failed."
-    },
-    "invite.links.error.edit": {
-      "text": "Could not save the link. Check your connection and try again.",
-      "comment": "Shown when saving new terms for an invite link failed; the old link still works."
     }
   }
 }

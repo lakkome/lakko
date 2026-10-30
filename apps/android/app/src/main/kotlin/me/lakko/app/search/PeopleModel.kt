@@ -99,6 +99,9 @@ public data class PersonResult(
      *  sealed to the key it names once it verifies against the person's
      *  account key; without it (and without a grant) nothing is written. */
     val mailboxBindingB64: String? = null,
+    /** [grantWireB64] is a grant the DS reach check just passed, not one this
+     *  device merely kept. */
+    val grantChecked: Boolean = false,
 )
 
 /**
@@ -113,6 +116,26 @@ public fun shownUsername(verified: String?, reach: PersonReach): String? =
 public fun canAddContact(person: PersonResult): Boolean =
     (person.reach == PersonReach.OPEN || person.reach == PersonReach.GRANT) && person.accountIdHex != null
 
+/**
+ * What the Delivery Service said about the grants kept for a person (UX
+ * section 6.1, "A kept grant is checked before it is offered"). A person this
+ * device knows from a group may have left it, and then the grant it kept no
+ * longer reaches them. No answer yet: the row is the name alone.
+ */
+public sealed interface KeptGrantCheck {
+    /** A verdict: this grant passed. It is the one the row offers; the send
+     *  tries every other grant held for the person if it no longer does. */
+    public data class Live(val wireB64: String) : KeptGrantCheck
+
+    /** A verdict: every kept grant was refused. */
+    public data object Dead : KeptGrantCheck
+
+    /** Not a verdict: the check of this grant could not be made (a network
+     *  failure). The row offers it as it would have without a check, the send
+     *  checks again, and the next text in the field asks again. */
+    public data class Unreached(val wireB64: String) : KeptGrantCheck
+}
+
 /** A person this device already knows: a contact, or a member of one of its
  *  groups or channels whose profile it holds. */
 public data class LocalCandidate(
@@ -125,15 +148,36 @@ public data class LocalCandidate(
     val verifiedUsername: String?,
     val isContact: Boolean,
     val accountIdHex: String?,
-    /** The widest grant kept for them (standard base64 of its wire), or `null`. */
-    val keptGrantWireB64: String?,
+    /** Every grant kept for them, standard base64 of each wire, in the order
+     *  they are tried: contact, each group, each channel, the found one.
+     *  Never a bare `member` grant. Secret. */
+    val keptGrantWiresB64: List<String>,
+    /** What the Delivery Service said about those grants, if it has. */
+    val keptGrantCheck: KeptGrantCheck? = null,
 )
 
-/** A local candidate as a result, with its reach worked out. */
+/** Each candidate with what the Delivery Service said about its grants, the
+ *  step before the local match. */
+public fun withKeptGrantChecks(
+    candidates: List<LocalCandidate>,
+    checks: Map<String, KeptGrantCheck>,
+): List<LocalCandidate> = candidates.map { it.copy(keptGrantCheck = checks[it.keyHex]) }
+
+/**
+ * A local candidate as a result, with its reach worked out. A kept grant
+ * counts only once the Delivery Service answered for it: with no answer yet,
+ * or with every grant refused, the person is a name and nothing more.
+ */
 public fun localResult(c: LocalCandidate, name: String): PersonResult {
+    val check = c.keptGrantCheck
+    val wire = when (check) {
+        is KeptGrantCheck.Live -> check.wireB64
+        is KeptGrantCheck.Unreached -> check.wireB64
+        KeptGrantCheck.Dead, null -> null
+    }
     val reach = when {
         c.isContact -> PersonReach.CONTACT
-        c.keptGrantWireB64 != null -> PersonReach.GRANT
+        wire != null -> PersonReach.GRANT
         else -> PersonReach.NONE
     }
     return PersonResult(
@@ -143,7 +187,8 @@ public fun localResult(c: LocalCandidate, name: String): PersonResult {
         name = name,
         username = shownUsername(c.verifiedUsername, reach),
         reach = reach,
-        grantWireB64 = if (reach == PersonReach.GRANT) c.keptGrantWireB64 else null,
+        grantWireB64 = if (reach == PersonReach.GRANT) wire else null,
+        grantChecked = reach == PersonReach.GRANT && check is KeptGrantCheck.Live,
     )
 }
 
@@ -176,10 +221,31 @@ public fun localPeople(
 }
 
 /**
+ * Who the Delivery Service is asked about for this text: each candidate that
+ * holds a grant and matches it, whatever was said before. An answer holds for
+ * the text it was asked for: a person may have left a group, or come back,
+ * since (`docs/ux/who-can-find-me.md` section 6.1). A contact is never asked
+ * about. The match is [localPeople]'s, run as if the grant had passed, because
+ * a person this account may find also matches by username.
+ */
+public fun keptGrantsToCheck(
+    candidates: List<LocalCandidate>,
+    query: String,
+    normalize: Normalize,
+    ownKeyHex: String?,
+): List<LocalCandidate> {
+    val holding = candidates.filter { c -> !c.isContact && c.keptGrantWiresB64.isNotEmpty() }
+    val asIfLive = holding.map { it.copy(keptGrantCheck = KeptGrantCheck.Live(it.keptGrantWiresB64.first())) }
+    val matching = localPeople(asIfLive, query, normalize, ownKeyHex).mapTo(HashSet()) { it.keyHex }
+    return holding.filter { it.keyHex in matching }
+}
+
+/**
  * Merge result lists into one, keyed on the account key: the strongest reach
  * wins, the first list's name is kept (the local one, which respects a
  * rename), and a username is kept from whichever list verified one - then
- * gated again by the merged reach. The own account never appears.
+ * gated again by the merged reach. Between two grants, the one that passed a
+ * check wins. The own account never appears.
  */
 public fun mergePeople(lists: List<List<PersonResult>>, ownKeyHex: String?): List<PersonResult> {
     val byKey = LinkedHashMap<String, PersonResult>()
@@ -193,6 +259,7 @@ public fun mergePeople(lists: List<List<PersonResult>>, ownKeyHex: String?): Lis
             }
             val stronger = if (p.reach.rank > held.reach.rank) p else held
             val reach = stronger.reach
+            val checked = listOf(held, p).firstOrNull { it.grantChecked && it.grantWireB64 != null }
             byKey[p.keyHex] = PersonResult(
                 keyB64 = held.keyB64,
                 keyHex = held.keyHex,
@@ -201,11 +268,12 @@ public fun mergePeople(lists: List<List<PersonResult>>, ownKeyHex: String?): Lis
                 username = shownUsername(held.username ?: p.username, reach),
                 reach = reach,
                 grantWireB64 = if (reach == PersonReach.GRANT) {
-                    stronger.grantWireB64 ?: held.grantWireB64 ?: p.grantWireB64
+                    checked?.grantWireB64 ?: stronger.grantWireB64 ?: held.grantWireB64 ?: p.grantWireB64
                 } else {
                     null
                 },
                 mailboxBindingB64 = held.mailboxBindingB64 ?: p.mailboxBindingB64,
+                grantChecked = reach == PersonReach.GRANT && checked != null,
             )
         }
     }
@@ -256,6 +324,14 @@ public fun searchStateMessage(state: PeopleSearchState): UiText? = when (state) 
     PeopleSearchState.ALLOWANCE_USED -> SEARCH_OUT_OF_SEARCHES
     else -> null
 }
+
+/**
+ * The line under the rows of the People part. "No one found" is about the
+ * network half, and under a person who stands there it would contradict the
+ * row above it, so it is said only when no person row stands.
+ */
+public fun peopleSectionMessage(state: PeopleSearchState, personRows: Int): UiText? =
+    searchStateMessage(state).takeUnless { state == PeopleSearchState.NOT_FOUND && personRows > 0 }
 
 /** Lower-case hex of a byte string. */
 public fun searchHex(bytes: ByteArray): String {

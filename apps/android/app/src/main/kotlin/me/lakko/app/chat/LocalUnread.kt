@@ -28,27 +28,43 @@ package me.lakko.app.chat
  * flag is flipped from the main thread.
  */
 internal class LocalUnreadCounter {
-    private data class Entry(val count: Int, val onScreen: Boolean, val viewedThisSession: Boolean)
+    /** [counted] holds the ids, not a number: a row a pairing bundle turns
+     *  out to carry leaves the count by id ([onSyncedThrough]). */
+    private data class Entry(val counted: Set<Long>, val onScreen: Boolean, val viewedThisSession: Boolean)
 
     private val lock = Any()
     private val entries = HashMap<String, Entry>()
 
-    /** [incoming] chat messages were applied for [groupIdHex]. Ignored while it is on screen. */
-    fun onIncomingApplied(groupIdHex: String, incoming: Int) {
-        if (incoming <= 0) return
+    /**
+     * Incoming chat messages [messageIds] were applied for [groupIdHex].
+     * Ignored while it is on screen, and for an id at or below the group's
+     * pairing-history floor [syncedThrough] ("History is not news").
+     */
+    fun onIncomingApplied(groupIdHex: String, messageIds: List<Long>, syncedThrough: Long? = null) {
+        val counted = messageIds.filter { syncedThrough == null || it > syncedThrough }
+        if (counted.isEmpty()) return
         synchronized(lock) {
-            val current = entries[groupIdHex] ?: Entry(0, onScreen = false, viewedThisSession = false)
+            val current = entries[groupIdHex] ?: Entry(emptySet(), onScreen = false, viewedThisSession = false)
             if (current.onScreen) return
-            entries[groupIdHex] = current.copy(count = current.count + incoming)
+            entries[groupIdHex] = current.copy(counted = current.counted + counted)
+        }
+    }
+
+    /** A pairing bundle reached [floor] in [groupIdHex]: a row counted before
+     *  the bundle came, that the bundle also carried, is no longer news. */
+    fun onSyncedThrough(groupIdHex: String, floor: Long) {
+        synchronized(lock) {
+            val current = entries[groupIdHex] ?: return
+            entries[groupIdHex] = current.copy(counted = current.counted.filterTo(HashSet()) { it > floor })
         }
     }
 
     /** The chat's screen became visible (clears the count) or stopped being visible. */
     fun setOnScreen(groupIdHex: String, onScreen: Boolean) {
         synchronized(lock) {
-            val current = entries[groupIdHex] ?: Entry(0, onScreen = false, viewedThisSession = false)
+            val current = entries[groupIdHex] ?: Entry(emptySet(), onScreen = false, viewedThisSession = false)
             entries[groupIdHex] = if (onScreen) {
-                Entry(count = 0, onScreen = true, viewedThisSession = true)
+                Entry(counted = emptySet(), onScreen = true, viewedThisSession = true)
             } else {
                 current.copy(onScreen = false)
             }
@@ -58,16 +74,16 @@ internal class LocalUnreadCounter {
     /** The current count and whether this process has shown the chat. */
     fun snapshot(groupIdHex: String): LocalUnread = synchronized(lock) {
         val entry = entries[groupIdHex]
-        LocalUnread(count = entry?.count ?: 0, viewedThisSession = entry?.viewedThisSession == true)
+        LocalUnread(count = entry?.counted?.size ?: 0, viewedThisSession = entry?.viewedThisSession == true)
     }
 
-    /** ADR-0063 section 5 — [seen] incoming messages of [groupIdHex] were
-     *  shown in the feed: they leave the local count. Never below zero. */
-    fun onSeenElsewhere(groupIdHex: String, seen: Int) {
-        if (seen <= 0) return
+    /** ADR-0063 section 5 — the messages [seen] of [groupIdHex] were shown in
+     *  the feed: they leave the local count. */
+    fun onSeenElsewhere(groupIdHex: String, seen: Collection<Long>) {
+        if (seen.isEmpty()) return
         synchronized(lock) {
             val current = entries[groupIdHex] ?: return
-            entries[groupIdHex] = current.copy(count = (current.count - seen).coerceAtLeast(0))
+            entries[groupIdHex] = current.copy(counted = current.counted - seen.toSet())
         }
     }
 
