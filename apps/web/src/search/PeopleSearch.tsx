@@ -27,6 +27,7 @@ import { A } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { base64UrlEncodeNoPad, base64Decode } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
+import { contactBackState, type ContactBackState } from "../chat/info-navigation";
 import { ContactsClient } from "../contacts/client";
 import { recordSentRequest } from "../contacts/sent-requests";
 import { t } from "../l10n";
@@ -81,6 +82,14 @@ export function PeopleSearch(props: {
 
   const [wasm, setWasm] = createSignal<Wasm | null>(null);
   void loadWasm().then(setWasm);
+
+  /** `docs/ux/conversation-info.md` section 3.1 — a contact opened from the
+   *  Chats field covers that screen, so its back control returns here. From
+   *  the Contacts field nothing is covered: the list stays beside it. */
+  const contactOpenState = (): ContactBackState | undefined =>
+    props.scope === "chats"
+      ? contactBackState(`${globalThis.location.pathname}${globalThis.location.search}`)
+      : undefined;
 
   const ownKeyHex = (): string | null => reachSession()?.accountKeyHex ?? null;
   const inContacts = props.scope === "contacts";
@@ -164,7 +173,7 @@ export function PeopleSearch(props: {
             <span class="lakko-spinner" role="status" aria-label={t("search.people.searching_a11y")} />
           </Show>
         </div>
-        <For each={people()}>{(p) => <PersonRow person={p} wasm={wasm} chats={chats} onSent={props.onSent} />}</For>
+        <For each={people()}>{(p) => <PersonRow person={p} wasm={wasm} chats={chats} onSent={props.onSent} openState={contactOpenState} />}</For>
         <Show when={channel()}>
           {(c) => (
             <button
@@ -194,6 +203,8 @@ function PersonRow(props: {
   readonly wasm: () => Wasm | null;
   readonly chats: ReturnType<typeof useChats>;
   readonly onSent?: (() => void) | undefined;
+  /** The history state the contact screen is opened with (its way back). */
+  readonly openState: () => ContactBackState | undefined;
 }): JSX.Element {
   const auth = useAuth();
   const profiles = useProfiles();
@@ -264,7 +275,7 @@ function PersonRow(props: {
           </Show>
         </div>
         <Show when={props.person.reach === "contact"}>
-          <A href={contactHref()} class="lk-pane-lookup" style={{ width: "auto" }}>
+          <A href={contactHref()} state={props.openState()} class="lk-pane-lookup" style={{ width: "auto" }}>
             {t("common.open")}
           </A>
         </Show>

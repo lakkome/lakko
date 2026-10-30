@@ -2407,19 +2407,23 @@
       "status": "machine"
     },
     "chat.members.add.error.some_failed": {
-      "text": "无法添加{names}。请在成员面板中添加。",
+      "text": "无法添加{names}。请重试。",
       "status": "machine"
     },
-    "chat.members.add.error.unknown_username": {
-      "text": "没有注册为 {name} 的账号。",
-      "status": "machine"
-    },
-    "chat.members.add.placeholder": {
-      "text": "@用户名",
+    "chat.members.add.search_placeholder": {
+      "text": "搜索联系人或其他人",
       "status": "machine"
     },
     "chat.members.add.submit": {
       "text": "添加",
+      "status": "machine"
+    },
+    "chat.members.add.submit_count": {
+      "text": "添加 {count} 人",
+      "status": "machine"
+    },
+    "chat.members.add.title": {
+      "text": "添加成员",
       "status": "machine"
     },
     "chat.members.admin.make": {

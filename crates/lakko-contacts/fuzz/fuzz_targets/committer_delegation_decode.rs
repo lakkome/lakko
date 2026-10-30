@@ -32,7 +32,7 @@ fuzz_target!(|data: &[u8]| {
         (COMMITTER_DELEGATION_ENVELOPE_MIN_LEN..=COMMITTER_DELEGATION_ENVELOPE_MAX_LEN)
             .contains(&data.len())
     );
-    assert!((1..=MAX_COMMITTER_DELEGATIONS).contains(&envelope.delegations.len()));
+    assert!(envelope.delegations.len() <= MAX_COMMITTER_DELEGATIONS);
     let recomposed = compose_committer_delegation(&envelope).expect("a decoded envelope composes");
     assert_eq!(
         recomposed.as_slice(),

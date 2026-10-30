@@ -40,6 +40,12 @@ public struct FoundPerson: Equatable, Identifiable {
     /// against the person's key. `nil` when none verified (no request can be
     /// sent then).
     public let mailbox: MailboxTarget?
+    /// The whole grant `writeSeed` came from, when the search read one this
+    /// device does not hold yet (the `fof` grant of an introduction record):
+    /// what an add of this person keeps as a held grant
+    /// (``ReachCenter/keepFoundGrant(_:accountKey:)``). `nil` for a grant
+    /// already held and for a person in Everyone.
+    public let grant: FfiReachGrant?
     public let reach: PersonReach
 
     public var id: Data { accountKey }
@@ -51,7 +57,7 @@ public struct FoundPerson: Equatable, Identifiable {
 
     public init(
         accountKey: Data, accountId: Data?, displayName: String?, username: String?, writeSeed: Data?,
-        reach: PersonReach? = nil, mailbox: MailboxTarget? = nil
+        reach: PersonReach? = nil, mailbox: MailboxTarget? = nil, grant: FfiReachGrant? = nil
     ) {
         let resolved = reach ?? (writeSeed == nil ? .open : .grant)
         self.accountKey = accountKey
@@ -60,6 +66,9 @@ public struct FoundPerson: Equatable, Identifiable {
         self.username = PeopleSearch.shownUsername(username, reach: resolved)
         self.writeSeed = resolved == .grant ? writeSeed : nil
         self.mailbox = mailbox
+        // Only the grant the seed is: a grant whose seed is not the one this
+        // result writes with is not carried.
+        self.grant = (resolved == .grant && grant?.seed == writeSeed) ? grant : nil
         self.reach = resolved
     }
 }
@@ -422,12 +431,14 @@ public enum PeopleSearch {
                 }
                 let stronger = p.reach > held.reach ? p : held
                 let reach = stronger.reach
+                let seed = reach == .grant ? (stronger.writeSeed ?? held.writeSeed ?? p.writeSeed) : nil
                 byKey[p.accountKey] = FoundPerson(
                     accountKey: held.accountKey, accountId: held.accountId ?? p.accountId,
                     displayName: held.displayName, username: held.username ?? p.username,
-                    writeSeed: reach == .grant ? (stronger.writeSeed ?? held.writeSeed ?? p.writeSeed) : nil,
+                    writeSeed: seed,
                     reach: reach,
-                    mailbox: stronger.mailbox ?? held.mailbox ?? p.mailbox)
+                    mailbox: stronger.mailbox ?? held.mailbox ?? p.mailbox,
+                    grant: [stronger.grant, held.grant, p.grant].compactMap { $0 }.first { $0.seed == seed })
             }
         }
         return order.compactMap { byKey[$0] }
@@ -464,7 +475,8 @@ public enum PeopleSearch {
     /// fingerprint, and a person with no name at all is dropped.
     static func result(
         key: Data, accountId: Data?, known: KnownPerson, foundReach: PersonReach,
-        foundName: String?, foundUsername: String?, seed: Data?, mailbox: MailboxTarget? = nil
+        foundName: String?, foundUsername: String?, seed: Data?, mailbox: MailboxTarget? = nil,
+        grant: FfiReachGrant? = nil
     ) -> FoundPerson? {
         let reach: PersonReach = known.isContact ? .contact : foundReach
         guard let name = known.name ?? foundName ?? known.fallbackName else { return nil }
@@ -472,7 +484,8 @@ public enum PeopleSearch {
             accountKey: key, accountId: accountId, displayName: name,
             username: foundUsername ?? known.verifiedUsername, writeSeed: seed, reach: reach,
             // A grant's seed opens only the mailbox its own binding names.
-            mailbox: foundReach == .grant ? mailbox : (mailbox ?? known.keptMailbox))
+            mailbox: foundReach == .grant ? mailbox : (mailbox ?? known.keptMailbox),
+            grant: grant)
     }
 
     /// ADR-0078 — the mailbox a public record or an introduction names: its
@@ -631,7 +644,8 @@ public enum PeopleSearch {
             if let r = result(
                 key: personKey, accountId: payload.accountId, known: known(personKey),
                 foundReach: .grant, foundName: name, foundUsername: verified, seed: fof.seed,
-                mailbox: MailboxTarget.verifiedOrNil(grant: fof, accountKey: payload.identityPk)) {
+                mailbox: MailboxTarget.verifiedOrNil(grant: fof, accountKey: payload.identityPk),
+                grant: fof) {
                 byIntroduction.append(r)
             }
         }

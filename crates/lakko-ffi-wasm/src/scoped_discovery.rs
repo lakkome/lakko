@@ -2075,8 +2075,15 @@ mod tests {
         let refusal = committer_delegation_for_inner(&bad, &owner).unwrap_err();
         assert_eq!(refusal.property, "committerDelegationError");
         assert_eq!(refusal.code, "wrongMailbox");
+        // A person in Everyone: no delegation, the binding alone names the
+        // open mailbox.
+        let open = CommitterDelegationEnvelope::new_inner(&added, &binding, &[]).unwrap();
+        let wire = compose_committer_delegation_inner(&open).unwrap();
+        assert!(decode_committer_delegation_inner(&wire).is_ok());
+        assert!(check_committer_delegations_inner(&open).unwrap().is_empty());
+        let too_many: Vec<_> = (0u8..17).map(|i| blob(&mailbox, owner, i)).collect();
         let refusal = compose_committer_delegation_inner(
-            &CommitterDelegationEnvelope::new_inner(&added, &binding, &[]).unwrap(),
+            &CommitterDelegationEnvelope::new_inner(&added, &binding, &too_many).unwrap(),
         )
         .unwrap_err();
         assert_eq!(refusal.code, "badCount");

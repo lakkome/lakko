@@ -50,6 +50,7 @@ import { conversationSeedOf, useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import { useCallHost } from "../calls/CallHostContext";
 import { isDsNetworkFailure } from "../ds/client";
+import { journalHex } from "../ds/access";
 import { JOURNAL_REPAIR_MAX_POLLS, journalRepair } from "../ds/journal-repair";
 import {
   createWakeLatch,
@@ -1915,6 +1916,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         payload: e.payload,
         senderKeyB64: e.senderKey,
         oneToOne: isOneToOne(entry.group),
+        scopeHex: journalHex(base64Decode(groupIdB64)),
       });
     }
     // ADR-0048 §2 trigger 4 — another member asked this group to introduce

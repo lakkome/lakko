@@ -2870,10 +2870,17 @@ public final class ChatRepository: ObservableObject {
     /// group journal so existing members advance their epoch, and marked as
     /// own so the poll loop suppresses the echo — re-applying our own commit
     /// would fork the MLS epoch. Returns the commit's DS message id.
+    ///
+    /// `openMailbox` is the verified mailbox of a person found in Everyone
+    /// (ADR-0060 section 6, "An add of a person found by search"): recorded
+    /// for this device's own sweep before the proposal, and named in a
+    /// committer-delegation envelope with no delegation after it, unless a
+    /// grant held for the person signs real delegations.
     public func addMemberToGroup(
         groupIdHex: String,
         recipientAccountId: Data,
-        recipientSignaturePubkey: Data
+        recipientSignaturePubkey: Data,
+        openMailbox: MailboxTarget? = nil
     ) async throws -> MembershipOutcome {
         // Fast-fail pre-checks, kept OUTSIDE the lock so an obviously-invalid
         // call reports the same error it always did without queueing. They are
@@ -2909,6 +2916,15 @@ public final class ChatRepository: ObservableObject {
         // ADR-0060 — remember whose leaves these are, so the Welcome of the
         // commit that adds them goes to the person's account mailbox.
         noteAddedLeafAccounts(keyPackages: devices.map(\.keyPackage))
+        // ADR-0060 section 6 — a person found in Everyone: this device's own
+        // sweep may write their Welcome to the open mailbox. Recorded before
+        // the proposal, so a sweep that runs right after it finds it.
+        let open = Self.openMailboxFor(
+            openMailbox, addedAccountKey: recipientSignaturePubkey,
+            current: { ReachCenter.shared.currentAccountKey(of: $0) })
+        if let open {
+            ReachCenter.shared.recordOpenAdd(groupIdHex: groupIdHex, target: open)
+        }
 
         // ADR-0050 — one proposal / one commit per device of the person. The
         // outcome reported is the last device's; every earlier one either
@@ -2940,9 +2956,19 @@ public final class ChatRepository: ObservableObject {
         // device's grant for the person, in the group beside the proposal.
         if case .proposed = outcome {
             await sendCommitterDelegations(
-                groupIdHex: groupIdHex, addedAccountKey: recipientSignaturePubkey)
+                groupIdHex: groupIdHex, addedAccountKey: recipientSignaturePubkey, openMailbox: open)
         }
         return outcome
+    }
+
+    /// The Everyone mailbox an add may name for the person `addedAccountKey`:
+    /// `candidate` when its binding verified under that person's key (the
+    /// same person under `current`), else `nil`.
+    nonisolated static func openMailboxFor(
+        _ candidate: MailboxTarget?, addedAccountKey: Data, current: (Data) -> Data
+    ) -> MailboxTarget? {
+        guard let candidate, current(candidate.accountKey) == current(addedAccountKey) else { return nil }
+        return candidate
     }
 
     /// The proven-predecessor map the add-member key check reads. Injectable
@@ -6874,6 +6900,24 @@ public final class ChatRepository: ObservableObject {
         return requests
     }
 
+    /// `docs/ux/conversation-info.md` section 2.4 — the people (account keys)
+    /// with an add waiting for the sweep, so the Add members screen does not
+    /// list them again: this device's own add requests whose device proposals
+    /// are still pending, and any pending add whose leaf key is the person's.
+    public func pendingAddPersonKeys(groupIdHex: String) -> Set<Data> {
+        guard let record = groups[groupIdHex],
+              let pending = try? record.group.pendingProposals() else { return [] }
+        let leafKeys: Set<String> = Set(pending.compactMap {
+            guard $0.stored, case .add(let key) = $0.kind else { return nil }
+            return base64Encode(key)
+        })
+        guard !leafKeys.isEmpty else { return [] }
+        let intents = currentAccountIdB64.map {
+            pendingRequestStore.intents(accountIdB64: $0, groupIdB64: base64Encode(record.groupId))
+        } ?? []
+        return AddMembersRules.pendingAddPersonKeys(pendingAddLeafKeysB64: leafKeys, intents: intents)
+    }
+
     /// ADR-0045 S7 residual 1 / ADR-0050 2.5a — the `Not applied` rows the
     /// user has not dismissed, recorded by the superseded re-request when it
     /// stops.
@@ -8034,13 +8078,23 @@ public final class ChatRepository: ObservableObject {
     /// candidate (the owner, then the admins), signed with the grant this
     /// device holds for them. Best effort; with no grant held there is nothing
     /// to delegate and the committer must hold its own.
-    func sendCommitterDelegations(groupIdHex: String, addedAccountKey: Data) async {
+    ///
+    /// ADR-0060 section 6 — with no grant held and `openMailbox` given (a
+    /// person found in Everyone), the envelope carries NO delegation and
+    /// names that mailbox, so whichever candidate commits may write the
+    /// Welcome there without a proof.
+    func sendCommitterDelegations(
+        groupIdHex: String, addedAccountKey: Data, openMailbox: MailboxTarget? = nil
+    ) async {
         guard let record = groups[groupIdHex],
               let table = try? record.group.groupRoles() else { return }
         let candidates = [table.owner] + table.admins
-        guard let envelope = ReachCenter.shared.composeDelegations(
-            addedAccountKey: addedAccountKey, candidateAccountKeys: candidates,
-            groupIdHex: groupIdHex) else { return }
+        guard let envelope = CommitterDelegationChoice.envelope(
+            signed: ReachCenter.shared.composeDelegations(
+                addedAccountKey: addedAccountKey, candidateAccountKeys: candidates,
+                groupIdHex: groupIdHex),
+            open: openMailbox.flatMap { ReachCenter.shared.composeOpenEnvelope(target: $0) })
+        else { return }
         do {
             try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: envelope)
         } catch {
@@ -8090,7 +8144,8 @@ public final class ChatRepository: ObservableObject {
         guard let senderKey else { return }
         switch envelope {
         case .committerDelegation(let delegation):
-            ReachCenter.shared.keepDelegation(delegation, fromAccountKeyB64: senderKey)
+            ReachCenter.shared.keepDelegation(
+                delegation, fromAccountKeyB64: senderKey, groupIdHex: groupIdHex)
         case .introductionOffer(let record):
             guard isOneToOneWithOther(groupIdHex: groupIdHex, senderKey: senderKey) else { return }
             // A new or changed offer is relayed to this account's other
@@ -8157,9 +8212,16 @@ public final class ChatRepository: ObservableObject {
             let plan = memberAccountKey.flatMap {
                 ReachCenter.shared.writePlan(toAccountKey: $0, groupIdHex: groupIdHex)
             } ?? ReachCenter.shared.writePlan(toMailbox: target, groupIdHex: groupIdHex)
+            // ADR-0060 section 6 — a person found in Everyone, named by a
+            // kept no-delegation envelope or this device's own record, is
+            // written to without a proof, and only when the signed order
+            // above offers nothing.
+            let open = memberAccountKey.flatMap {
+                ReachCenter.shared.openWelcomeTarget(ofPerson: $0, groupIdHex: groupIdHex)
+            } ?? ReachCenter.shared.openWelcomeTarget(forMailbox: target, groupIdHex: groupIdHex)
             // ADR-0078 — no verified mailbox, no write: the Welcome stays
             // owed (``SweepWelcomeUndeliverable`` with no key tried).
-            return SweepWelcomeAttempt(target: plan?.target, candidates: plan?.candidates ?? [])
+            return SweepWelcomeAttempt.decide(plan: plan, open: open)
         }
         let digest = base64Encode(Data(SHA256.hash(data: bytes)))
         let dedupe = digest + "|" + base64Encode(try resolve().mailbox ?? target)
@@ -8188,13 +8250,27 @@ public final class ChatRepository: ObservableObject {
                         throw SweepWelcomeUndeliverable(triedKeys: 0)
                     }
                     let row = try mailboxTarget.seal(kind: .welcome, body: bytes)
-                    let id = try await deliverSweepWelcome(
-                        candidates: attempt.candidates,
-                        publish: { auth in
+                    let id: Int64
+                    if attempt.openUnsigned {
+                        // ADR-0060 section 6 — one proofless write, spending a
+                        // `mailbox-write` token, as a contact request to a
+                        // person in Everyone is written.
+                        id = try await deliverOpenSweepWelcome {
                             try await client.publishMailbox(
-                                pseudonym: mailboxTarget.address, payload: row, writeAuth: auth
+                                pseudonym: mailboxTarget.address, payload: row, writeAuth: nil
                             ).id
-                        })
+                        }
+                        ReachCenter.shared.dropOpenAdd(
+                            groupIdHex: groupIdHex, person: mailboxTarget.accountKey)
+                    } else {
+                        id = try await deliverSweepWelcome(
+                            candidates: attempt.candidates,
+                            publish: { auth in
+                                try await client.publishMailbox(
+                                    pseudonym: mailboxTarget.address, payload: row, writeAuth: auth
+                                ).id
+                            })
+                    }
                     delivered = mailboxTarget.address
                     return id
                 })

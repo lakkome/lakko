@@ -1638,12 +1638,19 @@ public class ChatRepository(
      * predecessor, so it is resolved first and the CURRENT key's mailbox is
      * addressed, with the grants held for that person (ADR-0074 3.5a).
      */
-    private fun welcomeMailboxFor(accountKey: ByteArray): ByteArray {
+    private fun welcomeMailboxFor(accountKey: ByteArray, groupIdHex: String? = null): ByteArray {
         val current = mailboxAccountKeyOf(accountKey)
         // ADR-0078: the mailbox key comes from a binding verified against the
-        // person's current account key; none known writes nothing.
+        // person's current account key; none known writes nothing. In a
+        // group ([groupIdHex], the sweep's Welcome) a committer that holds
+        // no grant for the person finds it in the delegation that names it,
+        // or in the binding of a person found in Everyone (ADR-0060
+        // section 6) — before, such a committer threw here and its
+        // delegation was never used.
         val mailbox = try {
-            me.lakko.app.reach.ReachManager.get(applicationContext).mailboxAddressFor(current)
+            me.lakko.app.reach.ReachManager.get(applicationContext)
+                .welcomeMailboxPkFor(current, groupIdHex)
+                ?.let(mailboxCrypto::address)
         } catch (_: Throwable) {
             null
         } ?: throw me.lakko.app.contacts.MailboxUnknown()
@@ -1715,7 +1722,7 @@ public class ChatRepository(
                     false
                 }
                 val next = try {
-                    welcomeMailboxFor(account)
+                    welcomeMailboxFor(account, groupIdHex)
                 } catch (_: me.lakko.app.contacts.MailboxUnknown) {
                     target
                 }
@@ -1792,6 +1799,21 @@ public class ChatRepository(
                 isRefusal = { it is me.lakko.app.ds.DsReachRefusedError },
                 requireGrant = requireGrant,
                 accountKeyHex = accountHex,
+                // ADR-0060 section 6 (amended 2026-10-29) — only when this
+                // device holds no grant or delegation for the person at all
+                // (a refused one keeps the Welcome owed): a person found in
+                // Everyone, named by this device's record or a kept
+                // no-delegation envelope, is written proofless into their
+                // open mailbox (one `mailbox-write` token). Never for anyone
+                // else.
+                openFallback = groupIdHex?.let { group ->
+                    {
+                        reach.openWelcomeMailboxPk(group, account)?.let {
+                            android.util.Log.i("ChatRepository", "ADR-0060: Welcome written to an open mailbox")
+                            me.lakko.app.contacts.MailboxDest(it, null)
+                        }
+                    }
+                },
             )
         } catch (undeliverable: WelcomeUndeliverable) {
             if (groupIdHex != null) {
@@ -1859,7 +1881,7 @@ public class ChatRepository(
         )
         sweepWelcomesWritten[key]?.let { return it }
         val mailbox = try {
-            welcomeMailboxFor(account)
+            welcomeMailboxFor(account, groupIdHex)
         } catch (_: me.lakko.app.contacts.MailboxUnknown) {
             undeliveredWelcomeGroups.getOrPut(DsClient.pseudonymHex(mailboxAccountKeyOf(account))) {
                 java.util.concurrent.ConcurrentHashMap.newKeySet()
@@ -1877,12 +1899,16 @@ public class ChatRepository(
 
     /**
      * ADR-0060 §6 — an Add this device proposed for [addedAccount]: when this
-     * device is the added person's contact, sign one delegation per committer
-     * candidate ([candidates], owner first, then admins by rank) and send them
-     * in the group, so whichever of them sweeps the Add can deliver the
-     * Welcome into the added person's closed mailbox. Nothing is sent when
-     * this device holds no contact grant for them (another path must carry
-     * the Welcome: their reply key, or their setting).
+     * device holds a grant for the added person (their contact key, or a
+     * group, channel or contacts-of-contacts key, a grant a search found them
+     * through included), sign one delegation per committer candidate
+     * ([candidates], owner first, then admins by rank) and send them in the
+     * group, so whichever of them sweeps the Add can deliver the Welcome into
+     * the added person's closed mailbox. For a person found in Everyone (no
+     * grant, a binding this device recorded for this add) the envelope
+     * carries the binding and no delegation: the committer writes the
+     * Welcome into their open mailbox (amended 2026-10-29). Nothing is sent
+     * when neither is held (another path must carry the Welcome).
      */
     private fun sendCommitterDelegationsBestEffort(
         groupIdHex: String,
@@ -1893,7 +1919,7 @@ public class ChatRepository(
         reachScope.launchSession {
             try {
                 val envelope = me.lakko.app.reach.ReachManager.get(applicationContext)
-                    .composeDelegations(addedAccount, candidates) ?: return@launchSession
+                    .composeDelegations(addedAccount, candidates, groupIdHex) ?: return@launchSession
                 val identity = canonicalIdentity.get() ?: return@launchSession
                 val record = groups[groupIdHex] ?: return@launchSession
                 broadcastControlToGroup(

@@ -1243,7 +1243,10 @@ pub struct FfiCommitterDelegationEnvelope {
     /// `added_account_key`, and every delegation must name its mailbox
     /// (`checkCommitterDelegations` checks both).
     pub added_mailbox_binding: Vec<u8>,
-    /// 1 to [`max_committer_delegations`] raw 185-byte delegation blobs.
+    /// 0 to [`max_committer_delegations`] raw 185-byte delegation blobs. None
+    /// means the added person's mailbox is open (Everyone): the committer
+    /// writes the Welcome to `added_mailbox_binding`'s mailbox without a
+    /// proof, spending a `mailbox-write` token.
     pub delegations: Vec<Vec<u8>>,
 }
 
@@ -1331,7 +1334,7 @@ impl From<&Delegation> for FfiDelegation {
 ///
 /// # Errors
 ///
-/// [`FfiError::CommitterDelegation`] `badCount` (none, or more than
+/// [`FfiError::CommitterDelegation`] `badCount` (more than
 /// [`max_committer_delegations`]) or `delegationMalformed` (a blob that is
 /// not 185 bytes); [`FfiError::Reach`] `keyLength` for an added account key
 /// that is not 32 bytes.
@@ -1554,10 +1557,25 @@ mod tests {
         let err = committer_delegation_for(bad, owner.to_vec()).unwrap_err();
         assert!(matches!(err, FfiError::CommitterDelegation(_)));
         assert_eq!(code_of(&err), "wrongMailbox");
+        // A person in Everyone: no delegation, the binding alone names the
+        // open mailbox, and the envelope round-trips and checks.
+        let open = FfiCommitterDelegationEnvelope {
+            added_account_key: added.to_vec(),
+            added_mailbox_binding: added_binding.clone(),
+            delegations: vec![],
+        };
+        let wire = compose_committer_delegation_envelope(open.clone()).unwrap();
+        assert_eq!(decode_committer_delegation_envelope(wire).unwrap(), open);
+        assert!(check_committer_delegations(open.clone())
+            .unwrap()
+            .is_empty());
+        assert!(committer_delegation_for(open, owner.to_vec())
+            .unwrap()
+            .is_none());
         let err = compose_committer_delegation_envelope(FfiCommitterDelegationEnvelope {
             added_account_key: added.to_vec(),
             added_mailbox_binding: added_binding,
-            delegations: vec![],
+            delegations: vec![vec![0u8; 185]; 17],
         })
         .unwrap_err();
         assert_eq!(code_of(&err), "badCount");

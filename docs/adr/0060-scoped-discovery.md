@@ -328,6 +328,35 @@ now carries a grant, or a delegation to a key known in advance.
   candidate (the owner and each admin), each to that candidate's account
   key. A delegation lives at most 24 hours, so the proposer re-sends a fresh
   one while its proposal is pending.
+- **An add of a person found by search (amended 2026-10-29, the
+  maintainer's call).** Group info's Add members screen
+  ([`docs/ux/conversation-info.md`](../ux/conversation-info.md) section 2.4)
+  lets the owner or an admin add a person the search found who is not a
+  contact. Two cases:
+  - found through a grant the person handed out (contacts of contacts, a
+    group or a channel): the proposer keeps that grant as one it holds for
+    the person, and the delegations above are signed with it;
+  - found in **Everyone**: the person publishes no reach key, only the
+    mailbox binding in the public record, and their mailbox is open. The
+    proposer posts the committer-delegation envelope with **no delegation**
+    and the binding from the search result (verified under the person's
+    account key, as everywhere). Whichever candidate commits writes the
+    Welcome to that mailbox without a proof, spending one `mailbox-write`
+    token ([ADR-0078](0078-servers-cannot-link-accounts.md) section 1), as a
+    contact request to that person does. A committer writes unsigned only
+    for a person named by such an envelope, and only when it holds no grant
+    or delegation for them.
+
+  **Residual, accepted.** If the person leaves Everyone between the search
+  and the sweep, the mailbox is closed when the Welcome is written; the
+  Delivery Service drops the proofless write and answers as for a stored
+  one (it never tells open from closed), so the committer counts the
+  Welcome delivered and the person is not in the group. This is the case
+  ADR-0050 section 2.5a item 7 keeps sweepers from (writing unsigned with
+  no binding at all); here the binding is a fresh, verified statement that
+  the mailbox was open. Any member could post a no-delegation envelope; its
+  binding must verify under the added person's account key, so it can only
+  name that person's own mailbox, and the cost to a committer is one token.
 
 **One inbound mailbox per person** (decided 2026-09-29 after S3b, the
 maintainer's call). Reach keys are registered on the **account** mailbox

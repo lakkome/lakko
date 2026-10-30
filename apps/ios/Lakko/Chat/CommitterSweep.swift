@@ -1167,6 +1167,23 @@ public func deliverSweepWelcome<Auth>(
     throw SweepWelcomeUndeliverable(triedKeys: refused)
 }
 
+/// ADR-0060 section 6 — deliver one sweep Welcome to the open mailbox of a
+/// person found in Everyone: one write without a proof, spending a
+/// `mailbox-write` token. Delivered when the DS answers 2xx (`publish`
+/// returns). A refusal (`401`) is ``SweepWelcomeUndeliverable`` with one key
+/// tried, and an anonymous token that could not be had is one with none
+/// tried: the Welcome stays owed and the fan-out to the others goes on. Any
+/// other failure is rethrown as it came (transient; the fan-out is retried).
+public func deliverOpenSweepWelcome(publish: () async throws -> Int64) async throws -> Int64 {
+    do {
+        return try await publish()
+    } catch DsClientError.http(let status, _, _) where status == 401 {
+        throw SweepWelcomeUndeliverable(triedKeys: 1)
+    } catch is AnonTokenUnavailable {
+        throw SweepWelcomeUndeliverable(triedKeys: 0)
+    }
+}
+
 // MARK: - Registration backoff
 
 /// The retry schedule of a sweep whose epoch registration the DS refused.

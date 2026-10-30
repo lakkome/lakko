@@ -318,6 +318,18 @@ public final class ContactsViewModel: ObservableObject {
     /// The inverse of ``chatGroupIdHex(for:)`` and reads the same two facts:
     /// the id the accept flow recorded, else the other member's key. A read
     /// over the live roster, no state change.
+    /// The contact row a group member opens (`docs/ux/conversation-info.md`
+    /// section 2.2), by the member's person (account) key; `nil` for a
+    /// member who is not a contact. A proven predecessor key names the same
+    /// person.
+    public func contactMessageId(forPersonKey personKey: Data) -> Int64? {
+        let current = ReachCenter.shared.currentAccountKey(of: personKey)
+        return repositoryState.accepted.first {
+            $0.request.fromPubkey == personKey
+                || ReachCenter.shared.currentAccountKey(of: $0.request.fromPubkey) == current
+        }?.request.messageId
+    }
+
     public func contact(forOneToOneChat groupIdHex: String) -> AcceptedContact? {
         if let recorded = repositoryState.accepted.first(where: { $0.groupIdHex == groupIdHex }) {
             return recorded

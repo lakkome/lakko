@@ -145,6 +145,10 @@ export async function intakeScopedEnvelope(args: {
   readonly payload: Uint8Array;
   readonly senderKeyB64: string | undefined;
   readonly oneToOne: boolean;
+  /** The group the envelope arrived in (journal id hex). Recorded with a
+   *  committer-delegation envelope: one with no delegation authorises the
+   *  unsigned Welcome for this group only (ADR-0060 section 6). */
+  readonly scopeHex?: string;
 }): Promise<void> {
   const session = reachSession();
   if (session === null) return;
@@ -181,6 +185,7 @@ export async function intakeScopedEnvelope(args: {
           fileDelegations(g, sender, addedHex, {
             envelopeB64: base64Encode(args.payload),
             receivedAtMs: Date.now(),
+            ...(args.scopeHex === undefined ? {} : { scopeHex: args.scopeHex }),
           }),
         );
         return;

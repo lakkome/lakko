@@ -94,14 +94,38 @@ public struct MailboxWriteAttempt: Equatable {
 public struct SweepWelcomeAttempt: Equatable {
     public let target: MailboxTarget?
     public let candidates: [DsMailboxWriteAuth]
+    /// ADR-0060 section 6 — the Welcome goes to `target` WITHOUT a proof,
+    /// spending one `mailbox-write` token: the person was found in Everyone
+    /// and this device holds no grant or delegation for them.
+    public let openUnsigned: Bool
 
-    public init(target: MailboxTarget?, candidates: [DsMailboxWriteAuth]) {
+    public init(target: MailboxTarget?, candidates: [DsMailboxWriteAuth], openUnsigned: Bool = false) {
         self.target = target
         self.candidates = candidates
+        self.openUnsigned = openUnsigned
     }
 
     /// The address the row is posted under, `nil` when no mailbox is known.
     public var mailbox: Data? { target?.address }
+
+    /// How a sweep Welcome to one person goes (ADR-0050 2.5a item 7 with the
+    /// exception of ADR-0060 section 6). The signed order first: `plan` is
+    /// this device's own mailbox, an explicit grant, the held grants and the
+    /// delegation naming this account (``ReachCenter/writePlan(toAccountKey:groupIdHex:)``).
+    /// Only when it offers no signed candidate at all, and `open` (a kept
+    /// no-delegation envelope or this device's own record naming the person)
+    /// is known, the Welcome goes to that mailbox unsigned. Neither: nothing
+    /// is written and the Welcome stays owed. A grant or delegation that is
+    /// held but refused never falls back to an unsigned write.
+    public static func decide(plan: MailboxWritePlan?, open: MailboxTarget?) -> SweepWelcomeAttempt {
+        if let plan, !plan.candidates.isEmpty {
+            return SweepWelcomeAttempt(target: plan.target, candidates: plan.candidates)
+        }
+        if let open {
+            return SweepWelcomeAttempt(target: open, candidates: [], openUnsigned: true)
+        }
+        return SweepWelcomeAttempt(target: plan?.target, candidates: [])
+    }
 }
 
 /// The production re-check of rule 6.

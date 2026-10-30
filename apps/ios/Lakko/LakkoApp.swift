@@ -1105,6 +1105,12 @@ enum SessionTab: Hashable {
 /// Groups or Contacts, and back always returns to where it was opened from.
 enum TabRoute: Hashable {
     case chat(groupIdHex: String)
+    /// A group's info, pushed over its conversation
+    /// (`docs/ux/conversation-info.md` section 3). Keyed on the same id the
+    /// `.chat` route below it was opened with, so both share one view model.
+    case groupInfo(groupIdHex: String)
+    /// The Add members screen, pushed over a group's info (section 2.4).
+    case addMembers(groupIdHex: String)
     /// The contact picker behind the create menu's New chat.
     case newChat
     /// The create menu's Create group (see ``NewGroupScreen``).
@@ -1884,6 +1890,13 @@ private struct SessionRoot: View, Equatable {
                 // screen the Contacts list does (`docs/ux/conversation-info.md`
                 // section 3, "Except a person").
                 onOpenContact: { messageId in push(.contactDetail(messageId: messageId), on: tab) },
+                // `docs/ux/conversation-info.md` section 3 — a group's info is
+                // a push over the conversation, which stays as it was left.
+                onOpenGroupInfo: {
+                    let binding = path(for: tab)
+                    binding.wrappedValue = GroupInfoNavigation.openInfo(
+                        binding.wrappedValue, groupIdHex: groupIdHex)
+                },
                 // ADR-0052 decision 2 — after a forward, the conversation it
                 // went to; on a tapped attribution, the origin, told which
                 // message to show before it is on screen. Pop back to it when
@@ -1897,6 +1910,42 @@ private struct SessionRoot: View, Equatable {
             )
             // UX spec section 5.2 — a pushed chat fills the screen; the tab
             // bar returns with the list.
+            .toolbar(.hidden, for: .tabBar)
+        case .groupInfo(let groupIdHex):
+            // `docs/ux/conversation-info.md` sections 2.2 and 3 — the same
+            // view model as the conversation under it, so the roster, the
+            // pending set and the composer draft are one state.
+            GroupInfoScreen(
+                viewModel: chatViewModel(for: groupIdHex),
+                contacts: contactsVM,
+                onAddMembers: {
+                    let binding = path(for: tab)
+                    binding.wrappedValue = GroupInfoNavigation.openAddMembers(
+                        binding.wrappedValue, groupIdHex: groupIdHex)
+                },
+                // Section 2.2 — a member who is a contact opens their contact
+                // screen, whose back returns here.
+                onOpenContact: { messageId in push(.contactDetail(messageId: messageId), on: tab) },
+                // ADR-0045 UX 6.2.4 — the chat is gone: the info and the
+                // conversation under it both go.
+                onDeleted: {
+                    let binding = path(for: tab)
+                    binding.wrappedValue = GroupInfoNavigation.afterDelete(
+                        binding.wrappedValue, groupIdHex: groupIdHex)
+                }
+            )
+            .toolbar(.hidden, for: .tabBar)
+        case .addMembers(let groupIdHex):
+            AddMembersScreen(
+                viewModel: chatViewModel(for: groupIdHex),
+                contacts: contactsVM,
+                session: models.peopleSearchSession,
+                onAdded: {
+                    let binding = path(for: tab)
+                    binding.wrappedValue = GroupInfoNavigation.afterAdd(
+                        binding.wrappedValue, groupIdHex: groupIdHex)
+                }
+            )
             .toolbar(.hidden, for: .tabBar)
         case .newChat:
             ContactPickerScreen(
@@ -2220,10 +2269,6 @@ private struct SessionRoot: View, Equatable {
                 groupCallHost: services.groupCallHost,
                 sessionTokenProvider: {
                     services.authRepository.identitySecrets?.sessionToken
-                },
-                resolveRecipient: { username in
-                    try await services.contactsRepository
-                        .resolveVerifiedRecipient(username: username)
                 }
             )
             // Phase 2a3e2b — the cross-device draft / read-cursor sync is

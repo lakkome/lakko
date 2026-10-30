@@ -390,6 +390,9 @@ function grantCandidate(
  *   - otherwise every grant kept for the person under any key they have had
  *     (rule 2), the ones of before a rotation last and only while the old
  *     address stands (rule 6), then a committer delegation;
+ *   - with none of those, for a Welcome (`openWelcome`), the unsigned write
+ *     to the binding a kept no-delegation committer envelope names for this
+ *     person in `scope` (ADR-0060 section 6, a person found in Everyone);
  *   - and, with none of those, unless `neverUnsigned`, and only when the
  *     caller holds the person's mailbox binding (`openBinding`: from the
  *     public record of a person in Everyone), the unsigned write.
@@ -412,6 +415,15 @@ export async function planWriteToPerson(
     readonly exactKey?: boolean;
     /** ADR-0073 R.4 / ADR-0078 open question: see {@link ContinuityAuth}. */
     readonly continuity?: ContinuityAuth | null;
+    /**
+     * A sweep's Welcome (ADR-0060 section 6, a person found in Everyone):
+     * when no signed candidate exists, and a kept committer-delegation
+     * envelope with NO delegation names this person for `scope`, the Welcome
+     * is written unsigned to the mailbox that envelope's binding names
+     * (verified against the person's keys). Never for anyone else. Needs
+     * `scope`.
+     */
+    readonly openWelcome?: boolean;
   } = {},
 ): Promise<WritePlan> {
   // A Welcome (`allowMember`) to the new identity of an account whose reset
@@ -492,21 +504,72 @@ export async function planWriteToPerson(
       });
     }
   }
+  if (candidates.length === 0 && options.openWelcome === true && options.scope !== undefined && session !== null) {
+    const binding = await openWelcomeBinding(personHexes, journalHex(options.scope));
+    if (binding !== null) candidates.push(unsignedCandidate(binding, personKeys));
+  }
   const openBinding = options.openBinding ?? null;
   if (candidates.length === 0 && options.neverUnsigned !== true && openBinding !== null) {
-    candidates.push({
-      kind: "none",
-      resolve: async () => {
-        const target = await verifiedTargetOfBinding(openBinding, personKeys);
-        if (target === null) {
-          noteRefusedBinding("none");
-          return null;
-        }
-        return released("none", target, null, null);
-      },
-    });
+    candidates.push(unsignedCandidate(openBinding, personKeys));
   }
   return { candidates };
+}
+
+/** The unsigned candidate to the mailbox `binding` names, verified against
+ *  `personKeys` when resolved. */
+function unsignedCandidate(binding: Uint8Array, personKeys: readonly Uint8Array[]): WriteCandidate {
+  return {
+    kind: "none",
+    resolve: async () => {
+      const target = await verifiedTargetOfBinding(binding, personKeys);
+      if (target === null) {
+        noteRefusedBinding("none");
+        return null;
+      }
+      return released("none", target, null, null);
+    },
+  };
+}
+
+/**
+ * ADR-0060 section 6 - the mailbox binding of a person found in Everyone, as
+ * a kept committer-delegation envelope with NO delegation names it: kept for
+ * an add of the person `addedHexes` names (every key they have had), in the
+ * group `scopeHex` (an envelope that recorded no group authorises nothing),
+ * newest first, and passing the core's envelope check (the binding verifies
+ * under the added account key). `null` when none does. The caller verifies
+ * the binding again against the person's pinned keys before the write.
+ */
+export async function openWelcomeBinding(
+  addedHexes: readonly string[],
+  scopeHex: string,
+): Promise<Uint8Array | null> {
+  const session = reachSession();
+  if (session === null) return null;
+  const envelopes = delegationsForPerson(session.receivedGrants(), addedHexes).filter(
+    (held) => held.scopeHex === scopeHex,
+  );
+  if (envelopes.length === 0) return null;
+  const wasm = await loadWasm();
+  for (const held of envelopes) {
+    let env;
+    try {
+      env = wasm.decodeCommitterDelegationEnvelope(base64Decode(held.envelopeB64));
+    } catch {
+      continue;
+    }
+    try {
+      if (env.delegationCount() !== 0) continue;
+      if (!addedHexes.includes(journalHex(env.addedAccountKey))) continue;
+      wasm.checkCommitterDelegations(env).forEach((d) => d.free());
+      return env.addedMailboxBinding;
+    } catch {
+      /* a malformed envelope authorises nothing */
+    } finally {
+      env.free();
+    }
+  }
+  return null;
 }
 
 /** Log the ADR-0078 continuity no-op. No identifier is logged. */
@@ -590,6 +653,8 @@ export async function writeToPerson<T>(
     readonly exactKey?: boolean;
     /** ADR-0073 R.4: see {@link planWriteToPerson}. */
     readonly continuity?: ContinuityAuth | null;
+    /** See {@link planWriteToPerson}. */
+    readonly openWelcome?: boolean;
   },
   write: MailboxWrite<T>,
 ): Promise<T> {
@@ -613,7 +678,12 @@ export async function writeToPerson<T>(
  * The web client cannot tell whether a person's mailbox is open (Everyone):
  * the DS answers an unsigned write to an open and to a closed mailbox alike.
  * So a Welcome for an account this device holds no grant for waits, owed,
- * until one arrives; it is never written unsigned.
+ * until one arrives. One exception (ADR-0060 section 6, amended 2026-10-29):
+ * when none of the above exists and a kept committer-delegation envelope with
+ * NO delegation names the person for this group (their proposer found them
+ * in Everyone; this device's own record when it proposed), the Welcome is
+ * written unsigned to that envelope's verified binding, spending one
+ * `mailbox-write` token, and counted delivered on a 2xx.
  *
  * ADR-0074 section 3.5a rule 6: with `recheck`, the first refusal re-checks
  * the person's address once. `write` receives the verified target.
@@ -634,6 +704,7 @@ export async function writeWelcome<T>(
       explicit: options.explicit ?? null,
       allowMember: true,
       neverUnsigned: true,
+      openWelcome: true,
       recheck: options.recheck ?? null,
     },
     write,

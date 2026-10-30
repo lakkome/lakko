@@ -64,17 +64,18 @@ public class ChatViewModel(
      *  then refuses with a clear log line. Defaults to `{ null }` so
      *  existing call sites + tests compile unchanged. */
     private val sessionTokenProvider: () -> String? = { null },
-    /** Resolves `@username -> (accountId, signaturePubkey)` through the
-     *  G-4-verified contacts path for the add-member flow (A4). Threaded
-     *  from `MainActivity` as `{ contactsRepository.resolveVerifiedRecipient(it) }`.
-     *  Defaults to a fail-closed stub so existing call sites + tests compile
-     *  unchanged (add-member then refuses). */
-    private val resolveRecipient: suspend (String) -> Pair<ByteArray, ByteArray> = {
-        throw IllegalStateException("no @username resolver wired — add-member unavailable")
-    },
-    /** ADR-0048 §4 — the core's username rule (`validateUsername`). */
-    private val validateUsername: (String) -> String =
-        { uniffi.lakko_ffi_uniffi.validateUsername(it) },
+    /** `docs/ux/conversation-info.md` section 2.4 — keep the reach grant a
+     *  person found by the network search handed out (standard base64 of its
+     *  wire), before they are added, so the Welcome the sweep owes them can
+     *  be written into their mailbox with it. Wired from `MainActivity` to
+     *  `ReachManager.fileHeld`; a no-op by default (tests). */
+    private val keepFoundGrant: suspend (accountKey: ByteArray, grantWireB64: String) -> Unit = { _, _ -> },
+    /** ADR-0060 section 6 (amended 2026-10-29) — record the mailbox binding
+     *  of a person found in Everyone for the add about to be proposed in
+     *  the group (group id hex), so the delegation envelope carries it and
+     *  this device's own sweep can deliver their Welcome. */
+    private val keepFoundBinding: suspend (groupIdHex: String, accountKey: ByteArray, bindingB64: String) -> Unit =
+        { _, _, _ -> },
     /** The process-wide 1x1 call host ([me.lakko.app.calls.AppCallHost]). The
      *  1x1 call does not live in this view model any more: it must keep ringing
      *  and keep running when this chat is not on screen. `null` in tests — the
@@ -781,10 +782,28 @@ public class ChatViewModel(
     /** `true` while the members sheet is shown. */
     public val membersPanelOpen: StateFlow<Boolean> = mutableMembersPanelOpen.asStateFlow()
 
-    private val mutableAddMemberInput: MutableStateFlow<String> = MutableStateFlow("")
+    private val mutableAddMembersOpen: MutableStateFlow<Boolean> = MutableStateFlow(false)
 
-    /** `@username` typed into the add-member field. */
-    public val addMemberInput: StateFlow<String> = mutableAddMemberInput.asStateFlow()
+    /** `docs/ux/conversation-info.md` section 2.4 — `true` while the Add
+     *  members screen is pushed over the group's info. */
+    public val addMembersOpen: StateFlow<Boolean> = mutableAddMembersOpen.asStateFlow()
+
+    private val mutableAddPicks: MutableStateFlow<List<me.lakko.app.chat.AddMemberPick>> =
+        MutableStateFlow(emptyList())
+
+    /** The people picked on the Add members screen, in the order picked. */
+    public val addPicks: StateFlow<List<me.lakko.app.chat.AddMemberPick>> = mutableAddPicks.asStateFlow()
+
+    private val mutableRequestedAddKeys: MutableStateFlow<Set<String>> = MutableStateFlow(emptySet())
+
+    /**
+     * Account keys (standard base64) this screen asked to add in this
+     * session and that are not in the roster yet. The pending set names an
+     * add by the joining DEVICE's key, which is not the person key a contact
+     * carries, so the Add members screen also leaves out the people asked
+     * for here. Pruned against the roster on every refresh.
+     */
+    public val requestedAddKeys: StateFlow<Set<String>> = mutableRequestedAddKeys.asStateFlow()
 
     private val mutableMembershipBusy: MutableStateFlow<Boolean> = MutableStateFlow(false)
 
@@ -911,9 +930,22 @@ public class ChatViewModel(
      *  invite link" affordance), or `null` before it is generated. */
     public val inviteLink: StateFlow<String?> = mutableInviteLink.asStateFlow()
 
-    /** Update the add-member text field. */
-    public fun setAddMemberInput(value: String) {
-        mutableAddMemberInput.value = value
+    /** Section 2.4 — push the Add members screen over the info, with no
+     *  pick. */
+    public fun openAddMembers() {
+        mutableAddPicks.value = emptyList()
+        mutableAddMembersOpen.value = true
+    }
+
+    /** Its back control: return to the info, dropping the picks. */
+    public fun closeAddMembers() {
+        mutableAddMembersOpen.value = false
+        mutableAddPicks.value = emptyList()
+    }
+
+    /** Pick, or un-pick, one person. */
+    public fun toggleAddPick(pick: me.lakko.app.chat.AddMemberPick) {
+        mutableAddPicks.value = me.lakko.app.chat.togglePick(mutableAddPicks.value, pick)
     }
 
     // --- ADR-0052 decision 3 — pins ------------------------------------------
@@ -1059,6 +1091,10 @@ public class ChatViewModel(
             // away from with a successor already picked.
             mutableTransferStepOpen.value = false
             refreshMembers()
+        } else {
+            // Leaving the info leaves whatever was pushed over it.
+            mutableAddMembersOpen.value = false
+            mutableAddPicks.value = emptyList()
         }
     }
 
@@ -1377,13 +1413,10 @@ public class ChatViewModel(
         val scope = retryScope() ?: return
         // Stand down while a MANUAL membership operation is in flight.
         //
-        // The disarm-on-tap covers every handler that knows its descriptor up
-        // front, but `onAddMember` cannot: the request only becomes nameable
-        // once the typed handle has resolved, so between the tap and the
-        // resolution there is a window in which a retry for the same person
-        // could fire behind the user's own attempt. Standing down costs at
-        // most one poll — the repository emission after the next one
-        // re-evaluates.
+        // A manual add of several picks runs one after another, and a retry
+        // for a pick further down could fire behind the user's own attempt.
+        // Standing down costs at most one poll — the repository emission
+        // after the next one re-evaluates.
         if (mutableMembershipBusy.value) return
         val armed = retryStore.armed(scope)
         if (armed.isEmpty()) return
@@ -1479,6 +1512,12 @@ public class ChatViewModel(
         refreshMembership()
         val ended = membershipEnded.value
         mutableMembers.value = repo.members(groupIdHex) ?: emptyList()
+        // Section 2.4 — a person asked for here leaves the "asked for" set
+        // once the roster holds them.
+        val memberKeys = mutableMembers.value.map { me.lakko.app.chat.outboxB64(it.signaturePublicKey) }.toSet()
+        if (mutableRequestedAddKeys.value.any { it in memberKeys }) {
+            mutableRequestedAddKeys.value = mutableRequestedAddKeys.value - memberKeys
+        }
         // ADR-0051 — the shared name rides the same refresh as the roster.
         refreshGroupName()
         val role = repo.ownRole(groupIdHex)
@@ -1967,42 +2006,62 @@ public class ChatViewModel(
     }
 
     /**
-     * Resolve the typed `@username` (G-4-verified) and add it to this group:
-     * publish the add commit to the journal (own-marked) + ferry the Welcome.
-     * Fail-closed — a resolve / verify / publish failure surfaces an error and
-     * leaves the group untouched.
+     * `docs/ux/conversation-info.md` section 2.4 — **Add** on the Add members
+     * screen. The screen closes back to the info at once; each pick is then
+     * added through the conversation's add path, one after another, by its
+     * account id and person key (no username lookup), with everything that
+     * path owes (the proposal per device, the echo filter, the own-request
+     * note and retry record, the committer delegations, the durable commit
+     * record); then one sweep, as the group setup does. No notice on
+     * success: the member row's pending annotation says it (section 2 of
+     * `proposal-based-membership.md`). Picks that could not be added at all
+     * are named once, in place: "Could not add {names}. Try again."
+     *
+     * A person a search found through a grant they handed out has that grant
+     * kept first ([keepFoundGrant]), so the delegations and the sweep's
+     * Welcome are signed with it; a person found in Everyone has the mailbox
+     * binding their public record carried recorded for this add
+     * ([keepFoundBinding]), so the Welcome goes into their open mailbox.
      */
-    public fun onAddMember() {
-        val typed = mutableAddMemberInput.value
-        if (typed.isBlank() || mutableMembershipBusy.value) return
-        // ADR-0048 §4 — a name failing the rule is never looked up.
-        val username = when (val decision = me.lakko.app.profile.searchDecision(typed, validateUsername)) {
-            is me.lakko.app.profile.SearchDecision.Refuse -> {
-                mutableMembershipError.value = decision.text
-                return
-            }
-            is me.lakko.app.profile.SearchDecision.Lookup -> decision.normalized
-        }
+    public fun onAddPicked() {
+        val picks = mutableAddPicks.value
+        if (picks.isEmpty() || mutableMembershipBusy.value) return
+        mutableAddMembersOpen.value = false
+        mutableAddPicks.value = emptyList()
         mutableMembershipBusy.value = true
         mutableMembershipError.value = null
         viewModelScope.launch {
             try {
-                val (accountId, signaturePubkey) = resolveRecipient(username)
-                // ADR-0045 UX §7 — the descriptor is only knowable once the
-                // typed handle has resolved, which is why it is built here and
-                // not before: re-resolving a username later could name a
-                // different account if the handle has since been
-                // re-registered, and adding the wrong person is not a retry.
-                withMembershipRetry(
-                    me.lakko.app.chat.RetryableRequest.Add(
-                        subjectKeyB64 = me.lakko.app.chat.outboxB64(signaturePubkey),
-                        subjectAccountIdB64 = me.lakko.app.chat.outboxB64(accountId),
-                    ),
-                ) { repo.addMemberToGroup(groupIdHex, accountId, signaturePubkey) }
-                mutableAddMemberInput.value = ""
+                val failed = me.lakko.app.chat.addPicksInTurn(picks) { pick ->
+                    val key = me.lakko.app.chat.outboxUnb64(pick.keyB64)
+                    val accountId = me.lakko.app.chat.outboxUnb64(pick.accountIdB64)
+                    when (val found = me.lakko.app.chat.foundReachOf(pick)) {
+                        is me.lakko.app.chat.FoundReach.Grant -> keepFoundGrant(key, found.wireB64)
+                        is me.lakko.app.chat.FoundReach.OpenBinding -> keepFoundBinding(groupIdHex, key, found.bindingB64)
+                        null -> Unit
+                    }
+                    withMembershipRetry(
+                        me.lakko.app.chat.RetryableRequest.Add(
+                            subjectKeyB64 = pick.keyB64,
+                            subjectAccountIdB64 = pick.accountIdB64,
+                        ),
+                    ) { repo.addMemberToGroup(groupIdHex, accountId, key) }
+                    mutableRequestedAddKeys.value = mutableRequestedAddKeys.value + pick.keyB64
+                }
+                if (failed.size < picks.size) {
+                    try {
+                        repo.sweepIfCommitter(groupIdHex)
+                    } catch (e: Throwable) {
+                        me.lakko.app.rethrowIfCancelled(e)
+                        // The poll's own sweep takes it from here.
+                        android.util.Log.w("ChatViewModel", "sweep after add failed", e)
+                    }
+                }
+                mutableMembershipError.value =
+                    me.lakko.app.chat.someFailedText(failed, Localization.strings.value)
                 refreshMembers()
             } catch (e: Throwable) {
-                reportMembershipFailure(e, "onAddMember", "chat.error.add_member")
+                reportMembershipFailure(e, "onAddPicked", "chat.error.add_member")
             } finally {
                 mutableMembershipBusy.value = false
             }

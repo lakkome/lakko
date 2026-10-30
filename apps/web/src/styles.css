@@ -7630,3 +7630,142 @@ button.lk-folder-new {
 .lk-word-suggest > .active {
   background: var(--surface-hover);
 }
+
+/* ------------------------------------------------------- info screens */
+
+/* `docs/ux/conversation-info.md` section 3 — a group's info, and Add members
+   over it, are screens in the conversation's column. They cover the
+   conversation, which stays laid out underneath (inert), so its scroll
+   position and draft are as they were left. */
+.lk-info-screen {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface-bg);
+}
+.lk-info-head {
+  gap: 8px;
+  padding-left: 12px;
+}
+@media (max-width: 720px) {
+  .lk-info-head {
+    padding-left: 4px;
+  }
+}
+.lk-info-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 16px;
+  line-height: 22px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lk-info-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 24px 24px;
+}
+@media (max-width: 720px) {
+  .lk-info-scroll {
+    padding: 12px 16px 20px;
+  }
+}
+/* Keeps the info readable on a wide column instead of stretching it. */
+.lk-info-scroll > * {
+  width: 100%;
+  max-width: 640px;
+  align-self: center;
+}
+
+/* A member row's person, when it opens their contact screen. */
+.lk-member-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: normal;
+  cursor: pointer;
+}
+.lk-member-open:hover .lk-row-title {
+  text-decoration: underline;
+}
+.lk-member-open:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: 2px;
+}
+
+/* Add members, the first row of the members list. */
+.lk-member-add {
+  width: 100%;
+  padding: 8px 10px;
+  gap: 10px;
+  min-height: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  justify-content: flex-start;
+  cursor: pointer;
+}
+.lk-member-add:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.lk-member-add .lk-row-title {
+  color: var(--accent);
+}
+.lk-member-add-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-pill);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Add members: the picked people, removable, between the field and the list. */
+.lk-pick-chips {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.lk-pick-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 2px 2px 2px 4px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--surface-fg);
+  font-size: 14px;
+}
+.lk-pick-chip .lk-icon-button {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-pill);
+}

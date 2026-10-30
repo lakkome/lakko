@@ -148,7 +148,7 @@ import {
 } from "../auth/account-id";
 import { ChatClient, HeldForSuccessor, type PollMessagesResult } from "../chat/client";
 import { isDsNetworkFailure } from "../ds/client";
-import { dsAccess, dsClockSkewNotice } from "../ds/access";
+import { dsAccess, dsClockSkewNotice, journalHex } from "../ds/access";
 import {
   createWakeLatch,
   LONG_POLL_WAIT_SECS,
@@ -304,8 +304,6 @@ import {
 } from "../chat/group-name-store";
 import { observeMembership } from "../profile/membership-baseline";
 import { isOwnKeyB64 } from "../profile/own-key";
-import { createUsernameCheck } from "../profile/username-field";
-import { mayLookUp, usernameReason } from "../profile/rules";
 import {
   ensureGroupPushRouting,
   memberSignatureKeys,
@@ -361,6 +359,7 @@ import {
   retryKey,
   retryScopeKey,
   retryVerdict,
+  loadOwnRequests,
   runSupersededRerequests,
   type GroupSnapshot,
   type RetryableRequest,
@@ -478,7 +477,22 @@ import {
   type PendingGroupSetup,
 } from "../chat/pending-group-setup";
 import { Icon } from "../ui/icons";
-import { ModalLayer } from "../ui/ModalLayer";
+import { AddMembersScreen } from "../chat/AddMembersScreen";
+import {
+  addPicksInTurn,
+  pendingPersonKeys,
+  type AddPick,
+  type ContactCandidate,
+  type Excluded,
+  type OwnAddRecord,
+} from "../chat/add-members";
+import {
+  contactBackState,
+  infoBackStep,
+  infoParamOf,
+  infoScreenOf,
+  type InfoScreen,
+} from "../chat/info-navigation";
 // docs/ux/client-redesign.md section 5.2 — the row type and the bubble
 // renderer live under `chat/`; this file computes the layout (date
 // separators, sender runs) through `timeline-layout.ts` and renders the list.
@@ -652,7 +666,8 @@ function ChatView(props: {
   // its result never pulls the person out of wherever they went meanwhile
   // (`ui/screen-anchor.ts`). The path rather than a mounted flag: deleting the
   // chat unmounts this view by its own success, and the way out is still owed.
-  const onThisScreen = screenAnchor(useLocation());
+  const location = useLocation();
+  const onThisScreen = screenAnchor(location);
   // ADR-0048 — profile names: the one display resolver, the received-profile
   // store the receive loop feeds, and the publish triggers.
   const profiles = useProfiles();
@@ -1349,41 +1364,71 @@ function ChatView(props: {
    * roles, ownership and `Leave group` can no longer surface in a chat
    * between two people, where none of them mean anything.
    *
-   * A group's info is a LAYER over the conversation, which stays where it is
-   * behind the dim. A person's info IS the contact screen, and there is one
-   * of it: the header goes to the contact's own page (`paths.contact`)
-   * exactly the way the contact list opens it, Message included - from here
-   * Message is just the way back. Until 2026-09-26 the chat rendered a
-   * second copy of that card as a layer, with Message withheld, and the same
-   * person had two cards. A person the viewer removed has no contact record
-   * but keeps the conversation; their card is the same page, which then
-   * offers `Add to contacts` (amended 2026-10-24). A one-to-one whose peer
-   * cannot be read opens nothing at all (`infoOpening`).
+   * A group's info is a SCREEN pushed from the conversation (amended
+   * 2026-10-29, section 3): it takes the conversation's column, with a back
+   * icon in its header and a history entry of its own (`?info=group`, see
+   * `chat/info-navigation.ts`), so the browser's Back and `Esc` return to the
+   * conversation too. The conversation stays mounted under it, so its scroll
+   * position and composer draft are as they were left. A person's info IS
+   * the contact screen, and there is one of it: the header goes to the
+   * contact's own page (`paths.contact`) exactly the way the contact list
+   * opens it, Message included, and records this conversation as where its
+   * back control returns (section 3.1). A person the viewer removed has no
+   * contact record but keeps the conversation; their card is the same page,
+   * which then offers `Add to contacts` (amended 2026-10-24). A one-to-one
+   * whose peer cannot be read opens nothing at all (`infoOpening`).
    */
   function openInfo(): void {
-    setHeaderMenuOpen(false);
     const opening = infoOpening(infoTarget(), infoPerson());
     if (opening === "nothing") return;
     if (opening === "contact-page") {
       const record = infoPerson();
       if (record === null) return;
-      navigate(paths.contact(base64UrlEncodeNoPad(base64Decode(record.signaturePubkeyB64))));
+      openContactScreen(record.signaturePubkeyB64);
       return;
     }
-    setInfoOpen(true);
     showNotice(null);
     setError(null);
-    // Bump version so the layer reads fresh data when it opens (covers the
+    // Bump version so the screen reads fresh data when it opens (covers the
     // case where new commits arrived between the last poll and this click).
     setMembersVersion(membersVersion() + 1);
+    goToInfoScreen("group");
   }
 
-  /** One obvious way out, shared by the backdrop, `Esc` and the close
-   *  button. The add-member form is part of the group info, so it closes
-   *  with it rather than being left armed behind the conversation. */
+  /** Open a person's contact screen over this one; its back control returns
+   *  here, to the conversation or to the group's info as it is now. */
+  function openContactScreen(keyB64: string): void {
+    navigate(paths.contact(base64UrlEncodeNoPad(base64Decode(keyB64))), {
+      state: contactBackState(`${location.pathname}${location.search}`),
+    });
+  }
+
+  /** Step forward to an info screen: a history entry of its own, marked so
+   *  the back control knows it may simply go back through it. */
+  function goToInfoScreen(screen: InfoScreen): void {
+    setSearchParams({ info: infoParamOf(screen) }, { state: { lkInfoStep: true } });
+  }
+
+  /**
+   * One step back from the info screen shown, shared by the back icon and
+   * `Esc`: Add members to the info, the info to the conversation. When this
+   * view pushed the entry it goes back through it, so the browser's history
+   * is the one the person walked; an entry it did not push (a reload, a link)
+   * is replaced by the step back instead, so Back never leaves the app.
+   */
   function closeInfo(): void {
-    setInfoOpen(false);
-    setAddMemberOpen(false);
+    const screen = infoScreen();
+    if (screen === null) return;
+    const pushedHere =
+      typeof location.state === "object" &&
+      location.state !== null &&
+      (location.state as { lkInfoStep?: unknown }).lkInfoStep === true;
+    if (pushedHere) {
+      navigate(-1);
+      return;
+    }
+    const back = infoBackStep(screen);
+    setSearchParams({ info: back === null ? undefined : infoParamOf(back) }, { replace: true });
   }
 
   const resolvePeerName = (): string => {
@@ -1543,7 +1588,7 @@ function ChatView(props: {
   // or `?call=video` (docs/ux/client-redesign.md section 5.3): the same header
   // buttons, pressed once the chat can offer a call. The parameter is dropped
   // from the URL first, so a reload or Back does not place a second call.
-  const [searchParams, setSearchParams] = useSearchParams<{ call?: string; at?: string; reply?: string }>();
+  const [searchParams, setSearchParams] = useSearchParams<{ call?: string; at?: string; reply?: string; info?: string }>();
   // ADR-0052 decision 2 — `?at=<messageId>`: a forwarded message's "Forwarded
   // from" line in another conversation opened this one at its original. The
   // jump runs once the row is in the loaded timeline (the log hydrates
@@ -1746,11 +1791,6 @@ function ChatView(props: {
       }),
   });
   onCleanup(() => hub.dispose());
-  // 1.18g — Add-member panel state. Inline form expands below
-  // the chat header when toggled; collapses after a successful
-  // add or explicit Cancel.
-  const [addMemberOpen, setAddMemberOpen] = createSignal(false);
-  const [addMemberInput, setAddMemberInput] = createSignal("");
   // ADR-0051 — the `Group name` row of the group info (UX spec §3.1.2 / §5).
   const [groupNameInput, setGroupNameInput] = createSignal("");
   const [groupNameBusy, setGroupNameBusy] = createSignal(false);
@@ -1795,8 +1835,6 @@ function ChatView(props: {
   const canRenameGroup = (): boolean => ownRole() !== "member" && !membershipEnded();
   const groupNameUnchanged = (): boolean =>
     groupNameInput().trim() === (groupNames.nameOf(props.entry.groupIdB64) ?? "");
-  // ADR-0048 §4 — no lookup leaves the device for a name that fails the rule.
-  const addMemberCheck = createUsernameCheck(addMemberInput);
   // ADR-0028 (G-3) — the minted group invite-link (the owner/admin
   // "create invite link" affordance), or `null` before it is generated.
   const [inviteLink, setInviteLink] = createSignal<string | null>(null);
@@ -1821,13 +1859,7 @@ function ChatView(props: {
   // `members` createMemo re-reads `group.members()` whenever
   // it changes. Same trick as `memberCount` — Solid only
   // tracks signal reads, not WASM-side property accesses.
-  const [infoOpen, setInfoOpen] = createSignal(false);
   const [membersVersion, setMembersVersion] = createSignal(0);
-  // The header's overflow menu. Info is NOT in it: the name at the top is the
-  // only way in (`docs/ux/conversation-info.md` section 1), because two routes
-  // to one screen means two things to keep in step and the one in the menu is
-  // the one that drifts.
-  const [headerMenuOpen, setHeaderMenuOpen] = createSignal(false);
   /**
    * Which info this conversation's header opens - the person or the group.
    *
@@ -1837,6 +1869,42 @@ function ChatView(props: {
    * rule, and a second copy is what this whole move exists to end.
    */
   const infoTarget = createMemo(() => infoTargetForKind(uiRules(), conversationKind()));
+  /**
+   * The info screen on show, from the URL (`chat/info-navigation.ts`):
+   * `group` (the group's info) or `add-members` (pushed over it), `null` for
+   * the conversation. Only a group has them, and only once the destination is
+   * known, so a one-to-one never shows the group's screens.
+   */
+  const infoScreen = createMemo(() => infoScreenOf(searchParams.info, infoTarget() === "group"));
+  const infoOpen = (): boolean => infoScreen() !== null;
+  /** Add members is on show over the info: asked for, and the person may add
+   *  (the `add-member` block of the shared rule). Anyone else asking by URL
+   *  sees the info. */
+  const addMembersShown = (): boolean =>
+    infoScreen() === "add-members" && groupSections().includes("add-member");
+  /** The info's back icon, focused when the info opens so the keyboard starts
+   *  on the screen it is on. */
+  let infoBackButton: HTMLButtonElement | undefined;
+  createEffect(
+    on(infoScreen, (screen, prev) => {
+      if (screen === "group" && prev !== "add-members") {
+        queueMicrotask(() => infoBackButton?.focus());
+      }
+    }),
+  );
+  // `Esc` steps back from an info screen, like its back icon. Not while a
+  // dialog of its own is open over it (a confirm, a picker): that dialog
+  // answers `Esc` first.
+  {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== "Escape" || e.defaultPrevented || !infoOpen()) return;
+      if (document.querySelector("dialog[open]") !== null) return;
+      e.preventDefault();
+      closeInfo();
+    };
+    document.addEventListener("keydown", onKey);
+    onCleanup(() => document.removeEventListener("keydown", onKey));
+  }
   /** The header button's accessible name, once the destination is known.
    *  `undefined` before that, so the button falls back to its own text - the
    *  conversation's name - rather than to an invented label. */
@@ -1844,8 +1912,8 @@ function ChatView(props: {
     const target = infoTarget();
     return target === null ? undefined : infoOpenLabel(target);
   };
-  /** The heading of the opened layer. The empty string is never rendered:
-   *  the layer stays CLOSED while the destination is unknown, so there is no
+  /** The heading of the opened screen. The empty string is never rendered:
+   *  the screen stays CLOSED while the destination is unknown, so there is no
    *  heading to invent and no risk of showing the wrong panel. */
   const infoTargetHeading = (): string => {
     const target = infoTarget();
@@ -2037,8 +2105,6 @@ function ChatView(props: {
   // body or a render, both of which run after this component's setup.
   const canManageMembers = (): boolean =>
     ownRole() !== "member" && !membershipEnded();
-  /** Whether the header's overflow menu has anything in it at all. */
-  const headerMenuHasItems = (): boolean => canManageMembers();
   // ADR-0022 — only the owner may promote / demote admins.
   const isOwner = (): boolean => ownRole() === "owner";
 
@@ -4081,6 +4147,7 @@ function ChatView(props: {
           payload: e.payload,
           senderKeyB64: e.senderKey,
           oneToOne: isOneToOne(props.entry.group),
+          scopeHex: journalHex(base64Decode(props.entry.groupIdB64)),
         });
         continue;
       }
@@ -5711,18 +5778,10 @@ function ChatView(props: {
     return hub.urlFor(mediaKey(ref.blobId));
   }
 
-  // 1.18g — "Add member" submission handler. Resolves the
-  // typed @username via discovery, runs the full MLS add
-  // (fetch KeyPackage → group.addMember → publish commit to DS
-  // → ship Welcome to stranger inbox), then registers the
-  // commit's DS id with `ChatClient.markOwnPublishedCommit` so
-  // the very next pollMessages drops our own echo and doesn't
-  // hit `processIncoming` on a commit we just applied locally.
-  // Final step is a `refresh()` — pulls the (now-suppressed)
-  // commit off the wire + re-renders the header (memberCount
-  // signal updates from `group.memberCount` post-add).
   /** Everything an add owes once the artifact is on the wire, shared by the
-   *  typed add and the New-group setup. */
+   *  Add members screen and the New-group setup. The ChatClient echo filter
+   *  is armed with the artifact's DS id so the next poll does not try to
+   *  process this device's own proposal or commit. */
   function afterMemberAdded(
     outcome: { kind: "committed"; commitMessageId: number } | { kind: "proposed"; proposalMessageId: number },
     recipientKeyB64: string,
@@ -5768,7 +5827,7 @@ function ChatView(props: {
   }
 
   /** The New-group screen's remaining picks (`docs/ux/new-group.md` §2 step
-   *  3): added one after another through the same path as a typed add, then
+   *  3): added one after another through the same path as Add members, then
    *  swept once. A failed add is reported and skipped; the rest still land. */
   async function runPendingGroupSetup(setup: PendingGroupSetup): Promise<void> {
     setBusy(true);
@@ -5804,68 +5863,121 @@ function ChatView(props: {
     if (setup !== null) void runPendingGroupSetup(setup);
   });
 
-  async function onAddMember(): Promise<void> {
-    const username = addMemberInput().trim();
-    if (username.length === 0) return;
-    if (!mayLookUp(addMemberCheck())) return;
+  /**
+   * The keys of the people this view has an add in flight for (the Add
+   * members screen's picks being added): out of that screen's lists until
+   * their requests are in the pending set or they are members.
+   */
+  const [addsInFlight, setAddsInFlight] = createSignal<ReadonlySet<string>>(new Set());
+
+  /**
+   * `docs/ux/conversation-info.md` section 2.4 — Add on the Add members
+   * screen. The screen has already closed back to the info; each pick goes
+   * through the same add as the New-group setup (by account id and signature
+   * key, no username lookup), one after another, with everything an add owes
+   * (`afterMemberAdded`) and the queue-full re-send armed exactly as for a
+   * single add, then one sweep. No notice, in effect or not: the pending
+   * section and the roster say it. Picks that could not be added are named
+   * once, in place, in the info; the others still land.
+   */
+  async function onAddPicks(picks: readonly AddPick[]): Promise<void> {
+    if (picks.length === 0) return;
     setError(null);
     showNotice(null);
+    setAddsInFlight(new Set([...addsInFlight(), ...picks.map((p) => p.keyB64)]));
     setBusy(true);
-    // ADR-0045 UX §7 — the add descriptor is only knowable once the typed
-    // handle has resolved, which happens inside the call, so it is captured
-    // through the resolution hook rather than reconstructed from a throw. The
-    // pending count is read at the SAME moment: it is the baseline the drain
-    // is measured against, and reading it before the discovery round-trip
-    // would compare against a set that may since have moved.
-    let addRequest: RetryableRequest | null = null;
-    let addPendingBefore = 0;
+    let failed: string[] = [];
     try {
-      const result = await contacts.addMemberToGroupByUsername(
-        props.requireIdentity(),
-        props.entry.group,
-        username,
-        (recipient) => {
-          addRequest = {
+      failed = await addPicksInTurn(picks, {
+        addOne: async (pick) => {
+          // ADR-0045 UX §7 — a manual attempt owns the retry slot for this
+          // person, and the pending count is the baseline a queue-full
+          // refusal is measured against.
+          const request: RetryableRequest = {
             kind: "add",
-            subjectKeyB64: base64Encode(recipient.signaturePubkey),
-            subjectAccountIdB64: base64Encode(recipient.accountId),
+            subjectKeyB64: pick.keyB64,
+            subjectAccountIdB64: base64Encode(accountIdBytesFromHex(pick.accountIdHex)),
           };
-          // A manual attempt owns the slot: disarm any retry already armed for
-          // this same person before starting, so an in-flight one cannot
-          // publish a second copy behind this.
-          disarmRetry(addRequest);
-          addPendingBefore = pendingCountNow();
+          disarmRetry(request);
+          const pendingBefore = pendingCountNow();
+          try {
+            const outcome = await contacts.addMemberToGroup(
+              props.requireIdentity(),
+              props.entry.group,
+              accountIdBytesFromHex(pick.accountIdHex),
+              base64Decode(pick.keyB64),
+              { foundGrantWireB64: pick.grantWireB64, openBindingB64: pick.openBindingB64 },
+            );
+            afterMemberAdded(outcome, pick.keyB64);
+          } catch (err) {
+            armRetryIfQueueFull(request, err, pendingBefore);
+            // eslint-disable-next-line no-console
+            console.warn("add members: an add failed", err instanceof Error ? err.name : "");
+            throw err;
+          }
         },
-      );
-      afterMemberAdded(result.outcome, base64Encode(result.recipientSignaturePubkey));
-      // UX section 2 (amended 2026-10-29) — no notice: the member row's
-      // annotation shows a waiting add, and once it lands the row and the
-      // timeline's named row say so.
-      setAddMemberInput("");
-      setAddMemberOpen(false);
-      // ADR-0045 — if this device is the committer (the owner, rank 0) sweep
-      // the request it just published straight away, so the common case is
-      // still "tap, done". Awaited, not fired-and-forgotten, so the panel
-      // refresh below sees the post-sweep roster.
-      await sweepNow();
-      // Pull anything that arrived during the add (no-op when
-      // there's nothing new but cheap, and keeps the cursor
-      // moving past the suppressed commit row).
-      void refresh();
-    } catch (err) {
-      // ADR-0045 UX §7 — `addRequest` is `null` only when the failure came
-      // BEFORE the handle resolved (an unknown username, a discovery outage),
-      // where there is no request to re-send and nothing to arm.
-      if (addRequest !== null) {
-        armRetryIfQueueFull(addRequest, err, addPendingBefore);
-      }
-      setError(errorText(err, "chat.error.add_member"));
+        sweep: async () => {
+          await sweepNow();
+        },
+      });
     } finally {
+      const done = new Set(picks.map((p) => p.keyB64));
+      setAddsInFlight(new Set([...addsInFlight()].filter((k) => !done.has(k))));
       setBusy(false);
+    }
+    void refresh();
+    if (failed.length > 0) {
+      setError(() => t("chat.members.add.error.some_failed", { names: joinList(failed) }));
     }
   }
 
-  // 1.18h — Remove-member handler. Symmetric to onAddMember
+  /** The Add members screen's contacts: the address book, named the way the
+   *  roster names people. */
+  const addMemberContacts = createMemo((): ContactCandidate[] => {
+    profiles.version();
+    acceptedVersion();
+    return loadAccepted().map((c) => {
+      const resolved = profiles.resolve(c.signaturePubkeyB64);
+      return {
+        keyB64: c.signaturePubkeyB64,
+        accountIdHex: c.accountIdHex,
+        name: memberNameOf(resolved),
+        username: resolved.username,
+      };
+    });
+  });
+
+  /** The account keys of this device's contacts: a member row of one opens
+   *  their contact screen. */
+  const contactKeySet = createMemo(() => new Set(addMemberContacts().map((c) => c.keyB64)));
+
+  /** Who the Add members screen leaves out: the people in the group, the
+   *  people an add is waiting for (the group's pending adds and this view's
+   *  in-flight ones), and this account. */
+  const addMemberExcluded = createMemo((): Excluded => {
+    const leaves: string[] = [];
+    for (const r of pendingRequests()) {
+      if (r.kind === "add" && r.addSignatureKeyB64 !== undefined) leaves.push(r.addSignatureKeyB64);
+    }
+    const ownAdds: OwnAddRecord[] = [];
+    const s = auth.state();
+    if (s.kind === "session" && leaves.length > 0) {
+      for (const rec of loadOwnRequests(s.account.accountId, props.entry.groupIdB64).values()) {
+        if (rec.request.kind === "add") {
+          ownAdds.push({ subjectKeyB64: rec.request.subjectKeyB64, deviceKeysB64: rec.deviceKeysB64 ?? [] });
+        }
+      }
+    }
+    const pending = pendingPersonKeys(leaves, ownAdds);
+    for (const k of addsInFlight()) pending.add(k);
+    return {
+      memberKeysB64: new Set(members().map((m) => base64Encode(m.sigPubkey))),
+      pendingKeysB64: pending,
+      ownKeyB64: ownPersonKeyB64(chats.identity()) ?? null,
+    };
+  });
+
+  // 1.18h — Remove-member handler. Symmetric to the add
   // minus the discovery/Welcome dance: caller picks the leaf
   // index from the members list, we drive the MLS remove,
   // broadcast the commit, suppress the echo. The removed
@@ -7062,8 +7174,14 @@ function ChatView(props: {
   });
 
   return (
+    <div class="lk-chat-body" style={{ position: "relative" }}>
+    {/* `docs/ux/conversation-info.md` section 3 — the conversation stays
+        mounted (and laid out, so its scroll position and draft are kept)
+        while an info screen covers it; `inert` takes it out of focus and the
+        accessibility tree meanwhile. */}
     <div
       class="lk-chat-body"
+      inert={infoOpen()}
       onDragEnter={onDragEnter}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
@@ -7147,12 +7265,8 @@ function ChatView(props: {
           class="lk-chat-title"
           title={infoTargetLabel()}
           aria-label={infoTargetLabel()}
-          // A dialog only where one opens: a contact's info is their own
-          // page, and the button is then a plain link-like control.
-          aria-haspopup={
-            infoOpening(infoTarget(), infoPerson()) === "layer" ? "dialog" : undefined
-          }
-          aria-expanded={infoOpen()}
+          // Both destinations are screens (a group's info, a contact's own
+          // page), so the button is a plain link-like control.
           onClick={openInfo}
         >
           <Avatar
@@ -7207,62 +7321,10 @@ function ChatView(props: {
               <Icon name="video" size={20} />
             </button>
           </Show>
-          {/* Everything that is not a call lives in the overflow menu
-              (docs/ux section 5.2). Receiving is automatic, so there is no
-              Refresh: the receive loop below polls while the chat is open. */}
-          <div class="lk-menu-anchor">
-            {/* Shown only when it has something in it: with `Members` gone
-                to the header, a plain member's menu would otherwise open
-                empty. */}
-            <Show when={headerMenuHasItems()}>
-            <button
-              type="button"
-              class="lk-icon-button"
-              title={t("common.more_options")}
-              aria-label={t("common.more_options")}
-              aria-haspopup="menu"
-              aria-expanded={headerMenuOpen()}
-              onClick={() => setHeaderMenuOpen(!headerMenuOpen())}
-              disabled={busy()}
-            >
-              <Icon name="more" size={20} />
-            </button>
-            </Show>
-            <Show when={headerMenuOpen()}>
-              <div class="lk-menu-backdrop" onClick={() => setHeaderMenuOpen(false)} />
-              <div class="lk-menu" role="menu">
-                {/* `Members` used to live here as a second route to the same
-                    screen. It is gone: the name at the top is the one way in
-                    (`docs/ux/conversation-info.md` section 1).
-
-                    Only in a GROUP. A one-to-one does not turn into a group
-                    by growing: the maintainer's call on 2026-09-23, after
-                    both natives lost the affordance and only web kept it.
-                    Adding a third person starts a new group, which is the one
-                    rule on all three clients rather than a capability one of
-                    them happens to have (`conversation-info.md` section 2.1).
-
-                    ADR-0022 — within a group, only owner/admin (or an
-                    open/legacy group) sees it; a plain member's add would be
-                    refused by peers. Adding is part of the group's info, so
-                    this opens the info with the form ready rather than a form
-                    of its own floating under the header. */}
-                <Show when={isGroupChat() && canManageMembers()}>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setAddMemberOpen(true);
-                      openInfo();
-                    }}
-                  >
-                    <Icon name="plus" size={18} />
-                    {t("chat.members.add.action")}
-                  </button>
-                </Show>
-              </div>
-            </Show>
-          </div>
+          {/* No overflow menu: its one item, `Add member`, became the first
+              row of the members list in the group's info
+              (`docs/ux/conversation-info.md` section 2.4), and receiving is
+              automatic, so there is nothing left to put in one. */}
         </div>
       </header>
       </Show>
@@ -7435,1135 +7497,6 @@ function ChatView(props: {
       </Show>
 
 
-      {/* `docs/ux/conversation-info.md` — the info about THIS conversation,
-          opened by the name at the top of it.
-
-          Two things changed here. It is a LAYER over the conversation, which
-          stays where it is behind the dim, rather than a section that pushed
-          the messages sideways — a panel that shoves the timeline aside to
-          show two rows reads as a glitch, which is why the click used to feel
-          like nothing happened (section 3). And what is inside is decided by
-          what the conversation IS (section 1): everything below is a GROUP's
-          info, and a conversation between two people opens the person instead
-          — so `Group name`, `Create invite link`, `Make admin`, `Transfer
-          ownership` and `Leave group` can no longer appear where there is no
-          group to name, no owner to transfer and nothing to leave that is not
-          simply the other person. */}
-      <ModalLayer
-        open={infoOpen() && infoTarget() === "group"}
-        title={infoTargetHeading()}
-        onClose={closeInfo}
-      >
-        {/* The layer is the GROUP's idiom and nothing else's: a person's info
-            is their own page (`openInfo` navigates there), so this never has
-            to choose a panel for any other destination. A one-to-one showing
-            the group panel is precisely the defect the routing was changed to
-            fix, and a fallback here would reopen it for the first render. */}
-        <Show when={infoTarget() === "group"}>
-          {/* `docs/ux/conversation-info.md` section 4 — an action refused
-              says so IN PLACE and the layer stays open. These two used to sit
-              under the panel, which is now behind the dim and unreadable. */}
-          <Show when={error()}>
-            {(message) => (
-              <div class="form-error">
-                {message()}
-              </div>
-            )}
-          </Show>
-          <Show when={notice()}>{(message) => <div class="form-notice">{message()}</div>}</Show>
-          {/* ADR-0059 section 6 — share the listed channels this person
-              follows with this group. Not a block of the shared info rule
-              (`lakko-ui-rules`): it is shown in every group this device is
-              still a member of. */}
-          <Show when={!membershipEnded()}>
-            <ShareChannelsSwitch entry={props.entry} />
-          </Show>
-          {/* 1.18g — the add-member form, reached from `Add member` in the
-              header's overflow menu, which opens this info with the form
-              ready. Submit drives
-              ContactsClient.addMemberToGroupByUsername, which fetches the
-              recipient's KeyPackage, runs Group.addMember, broadcasts the
-              commit to existing members via DS, and ships the Welcome to
-              the new member's stranger inbox. */}
-          <Show when={addMemberOpen() && groupSections().includes("add-member")}>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                void onAddMember();
-              }}
-              class="lk-card"
-              style={{ "flex-direction": "row", "align-items": "center", gap: "8px" }}
-            >
-              <input
-                type="text"
-                placeholder={t("chat.members.add.placeholder")}
-                autocomplete="off"
-                value={addMemberInput()}
-                onInput={(e) => setAddMemberInput(e.currentTarget.value)}
-                style={{ flex: 1 }}
-                disabled={busy()}
-                aria-invalid={addMemberCheck().kind === "invalid"}
-              />
-              <button
-                class="primary"
-                type="submit"
-                disabled={busy() || !mayLookUp(addMemberCheck())}
-              >
-                {busy() ? t("common.adding") : t("chat.members.add.submit")}
-              </button>
-              <Show when={usernameReason(addMemberCheck())}>
-                {(reason) => (
-                  <span class="form-error" role="status" style={{ "align-self": "center" }}>
-                    {reason()}
-                  </span>
-                )}
-              </Show>
-            </form>
-          </Show>
-          {/* ADR-0051 — the `Group name` row (UX spec §3.1.2 / §5). Visible to
-              everyone in a group; editable by the owner and admins (read from
-              the live group at Save), read-only for a plain member. An empty
-              name clears it and the title falls back to the members' names. */}
-          <section aria-label={GROUP_NAME_LABEL()} class="lk-card" style={{ gap: "8px" }}>
-            <h2>{GROUP_NAME_LABEL()}</h2>
-            <Show
-              when={groupSections().includes("rename-group")}
-              fallback={<span style={{ "font-size": "0.9rem" }}>{resolvePeerName()}</span>}
-            >
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void onSaveGroupName();
-                }}
-                style={{ display: "flex", "flex-direction": "row", "align-items": "center", gap: "8px" }}
-              >
-                <input
-                  type="text"
-                  aria-label={GROUP_NAME_LABEL()}
-                  placeholder={resolvePeerName()}
-                  autocomplete="off"
-                  maxLength={64}
-                  value={groupNameInput()}
-                  onInput={(e) => setGroupNameInput(e.currentTarget.value)}
-                  style={{ flex: 1 }}
-                  disabled={groupNameBusy()}
-                  aria-invalid={groupNameError() !== null}
-                />
-                <button
-                  class="primary"
-                  type="submit"
-                  disabled={groupNameBusy() || groupNameUnchanged()}
-                >
-                  {groupNameBusy() ? t("common.saving") : GROUP_NAME_SAVE()}
-                </button>
-              </form>
-            </Show>
-            <Show when={groupNameError()}>
-              {(msg) => (
-                <span class="form-error" role="alert">
-                  {msg()}
-                </span>
-              )}
-            </Show>
-          </section>
-          <MembersCanFindMeSwitch kind="group" groupIdB64={props.entry.groupIdB64} />
-          <section aria-label={t("chat.members.title")} class="lk-card" style={{ gap: "8px" }}>
-            <h2>{t("chat.members.heading", { count: members().length })}</h2>
-            {/* ADR-0045 UX §5.1 — the pending notice. TOP of the panel, above
-                everything, and rendered only once at least one request is past
-                the quiet window: the owner is rank 0 and sweeps its own request
-                immediately, so in the common case nothing ever renders here. A
-                spinner that appears and vanishes in 300 ms teaches the user that
-                membership is slow when it is not.
-
-                Announced POLITELY (`aria-live="polite"`): nothing about it is
-                urgent and it can change while the roster is being read. It is
-                carried by TEXT, never by hue or a lone icon. */}
-            <Show when={pendingRequestNotice() !== null}>
-              <div
-                role="status"
-                aria-live="polite"
-                style={{
-                  margin: "0 0 0.6rem 0",
-                  padding: "0.4rem 0.5rem",
-                  border: "1px solid var(--surface-border)",
-                  "border-radius": "var(--radius-sm)",
-                  background: "var(--surface-bg)",
-                  display: "flex",
-                  "flex-direction": "column",
-                  gap: "0.2rem",
-                }}
-              >
-                <span style={{ "font-size": "0.8rem", color: "var(--surface-fg)" }}>
-                  {pendingRequestNotice()?.count}
-                </span>
-                <span style={{ "font-size": "0.75rem", color: "var(--surface-muted)" }}>
-                  {pendingRequestNotice()?.liveness}
-                </span>
-              </div>
-            </Show>
-            {/* ADR-0045 UX §6.1.9 — the new-owner notice. Rendered once,
-                dismissible, at panel level, announced POLITELY.
-
-                It is a client-side INFERENCE from an observed role-table change,
-                not a message: nothing on the wire announces a transfer. So it is
-                best-effort and fails open — a device that first observes the table
-                already naming it owner says nothing — and it must never be the
-                only way a user learns their role. The panel's affordances stay the
-                primary signal, exactly as they are for admin today.
-
-                Placed directly BELOW the pending notice so §5's "pending notice,
-                top of the panel, above everything" ordering stays literally
-                intact; the two are almost never present at the same moment. */}
-            <Show when={newOwnerBanner() !== null}>
-              <div
-                role="status"
-                aria-live="polite"
-                style={{
-                  margin: "0 0 0.6rem 0",
-                  padding: "0.4rem 0.5rem",
-                  border: "1px solid var(--surface-border)",
-                  "border-radius": "var(--radius-sm)",
-                  background: "var(--surface-bg)",
-                  display: "flex",
-                  "flex-direction": "column",
-                  gap: "0.2rem",
-                }}
-              >
-                <span style={{ "font-size": "0.8rem", color: "var(--surface-fg)" }}>
-                  {newOwnerBanner()?.headline}
-                </span>
-                {/* The second line names the exit deliberately: it is the one
-                    sentence that stops the new owner from arriving where the old
-                    one was. */}
-                <span style={{ "font-size": "0.75rem", color: "var(--surface-muted)" }}>
-                  {newOwnerBanner()?.body}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setNewOwnerBanner(null)}
-                  style={{
-                    "font-size": "0.75rem",
-                    padding: "0.2rem 0.5rem",
-                    "border-radius": "var(--radius-sm)",
-                    border: "1px solid var(--surface-border)",
-                    background: "transparent",
-                    color: "var(--surface-fg)",
-                    cursor: "pointer",
-                    "align-self": "flex-start",
-                  }}
-                >
-                  {NEW_OWNER_DISMISS()}
-                </button>
-              </div>
-            </Show>
-            {/* ADR-0028 (G-3) — owner/admin "create invite link" affordance.
-                Mints a /g/<slug> link conveying this group's id; a non-member
-                opens it to request to join, approved via the pending list above.
-                Same role gate as add/remove. */}
-            <Show when={groupSections().includes("invite-link")}>
-              <div
-                style={{
-                  margin: "0 0 0.6rem 0",
-                  display: "flex",
-                  "flex-direction": "column",
-                  gap: "0.4rem",
-                }}
-              >
-                <button
-                  type="button"
-                  disabled={busy()}
-                  onClick={() => void onCreateInviteLink()}
-                  style={{
-                    "font-size": "0.8rem",
-                    padding: "0.3rem 0.6rem",
-                    "border-radius": "var(--radius-sm)",
-                    border: "1px solid var(--surface-border)",
-                    background: "var(--surface-bg)",
-                    color: "var(--surface-fg)",
-                    cursor: "pointer",
-                    "align-self": "flex-start",
-                  }}
-                >
-                  {t("chat.invite_link.create")}
-                </button>
-                <Show when={inviteLink()}>
-                  {(l) => (
-                    <ShareLinkRow
-                      url={l()}
-                      onRevoke={() => void onRevokeInviteLink()}
-                      busy={busy()}
-                    />
-                  )}
-                </Show>
-              </div>
-            </Show>
-            {/* ADR-0027 (G-3) — pending external-join requests. Owner / admin
-                only (same gate as add / remove). Each row offers Approve (ADR-0045
-                S7: publishes ONE `Add` proposal; the joiner is admitted when a
-                committer sweeps it) or Reject (drops the retained request
-                locally). A request whose joiner has since landed disappears on
-                its own — the core filters it out of `pendingExternalJoins()` on
-                every read — so this list retires its own rows with no message
-                saying so. Hidden when empty. */}
-            <Show
-              when={canManageMembers() && (pendingJoins().length > 0 || unkeptJoinRequest())}
-            >
-              <div
-                style={{
-                  margin: "0 0 0.6rem 0",
-                  padding: "0.4rem 0.5rem",
-                  border: "1px dashed var(--surface-border)",
-                  "border-radius": "var(--radius-sm)",
-                  background: "var(--surface-bg)",
-                }}
-              >
-                <h3
-                  style={{
-                    "font-size": "0.78rem",
-                    "text-transform": "uppercase",
-                    "letter-spacing": "0.04em",
-                    color: "var(--surface-muted)",
-                    margin: "0 0 0.2rem 0",
-                  }}
-                >
-                  {t("chat.members.join.heading", { count: pendingJoins().length })}
-                </h3>
-                {/* ADR-0027 / §7.1 — a request the quarantine turned away. It
-                    is in no list below, because the core never kept it, and it
-                    gets no Approve for the same reason: there is nothing to
-                    approve. Informational only, which is the most
-                    `externalJoinAffordance` allows for an unretained
-                    request. */}
-                <Show when={unkeptJoinRequest()}>
-                  <p
-                    style={{
-                      "font-size": "0.7rem",
-                      color: "var(--surface-muted)",
-                      margin: "0 0 0.4rem 0",
-                    }}
-                  >
-                    {JOIN_REQUEST_NOT_KEPT()}
-                  </p>
-                </Show>
-                <ul
-                  style={{
-                    "list-style": "none",
-                    padding: 0,
-                    margin: 0,
-                    display: "flex",
-                    "flex-direction": "column",
-                    gap: "0.3rem",
-                  }}
-                >
-                  <For each={pendingJoins()}>
-                    {(ref) => (
-                      <li
-                        style={{
-                          display: "flex",
-                          "align-items": "center",
-                          "justify-content": "space-between",
-                          gap: "0.5rem",
-                        }}
-                      >
-                        <Avatar
-                          label={pendingJoinName(props.entry.group, ref, base64Encode, (k) => profiles.resolve(k))}
-                          id={pendingJoinPersonKey(props.entry.group, ref, base64Encode)}
-                          size="sm"
-                          personKey={pendingJoinPersonKey(props.entry.group, ref, base64Encode)}
-                        />
-                        <div
-                          style={{
-                            display: "flex",
-                            "flex-direction": "column",
-                            gap: "0.1rem",
-                            overflow: "hidden",
-                            flex: "1",
-                          }}
-                        >
-                          <span class="lk-ellipsis" style={{ "font-size": "0.85rem" }}>
-                            {/* Resolved through the joiner's ACCOUNT key: the
-                                request is keyed on its device leaf, contacts on
-                                the account (ADR-0050). */}
-                            {pendingJoinLabel(props.entry.group, ref, base64Encode, (k) =>
-                              profiles.resolve(k),
-                            )}
-                          </span>
-                          {(() => {
-                            const attr = joinAttributions().get(base64Encode(ref));
-                            if (!attr) {
-                              return (
-                                <span
-                                  style={{
-                                    "font-size": "0.7rem",
-                                    color: "var(--surface-muted)",
-                                  }}
-                                >
-                                  {t("chat.members.join.link_unknown")}
-                                </span>
-                              );
-                            }
-                            return (
-                              <span
-                                style={{
-                                  "font-size": "0.7rem",
-                                  color: attr.issuerInRoster
-                                    ? "var(--surface-muted)"
-                                    : "var(--danger, #c0392b)",
-                                }}
-                              >
-                                {attr.issuerInRoster
-                                  ? t("chat.members.join.via_member", { name: memberName(attr.issuerKeyB64) })
-                                  : t("chat.members.join.via_former", { name: memberName(attr.issuerKeyB64) })}
-                              </span>
-                            );
-                          })()}
-                        </div>
-                        <span style={{ display: "flex", gap: "0.3rem" }}>
-                          <button
-                            type="button"
-                            disabled={busy()}
-                            onClick={() => void onApproveJoin(ref)}
-                            style={{
-                              "font-size": "0.78rem",
-                              padding: "0.2rem 0.5rem",
-                              "border-radius": "var(--radius-sm)",
-                              border: "1px solid var(--accent)",
-                              background: "var(--accent)",
-                              color: "var(--accent-fg)",
-                              cursor: "pointer",
-                            }}
-                          >
-                            {t("chat.members.join.approve")}
-                          </button>
-                          <button
-                            type="button"
-                            disabled={busy()}
-                            onClick={() => void onRejectJoin(ref)}
-                            style={{
-                              "font-size": "0.78rem",
-                              padding: "0.2rem 0.5rem",
-                              "border-radius": "var(--radius-sm)",
-                              border: "1px solid var(--surface-border)",
-                              background: "transparent",
-                              color: "var(--surface-fg)",
-                              cursor: "pointer",
-                            }}
-                          >
-                            {t("chat.members.join.reject")}
-                          </button>
-                        </span>
-                      </li>
-                    )}
-                  </For>
-                </ul>
-              </div>
-            </Show>
-            {/* ADR-0045 UX §5 — `Waiting to be added ({n})`. A separate section,
-                not a roster row, and that is the load-bearing half of the
-                no-optimistic-update rule in reverse: a person who has been
-                REQUESTED is not a member, so putting them in the members list
-                would assert a membership that does not exist. Same identity
-                treatment the join-request rows use (short fingerprint). */}
-            <Show when={pendingAdds().length > 0}>
-              <div
-                style={{
-                  margin: "0 0 0.6rem 0",
-                  padding: "0.4rem 0.5rem",
-                  border: "1px dashed var(--surface-border)",
-                  "border-radius": "var(--radius-sm)",
-                  background: "var(--surface-bg)",
-                }}
-              >
-                <h3
-                  style={{
-                    "font-size": "0.78rem",
-                    "text-transform": "uppercase",
-                    "letter-spacing": "0.04em",
-                    color: "var(--surface-muted)",
-                    margin: "0 0 0.4rem 0",
-                  }}
-                >
-                  {t("chat.members.pending.adds_heading", { count: pendingAdds().length })}
-                </h3>
-                <ul
-                  style={{
-                    "list-style": "none",
-                    padding: 0,
-                    margin: 0,
-                    display: "flex",
-                    "flex-direction": "column",
-                    gap: "0.3rem",
-                  }}
-                >
-                  <For each={pendingAdds()}>
-                    {(req) => (
-                      <li
-                        style={{
-                          display: "flex",
-                          "flex-direction": "column",
-                          gap: "0.1rem",
-                        }}
-                      >
-                        <span style={{ "font-size": "0.85rem" }}>{labelForAddRequest(req)}</span>
-                        <span
-                          style={{
-                            "font-size": "0.7rem",
-                            color: "var(--surface-muted)",
-                          }}
-                        >
-                          {t("chat.members.pending.waiting_added")}
-                        </span>
-                      </li>
-                    )}
-                  </For>
-                </ul>
-              </div>
-            </Show>
-            {/* ADR-0045 S7 residual 1 — `Not applied ({n})`.
-
-                A sweep does not necessarily carry everything it finds, and an
-                excluded request used to vanish without a trace: OpenMLS empties
-                the proposal store on every merged commit whether or not the
-                commit carried the proposal, so the pending set that was the
-                request's only representation is cleared either way. For an
-                approved join it is worse, because a successful approve CONSUMED
-                the retained request — the admin cannot even re-approve.
-
-                This section says the one thing that is knowable, and no more:
-                the request did not apply. The core reports no reason for an
-                exclusion (`CreateCommitError` names no proposal), so neither
-                does the copy. Sits directly under `Waiting to be added` because
-                it is where those rows go when they stop waiting. */}
-            <Show when={unappliedAdds().length > 0}>
-              <div
-                style={{
-                  margin: "0 0 0.6rem 0",
-                  padding: "0.4rem 0.5rem",
-                  border: "1px dashed var(--surface-border)",
-                  "border-radius": "var(--radius-sm)",
-                  background: "var(--surface-bg)",
-                }}
-              >
-                <h3
-                  style={{
-                    "font-size": "0.78rem",
-                    "text-transform": "uppercase",
-                    "letter-spacing": "0.04em",
-                    color: "var(--surface-muted)",
-                    margin: "0 0 0.2rem 0",
-                  }}
-                >
-                  {unappliedHeading(unappliedAdds().length)}
-                </h3>
-                <p
-                  style={{
-                    "font-size": "0.7rem",
-                    color: "var(--surface-muted)",
-                    margin: "0 0 0.4rem 0",
-                  }}
-                >
-                  {UNAPPLIED_EXPLANATION()}
-                </p>
-                <ul
-                  style={{
-                    "list-style": "none",
-                    padding: 0,
-                    margin: 0,
-                    display: "flex",
-                    "flex-direction": "column",
-                    gap: "0.3rem",
-                  }}
-                >
-                  <For each={unappliedAdds()}>
-                    {(item) => (
-                      <li
-                        style={{
-                          display: "flex",
-                          "align-items": "flex-start",
-                          "justify-content": "space-between",
-                          gap: "0.5rem",
-                        }}
-                      >
-                        <span
-                          style={{ display: "flex", "flex-direction": "column", gap: "0.1rem" }}
-                        >
-                          <span style={{ "font-size": "0.85rem" }}>
-                            {labelForSignatureKey(item.subjectKeyB64)}
-                          </span>
-                          <span
-                            style={{ "font-size": "0.7rem", color: "var(--surface-muted)" }}
-                          >
-                            {unappliedLine(item)}
-                          </span>
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => onDismissUnapplied(item.key)}
-                          style={{ "font-size": "0.7rem" }}
-                        >
-                          {t("common.dismiss")}
-                        </button>
-                      </li>
-                    )}
-                  </For>
-                </ul>
-              </div>
-            </Show>
-            {/* ADR-0045 UX §6.2.7 — the roster stays, READ-ONLY, and carries one
-                line saying so.
-
-                It stays because it is the last thing you knew about who you were
-                in a group with, it is genuinely informative next to a frozen
-                transcript, and it is still readable: `members()` is a plain read
-                of the public group with no state gate.
-
-                The line is a statement about the LIST, not about any row in it,
-                and that is load-bearing rather than stylistic. A `Remove`
-                rewrites no `GroupContext`, so the role table is untouched and a
-                removed admin's frozen roster still names them an admin — nothing
-                here may present that as a live role. "Stopped updating" is the
-                literal truth (the local view is frozen at the removing epoch and
-                never moves again) rather than a euphemism for it, and it is
-                deliberately neutral between having left and having been
-                removed. */}
-            <Show when={membershipEnded()}>
-              <p
-                style={{
-                  margin: "0 0 0.4rem 0",
-                  "font-size": "0.75rem",
-                  color: "var(--surface-muted)",
-                }}
-              >
-                {FROZEN_ROSTER_HEADER()}
-              </p>
-            </Show>
-            <ul
-              style={{
-                "list-style": "none",
-                padding: 0,
-                margin: 0,
-                display: "flex",
-                "flex-direction": "column",
-                gap: "0.25rem",
-              }}
-            >
-              <For each={members()}>
-                {(m) => {
-                  const isSelf = m.leafIndex === props.entry.group.ownLeafIndex;
-                  // 1.18i — render the accepted-contact's
-                  // displayName when this leaf's pubkey is in our
-                  // local cache. Falls back to a hex fingerprint
-                  // (a recipient we've not formally accepted yet,
-                  // or somebody else who joined a group we're in).
-                  // Lookup key matches `local-store.ts`'s
-                  // `signaturePubkeyB64` shape (standard base64
-                  // of the 32-byte Ed25519 verifying key).
-                  const memberKeyB64 = base64Encode(m.sigPubkey);
-                  // ADR-0045 — NO optimistic update. A member with a pending
-                  // removal stays in the roster, annotated, because they are
-                  // still cryptographically in the group and still receiving
-                  // every message until the commit lands. Dropping the row would
-                  // be the membership equivalent of a green E2EE pill over an
-                  // unencrypted call.
-                  const annotation = (): string | null =>
-                    rowAnnotation(pendingRequests(), m.leafIndex, ownLeaf());
-                  const removePending = (): boolean =>
-                    rowAnnotation(pendingRequests(), m.leafIndex, ownLeaf()) !== null;
-                  const label = (): string => memberListLabel(memberKeyB64);
-                  return (
-                    <li
-                      // The annotation is part of the row's ACCESSIBLE LABEL, not
-                      // a separate focus stop — a screen-reader user hears it as
-                      // one thing, and hears WHY the Remove button below is
-                      // disabled rather than losing the control.
-                      aria-label={
-                        annotation() === null
-                          ? label()
-                          : t("chat.members.row_label", { name: label(), state: annotation() ?? "" })
-                      }
-                      class="lk-row"
-                      style={{ padding: "8px 10px", gap: "10px" }}
-                    >
-                      <Avatar label={memberName(memberKeyB64)} id={memberKeyB64} size="sm" personKey={memberKeyB64} />
-                      <span
-                        style={{
-                          display: "flex",
-                          "flex-direction": "column",
-                          gap: "0.1rem",
-                        }}
-                      >
-                        <span class="lk-row-title">{label()}</span>
-                        <Show when={m.deviceCount > 1}>
-                          <span class="lk-row-sub">{t("chat.members.devices", { count: m.deviceCount })}</span>
-                        </Show>
-                        <Show when={annotation() !== null}>
-                          <span
-                            aria-hidden="true"
-                            style={{
-                              "font-size": "0.7rem",
-                              color: "var(--surface-muted)",
-                              display: "inline-flex",
-                              "align-items": "center",
-                              gap: "0.25rem",
-                            }}
-                          >
-                            {annotation()}
-                          </span>
-                        </Show>
-                      </span>
-                      <span style={{ flex: 1 }} />
-                      <Show
-                        when={!isSelf}
-                        fallback={
-                          <span
-                            style={{
-                              "font-size": "0.8rem",
-                              color: "var(--surface-muted)",
-                            }}
-                          >
-                            {t("chat.author.you")}
-                          </span>
-                        }
-                      >
-                        {/* ADR-0022 — only the owner promotes / demotes admins;
-                            never the owner's own row. */}
-                        <Show when={isOwner() && ownerPubkeyHex() !== hexOf(m.sigPubkey)}>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              void onToggleAdmin(
-                                m,
-                                !adminPubkeys().has(hexOf(m.sigPubkey)),
-                              );
-                            }}
-                            class="ghost small"
-                            disabled={busy()}
-                          >
-                            {adminPubkeys().has(hexOf(m.sigPubkey))
-                              ? t("chat.members.admin.remove")
-                              : t("chat.members.admin.make")}
-                          </button>
-                        </Show>
-                        {/* ADR-0022 — only owner/admin (or an open/legacy
-                            group) sees Remove; a member's removal is refused.
-                            ADR-0045 UX §5.3 — while a removal is pending the
-                            button stays VISIBLE but disabled: hiding it would
-                            read as the permission having vanished, and the row
-                            annotation is what explains the disabled state. */}
-                        <Show when={canManageMembers()}>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              void onRemoveMember(m.leafIndex);
-                            }}
-                            class="ghost small"
-                            disabled={busy() || removePending()}
-                            style={{ color: "var(--danger)" }}
-                          >
-                            {t("common.remove")}
-                          </button>
-                        </Show>
-                      </Show>
-                    </li>
-                  );
-                }}
-              </For>
-            </ul>
-            {/* ADR-0045 UX §5 item 6 / §6.1.1 — THE EXIT BLOCK, bottom of the
-                panel. Exactly one of its two controls is ever live for a given
-                reader, because they are role-disjoint: the owner sees
-                `Transfer ownership` above a DISABLED `Leave group` carrying its
-                precondition, everyone else sees `Leave group` alone.
-
-                The owner's `Leave group` used to be HIDDEN, and this reverses
-                that — not because the old argument (a control that always refuses
-                is worse than no control) was wrong, but because it was right only
-                while transfer was unreachable. A disabled control whose reason
-                names the action directly above it is a signposted route, and it
-                is the same visible-but-disabled pattern §5.3 already uses for a
-                pending row's `Remove`. Hiding it now would leave an owner looking
-                for the exit finding nothing at all about leaving.
-
-                Only on the proposal path: a legacy group's core has no
-                self-remove route and no owner to transfer from. */}
-            <Show when={exitBlockState().kind !== "hidden"}>
-              <div
-                style={{
-                  "margin-top": "0.6rem",
-                  display: "flex",
-                  "flex-direction": "column",
-                  gap: "0.35rem",
-                }}
-              >
-                {/* ADR-0045 UX §6.2.4 / §6.2.7 — once the membership has ended,
-                    both of the other controls are gone (one names a group the
-                    reader is not in, the other is owner-only and they are not)
-                    and the block holds `Delete this chat` instead.
-
-                    This slot is the right home by §6.1.1's own argument: the
-                    block's meaning is *the exit*, and once you are out the only
-                    exit-shaped action left is closing the door behind you. A
-                    permanently dead row with no action available is its own
-                    defect — everything else about this state is "you cannot",
-                    and this is the one thing they still can.
-
-                    It is also the ONE control in this whole design that destroys
-                    user data on request. Everything else in §6.2 removes a claim
-                    the UI should not have been making; this removes a transcript
-                    that exists nowhere else, on one confirmation, with no undo
-                    and no export. The confirmation says so in as many words, and
-                    that is the only protection there is. */}
-                <Show when={exitBlockState().kind === "ended"}>
-                  <button
-                    type="button"
-                    disabled={busy()}
-                    onClick={() => void onDeleteChat()}
-                    style={{
-                      "font-size": "0.8rem",
-                      padding: "0.3rem 0.6rem",
-                      "border-radius": "var(--radius-sm)",
-                      border: "1px solid var(--surface-border)",
-                      background: "transparent",
-                      color: "var(--danger, #c0392b)",
-                      cursor: "pointer",
-                      "align-self": "flex-start",
-                    }}
-                  >
-                    {DELETE_CHAT_CONTROL()}
-                  </button>
-                </Show>
-                <Show when={ownerExit()}>
-                  {(owner) => (
-                    <>
-                      {/* NOT destructive-styled at rest. Red would file it with
-                        `Remove` and `Leave group`, and an owner scanning for a
-                        way out should not have to read a warning colour to
-                        find one. Transfer is not a destruction; it is a
-                        handover that happens to be final, and finality is a
-                        property of the confirmation below, not of the button
-                        that opens it. */}
-                      <button
-                        type="button"
-                        disabled={busy() || !owner().transfer.enabled}
-                        title={owner().transfer.disabledReason ?? undefined}
-                        onClick={openTransferStep}
-                        style={{
-                          "font-size": "0.8rem",
-                          padding: "0.3rem 0.6rem",
-                          "border-radius": "var(--radius-sm)",
-                          border: "1px solid var(--surface-border)",
-                          background: "var(--surface-bg)",
-                          color: "var(--surface-fg)",
-                          cursor: "pointer",
-                          "align-self": "flex-start",
-                        }}
-                      >
-                        {t("chat.transfer.action")}
-                      </button>
-                      <Show when={owner().transfer.disabledReason !== null}>
-                        <span
-                          style={{
-                            "font-size": "0.7rem",
-                            color: "var(--surface-muted)",
-                          }}
-                        >
-                          {owner().transfer.disabledReason}
-                        </span>
-                      </Show>
-                      <button
-                        type="button"
-                        disabled
-                        style={{
-                          "font-size": "0.8rem",
-                          padding: "0.3rem 0.6rem",
-                          "border-radius": "var(--radius-sm)",
-                          border: "1px solid var(--surface-border)",
-                          background: "transparent",
-                          color: "var(--surface-muted)",
-                          "align-self": "flex-start",
-                        }}
-                      >
-                        {t("chat.leave.action")}
-                      </button>
-                      {/* The reason is part of the control's ACCESSIBLE
-                          description, not a decoration: a reader who cannot see
-                          the greyed button must still hear why. */}
-                      <span
-                        style={{
-                          "font-size": "0.7rem",
-                          color: "var(--surface-muted)",
-                        }}
-                      >
-                        {owner().leave.disabledReason}
-                      </span>
-                    </>
-                  )}
-                </Show>
-                <Show when={memberExit()}>
-                  {(member) => (
-                    <>
-                      <button
-                        type="button"
-                        disabled={busy() || !member().leave.enabled}
-                        onClick={() => void onLeaveGroup()}
-                        style={{
-                          "font-size": "0.8rem",
-                          padding: "0.3rem 0.6rem",
-                          "border-radius": "var(--radius-sm)",
-                          border: "1px solid var(--surface-border)",
-                          background: "transparent",
-                          color: "var(--danger, #c0392b)",
-                          cursor: "pointer",
-                          "align-self": "flex-start",
-                        }}
-                      >
-                        {t("chat.leave.action")}
-                      </button>
-                      <Show when={member().leave.disabledReason !== null}>
-                        <span
-                          style={{
-                            "font-size": "0.7rem",
-                            color: "var(--surface-muted)",
-                          }}
-                        >
-                          {member().leave.disabledReason}
-                        </span>
-                      </Show>
-                    </>
-                  )}
-                </Show>
-              </div>
-            </Show>
-
-            {/* ADR-0045 UX §6.1.4 / §6.1.5 — the transfer step.
-
-                There is NO second dialog behind this, and that is the design
-                rather than a shortcut: this step IS the confirmation, which
-                happens to require two choices to be well-formed. Stacking an
-                `Are you sure?` on a modal that already asked two questions buys
-                friction of the kind that gets dismissed reflexively. What
-                replaces it is friction that cannot be discharged without reading
-                — the action names the person, is disabled until one is picked,
-                and uses the picked row's label verbatim.
-
-                Ordering inside the step is load-bearing: the irreversibility
-                statement sits ABOVE the role choice. Below it, the pre-selected
-                option would read as the safe one and the warning would read as
-                being about the other one. */}
-            <Show when={transferOpen()}>
-              <div
-                role="group"
-                aria-label={t("chat.transfer.action")}
-                style={{
-                  "margin-top": "0.6rem",
-                  padding: "0.5rem 0.6rem",
-                  border: "1px solid var(--surface-border)",
-                  "border-radius": "var(--radius-sm)",
-                  background: "var(--surface-bg)",
-                  display: "flex",
-                  "flex-direction": "column",
-                  gap: "0.5rem",
-                }}
-              >
-                <div style={{ display: "flex", "flex-direction": "column", gap: "0.2rem" }}>
-                  <strong style={{ "font-size": "0.82rem", color: "var(--surface-fg)" }}>
-                    {TRANSFER_IRREVERSIBLE_HEADLINE()}
-                  </strong>
-                  <span style={{ "font-size": "0.75rem", color: "var(--surface-muted)" }}>
-                    {TRANSFER_IRREVERSIBLE_BODY()}
-                  </span>
-                </div>
-
-                {/* §6.1.3 — every member except the owner, in the roster's own
-                    order, with a muted `Admin` MARKER rather than a filter. An
-                    admins-only picker is EMPTY in the commonest small group
-                    (owner plus one member, no admins ever appointed) — the exact
-                    dead end this feature exists to close, reappearing as a UI
-                    rule. The selection value is the 32-byte signature key. */}
-                <fieldset
-                  style={{
-                    border: "none",
-                    margin: 0,
-                    padding: 0,
-                    display: "flex",
-                    "flex-direction": "column",
-                    gap: "0.2rem",
-                  }}
-                >
-                  <legend
-                    style={{
-                      "font-size": "0.7rem",
-                      "text-transform": "uppercase",
-                      "letter-spacing": "0.04em",
-                      color: "var(--surface-muted)",
-                      padding: 0,
-                    }}
-                  >
-                    {t("chat.transfer.new_owner_legend")}
-                  </legend>
-                  <For each={transferPickerRows()}>
-                    {(row) => (
-                      <label
-                        style={{
-                          display: "flex",
-                          "align-items": "center",
-                          gap: "0.4rem",
-                          "font-size": "0.8rem",
-                        }}
-                      >
-                        {/* UX §13 — a picker row announces the roster label plus
-                            `, admin` where the marker shows. The explicit
-                            `aria-label` is what keeps that a comma rather than the
-                            two spans running together. */}
-                        <input
-                          type="radio"
-                          name="lakko-transfer-successor"
-                          aria-label={row.isAdmin ? t("chat.transfer.candidate_admin", { name: row.label }) : row.label}
-                          value={row.signatureKeyB64}
-                          checked={transferPick() === row.signatureKeyB64}
-                          onChange={() => setTransferPick(row.signatureKeyB64)}
-                        />
-                        <Avatar label={memberName(row.signatureKeyB64)} id={row.signatureKeyB64} size="sm" personKey={row.signatureKeyB64} />
-                        <span aria-hidden="true">{row.label}</span>
-                        {/* MARK, do not filter and do not sort. Who is already an
-                            admin is information the owner assigned and is worth
-                            having when choosing a successor; it is not a reason to
-                            hide anyone, and hoisting admins to the top would be a
-                            soft version of the filter §6.1.3 rejects. */}
-                        <Show when={row.isAdmin}>
-                          <span
-                            aria-hidden="true"
-                            style={{
-                              "font-size": "0.7rem",
-                              color: "var(--surface-muted)",
-                            }}
-                          >
-                            {t("chat.members.admin.marker")}
-                          </span>
-                        </Show>
-                      </label>
-                    )}
-                  </For>
-                </fieldset>
-
-                {/* §6.1.4 — a real decision, pre-selected but never defaulted. A
-                    single-select control, NEVER a checkbox: a checkbox has an
-                    unstated default state and this has none. The core refuses to
-                    default it because either silent choice is wrong in one
-                    direction, and the UI must not undo with a layout choice what
-                    the core protected with a type. */}
-                <fieldset
-                  style={{
-                    border: "none",
-                    margin: 0,
-                    padding: 0,
-                    display: "flex",
-                    "flex-direction": "column",
-                    gap: "0.3rem",
-                  }}
-                >
-                  <legend
-                    style={{
-                      "font-size": "0.7rem",
-                      "text-transform": "uppercase",
-                      "letter-spacing": "0.04em",
-                      color: "var(--surface-muted)",
-                      padding: 0,
-                    }}
-                  >
-                    {t("chat.transfer.role_legend")}
-                  </legend>
-                  <For each={OUTGOING_OWNER_OPTIONS}>
-                    {(opt) => (
-                      <label
-                        style={{
-                          display: "flex",
-                          "align-items": "flex-start",
-                          gap: "0.4rem",
-                          "font-size": "0.8rem",
-                        }}
-                      >
-                        <input
-                          type="radio"
-                          name="lakko-transfer-outgoing"
-                          value={opt.value}
-                          checked={transferOutgoing() === opt.value}
-                          onChange={() => setTransferOutgoing(opt.value)}
-                        />
-                        <span
-                          style={{
-                            display: "flex",
-                            "flex-direction": "column",
-                            gap: "0.1rem",
-                          }}
-                        >
-                          <span>{opt.label}</span>
-                          <span
-                            style={{
-                              "font-size": "0.7rem",
-                              color: "var(--surface-muted)",
-                            }}
-                          >
-                            {opt.consequence}
-                          </span>
-                        </span>
-                      </label>
-                    )}
-                  </For>
-                </fieldset>
-
-                {/* Note APPLIED, not NOW: the transfer is a proposal, and
-                    asserting the exit is open before the commit lands would be
-                    the optimistic update §3 forbids. */}
-                <span style={{ "font-size": "0.72rem", color: "var(--surface-muted)" }}>
-                  {TRANSFER_UNLOCKS_LEAVE()}
-                </span>
-
-                <div style={{ display: "flex", gap: "0.4rem" }}>
-                  <button
-                    type="button"
-                    disabled={busy() || !transferAction().enabled}
-                    onClick={() => void onTransferOwnership()}
-                    style={{
-                      "font-size": "0.8rem",
-                      padding: "0.3rem 0.6rem",
-                      "border-radius": "var(--radius-sm)",
-                      border: "1px solid var(--danger, #c0392b)",
-                      background: "transparent",
-                      color: "var(--danger, #c0392b)",
-                      cursor: "pointer",
-                    }}
-                  >
-                    {transferAction().label}
-                  </button>
-                  {/* `Cancel` is a PRE-PUBLISH exit, and it is the last one.
-                      Nothing here is a withdraw: once the proposal is published it
-                      is in every member's store and dies only when some commit
-                      lands, so no client may offer a cancel afterwards —
-                      including, and especially, for a transfer. */}
-                  <button
-                    type="button"
-                    disabled={busy()}
-                    onClick={() => setTransferOpen(false)}
-                    style={{
-                      "font-size": "0.8rem",
-                      padding: "0.3rem 0.6rem",
-                      "border-radius": "var(--radius-sm)",
-                      border: "1px solid var(--surface-border)",
-                      background: "transparent",
-                      color: "var(--surface-fg)",
-                      cursor: "pointer",
-                    }}
-                  >
-                    {t("common.cancel")}
-                  </button>
-                </div>
-              </div>
-            </Show>
-          </section>
-        </Show>
-      </ModalLayer>
 
       {/* ADR-0052 decision 2 / section 5.1 — the "Forward to" picker, open
           while a message id is armed. Picking sends at once and navigates;
@@ -9170,6 +8103,1155 @@ function ChatView(props: {
       </Show>
 
     </div>
+    <Show when={infoOpen()}>
+      {/* The group's info: a screen in the conversation's column with a back
+          icon (`docs/ux/conversation-info.md` sections 2.2 and 3). What is
+          inside is decided by what the conversation IS (section 1): only a
+          group has this screen (`infoScreenOf`), and a conversation between
+          two people opens the person instead, so `Group name`, `Create
+          invite link`, `Make admin`, `Transfer ownership` and `Leave group`
+          never appear where there is no group. */}
+      <section
+        class="lk-info-screen"
+        aria-labelledby="lk-group-info-title"
+        inert={addMembersShown()}
+      >
+        <header class="lk-chat-head lk-info-head">
+          <button
+            ref={infoBackButton}
+            type="button"
+            class="lk-icon-button"
+            aria-label={t("common.back")}
+            title={t("common.back")}
+            onClick={closeInfo}
+          >
+            <Icon name="back" size={20} />
+          </button>
+          <h1 id="lk-group-info-title" class="lk-info-title">
+            {infoTargetHeading()}
+          </h1>
+        </header>
+        <div class="lk-info-scroll">
+          {/* `docs/ux/conversation-info.md` section 4 — an action refused
+              says so IN PLACE and the screen stays open; the conversation
+              under it is not shown, so these two are read here. */}
+          <Show when={error()}>
+            {(message) => (
+              <div class="form-error">
+                {message()}
+              </div>
+            )}
+          </Show>
+          <Show when={notice()}>{(message) => <div class="form-notice">{message()}</div>}</Show>
+          {/* ADR-0059 section 6 — share the listed channels this person
+              follows with this group. Not a block of the shared info rule
+              (`lakko-ui-rules`): it is shown in every group this device is
+              still a member of. */}
+          <Show when={!membershipEnded()}>
+            <ShareChannelsSwitch entry={props.entry} />
+          </Show>
+          {/* ADR-0051 — the `Group name` row (UX spec §3.1.2 / §5). Visible to
+              everyone in a group; editable by the owner and admins (read from
+              the live group at Save), read-only for a plain member. An empty
+              name clears it and the title falls back to the members' names. */}
+          <section aria-label={GROUP_NAME_LABEL()} class="lk-card" style={{ gap: "8px" }}>
+            <h2>{GROUP_NAME_LABEL()}</h2>
+            <Show
+              when={groupSections().includes("rename-group")}
+              fallback={<span style={{ "font-size": "0.9rem" }}>{resolvePeerName()}</span>}
+            >
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void onSaveGroupName();
+                }}
+                style={{ display: "flex", "flex-direction": "row", "align-items": "center", gap: "8px" }}
+              >
+                <input
+                  type="text"
+                  aria-label={GROUP_NAME_LABEL()}
+                  placeholder={resolvePeerName()}
+                  autocomplete="off"
+                  maxLength={64}
+                  value={groupNameInput()}
+                  onInput={(e) => setGroupNameInput(e.currentTarget.value)}
+                  style={{ flex: 1 }}
+                  disabled={groupNameBusy()}
+                  aria-invalid={groupNameError() !== null}
+                />
+                <button
+                  class="primary"
+                  type="submit"
+                  disabled={groupNameBusy() || groupNameUnchanged()}
+                >
+                  {groupNameBusy() ? t("common.saving") : GROUP_NAME_SAVE()}
+                </button>
+              </form>
+            </Show>
+            <Show when={groupNameError()}>
+              {(msg) => (
+                <span class="form-error" role="alert">
+                  {msg()}
+                </span>
+              )}
+            </Show>
+          </section>
+          <MembersCanFindMeSwitch kind="group" groupIdB64={props.entry.groupIdB64} />
+          <section aria-label={t("chat.members.title")} class="lk-card" style={{ gap: "8px" }}>
+            <h2>{t("chat.members.heading", { count: members().length })}</h2>
+            {/* ADR-0045 UX §5.1 — the pending notice. TOP of the panel, above
+                everything, and rendered only once at least one request is past
+                the quiet window: the owner is rank 0 and sweeps its own request
+                immediately, so in the common case nothing ever renders here. A
+                spinner that appears and vanishes in 300 ms teaches the user that
+                membership is slow when it is not.
+
+                Announced POLITELY (`aria-live="polite"`): nothing about it is
+                urgent and it can change while the roster is being read. It is
+                carried by TEXT, never by hue or a lone icon. */}
+            <Show when={pendingRequestNotice() !== null}>
+              <div
+                role="status"
+                aria-live="polite"
+                style={{
+                  margin: "0 0 0.6rem 0",
+                  padding: "0.4rem 0.5rem",
+                  border: "1px solid var(--surface-border)",
+                  "border-radius": "var(--radius-sm)",
+                  background: "var(--surface-bg)",
+                  display: "flex",
+                  "flex-direction": "column",
+                  gap: "0.2rem",
+                }}
+              >
+                <span style={{ "font-size": "0.8rem", color: "var(--surface-fg)" }}>
+                  {pendingRequestNotice()?.count}
+                </span>
+                <span style={{ "font-size": "0.75rem", color: "var(--surface-muted)" }}>
+                  {pendingRequestNotice()?.liveness}
+                </span>
+              </div>
+            </Show>
+            {/* ADR-0045 UX §6.1.9 — the new-owner notice. Rendered once,
+                dismissible, at panel level, announced POLITELY.
+
+                It is a client-side INFERENCE from an observed role-table change,
+                not a message: nothing on the wire announces a transfer. So it is
+                best-effort and fails open — a device that first observes the table
+                already naming it owner says nothing — and it must never be the
+                only way a user learns their role. The panel's affordances stay the
+                primary signal, exactly as they are for admin today.
+
+                Placed directly BELOW the pending notice so §5's "pending notice,
+                top of the panel, above everything" ordering stays literally
+                intact; the two are almost never present at the same moment. */}
+            <Show when={newOwnerBanner() !== null}>
+              <div
+                role="status"
+                aria-live="polite"
+                style={{
+                  margin: "0 0 0.6rem 0",
+                  padding: "0.4rem 0.5rem",
+                  border: "1px solid var(--surface-border)",
+                  "border-radius": "var(--radius-sm)",
+                  background: "var(--surface-bg)",
+                  display: "flex",
+                  "flex-direction": "column",
+                  gap: "0.2rem",
+                }}
+              >
+                <span style={{ "font-size": "0.8rem", color: "var(--surface-fg)" }}>
+                  {newOwnerBanner()?.headline}
+                </span>
+                {/* The second line names the exit deliberately: it is the one
+                    sentence that stops the new owner from arriving where the old
+                    one was. */}
+                <span style={{ "font-size": "0.75rem", color: "var(--surface-muted)" }}>
+                  {newOwnerBanner()?.body}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setNewOwnerBanner(null)}
+                  style={{
+                    "font-size": "0.75rem",
+                    padding: "0.2rem 0.5rem",
+                    "border-radius": "var(--radius-sm)",
+                    border: "1px solid var(--surface-border)",
+                    background: "transparent",
+                    color: "var(--surface-fg)",
+                    cursor: "pointer",
+                    "align-self": "flex-start",
+                  }}
+                >
+                  {NEW_OWNER_DISMISS()}
+                </button>
+              </div>
+            </Show>
+            {/* ADR-0028 (G-3) — owner/admin "create invite link" affordance.
+                Mints a /g/<slug> link conveying this group's id; a non-member
+                opens it to request to join, approved via the pending list above.
+                Same role gate as add/remove. */}
+            <Show when={groupSections().includes("invite-link")}>
+              <div
+                style={{
+                  margin: "0 0 0.6rem 0",
+                  display: "flex",
+                  "flex-direction": "column",
+                  gap: "0.4rem",
+                }}
+              >
+                <button
+                  type="button"
+                  disabled={busy()}
+                  onClick={() => void onCreateInviteLink()}
+                  style={{
+                    "font-size": "0.8rem",
+                    padding: "0.3rem 0.6rem",
+                    "border-radius": "var(--radius-sm)",
+                    border: "1px solid var(--surface-border)",
+                    background: "var(--surface-bg)",
+                    color: "var(--surface-fg)",
+                    cursor: "pointer",
+                    "align-self": "flex-start",
+                  }}
+                >
+                  {t("chat.invite_link.create")}
+                </button>
+                <Show when={inviteLink()}>
+                  {(l) => (
+                    <ShareLinkRow
+                      url={l()}
+                      onRevoke={() => void onRevokeInviteLink()}
+                      busy={busy()}
+                    />
+                  )}
+                </Show>
+              </div>
+            </Show>
+            {/* ADR-0027 (G-3) — pending external-join requests. Owner / admin
+                only (same gate as add / remove). Each row offers Approve (ADR-0045
+                S7: publishes ONE `Add` proposal; the joiner is admitted when a
+                committer sweeps it) or Reject (drops the retained request
+                locally). A request whose joiner has since landed disappears on
+                its own — the core filters it out of `pendingExternalJoins()` on
+                every read — so this list retires its own rows with no message
+                saying so. Hidden when empty. */}
+            <Show
+              when={canManageMembers() && (pendingJoins().length > 0 || unkeptJoinRequest())}
+            >
+              <div
+                style={{
+                  margin: "0 0 0.6rem 0",
+                  padding: "0.4rem 0.5rem",
+                  border: "1px dashed var(--surface-border)",
+                  "border-radius": "var(--radius-sm)",
+                  background: "var(--surface-bg)",
+                }}
+              >
+                <h3
+                  style={{
+                    "font-size": "0.78rem",
+                    "text-transform": "uppercase",
+                    "letter-spacing": "0.04em",
+                    color: "var(--surface-muted)",
+                    margin: "0 0 0.2rem 0",
+                  }}
+                >
+                  {t("chat.members.join.heading", { count: pendingJoins().length })}
+                </h3>
+                {/* ADR-0027 / §7.1 — a request the quarantine turned away. It
+                    is in no list below, because the core never kept it, and it
+                    gets no Approve for the same reason: there is nothing to
+                    approve. Informational only, which is the most
+                    `externalJoinAffordance` allows for an unretained
+                    request. */}
+                <Show when={unkeptJoinRequest()}>
+                  <p
+                    style={{
+                      "font-size": "0.7rem",
+                      color: "var(--surface-muted)",
+                      margin: "0 0 0.4rem 0",
+                    }}
+                  >
+                    {JOIN_REQUEST_NOT_KEPT()}
+                  </p>
+                </Show>
+                <ul
+                  style={{
+                    "list-style": "none",
+                    padding: 0,
+                    margin: 0,
+                    display: "flex",
+                    "flex-direction": "column",
+                    gap: "0.3rem",
+                  }}
+                >
+                  <For each={pendingJoins()}>
+                    {(ref) => (
+                      <li
+                        style={{
+                          display: "flex",
+                          "align-items": "center",
+                          "justify-content": "space-between",
+                          gap: "0.5rem",
+                        }}
+                      >
+                        <Avatar
+                          label={pendingJoinName(props.entry.group, ref, base64Encode, (k) => profiles.resolve(k))}
+                          id={pendingJoinPersonKey(props.entry.group, ref, base64Encode)}
+                          size="sm"
+                          personKey={pendingJoinPersonKey(props.entry.group, ref, base64Encode)}
+                        />
+                        <div
+                          style={{
+                            display: "flex",
+                            "flex-direction": "column",
+                            gap: "0.1rem",
+                            overflow: "hidden",
+                            flex: "1",
+                          }}
+                        >
+                          <span class="lk-ellipsis" style={{ "font-size": "0.85rem" }}>
+                            {/* Resolved through the joiner's ACCOUNT key: the
+                                request is keyed on its device leaf, contacts on
+                                the account (ADR-0050). */}
+                            {pendingJoinLabel(props.entry.group, ref, base64Encode, (k) =>
+                              profiles.resolve(k),
+                            )}
+                          </span>
+                          {(() => {
+                            const attr = joinAttributions().get(base64Encode(ref));
+                            if (!attr) {
+                              return (
+                                <span
+                                  style={{
+                                    "font-size": "0.7rem",
+                                    color: "var(--surface-muted)",
+                                  }}
+                                >
+                                  {t("chat.members.join.link_unknown")}
+                                </span>
+                              );
+                            }
+                            return (
+                              <span
+                                style={{
+                                  "font-size": "0.7rem",
+                                  color: attr.issuerInRoster
+                                    ? "var(--surface-muted)"
+                                    : "var(--danger, #c0392b)",
+                                }}
+                              >
+                                {attr.issuerInRoster
+                                  ? t("chat.members.join.via_member", { name: memberName(attr.issuerKeyB64) })
+                                  : t("chat.members.join.via_former", { name: memberName(attr.issuerKeyB64) })}
+                              </span>
+                            );
+                          })()}
+                        </div>
+                        <span style={{ display: "flex", gap: "0.3rem" }}>
+                          <button
+                            type="button"
+                            disabled={busy()}
+                            onClick={() => void onApproveJoin(ref)}
+                            style={{
+                              "font-size": "0.78rem",
+                              padding: "0.2rem 0.5rem",
+                              "border-radius": "var(--radius-sm)",
+                              border: "1px solid var(--accent)",
+                              background: "var(--accent)",
+                              color: "var(--accent-fg)",
+                              cursor: "pointer",
+                            }}
+                          >
+                            {t("chat.members.join.approve")}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busy()}
+                            onClick={() => void onRejectJoin(ref)}
+                            style={{
+                              "font-size": "0.78rem",
+                              padding: "0.2rem 0.5rem",
+                              "border-radius": "var(--radius-sm)",
+                              border: "1px solid var(--surface-border)",
+                              background: "transparent",
+                              color: "var(--surface-fg)",
+                              cursor: "pointer",
+                            }}
+                          >
+                            {t("chat.members.join.reject")}
+                          </button>
+                        </span>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </div>
+            </Show>
+            {/* ADR-0045 UX §5 — `Waiting to be added ({n})`. A separate section,
+                not a roster row, and that is the load-bearing half of the
+                no-optimistic-update rule in reverse: a person who has been
+                REQUESTED is not a member, so putting them in the members list
+                would assert a membership that does not exist. Same identity
+                treatment the join-request rows use (short fingerprint). */}
+            <Show when={pendingAdds().length > 0}>
+              <div
+                style={{
+                  margin: "0 0 0.6rem 0",
+                  padding: "0.4rem 0.5rem",
+                  border: "1px dashed var(--surface-border)",
+                  "border-radius": "var(--radius-sm)",
+                  background: "var(--surface-bg)",
+                }}
+              >
+                <h3
+                  style={{
+                    "font-size": "0.78rem",
+                    "text-transform": "uppercase",
+                    "letter-spacing": "0.04em",
+                    color: "var(--surface-muted)",
+                    margin: "0 0 0.4rem 0",
+                  }}
+                >
+                  {t("chat.members.pending.adds_heading", { count: pendingAdds().length })}
+                </h3>
+                <ul
+                  style={{
+                    "list-style": "none",
+                    padding: 0,
+                    margin: 0,
+                    display: "flex",
+                    "flex-direction": "column",
+                    gap: "0.3rem",
+                  }}
+                >
+                  <For each={pendingAdds()}>
+                    {(req) => (
+                      <li
+                        style={{
+                          display: "flex",
+                          "flex-direction": "column",
+                          gap: "0.1rem",
+                        }}
+                      >
+                        <span style={{ "font-size": "0.85rem" }}>{labelForAddRequest(req)}</span>
+                        <span
+                          style={{
+                            "font-size": "0.7rem",
+                            color: "var(--surface-muted)",
+                          }}
+                        >
+                          {t("chat.members.pending.waiting_added")}
+                        </span>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </div>
+            </Show>
+            {/* ADR-0045 S7 residual 1 — `Not applied ({n})`.
+
+                A sweep does not necessarily carry everything it finds, and an
+                excluded request used to vanish without a trace: OpenMLS empties
+                the proposal store on every merged commit whether or not the
+                commit carried the proposal, so the pending set that was the
+                request's only representation is cleared either way. For an
+                approved join it is worse, because a successful approve CONSUMED
+                the retained request — the admin cannot even re-approve.
+
+                This section says the one thing that is knowable, and no more:
+                the request did not apply. The core reports no reason for an
+                exclusion (`CreateCommitError` names no proposal), so neither
+                does the copy. Sits directly under `Waiting to be added` because
+                it is where those rows go when they stop waiting. */}
+            <Show when={unappliedAdds().length > 0}>
+              <div
+                style={{
+                  margin: "0 0 0.6rem 0",
+                  padding: "0.4rem 0.5rem",
+                  border: "1px dashed var(--surface-border)",
+                  "border-radius": "var(--radius-sm)",
+                  background: "var(--surface-bg)",
+                }}
+              >
+                <h3
+                  style={{
+                    "font-size": "0.78rem",
+                    "text-transform": "uppercase",
+                    "letter-spacing": "0.04em",
+                    color: "var(--surface-muted)",
+                    margin: "0 0 0.2rem 0",
+                  }}
+                >
+                  {unappliedHeading(unappliedAdds().length)}
+                </h3>
+                <p
+                  style={{
+                    "font-size": "0.7rem",
+                    color: "var(--surface-muted)",
+                    margin: "0 0 0.4rem 0",
+                  }}
+                >
+                  {UNAPPLIED_EXPLANATION()}
+                </p>
+                <ul
+                  style={{
+                    "list-style": "none",
+                    padding: 0,
+                    margin: 0,
+                    display: "flex",
+                    "flex-direction": "column",
+                    gap: "0.3rem",
+                  }}
+                >
+                  <For each={unappliedAdds()}>
+                    {(item) => (
+                      <li
+                        style={{
+                          display: "flex",
+                          "align-items": "flex-start",
+                          "justify-content": "space-between",
+                          gap: "0.5rem",
+                        }}
+                      >
+                        <span
+                          style={{ display: "flex", "flex-direction": "column", gap: "0.1rem" }}
+                        >
+                          <span style={{ "font-size": "0.85rem" }}>
+                            {labelForSignatureKey(item.subjectKeyB64)}
+                          </span>
+                          <span
+                            style={{ "font-size": "0.7rem", color: "var(--surface-muted)" }}
+                          >
+                            {unappliedLine(item)}
+                          </span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => onDismissUnapplied(item.key)}
+                          style={{ "font-size": "0.7rem" }}
+                        >
+                          {t("common.dismiss")}
+                        </button>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </div>
+            </Show>
+            {/* ADR-0045 UX §6.2.7 — the roster stays, READ-ONLY, and carries one
+                line saying so.
+
+                It stays because it is the last thing you knew about who you were
+                in a group with, it is genuinely informative next to a frozen
+                transcript, and it is still readable: `members()` is a plain read
+                of the public group with no state gate.
+
+                The line is a statement about the LIST, not about any row in it,
+                and that is load-bearing rather than stylistic. A `Remove`
+                rewrites no `GroupContext`, so the role table is untouched and a
+                removed admin's frozen roster still names them an admin — nothing
+                here may present that as a live role. "Stopped updating" is the
+                literal truth (the local view is frozen at the removing epoch and
+                never moves again) rather than a euphemism for it, and it is
+                deliberately neutral between having left and having been
+                removed. */}
+            <Show when={membershipEnded()}>
+              <p
+                style={{
+                  margin: "0 0 0.4rem 0",
+                  "font-size": "0.75rem",
+                  color: "var(--surface-muted)",
+                }}
+              >
+                {FROZEN_ROSTER_HEADER()}
+              </p>
+            </Show>
+            <ul
+              style={{
+                "list-style": "none",
+                padding: 0,
+                margin: 0,
+                display: "flex",
+                "flex-direction": "column",
+                gap: "0.25rem",
+              }}
+            >
+              {/* Section 2.4 — Add members is the first row of the list, for
+                  whoever may add, and the only way in. */}
+              <Show when={groupSections().includes("add-member")}>
+                <li>
+                  <button
+                    type="button"
+                    class="lk-row lk-member-add"
+                    disabled={busy()}
+                    onClick={() => goToInfoScreen("add-members")}
+                  >
+                    <span class="lk-member-add-icon" aria-hidden="true">
+                      <Icon name="userPlus" size={18} />
+                    </span>
+                    <span class="lk-row-title">{t("chat.members.add.action")}</span>
+                  </button>
+                </li>
+              </Show>
+              <For each={members()}>
+                {(m) => {
+                  const isSelf = m.leafIndex === props.entry.group.ownLeafIndex;
+                  // 1.18i — render the accepted-contact's
+                  // displayName when this leaf's pubkey is in our
+                  // local cache. Falls back to a hex fingerprint
+                  // (a recipient we've not formally accepted yet,
+                  // or somebody else who joined a group we're in).
+                  // Lookup key matches `local-store.ts`'s
+                  // `signaturePubkeyB64` shape (standard base64
+                  // of the 32-byte Ed25519 verifying key).
+                  const memberKeyB64 = base64Encode(m.sigPubkey);
+                  // ADR-0045 — NO optimistic update. A member with a pending
+                  // removal stays in the roster, annotated, because they are
+                  // still cryptographically in the group and still receiving
+                  // every message until the commit lands. Dropping the row would
+                  // be the membership equivalent of a green E2EE pill over an
+                  // unencrypted call.
+                  const annotation = (): string | null =>
+                    rowAnnotation(pendingRequests(), m.leafIndex, ownLeaf());
+                  const removePending = (): boolean =>
+                    rowAnnotation(pendingRequests(), m.leafIndex, ownLeaf()) !== null;
+                  const label = (): string => memberListLabel(memberKeyB64);
+                  /** Tapping opens the contact screen for a contact who is
+                   *  not this account (section 2.2); anyone else's row is not
+                   *  a control. */
+                  const opensContact = (): boolean => !isSelf && contactKeySet().has(memberKeyB64);
+                  const identity = (): JSX.Element => (
+                    <>
+                      <Avatar label={memberName(memberKeyB64)} id={memberKeyB64} size="sm" personKey={memberKeyB64} />
+                      <span
+                        style={{
+                          display: "flex",
+                          "flex-direction": "column",
+                          gap: "0.1rem",
+                          "min-width": 0,
+                        }}
+                      >
+                        <span class="lk-row-title">{label()}</span>
+                        <Show when={m.deviceCount > 1}>
+                          <span class="lk-row-sub">{t("chat.members.devices", { count: m.deviceCount })}</span>
+                        </Show>
+                        <Show when={annotation() !== null}>
+                          <span
+                            aria-hidden="true"
+                            style={{
+                              "font-size": "0.7rem",
+                              color: "var(--surface-muted)",
+                              display: "inline-flex",
+                              "align-items": "center",
+                              gap: "0.25rem",
+                            }}
+                          >
+                            {annotation()}
+                          </span>
+                        </Show>
+                      </span>
+                    </>
+                  );
+                  return (
+                    <li
+                      // The annotation is part of the row's ACCESSIBLE LABEL, not
+                      // a separate focus stop — a screen-reader user hears it as
+                      // one thing, and hears WHY the Remove button below is
+                      // disabled rather than losing the control.
+                      aria-label={
+                        annotation() === null
+                          ? label()
+                          : t("chat.members.row_label", { name: label(), state: annotation() ?? "" })
+                      }
+                      class="lk-row"
+                      style={{ padding: "8px 10px", gap: "10px" }}
+                    >
+                      <Show
+                        when={opensContact()}
+                        fallback={
+                          <>
+                            {identity()}
+                            <span style={{ flex: 1 }} />
+                          </>
+                        }
+                      >
+                        {/* Section 2.2 — a member who is a contact opens their
+                            contact screen, whose back control returns here. */}
+                        <button
+                          type="button"
+                          class="lk-member-open"
+                          onClick={() => openContactScreen(memberKeyB64)}
+                        >
+                          {identity()}
+                        </button>
+                      </Show>
+                      <Show
+                        when={!isSelf}
+                        fallback={
+                          <span
+                            style={{
+                              "font-size": "0.8rem",
+                              color: "var(--surface-muted)",
+                            }}
+                          >
+                            {t("chat.author.you")}
+                          </span>
+                        }
+                      >
+                        {/* ADR-0022 — only the owner promotes / demotes admins;
+                            never the owner's own row. */}
+                        <Show when={isOwner() && ownerPubkeyHex() !== hexOf(m.sigPubkey)}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void onToggleAdmin(
+                                m,
+                                !adminPubkeys().has(hexOf(m.sigPubkey)),
+                              );
+                            }}
+                            class="ghost small"
+                            disabled={busy()}
+                          >
+                            {adminPubkeys().has(hexOf(m.sigPubkey))
+                              ? t("chat.members.admin.remove")
+                              : t("chat.members.admin.make")}
+                          </button>
+                        </Show>
+                        {/* ADR-0022 — only owner/admin (or an open/legacy
+                            group) sees Remove; a member's removal is refused.
+                            ADR-0045 UX §5.3 — while a removal is pending the
+                            button stays VISIBLE but disabled: hiding it would
+                            read as the permission having vanished, and the row
+                            annotation is what explains the disabled state. */}
+                        <Show when={canManageMembers()}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void onRemoveMember(m.leafIndex);
+                            }}
+                            class="ghost small"
+                            disabled={busy() || removePending()}
+                            style={{ color: "var(--danger)" }}
+                          >
+                            {t("common.remove")}
+                          </button>
+                        </Show>
+                      </Show>
+                    </li>
+                  );
+                }}
+              </For>
+            </ul>
+            {/* ADR-0045 UX §5 item 6 / §6.1.1 — THE EXIT BLOCK, bottom of the
+                panel. Exactly one of its two controls is ever live for a given
+                reader, because they are role-disjoint: the owner sees
+                `Transfer ownership` above a DISABLED `Leave group` carrying its
+                precondition, everyone else sees `Leave group` alone.
+
+                The owner's `Leave group` used to be HIDDEN, and this reverses
+                that — not because the old argument (a control that always refuses
+                is worse than no control) was wrong, but because it was right only
+                while transfer was unreachable. A disabled control whose reason
+                names the action directly above it is a signposted route, and it
+                is the same visible-but-disabled pattern §5.3 already uses for a
+                pending row's `Remove`. Hiding it now would leave an owner looking
+                for the exit finding nothing at all about leaving.
+
+                Only on the proposal path: a legacy group's core has no
+                self-remove route and no owner to transfer from. */}
+            <Show when={exitBlockState().kind !== "hidden"}>
+              <div
+                style={{
+                  "margin-top": "0.6rem",
+                  display: "flex",
+                  "flex-direction": "column",
+                  gap: "0.35rem",
+                }}
+              >
+                {/* ADR-0045 UX §6.2.4 / §6.2.7 — once the membership has ended,
+                    both of the other controls are gone (one names a group the
+                    reader is not in, the other is owner-only and they are not)
+                    and the block holds `Delete this chat` instead.
+
+                    This slot is the right home by §6.1.1's own argument: the
+                    block's meaning is *the exit*, and once you are out the only
+                    exit-shaped action left is closing the door behind you. A
+                    permanently dead row with no action available is its own
+                    defect — everything else about this state is "you cannot",
+                    and this is the one thing they still can.
+
+                    It is also the ONE control in this whole design that destroys
+                    user data on request. Everything else in §6.2 removes a claim
+                    the UI should not have been making; this removes a transcript
+                    that exists nowhere else, on one confirmation, with no undo
+                    and no export. The confirmation says so in as many words, and
+                    that is the only protection there is. */}
+                <Show when={exitBlockState().kind === "ended"}>
+                  <button
+                    type="button"
+                    disabled={busy()}
+                    onClick={() => void onDeleteChat()}
+                    style={{
+                      "font-size": "0.8rem",
+                      padding: "0.3rem 0.6rem",
+                      "border-radius": "var(--radius-sm)",
+                      border: "1px solid var(--surface-border)",
+                      background: "transparent",
+                      color: "var(--danger, #c0392b)",
+                      cursor: "pointer",
+                      "align-self": "flex-start",
+                    }}
+                  >
+                    {DELETE_CHAT_CONTROL()}
+                  </button>
+                </Show>
+                <Show when={ownerExit()}>
+                  {(owner) => (
+                    <>
+                      {/* NOT destructive-styled at rest. Red would file it with
+                        `Remove` and `Leave group`, and an owner scanning for a
+                        way out should not have to read a warning colour to
+                        find one. Transfer is not a destruction; it is a
+                        handover that happens to be final, and finality is a
+                        property of the confirmation below, not of the button
+                        that opens it. */}
+                      <button
+                        type="button"
+                        disabled={busy() || !owner().transfer.enabled}
+                        title={owner().transfer.disabledReason ?? undefined}
+                        onClick={openTransferStep}
+                        style={{
+                          "font-size": "0.8rem",
+                          padding: "0.3rem 0.6rem",
+                          "border-radius": "var(--radius-sm)",
+                          border: "1px solid var(--surface-border)",
+                          background: "var(--surface-bg)",
+                          color: "var(--surface-fg)",
+                          cursor: "pointer",
+                          "align-self": "flex-start",
+                        }}
+                      >
+                        {t("chat.transfer.action")}
+                      </button>
+                      <Show when={owner().transfer.disabledReason !== null}>
+                        <span
+                          style={{
+                            "font-size": "0.7rem",
+                            color: "var(--surface-muted)",
+                          }}
+                        >
+                          {owner().transfer.disabledReason}
+                        </span>
+                      </Show>
+                      <button
+                        type="button"
+                        disabled
+                        style={{
+                          "font-size": "0.8rem",
+                          padding: "0.3rem 0.6rem",
+                          "border-radius": "var(--radius-sm)",
+                          border: "1px solid var(--surface-border)",
+                          background: "transparent",
+                          color: "var(--surface-muted)",
+                          "align-self": "flex-start",
+                        }}
+                      >
+                        {t("chat.leave.action")}
+                      </button>
+                      {/* The reason is part of the control's ACCESSIBLE
+                          description, not a decoration: a reader who cannot see
+                          the greyed button must still hear why. */}
+                      <span
+                        style={{
+                          "font-size": "0.7rem",
+                          color: "var(--surface-muted)",
+                        }}
+                      >
+                        {owner().leave.disabledReason}
+                      </span>
+                    </>
+                  )}
+                </Show>
+                <Show when={memberExit()}>
+                  {(member) => (
+                    <>
+                      <button
+                        type="button"
+                        disabled={busy() || !member().leave.enabled}
+                        onClick={() => void onLeaveGroup()}
+                        style={{
+                          "font-size": "0.8rem",
+                          padding: "0.3rem 0.6rem",
+                          "border-radius": "var(--radius-sm)",
+                          border: "1px solid var(--surface-border)",
+                          background: "transparent",
+                          color: "var(--danger, #c0392b)",
+                          cursor: "pointer",
+                          "align-self": "flex-start",
+                        }}
+                      >
+                        {t("chat.leave.action")}
+                      </button>
+                      <Show when={member().leave.disabledReason !== null}>
+                        <span
+                          style={{
+                            "font-size": "0.7rem",
+                            color: "var(--surface-muted)",
+                          }}
+                        >
+                          {member().leave.disabledReason}
+                        </span>
+                      </Show>
+                    </>
+                  )}
+                </Show>
+              </div>
+            </Show>
+
+            {/* ADR-0045 UX §6.1.4 / §6.1.5 — the transfer step.
+
+                There is NO second dialog behind this, and that is the design
+                rather than a shortcut: this step IS the confirmation, which
+                happens to require two choices to be well-formed. Stacking an
+                `Are you sure?` on a modal that already asked two questions buys
+                friction of the kind that gets dismissed reflexively. What
+                replaces it is friction that cannot be discharged without reading
+                — the action names the person, is disabled until one is picked,
+                and uses the picked row's label verbatim.
+
+                Ordering inside the step is load-bearing: the irreversibility
+                statement sits ABOVE the role choice. Below it, the pre-selected
+                option would read as the safe one and the warning would read as
+                being about the other one. */}
+            <Show when={transferOpen()}>
+              <div
+                role="group"
+                aria-label={t("chat.transfer.action")}
+                style={{
+                  "margin-top": "0.6rem",
+                  padding: "0.5rem 0.6rem",
+                  border: "1px solid var(--surface-border)",
+                  "border-radius": "var(--radius-sm)",
+                  background: "var(--surface-bg)",
+                  display: "flex",
+                  "flex-direction": "column",
+                  gap: "0.5rem",
+                }}
+              >
+                <div style={{ display: "flex", "flex-direction": "column", gap: "0.2rem" }}>
+                  <strong style={{ "font-size": "0.82rem", color: "var(--surface-fg)" }}>
+                    {TRANSFER_IRREVERSIBLE_HEADLINE()}
+                  </strong>
+                  <span style={{ "font-size": "0.75rem", color: "var(--surface-muted)" }}>
+                    {TRANSFER_IRREVERSIBLE_BODY()}
+                  </span>
+                </div>
+
+                {/* §6.1.3 — every member except the owner, in the roster's own
+                    order, with a muted `Admin` MARKER rather than a filter. An
+                    admins-only picker is EMPTY in the commonest small group
+                    (owner plus one member, no admins ever appointed) — the exact
+                    dead end this feature exists to close, reappearing as a UI
+                    rule. The selection value is the 32-byte signature key. */}
+                <fieldset
+                  style={{
+                    border: "none",
+                    margin: 0,
+                    padding: 0,
+                    display: "flex",
+                    "flex-direction": "column",
+                    gap: "0.2rem",
+                  }}
+                >
+                  <legend
+                    style={{
+                      "font-size": "0.7rem",
+                      "text-transform": "uppercase",
+                      "letter-spacing": "0.04em",
+                      color: "var(--surface-muted)",
+                      padding: 0,
+                    }}
+                  >
+                    {t("chat.transfer.new_owner_legend")}
+                  </legend>
+                  <For each={transferPickerRows()}>
+                    {(row) => (
+                      <label
+                        style={{
+                          display: "flex",
+                          "align-items": "center",
+                          gap: "0.4rem",
+                          "font-size": "0.8rem",
+                        }}
+                      >
+                        {/* UX §13 — a picker row announces the roster label plus
+                            `, admin` where the marker shows. The explicit
+                            `aria-label` is what keeps that a comma rather than the
+                            two spans running together. */}
+                        <input
+                          type="radio"
+                          name="lakko-transfer-successor"
+                          aria-label={row.isAdmin ? t("chat.transfer.candidate_admin", { name: row.label }) : row.label}
+                          value={row.signatureKeyB64}
+                          checked={transferPick() === row.signatureKeyB64}
+                          onChange={() => setTransferPick(row.signatureKeyB64)}
+                        />
+                        <Avatar label={memberName(row.signatureKeyB64)} id={row.signatureKeyB64} size="sm" personKey={row.signatureKeyB64} />
+                        <span aria-hidden="true">{row.label}</span>
+                        {/* MARK, do not filter and do not sort. Who is already an
+                            admin is information the owner assigned and is worth
+                            having when choosing a successor; it is not a reason to
+                            hide anyone, and hoisting admins to the top would be a
+                            soft version of the filter §6.1.3 rejects. */}
+                        <Show when={row.isAdmin}>
+                          <span
+                            aria-hidden="true"
+                            style={{
+                              "font-size": "0.7rem",
+                              color: "var(--surface-muted)",
+                            }}
+                          >
+                            {t("chat.members.admin.marker")}
+                          </span>
+                        </Show>
+                      </label>
+                    )}
+                  </For>
+                </fieldset>
+
+                {/* §6.1.4 — a real decision, pre-selected but never defaulted. A
+                    single-select control, NEVER a checkbox: a checkbox has an
+                    unstated default state and this has none. The core refuses to
+                    default it because either silent choice is wrong in one
+                    direction, and the UI must not undo with a layout choice what
+                    the core protected with a type. */}
+                <fieldset
+                  style={{
+                    border: "none",
+                    margin: 0,
+                    padding: 0,
+                    display: "flex",
+                    "flex-direction": "column",
+                    gap: "0.3rem",
+                  }}
+                >
+                  <legend
+                    style={{
+                      "font-size": "0.7rem",
+                      "text-transform": "uppercase",
+                      "letter-spacing": "0.04em",
+                      color: "var(--surface-muted)",
+                      padding: 0,
+                    }}
+                  >
+                    {t("chat.transfer.role_legend")}
+                  </legend>
+                  <For each={OUTGOING_OWNER_OPTIONS}>
+                    {(opt) => (
+                      <label
+                        style={{
+                          display: "flex",
+                          "align-items": "flex-start",
+                          gap: "0.4rem",
+                          "font-size": "0.8rem",
+                        }}
+                      >
+                        <input
+                          type="radio"
+                          name="lakko-transfer-outgoing"
+                          value={opt.value}
+                          checked={transferOutgoing() === opt.value}
+                          onChange={() => setTransferOutgoing(opt.value)}
+                        />
+                        <span
+                          style={{
+                            display: "flex",
+                            "flex-direction": "column",
+                            gap: "0.1rem",
+                          }}
+                        >
+                          <span>{opt.label}</span>
+                          <span
+                            style={{
+                              "font-size": "0.7rem",
+                              color: "var(--surface-muted)",
+                            }}
+                          >
+                            {opt.consequence}
+                          </span>
+                        </span>
+                      </label>
+                    )}
+                  </For>
+                </fieldset>
+
+                {/* Note APPLIED, not NOW: the transfer is a proposal, and
+                    asserting the exit is open before the commit lands would be
+                    the optimistic update §3 forbids. */}
+                <span style={{ "font-size": "0.72rem", color: "var(--surface-muted)" }}>
+                  {TRANSFER_UNLOCKS_LEAVE()}
+                </span>
+
+                <div style={{ display: "flex", gap: "0.4rem" }}>
+                  <button
+                    type="button"
+                    disabled={busy() || !transferAction().enabled}
+                    onClick={() => void onTransferOwnership()}
+                    style={{
+                      "font-size": "0.8rem",
+                      padding: "0.3rem 0.6rem",
+                      "border-radius": "var(--radius-sm)",
+                      border: "1px solid var(--danger, #c0392b)",
+                      background: "transparent",
+                      color: "var(--danger, #c0392b)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {transferAction().label}
+                  </button>
+                  {/* `Cancel` is a PRE-PUBLISH exit, and it is the last one.
+                      Nothing here is a withdraw: once the proposal is published it
+                      is in every member's store and dies only when some commit
+                      lands, so no client may offer a cancel afterwards —
+                      including, and especially, for a transfer. */}
+                  <button
+                    type="button"
+                    disabled={busy()}
+                    onClick={() => setTransferOpen(false)}
+                    style={{
+                      "font-size": "0.8rem",
+                      padding: "0.3rem 0.6rem",
+                      "border-radius": "var(--radius-sm)",
+                      border: "1px solid var(--surface-border)",
+                      background: "transparent",
+                      color: "var(--surface-fg)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {t("common.cancel")}
+                  </button>
+                </div>
+              </div>
+            </Show>
+          </section>
+        </div>
+      </section>
+      <Show when={addMembersShown()}>
+        {/* Section 2.4 — pushed over the info; its back icon returns there. */}
+        <AddMembersScreen
+          contacts={addMemberContacts}
+          excluded={addMemberExcluded}
+          onBack={closeInfo}
+          onAdd={(picks) => {
+            closeInfo();
+            void onAddPicks(picks);
+          }}
+        />
+      </Show>
+    </Show>
+    </div>
   );
 }
 
@@ -9347,8 +9429,6 @@ function errorText(err: unknown, fallbackKey: string): () => string {
     switch (variant.kind) {
       case "no-identity-secrets":
         return () => t("common.error.session_ended");
-      case "username-unknown":
-        return () => t("chat.members.add.error.unknown_username", { name: `@${variant.username}` });
       case "no-identity-bundle":
         return () => t("chat.members.add.error.no_bundle");
       default:
