@@ -74,6 +74,48 @@ public enum RefusedMailboxWrite {
     }
 }
 
+extension RefusedMailboxWrite {
+
+    /// ADR-0050 section 2.5a item 7 — one write under each key in turn, moving
+    /// on at a refusal: one key the owner rotated away must not cost a write
+    /// another key still opens. No key: one write without a proof. A failure
+    /// other than a refusal ends it, since the next key would meet the same
+    /// network. Every key refused: the last refusal.
+    public static func tryingCandidates<Output>(
+        _ candidates: [DsMailboxWriteAuth],
+        publish: (DsMailboxWriteAuth?) async throws -> Output
+    ) async throws -> Output {
+        guard !candidates.isEmpty else { return try await publish(nil) }
+        var refusal: Error?
+        for candidate in candidates {
+            do {
+                return try await publish(candidate)
+            } catch let error where isRefusal(error) {
+                refusal = error
+            }
+        }
+        throw refusal ?? MailboxUnknown()
+    }
+
+    /// ``tryingCandidates(_:publish:)`` across several mailboxes, in order: a
+    /// plan whose keys were all refused moves on to the next plan. No plan:
+    /// ``MailboxUnknown``, and nothing is written.
+    public static func tryingPlans<Output>(
+        _ plans: [MailboxWritePlan],
+        publish: (MailboxWritePlan) async throws -> Output
+    ) async throws -> Output {
+        var refusal: Error?
+        for plan in plans {
+            do {
+                return try await publish(plan)
+            } catch let error where isRefusal(error) {
+                refusal = error
+            }
+        }
+        throw refusal ?? MailboxUnknown()
+    }
+}
+
 /// One attempt at a mailbox write: the verified mailbox it goes to
 /// (ADR-0078) and how it is signed.
 public struct MailboxWriteAttempt: Equatable {

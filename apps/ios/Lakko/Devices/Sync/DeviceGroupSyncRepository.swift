@@ -193,6 +193,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     var onKeyRotationEnvelope: @MainActor (Data) -> Void = { _ in
         NSLog("ADR-0074: a key-rotation envelope arrived with no receiver wired; dropped")
     }
+    /// UX second-device.md section 3 — an open Devices screen hears of a
+    /// received commit once its snapshot is on disk.
+    private var rosterChange = RosterChangeAfterPersist()
     /// When the poll loop last completed a fetch that reached the journal's
     /// head (unix ms); 0 before the first one. Read by
     /// ``waitForJournalHead(timeoutMs:)``.
@@ -312,6 +315,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         // seeds the acknowledged set; a later one may raise the notice for a
         // device added while the app was closed and already applied.
         reportRoster(group: ensured.group)
+        DeviceRosterChanges.note(accountIdB64: accountIdB64)
         // ADR-0080 — this account's device cards, sent through this
         // repository's DeviceGroup `ServiceEnvelope`.
         DeviceCardCenter.shared.bind(accountIdB64: accountIdB64) { [weak self] envelope in
@@ -1276,6 +1280,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     }
                 case .commit:
                     noteMembershipChange(before: devicesBefore, group: g)
+                    rosterChange.commitApplied()
                     // ADR-0081 decision 4 — the sibling's record of which keys
                     // it saw added, and when (the row's DS time), so a knock
                     // answered by another sibling is not answered twice.
@@ -1304,9 +1309,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     handleGeneration = try DeviceGroupLifecycle.persistSnapshotOrThrow(
                         identity: id, accountIdB64: accountIdB64, expectedGeneration: handleGeneration)
                     saveAdmissions(accountIdB64: accountIdB64)
+                    if rosterChange.persisted() { DeviceRosterChanges.note(accountIdB64: accountIdB64) }
                 } catch is DeviceGroupSnapshotStore.SnapshotChanged {
                     NSLog("DeviceGroupSync: the snapshot moved under this handle; reloading")
                     reloadFromDisk(accountIdB64: accountIdB64)
+                    if rosterChange.persisted() { DeviceRosterChanges.note(accountIdB64: accountIdB64) }
                 } catch {
                     NSLog("DeviceGroupSync snapshot persist failed: %@", String(describing: error))
                 }

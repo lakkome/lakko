@@ -31,7 +31,7 @@
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "Відкритий код. Номер телефону не потрібен.",
+      "text": "Спілкування по-вашому. Без номера телефону.",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -3980,6 +3980,10 @@
     },
     "contacts.request.accept": {
       "text": "Прийняти",
+      "status": "machine"
+    },
+    "contacts.request.accept_failed": {
+      "text": "Не вдалося прийняти. Спробуйте ще раз.",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -8390,6 +8394,22 @@
       "text": "Застосування",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "Усі мої контакти",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "Лише вибрані",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "Лише контакти вибраних вами людей ({chosen} з {total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "Тепер лише вибрані вами контакти. Змінити в розділі {privacy}.",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "Контакти моїх контактів",
       "status": "machine"
@@ -8436,6 +8456,14 @@
     },
     "who_can_find_me.list.choose": {
       "text": "Виберіть групи й канали",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "У вас ще немає контактів.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "Пошук контактів",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -8500,6 +8528,10 @@
     },
     "who_can_find_me.status.offline": {
       "text": "Зміни застосуються, коли ви знову будете в мережі.",
+      "status": "machine"
+    },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "Їхні контакти можуть мене знайти",
       "status": "machine"
     },
     "who_can_find_me.title": {

@@ -302,6 +302,27 @@ public fun withoutAcceptedSenders(
     return pending.filterNot { it.fromPubkey.toList() in acceptedKeys }
 }
 
+/**
+ * The Sent list once these people answered with a Welcome: a Welcome from the
+ * person asked is the answer, whether or not an ack follows (an ack written
+ * after the requester retired their reply key is refused).
+ */
+public fun withoutSentAnsweredBy(
+    sent: List<SentContactRequest>,
+    answeredKeysB64: Set<String>,
+): List<SentContactRequest> =
+    if (answeredKeysB64.isEmpty()) sent else sent.filterNot { it.recipientKeyB64 in answeredKeysB64 }
+
+/** The Sent list once the person with this account id is dismissed from it. */
+public fun withoutSentTo(
+    sent: List<SentContactRequest>,
+    recipientAccountIdB64: String,
+): List<SentContactRequest> = sent.filterNot { it.recipientAccountIdB64 == recipientAccountIdB64 }
+
+/** How many incoming requests are waiting, as the Contacts list shows them. */
+public fun waitingRequestCount(pending: List<IncomingContactRequest>): Int =
+    pending.distinctBy { it.messageId }.size
+
 /** The contact list after a batch of accept acknowledgements was applied. */
 public data class AppliedContactAcks(
     val accepted: List<AcceptedContact>,

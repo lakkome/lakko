@@ -31,7 +31,7 @@
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "مفتوح المصدر. لا يلزم رقم هاتف.",
+      "text": "تواصل على طريقتك. دون الحاجة إلى رقم هاتف.",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -3980,6 +3980,10 @@
     },
     "contacts.request.accept": {
       "text": "قبول",
+      "status": "machine"
+    },
+    "contacts.request.accept_failed": {
+      "text": "تعذّر القبول. حاول مرة أخرى.",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -8390,6 +8394,22 @@
       "text": "جارٍ التطبيق",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "كل جهات اتصالي",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "فقط من أختارهم",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "جهات اتصال الأشخاص الذين تختارهم فقط ({chosen} من {total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "الآن جهات الاتصال التي تختارها فقط. غيّر ذلك في {privacy}.",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "جهات اتصال جهات اتصالي",
       "status": "machine"
@@ -8436,6 +8456,14 @@
     },
     "who_can_find_me.list.choose": {
       "text": "اختر المجموعات والقنوات",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "ليست لديك جهات اتصال بعد.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "البحث في جهات الاتصال",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -8500,6 +8528,10 @@
     },
     "who_can_find_me.status.offline": {
       "text": "سيُطبَّق عند عودتك إلى الاتصال.",
+      "status": "machine"
+    },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "يمكن لجهات اتصاله العثور عليّ",
       "status": "machine"
     },
     "who_can_find_me.title": {

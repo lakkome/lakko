@@ -64,6 +64,10 @@ export interface ContactListPaneProps {
   readonly pendingBusy: () => boolean;
   readonly error: () => string | null;
   readonly onAccept: (request: IncomingContactRequest) => void;
+  /** An Accept is running for this request. */
+  readonly accepting?: (request: IncomingContactRequest) => boolean;
+  /** The last Accept of this request failed; it is still listed. */
+  readonly acceptFailed?: (request: IncomingContactRequest) => boolean;
   readonly onDecline: (request: IncomingContactRequest) => void;
   readonly sent: () => readonly SentRequestRecord[];
   readonly onDismissSent: (record: SentRequestRecord) => void;
@@ -202,7 +206,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                       <button
                         class="primary small"
                         type="button"
-                        disabled={props.pendingBusy()}
+                        disabled={props.pendingBusy() || props.accepting?.(req) === true}
                         onClick={() => props.onAccept(req)}
                       >
                         {t("contacts.request.accept")}
@@ -211,6 +215,11 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                         {t("contacts.request.decline")}
                       </button>
                     </div>
+                    <Show when={props.acceptFailed?.(req) === true}>
+                      <div class="form-error" role="status">
+                        {t("contacts.request.accept_failed")}
+                      </div>
+                    </Show>
                   </div>
                 </div>
               );

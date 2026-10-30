@@ -68,6 +68,26 @@ import { boundContactsAccount } from "../contacts/local-store";
 export type SecondArtifactKind = "welcome";
 
 /**
+ * The accept of a contact request whose group stands and whose Welcome or ack
+ * has not landed (`contacts/owed-answer.ts`). The entry carries no commit: the
+ * founding commit fanned out to nobody. Its Welcome is `secondArtifactB64`.
+ * `sweepVerdictPending` and `sweepWelcomesOwed` are both set, so the restart
+ * loop leaves it alone and a new grant finds it (`chat/owed-welcomes.ts`); the
+ * sweep's own fan-out passes it over, since it would use other keys.
+ */
+export interface OwedAnswer {
+  /** The `reply` grant the request carried. Secret. */
+  readonly replyGrantB64: string | null;
+  /** The request's fields the ack is built from. */
+  readonly fromPubkeyB64: string;
+  readonly fromPseudonymB64: string;
+  /** Who the Welcome goes to, own mailbox first. */
+  readonly targets: readonly { readonly accountKeyB64: string; readonly isRecipient: boolean }[];
+  /** The Welcome landed; only the ack is owed. */
+  readonly welcomeLanded?: boolean;
+}
+
+/**
  * One durable pending-commit record. The primary key is `id` (a random hex
  * string). The commit + Welcome / rendezvous bytes are stored base64 — opaque
  * MLS public artefacts (ADR-0040; invariants #1 / #2).
@@ -133,6 +153,8 @@ export interface PendingCommitEntry {
    * `sweepWelcomesOwed` is fan-out-owed.
    */
   sweepWelcomesOwed?: boolean;
+  /** Set on the entry of an accepted contact request. See {@link OwedAnswer}. */
+  answer?: OwedAnswer;
   /**
    * ADR-0045 — the sweep's Welcome fan-out targets: base64 mailbox pseudonyms,
    * one per member the sweep adds.

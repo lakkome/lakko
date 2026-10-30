@@ -31,7 +31,7 @@
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "Código aberto. Não precisa de número de telefone.",
+      "text": "Comunicação do seu jeito. Sem precisar de número de telefone.",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -3980,6 +3980,10 @@
     },
     "contacts.request.accept": {
       "text": "Aceitar",
+      "status": "machine"
+    },
+    "contacts.request.accept_failed": {
+      "text": "Não foi possível aceitar. Tente novamente.",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -8390,6 +8394,22 @@
       "text": "Aplicando",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "Todos os meus contatos",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "Só os que eu escolher",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "Só os contatos das pessoas que você escolher ({chosen} de {total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "Agora só os contatos que você escolher. Altere em {privacy}.",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "Contatos dos meus contatos",
       "status": "machine"
@@ -8436,6 +8456,14 @@
     },
     "who_can_find_me.list.choose": {
       "text": "Escolha grupos e canais",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "Você ainda não tem contatos.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "Buscar contatos",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -8500,6 +8528,10 @@
     },
     "who_can_find_me.status.offline": {
       "text": "Será aplicado quando você estiver on-line de novo.",
+      "status": "machine"
+    },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "Os contatos dessa pessoa podem me encontrar",
       "status": "machine"
     },
     "who_can_find_me.title": {

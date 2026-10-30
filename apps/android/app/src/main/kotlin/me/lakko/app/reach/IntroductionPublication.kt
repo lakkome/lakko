@@ -3,6 +3,7 @@
 
 package me.lakko.app.reach
 
+import kotlin.coroutines.cancellation.CancellationException
 import uniffi.lakko_ffi_uniffi.FfiIntroductionPayload
 import uniffi.lakko_ffi_uniffi.FfiReachGrant
 import uniffi.lakko_ffi_uniffi.OprfResult
@@ -64,6 +65,8 @@ internal data class IntroPublicationState(
     val ownOffer: StoredOwnOffer? = null,
     val offerSentTo: Map<String, String> = emptyMap(),
     val bundleSentTo: Map<String, String> = emptyMap(),
+    /** One-to-one group hex -> when an ask last reopened its sent records. */
+    val reopenedAtMs: Map<String, Long> = emptyMap(),
 )
 
 /** What the run reads. */
@@ -193,4 +196,104 @@ internal suspend fun publishIntroductions(
         }
     }
     return state
+}
+
+// ---------------------------------------------------------------------
+// A device that holds nothing asks (ADR-0060 section 4)
+// ---------------------------------------------------------------------
+
+/** An ask reopens a conversation's sent records at most this often. Chosen,
+ *  not measured. */
+internal const val INTRODUCTIONS_RESEND_MIN_MS: Long = 60L * 60 * 1000
+
+/** With a contact grant held, a device asks this rarely. Chosen, not measured. */
+internal const val INTRODUCTIONS_ASK_WITH_GRANT_MIN_MS: Long = 7L * 24 * 60 * 60 * 1000
+
+/** What this device holds from the other person of a one-to-one. */
+internal data class IntroductionsHeld(val offer: Boolean, val bundle: Boolean, val contactGrant: Boolean)
+
+/**
+ * Whether a conversation lacks introductions: no offer and no bundle from the
+ * other person. A contact grant does not count, or a device that once got a
+ * profile would never ask; it only makes the ask rarer
+ * ([introductionsAskStamp]). [held] is `null` for a conversation that is not a
+ * one-to-one, or whose other person cannot be named: a torn roster read decides
+ * nothing.
+ */
+internal fun lacksIntroductions(held: IntroductionsHeld?): Boolean =
+    held != null && !held.offer && !held.bundle
+
+/**
+ * The stamp to record for an ask now, or `null` not to ask. [lastMs] is when
+ * this device last asked the conversation, by either route. With no contact
+ * grant held the profile request's own rule decides ([noGrantRule], at most
+ * daily); with one, the first ask goes out at once and later ones after
+ * [INTRODUCTIONS_ASK_WITH_GRANT_MIN_MS] (a backwards clock reads as recently
+ * asked).
+ */
+internal fun introductionsAskStamp(
+    held: IntroductionsHeld,
+    lastMs: ULong?,
+    nowMs: ULong,
+    noGrantRule: (lastMs: ULong?, nowMs: ULong) -> Boolean,
+): ULong? {
+    val ask = if (held.contactGrant) {
+        lastMs == null || (nowMs >= lastMs && nowMs - lastMs >= INTRODUCTIONS_ASK_WITH_GRANT_MIN_MS.toULong())
+    } else {
+        noGrantRule(lastMs, nowMs)
+    }
+    return if (ask) nowMs else null
+}
+
+/**
+ * Ask in every conversation of [heldByGroup] that lacks introductions and
+ * that [decide] lets ask now: the field-less profile request is the ask.
+ * [decide] answers with the stamp to [record] once the request went out; a
+ * send that throws or reports `false` records nothing, so the next run asks
+ * again, and does not stop the others.
+ */
+internal suspend fun askForIntroductions(
+    heldByGroup: Map<String, IntroductionsHeld?>,
+    decide: (groupHex: String, held: IntroductionsHeld) -> ULong?,
+    send: suspend (groupHex: String) -> Boolean,
+    record: suspend (groupHex: String, stamp: ULong) -> Unit,
+    noteFailure: (Throwable) -> Unit = {},
+) {
+    for ((groupHex, viewed) in heldByGroup) {
+        val held = viewed?.takeIf(::lacksIntroductions) ?: continue
+        val stamp = decide(groupHex, held) ?: continue
+        val sent = try {
+            send(groupHex)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            noteFailure(cause)
+            false
+        }
+        if (sent) record(groupHex, stamp)
+    }
+}
+
+/**
+ * The publication state after a profile request was received in [groupHex], or
+ * `null` to leave it alone. Only the OTHER person of a ONE-TO-ONE reopens it,
+ * at most once per [INTRODUCTIONS_RESEND_MIN_MS] per conversation (a backwards
+ * clock reads as recently done). Reopening forgets that one conversation in
+ * the sent records, so the next run sends the offer and the bundle there again.
+ */
+internal fun reopenedByAsk(
+    state: IntroPublicationState,
+    groupHex: String,
+    oneToOne: Boolean,
+    fromOtherPerson: Boolean,
+    nowMs: Long,
+): IntroPublicationState? {
+    if (!oneToOne || !fromOtherPerson) return null
+    val last = state.reopenedAtMs[groupHex]
+    if (last != null && nowMs - last < INTRODUCTIONS_RESEND_MIN_MS) return null
+    return state.copy(
+        offerSentTo = state.offerSentTo - groupHex,
+        bundleSentTo = state.bundleSentTo - groupHex,
+        reopenedAtMs = state.reopenedAtMs + (groupHex to nowMs),
+    )
 }

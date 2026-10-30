@@ -10,6 +10,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.lakko_ffi_uniffi.FfiContactsForm
 import uniffi.lakko_ffi_uniffi.FfiIncomingEnvelope
 import uniffi.lakko_ffi_uniffi.FfiIncomingEnvelopeKind
 import uniffi.lakko_ffi_uniffi.FfiProfile
@@ -39,6 +40,8 @@ class ReachDeviceSyncTest {
         chosen = emptyList(),
         lastContactsOfContacts = false,
         lastGroups = null,
+        contactsForm = FfiContactsForm.ALL,
+        chosenContacts = emptyList(),
         updatedAtMs = stamp,
     )
 

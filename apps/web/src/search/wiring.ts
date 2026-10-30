@@ -21,7 +21,7 @@ import { DsClient } from "../ds/client";
 import { bytesToHex } from "../channels/composer";
 import { personKeysOf, verifiedTargetOfGrant } from "../reach/mailbox-write";
 import { provenSuccessorWith } from "../contacts/proven-successor";
-import { bestGrantForPerson } from "../reach/received-grants";
+import { grantsInOrderForPerson } from "../reach/received-grants";
 import { personKeysHex } from "../contacts/address-resolver";
 import { reachSession, reachSignerForGrantWire } from "../reach/reach-service";
 import { loadIntroductions } from "../reach/scoped-intake";
@@ -29,7 +29,7 @@ import { ScopedDiscoveryClient, usernameCertKey } from "../reach/scoped-discover
 import type { Wasm } from "../wasm";
 import { openMatchingIntroductions, recordsOf } from "./introductions";
 import { searchNormalizer, toHex, type LocalCandidate, type Normalize } from "./people";
-import type { KnownPerson, OpenedPublicRecord, PeopleSearchDeps } from "./people-search";
+import type { KnownPerson, OpenedPublicRecord, PeopleSearchDeps, SearchCounts } from "./people-search";
 import type { SendDeps } from "./send-request";
 
 /** The core's search normaliser, with the short-input fallback. */
@@ -52,16 +52,18 @@ export function knownPerson(
   const resolved = profiles.resolve(keyB64);
   const named = resolved.source === "rename" || resolved.source === "profile";
   const session = reachSession();
-  let keptGrantWireB64: string | null = null;
+  let keptGrantWires: readonly string[] = [];
   if (session !== null) {
     try {
-      keptGrantWireB64 =
-        // ADR-0074 section 3.5a rule 2 - the grants of the PERSON, under
-        // any key a proven rotation left behind.
-        bestGrantForPerson(session.receivedGrants(), personKeysHex(toHex(base64Decode(keyB64))))
-          ?.wireB64 ?? null;
+      // ADR-0074 section 3.5a rule 2 - the grants of the PERSON, under any
+      // key a proven rotation left behind. All of them: a person may have
+      // rotated one away and still answer to another.
+      keptGrantWires = grantsInOrderForPerson(
+        session.receivedGrants(),
+        personKeysHex(toHex(base64Decode(keyB64))),
+      ).map((g) => g.wireB64);
     } catch {
-      keptGrantWireB64 = null;
+      keptGrantWires = [];
     }
   }
   return {
@@ -72,7 +74,7 @@ export function knownPerson(
     contactFallbackName: isContact && !named ? resolved.name : null,
     verifiedUsername: resolved.username === null ? null : resolved.username.replace(/^@+/, ""),
     isContact,
-    keptGrantWireB64,
+    keptGrantWires,
   };
 }
 
@@ -114,7 +116,7 @@ export function localCandidates(
       // A claimed account id only locates the identity bundle; the send path
       // checks the bundle's key against this key before anything goes out.
       accountIdHex: contactAccountIdHex ?? profiles.accountIdHexOf(keyB64),
-      keptGrantWireB64: k.keptGrantWireB64,
+      keptGrantWires: k.keptGrantWires,
     });
   }
   return out;
@@ -162,7 +164,7 @@ export function openPublicRecordWith(
  *  ADR-0078: the mailbox is the one the grant's binding names, verified
  *  against the person's key (and its proven chain); a binding that does not
  *  verify is a refusal, and no request is made. */
-async function reachCheckWith(identityPk: Uint8Array, grantWireB64: string): Promise<boolean> {
+export async function reachCheckWith(identityPk: Uint8Array, grantWireB64: string): Promise<boolean> {
   const target = await verifiedTargetOfGrant(grantWireB64, personKeysOf(identityPk));
   if (target === null) return false;
   const signer = await reachSignerForGrantWire(grantWireB64);
@@ -197,6 +199,16 @@ async function provenPredecessorOf(
   }
 }
 
+/** One line per finished network search: counts only. */
+function logSearchCounts(c: SearchCounts): void {
+  // eslint-disable-next-line no-console
+  console.info(
+    `[search] finished records_held=${c.recordsHeld} records_opened=${c.recordsOpened} ` +
+      `kept_after_match=${c.keptAfterMatch} refused_by_reach_check=${c.refusedByReachCheck} ` +
+      `people=${c.people}`,
+  );
+}
+
 /** The network search, answered from the running app. */
 export function peopleSearchDeps(args: {
   readonly wasm: Wasm;
@@ -206,6 +218,7 @@ export function peopleSearchDeps(args: {
   const { wasm, profiles } = args;
   const discovery = new DiscoveryClient(undefined, { sessionToken: args.sessionToken });
   const scoped = new ScopedDiscoveryClient(args.sessionToken);
+  let recordsHeld = 0;
   return {
     canonicalUsername: (typed) => canonicalUsernameOf(wasm, typed),
     queryTerm: (query) => wasm.nameQueryTerm(query) ?? null,
@@ -241,8 +254,12 @@ export function peopleSearchDeps(args: {
       const session = reachSession();
       if (session === null) return [];
       const row = await loadIntroductions(session.accountIdB64);
-      return openMatchingIntroductions(recordsOf(row, wasm), probes, wasm);
+      const records = recordsOf(row, wasm);
+      recordsHeld = records.length;
+      return openMatchingIntroductions(records, probes, wasm);
     },
+    introductionRecordsHeld: () => recordsHeld,
+    logCounts: logSearchCounts,
     verifyUsername: async (certificate, usernameLookupKey, accountId) => {
       try {
         const cert = wasm.verifyUsernameBinding(certificate, await usernameCertKey(), usernameLookupKey, accountId);

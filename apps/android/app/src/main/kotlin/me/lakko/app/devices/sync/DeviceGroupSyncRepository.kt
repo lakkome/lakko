@@ -153,6 +153,12 @@ public class DeviceGroupSyncRepository(
      *  watches it. */
     private val stateVersion: MutableStateFlow<Long> = MutableStateFlow(0L)
 
+    /** UX second-device.md section 3 - an open Devices screen hears of a
+     *  received commit once its snapshot is on disk. */
+    private val rosterChange = me.lakko.app.devices.RosterChangeAfterPersist {
+        me.lakko.app.devices.DeviceRosterChanges.note()
+    }
+
     // ------------------------------------------------------------
     // Internals
     // ------------------------------------------------------------
@@ -389,6 +395,7 @@ public class DeviceGroupSyncRepository(
             sendServiceEnvelope(envelope)
         }
         reportRoster(ensured.group, accountIdB64, localChange = letIn)
+        me.lakko.app.devices.DeviceRosterChanges.note()
         if (seedState) startSyncStatePersistence(accountIdB64)
         mutableReady.value = true
 
@@ -1896,6 +1903,7 @@ public class DeviceGroupSyncRepository(
                         // device list: a device this one has not
                         // acknowledged raises the notice.
                         reportRoster(g, accountIdB64, localChange = false)
+                        rosterChange.onCommitApplied()
                     }
                     // Proposal / ExternalJoinProposal — no application-state
                     // mutation.
@@ -1913,6 +1921,7 @@ public class DeviceGroupSyncRepository(
                         try {
                             persistHandleOrThrow(id, accountIdB64)
                             saveAdmissions(accountIdB64)
+                            rosterChange.onPersisted()
                         } catch (_: DeviceGroupSnapshotStore.SnapshotChanged) {
                             return
                         } catch (cause: Throwable) {

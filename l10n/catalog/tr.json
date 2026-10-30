@@ -31,7 +31,7 @@
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "Açık kaynak. Telefon numarası gerekmez.",
+      "text": "İletişim sizin tarzınızda. Telefon numarası gerekmez.",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -3980,6 +3980,10 @@
     },
     "contacts.request.accept": {
       "text": "Kabul et",
+      "status": "machine"
+    },
+    "contacts.request.accept_failed": {
+      "text": "Kabul edilemedi. Yeniden deneyin.",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -8390,6 +8394,22 @@
       "text": "Uygulanıyor",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "Tüm kişilerim",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "Yalnızca seçtiklerim",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "Yalnızca seçtiğiniz kişilerin kişileri ({chosen}/{total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "Artık yalnızca seçtiğiniz kişiler. {privacy} bölümünden değiştirin.",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "Kişilerimin kişileri",
       "status": "machine"
@@ -8436,6 +8456,14 @@
     },
     "who_can_find_me.list.choose": {
       "text": "Grupları ve kanalları seç",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "Henüz kişiniz yok.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "Kişilerde ara",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -8500,6 +8528,10 @@
     },
     "who_can_find_me.status.offline": {
       "text": "Yeniden çevrimiçi olduğunuzda uygulanacak.",
+      "status": "machine"
+    },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "Bu kişinin kişileri beni bulabilir",
       "status": "machine"
     },
     "who_can_find_me.title": {

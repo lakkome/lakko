@@ -128,6 +128,53 @@ pub fn delegation_for<'a>(
         .find(|d| d.delegate_pk == *own_account_key)
 }
 
+/// How long after sending a proposer's signed envelope is due again, in
+/// milliseconds: 12 hours. A delegation lives 23 hours at most on the
+/// clients and 24 at the Delivery Service, and an ADR-0045 proposal has no
+/// deadline, so the proposer re-sends while its `Add` waits (ADR-0060 §6).
+/// Half the lifetime, so a device opened about once a day still re-sends
+/// before the last envelope runs out. Chosen, not measured.
+pub const COMMITTER_ENVELOPE_RESEND_AFTER_MS: u64 = 12 * 60 * 60 * 1000;
+
+/// What a proposer sent last for one pending `Add`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SentCommitterEnvelope<'a> {
+    /// When it was sent, unix milliseconds.
+    pub sent_at_ms: u64,
+    /// Whether it carried delegations. An envelope without any (the added
+    /// person's mailbox is open) names a binding, which does not expire.
+    pub signed: bool,
+    /// The committer candidates it covered.
+    pub covered: &'a [[u8; ADDED_ACCOUNT_KEY_LEN]],
+}
+
+/// Is a proposer's committer-delegation envelope due for a pending `Add`
+/// (ADR-0060 §6)? The one rule the three clients share; the caller checks the
+/// `Add` is still pending and that it has something to send.
+///
+/// Due when nothing was sent yet, when a current candidate was not covered
+/// (a new admin has no delegation of its own, and cannot read a message sent
+/// before it joined), or when a signed envelope is
+/// [`COMMITTER_ENVELOPE_RESEND_AFTER_MS`] old. A local clock that went
+/// backwards counts as due for a signed envelope: one extra message, after
+/// which the sent time is the new clock, against a delegation left to expire.
+#[must_use]
+pub fn committer_envelope_due(
+    last: Option<SentCommitterEnvelope<'_>>,
+    candidates: &[[u8; ADDED_ACCOUNT_KEY_LEN]],
+    now_ms: u64,
+) -> bool {
+    let Some(last) = last else {
+        return true;
+    };
+    if candidates.iter().any(|c| !last.covered.contains(c)) {
+        return true;
+    }
+    last.signed
+        && (now_ms < last.sent_at_ms
+            || now_ms - last.sent_at_ms >= COMMITTER_ENVELOPE_RESEND_AFTER_MS)
+}
+
 // The envelope's blob length is this crate's wire length; a drift would make
 // every envelope unparseable here while the codec there accepts it.
 const _: () = assert!(COMMITTER_DELEGATION_BLOB_LEN == crate::delegation::DELEGATION_LEN);
@@ -236,6 +283,41 @@ mod tests {
             check_committer_delegations(&env),
             Err(CommitterDelegationCheckError::BadMailboxBinding)
         );
+    }
+
+    #[test]
+    fn an_envelope_is_due_first_then_on_age_then_for_a_new_candidate() {
+        let (a, b) = (account(1), account(2));
+        let covered = [a];
+        let sent = |signed| SentCommitterEnvelope {
+            sent_at_ms: 1_000,
+            signed,
+            covered: &covered,
+        };
+        assert!(committer_envelope_due(None, &[a], 0));
+        // Nothing to do while the signed envelope is young.
+        let young = 1_000 + COMMITTER_ENVELOPE_RESEND_AFTER_MS - 1;
+        assert!(!committer_envelope_due(Some(sent(true)), &[a], young));
+        assert!(committer_envelope_due(Some(sent(true)), &[a], young + 1));
+        // A candidate who left needs nothing; a new one is due at once.
+        assert!(!committer_envelope_due(Some(sent(true)), &[], young));
+        assert!(committer_envelope_due(Some(sent(true)), &[a, b], 1_000));
+        // A backward clock re-sends rather than letting delegations lapse.
+        assert!(committer_envelope_due(Some(sent(true)), &[a], 999));
+    }
+
+    #[test]
+    fn an_envelope_without_delegations_never_ages() {
+        let (a, b) = (account(1), account(2));
+        let covered = [a];
+        let open = SentCommitterEnvelope {
+            sent_at_ms: 1_000,
+            signed: false,
+            covered: &covered,
+        };
+        assert!(!committer_envelope_due(Some(open), &[a], u64::MAX));
+        assert!(!committer_envelope_due(Some(open), &[a], 0));
+        assert!(committer_envelope_due(Some(open), &[a, b], 1_001));
     }
 
     #[test]

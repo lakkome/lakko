@@ -12,6 +12,8 @@ import me.lakko.app.chat.PersistedAttachment
 import me.lakko.app.chat.PersistedGroup
 import me.lakko.app.chat.PersistedMessage
 import me.lakko.app.chat.PersistedThumb
+import me.lakko.app.chat.bundleFloor
+import me.lakko.app.chat.higherFloor
 import uniffi.lakko_ffi_uniffi.HistoryAttachment
 import uniffi.lakko_ffi_uniffi.HistoryMessageDirection
 import uniffi.lakko_ffi_uniffi.HistoryPlaceholder
@@ -157,14 +159,8 @@ public object HistoryBundleCodec {
         val existing = MessageLogStore.getLog(context, accountIdB64)
             ?: MessageLogPayload(version = 1, groups = emptyMap())
 
-        val nextGroups = existing.groups.toMutableMap()
-        var applied = 0
-
-        for (g in opened.groups) {
-            val hex = bytesToHex(g.groupId)
-            val slot = nextGroups[hex]
-                ?: PersistedGroup(cursor = 0L, messages = emptyList())
-            val decodedRows = g.messages.mapNotNull { m ->
+        val decoded = opened.groups.associate { g ->
+            bytesToHex(g.groupId) to g.messages.mapNotNull { m ->
                 // G-6 step 2: decode the canonical cross-platform
                 // placeholder via the shared Rust core. Bytes from
                 // a web or iOS scanner decode identically here.
@@ -175,22 +171,72 @@ public object HistoryBundleCodec {
                     null
                 }
             }
-            val (merged, added) = mergeRows(slot.messages, decodedRows)
-            applied += added
-            // `copy`, not a new slot: the feed's seen marks (ADR-0063
-            // section 5) ride the same slot and must survive the merge.
-            nextGroups[hex] = slot.copy(messages = merged)
         }
+        val merged = mergeBundle(existing.groups, decoded)
 
         MessageLogStore.putLog(
             context = context,
             accountIdB64 = accountIdB64,
             payload = MessageLogPayload(
                 version = existing.version,
-                groups = nextGroups,
+                groups = merged.groups,
             ),
         )
-        return applied
+        // A chat layer already running keeps the whole log in memory and
+        // rewrites it from there, so it has to be told what just landed.
+        liveLogSink?.invoke(accountIdB64, merged.opened)
+        return merged.applied
+    }
+
+    /**
+     * Where a bundle goes when the chat layer of its account is running
+     * (a device pairing while signed in). `null`, or a chat layer on another
+     * account: the next bootstrap reads it off the log.
+     */
+    @Volatile
+    public var liveLogSink: ((accountIdB64: String, opened: Map<String, PersistedGroup>) -> Unit)? = null
+
+    /** What [mergeBundle] made of one bundle. */
+    internal class MergedBundle(
+        /** The whole log after the merge. */
+        val groups: Map<String, PersistedGroup>,
+        /** How many rows the merge added across all groups. */
+        val applied: Int,
+        /** Per group, the bundle's own rows and floor: what a running chat
+         *  layer takes in ([liveLogSink]). */
+        val opened: Map<String, PersistedGroup>,
+    )
+
+    /**
+     * Merge a bundle's [decoded] rows, group by group, into the log [held] on
+     * this device. `copy`, not a new slot: the feed's seen marks (ADR-0063
+     * section 5) ride the same slot and must survive the merge. Each group's
+     * floor moves up to the highest id the bundle carried for it, and never
+     * down ("History is not news", `docs/ux/second-device.md` section 2).
+     */
+    internal fun mergeBundle(
+        held: Map<String, PersistedGroup>,
+        decoded: Map<String, List<PersistedMessage>>,
+    ): MergedBundle {
+        val next = held.toMutableMap()
+        val opened = LinkedHashMap<String, PersistedGroup>()
+        var applied = 0
+        for ((hex, rows) in decoded) {
+            val slot = next[hex] ?: PersistedGroup(cursor = 0L, messages = emptyList())
+            val (merged, added) = mergeRows(slot.messages, rows)
+            applied += added
+            val floor = bundleFloor(rows)
+            next[hex] = slot.copy(
+                messages = merged,
+                syncedThroughMessageId = higherFloor(slot.syncedThroughMessageId, floor),
+            )
+            opened[hex] = PersistedGroup(
+                cursor = 0L,
+                messages = mergeRows(emptyList(), rows).first,
+                syncedThroughMessageId = floor,
+            )
+        }
+        return MergedBundle(next, applied, opened)
     }
 
     /**

@@ -7,11 +7,13 @@ import {
   appendToGroupSlot,
   ClosedViewBaseline,
   eventToPersistedMessage,
+  fileHistoryRows,
   mergeClosedViewSlot,
   mergeForegroundSlot,
   summarizeGroupSlot,
 } from "./background-log";
-import type { PersistedGroup, PersistedMessage } from "./message-log-store";
+import { markSeenInSlot } from "../feed/feed-seen";
+import { withoutGroup, type PersistedGroup, type PersistedMessage } from "./message-log-store";
 
 function msg(
   id: number,
@@ -325,5 +327,93 @@ describe("ClosedViewBaseline", () => {
     expect(b.changed(rows)).toEqual([]);
     expect(b.cursorAdvanced(5)).toBe(false);
     expect(b.cursorAdvanced(6)).toBe(true);
+  });
+});
+
+describe("the history floor (docs/ux/second-device.md section 2)", () => {
+  it("files the rows the slot lacks, in order, and raises the floor", () => {
+    const stored: PersistedGroup = { cursor: "9", messages: [msg(4)] };
+    const { slot, added } = fileHistoryRows(stored, [msg(3), msg(4, "incoming", "theirs"), msg(1)], 4n);
+    expect(added).toBe(2);
+    expect(slot.messages.map((m) => m.messageId)).toEqual(["1", "3", "4"]);
+    expect(slot.messages[2]?.text).toBe("m4");
+    expect(slot.cursor).toBe("9");
+    expect(slot.syncedThroughMessageId).toBe("4");
+  });
+
+  it("creates the slot of a group this device has no log for", () => {
+    const { slot } = fileHistoryRows(undefined, [msg(2)], 2n);
+    expect(slot).toEqual({ cursor: "0", messages: [msg(2)], syncedThroughMessageId: "2" });
+  });
+
+  it("keeps the higher floor and what the slot says about this device", () => {
+    const stored: PersistedGroup = {
+      cursor: "9",
+      messages: [msg(9)],
+      lastViewedMessageId: "7",
+      feedSeen: ["9"],
+      syncedThroughMessageId: "8",
+    };
+    const { slot } = fileHistoryRows(stored, [msg(2)], 3n);
+    expect(slot.syncedThroughMessageId).toBe("8");
+    expect(slot.lastViewedMessageId).toBe("7");
+    expect(slot.feedSeen).toEqual(["9"]);
+  });
+
+  it("an empty bundle sets no floor", () => {
+    expect(fileHistoryRows(undefined, [], null).slot.syncedThroughMessageId).toBeUndefined();
+  });
+
+  const history = (): PersistedGroup =>
+    fileHistoryRows(undefined, [msg(1), msg(2), msg(3)], 3n).slot;
+
+  it("a history row is not unread, with no read position or a lower one", () => {
+    expect(summarizeGroupSlot(history(), null).unread).toBe(0);
+    expect(summarizeGroupSlot(history(), 1n).unread).toBe(0);
+    expect(summarizeGroupSlot({ ...history(), lastViewedMessageId: "1" }, null).unread).toBe(0);
+  });
+
+  it("what arrives after it counts, and a read position still covers it", () => {
+    const next = appendToGroupSlot(history(), [msg(4), msg(5)], 5);
+    expect(summarizeGroupSlot(next, null).unread).toBe(2);
+    expect(summarizeGroupSlot(next, 4n).unread).toBe(1);
+    expect(summarizeGroupSlot(next, 5n).unread).toBe(0);
+  });
+
+  it("covers a row that came over the journal before the bundle did", () => {
+    const live = appendToGroupSlot(undefined, [msg(3), msg(4)], 4);
+    const { slot } = fileHistoryRows(live, [msg(1), msg(3)], 3n);
+    expect(summarizeGroupSlot(slot, null).unread).toBe(1);
+  });
+
+  it("moves no read position: the slot has no lastViewedMessageId", () => {
+    expect(history().lastViewedMessageId).toBeUndefined();
+  });
+
+  it("an unreadable floor counts for nothing", () => {
+    const slot: PersistedGroup = { cursor: "1", messages: [msg(1)], syncedThroughMessageId: "x" };
+    expect(summarizeGroupSlot(slot, null).unread).toBe(1);
+  });
+
+  it("every writer of the slot keeps it, and so does a restart", () => {
+    const floor = "3";
+    const slot = history();
+    expect(appendToGroupSlot(slot, [msg(4)], 4).syncedThroughMessageId).toBe(floor);
+    expect(mergeForegroundSlot(slot, { messages: [msg(3)], cursor: 3 }).syncedThroughMessageId).toBe(floor);
+    expect(mergeClosedViewSlot(slot, [msg(4)], 4).syncedThroughMessageId).toBe(floor);
+    expect(markSeenInSlot(slot, ["3"], () => undefined).slot.syncedThroughMessageId).toBe(floor);
+    const restarted = JSON.parse(JSON.stringify(slot)) as PersistedGroup;
+    expect(restarted.syncedThroughMessageId).toBe(floor);
+    expect(summarizeGroupSlot(restarted, null).unread).toBe(0);
+  });
+
+  it("a slot that never had one does not grow the key", () => {
+    const merged = mergeForegroundSlot(undefined, { messages: [msg(1)], cursor: 1 });
+    expect("syncedThroughMessageId" in merged).toBe(false);
+  });
+
+  it("goes with the group's transcript", () => {
+    const payload = { version: 5, groups: { aa: history() } };
+    expect(withoutGroup(payload, "aa")?.groups["aa"]).toBeUndefined();
   });
 });

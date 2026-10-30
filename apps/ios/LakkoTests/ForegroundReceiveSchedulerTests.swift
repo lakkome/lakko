@@ -283,11 +283,11 @@ final class UnreadCountingTests: XCTestCase {
             message(4),
         ]
         XCTAssertEqual(UnreadCounting.incomingMessages(in: events), 2)
-        XCTAssertEqual(UnreadCounting.next(current: 3, applied: events, chatOpen: false), 5)
+        XCTAssertEqual(UnreadCounting.next(current: [10, 11, 12], applied: events, chatOpen: false).count, 5)
     }
 
     func testNothingCountsWhileTheChatIsOpen() {
-        XCTAssertEqual(UnreadCounting.next(current: 3, applied: [message(1)], chatOpen: true), 0)
+        XCTAssertEqual(UnreadCounting.next(current: [10, 11, 12], applied: [message(1)], chatOpen: true), [])
     }
 
     func testABroadcastReadCursorWinsOverTheLocalCount() {

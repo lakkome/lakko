@@ -13,7 +13,7 @@
  *    signed with our own `contact` key, which this account always registers;
  * 2. **explicit** - the caller holds the grant for exactly this write (the
  *    requester's `reply` grant when accepting a contact request, a `/g/`
- *    joiner's `reply` grant, an invite link's `link` grant);
+ *    joiner's `reply` grant, an invite link's `link` grant), tried first;
  * 3. **kept** - a grant the person handed us and we kept (contact, then the
  *    group / channel keys of a scope they let find them, then - only for a
  *    Welcome into that group - their `member` key);
@@ -22,6 +22,11 @@
  *    seed, next to the delegation header;
  * 5. **none** - unsigned, spending one `mailbox-write` token. An Everyone
  *    (open) or unclaimed mailbox stores it.
+ *
+ * The answer to a contact request is its own, shorter list
+ * (`answersRequest`): the request's `reply` grant, then a held `contact`
+ * grant, and nothing else. A group, member or channel key, or a delegation,
+ * has nothing to do with answering a request.
  *
  * ADR-0078: a mailbox address is no longer a function of the person's
  * identity key. It is `mailboxAddress(mailbox_pk)` for a mailbox key the
@@ -45,6 +50,7 @@ import { continuityKeyUsable } from "./continuity";
 import { loadWasm } from "../wasm";
 import { personKeysHex } from "../contacts/address-resolver";
 import {
+  contactGrantsForPerson,
   delegationsForPerson,
   grantsInOrderForPerson,
   type HeldGrant,
@@ -386,8 +392,11 @@ function grantCandidate(
  * The plan for a write to the person `targetAccountKey` names, in order:
  *
  *   - this account's own mailbox: its own `contact` key, alone;
- *   - an explicit grant for exactly this write, alone;
- *   - otherwise every grant kept for the person under any key they have had
+ *   - an answer to a contact request (`answersRequest`): the request's
+ *     `reply` grant, then the `contact` grants held for the person, and
+ *     nothing else, never unsigned;
+ *   - an explicit grant for exactly this write, first;
+ *   - then every grant kept for the person under any key they have had
  *     (rule 2), the ones of before a rotation last and only while the old
  *     address stands (rule 6), then a committer delegation;
  *   - with none of those, for a Welcome (`openWelcome`), the unsigned write
@@ -405,6 +414,9 @@ export async function planWriteToPerson(
   options: {
     readonly scope?: Uint8Array;
     readonly explicit?: WasmReachGrant | string | null;
+    /** This write answers a contact request: `explicit` is the request's
+     *  `reply` grant. See above. */
+    readonly answersRequest?: boolean;
     readonly allowMember?: boolean;
     readonly neverUnsigned?: boolean;
     /** The person's 97-byte mailbox binding from a public record, for the
@@ -467,8 +479,16 @@ export async function planWriteToPerson(
       ],
     };
   }
-  if (explicit !== null) return { candidates: [grantCandidate("explicit", explicit, personKeys)] };
   const candidates: WriteCandidate[] = [];
+  if (explicit !== null) candidates.push(grantCandidate("explicit", explicit, personKeys));
+  if (options.answersRequest === true) {
+    if (session !== null) {
+      for (const held of contactGrantsForPerson(session.receivedGrants(), personHexes)) {
+        if (held.wireB64 !== explicit) candidates.push(grantCandidate("kept", held.wireB64, personKeys));
+      }
+    }
+    return { candidates };
+  }
   if (session !== null) {
     // ADR-0073 R.7 case 3 - a Welcome into the successor of a conversation
     // may use the `member` key the person granted for the conversation's
@@ -478,7 +498,7 @@ export async function planWriteToPerson(
       options.scope === undefined
         ? [undefined]
         : [journalHex(options.scope), ...scopeLineage(journalHex(options.scope))];
-    const offered = new Set<string>();
+    const offered = new Set<string>(typeof explicit === "string" ? [explicit] : []);
     for (const scopeHex of scopeHexes) {
       for (const held of grantsInOrderForPerson(session.receivedGrants(), personHexes, {
         ...(scopeHex === undefined ? {} : { scopeHex }),
@@ -642,6 +662,8 @@ export async function writeToPerson<T>(
   options: {
     readonly scope?: Uint8Array;
     readonly explicit?: WasmReachGrant | string | null;
+    /** See {@link planWriteToPerson}. */
+    readonly answersRequest?: boolean;
     readonly allowMember?: boolean;
     /** A Welcome: never written unsigned, and an exhausted write throws
      *  {@link MailboxUnreachableError} so the caller keeps it owed. */
@@ -661,7 +683,7 @@ export async function writeToPerson<T>(
   const recheck = options.recheck === undefined ? installedRecheck : options.recheck;
   return writeWithAddressRecheck(() => planWriteToPerson(targetAccountKey, options), write, {
     recheck: recheck === null ? null : () => recheck(targetAccountKey),
-    unreachable: options.neverUnsigned === true,
+    unreachable: options.neverUnsigned === true || options.answersRequest === true,
   });
 }
 
@@ -669,10 +691,11 @@ export async function writeToPerson<T>(
  * A Welcome write to `targetAccountKey`'s account mailbox that is never sent
  * unsigned (ADR-0050 section 2.5a item 7):
  *
- *   - this account's own mailbox and an explicit grant: one candidate;
- *   - otherwise every kept grant for that account in order (contact, the
- *     scopes' `group`, their `channel`, then this group's `member`), then a
- *     committer delegation naming this account, moving to the next on `401`;
+ *   - this account's own mailbox: one candidate;
+ *   - otherwise an explicit grant, then every kept grant for that account in
+ *     order (contact, the scopes' `group`, their `channel`, then this group's
+ *     `member`), then a committer delegation naming this account, moving to
+ *     the next on `401`;
  *   - with nothing left, {@link MailboxUnreachableError} and no write.
  *
  * The web client cannot tell whether a person's mailbox is open (Everyone):

@@ -13,7 +13,9 @@
  * person was found. Its action: a contact shows **Open**; someone who lets
  * this account find them offers **Add contact**, which sends the request at
  * once with the key that found them and no introduction text, then reads
- * **Request sent**; anyone else shows their name only.
+ * **Request sent**; anyone else shows their name only. A kept grant counts
+ * only once the Delivery Service said it still reaches the person
+ * (`reach-verdicts.ts`).
  *
  * In Contacts (`scope: "contacts"`) only people are matched: the contacts
  * list above already shows the contacts, so they are not repeated here, and
@@ -38,12 +40,20 @@ import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { loadWasm, type Wasm } from "../wasm";
 import { AutoSearch, networkQueryOf, SearchMemory, type NetworkQuery, type NetworkView } from "./auto-search";
-import { canAddContact, localPeople, mergePeople, type PersonResult } from "./people";
+import { canAddContact, localPeople, mergePeople, type LocalCandidate, type PersonResult } from "./people";
 import { searchPeople } from "./people-search";
+import { candidatesMatching, ReachVerdicts } from "./reach-verdicts";
 import { rowStateAfter, rowView, type RowSendState } from "./row-send";
-import { REQUEST_FAILED, REQUEST_SENT, searchStateMessage } from "./search-state";
+import { peopleLineOf, REQUEST_FAILED, REQUEST_SENT } from "./search-state";
 import { sendFoundRequest, type SendOutcome } from "./send-request";
-import { canonicalUsernameOf, localCandidates, normalizerOf, peopleSearchDeps, sendDeps } from "./wiring";
+import {
+  canonicalUsernameOf,
+  localCandidates,
+  normalizerOf,
+  peopleSearchDeps,
+  reachCheckWith,
+  sendDeps,
+} from "./wiring";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 
 /** Where the field is: Chats matches conversations too, Contacts only people. */
@@ -94,13 +104,35 @@ export function PeopleSearch(props: {
   const ownKeyHex = (): string | null => reachSession()?.accountKeyHex ?? null;
   const inContacts = props.scope === "contacts";
 
+  /** The people this device knows, as they stand now. */
+  const candidates = createMemo((): LocalCandidate[] => {
+    if (wasm() === null || props.query().trim().length === 0) return [];
+    profiles.version();
+    return localCandidates(profiles, props.groupPeopleKeys());
+  });
+
+  // ---- whether a kept grant still reaches them ---------------------------
+  const [verdictsChanged, setVerdictsChanged] = createSignal(0);
+  const verdicts = new ReachVerdicts({
+    reachCheck: (keyB64, wireB64) => reachCheckWith(base64Decode(keyB64), wireB64),
+    onChange: () => setVerdictsChanged((n) => n + 1),
+  });
+  // Runs on the text and the candidates, never on a verdict: an unanswered
+  // check is asked again when the text changes, not in a loop.
+  createEffect(() => {
+    const w = wasm();
+    const held = candidates();
+    if (w === null) return;
+    verdicts.ask(candidatesMatching(held, props.query(), normalizerOf(w), ownKeyHex()));
+  });
+
   /** The local half, as the person types. */
   const local = createMemo((): PersonResult[] => {
     const w = wasm();
     const q = props.query();
     if (w === null || q.trim().length === 0) return [];
-    profiles.version();
-    return localPeople(localCandidates(profiles, props.groupPeopleKeys()), q, normalizerOf(w), ownKeyHex());
+    verdictsChanged();
+    return localPeople(verdicts.apply(candidates()), q, normalizerOf(w), ownKeyHex());
   });
 
   // ---- the network half: asked by itself as the person types ------------
@@ -153,7 +185,7 @@ export function PeopleSearch(props: {
   const message = (): string | null => {
     if (searching()) return null;
     const outcome = network().outcome;
-    return outcome === null ? null : searchStateMessage(outcome.state);
+    return outcome === null ? null : peopleLineOf(outcome.state, people().length);
   };
   const showsPeople = (): boolean =>
     people().length > 0 || channel() !== null || searching() || message() !== null;
@@ -173,7 +205,18 @@ export function PeopleSearch(props: {
             <span class="lakko-spinner" role="status" aria-label={t("search.people.searching_a11y")} />
           </Show>
         </div>
-        <For each={people()}>{(p) => <PersonRow person={p} wasm={wasm} chats={chats} onSent={props.onSent} openState={contactOpenState} />}</For>
+        <For each={people()}>
+          {(p) => (
+            <PersonRow
+              person={p}
+              wasm={wasm}
+              chats={chats}
+              onSent={props.onSent}
+              onReachRefused={(keyHex) => verdicts.refused(keyHex)}
+              openState={contactOpenState}
+            />
+          )}
+        </For>
         <Show when={channel()}>
           {(c) => (
             <button
@@ -203,13 +246,18 @@ function PersonRow(props: {
   readonly wasm: () => Wasm | null;
   readonly chats: ReturnType<typeof useChats>;
   readonly onSent?: (() => void) | undefined;
+  /** A send was refused by the reach check. */
+  readonly onReachRefused: (keyHex: string) => void;
   /** The history state the contact screen is opened with (its way back). */
   readonly openState: () => ContactBackState | undefined;
 }): JSX.Element {
   const auth = useAuth();
   const profiles = useProfiles();
 
-  const view = () => rowView(rowStateOf(props.person.keyHex), canAddContact(props.person));
+  // A contact has nothing to send: whatever this row said before they became
+  // one is over.
+  const view = () =>
+    rowView(props.person.reach === "contact" ? "idle" : rowStateOf(props.person.keyHex), canAddContact(props.person));
   const contactHref = (): string => paths.contact(base64UrlEncodeNoPad(base64Decode(props.person.keyB64)));
 
   /** Add contact: the request goes out at once - no dialog, no text. */
@@ -253,6 +301,7 @@ function PersonRow(props: {
       }
       props.onSent?.();
     }
+    if (outcome.kind === "refused" && outcome.byReachCheck === true) props.onReachRefused(person.keyHex);
     setRowState(person.keyHex, rowStateAfter(outcome));
   }
 

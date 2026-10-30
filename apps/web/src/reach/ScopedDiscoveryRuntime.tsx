@@ -13,34 +13,46 @@
  * failed step is retried at the next run (a setting or name change, a new
  * contact, coming back online, or the periodic tick). Decisions are in
  * `publication-model.ts`.
+ *
+ * An offer and a bundle go out once per conversation, so each run also asks
+ * for what this device never received, and answers such an ask by sending
+ * its own again (ADR-0060 section 4, "A device that holds nothing asks").
  */
 import { createEffect, onCleanup, untrack, type JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
-import { ChatClient } from "../chat/client";
+import { ChatClient, rosterOf } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
+import { personKeysHex, resolveAccountKeyHex } from "../contacts/address-resolver";
+import { journalHex } from "../ds/access";
+import { lastProfileRequestAt, recordProfileRequest } from "../profile/profile-request";
 import { isOneToOne, useProfiles } from "../profile/ProfileContext";
 import { loadWasm } from "../wasm";
 import {
+  askForMissingIntroductions,
+  askResetsRecords,
   bundleTargets,
   decodePublication,
   encodePublication,
   everyoneAction,
   everyoneKey,
+  forgetSentRecords,
   offerKey,
   offerNeedsRebuild,
   offerTargets,
+  oneToOnePeerHex,
   recordsDigest,
   termsToEvaluate,
   type PublicationState,
 } from "./publication-model";
+import { heldClassesForPerson } from "./received-grants";
 import { reachSession, reachSessionSignal, reachVersionsTick } from "./reach-service";
 import { loadReachRow, saveReachRow } from "./reach-store";
 import { ScopedDiscoveryClient } from "./scoped-discovery";
 import type { OprfPair } from "../discovery/oprf-pair";
-import { introductionOffersTick, loadIntroductions } from "./scoped-intake";
+import { introductionOffersTick, loadIntroductions, takeIntroductionAsks } from "./scoped-intake";
 import { visibilitySetting } from "./visibility-store";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 
@@ -93,6 +105,59 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
       state = next;
       await saveReachRow(account, "publication", encodePublication(next));
     };
+
+    // One-to-one conversations with contacts that can still carry a message.
+    const oneToOnes = chats
+      .groups()
+      .filter((g) => readIsActive(g.group) !== false && isOneToOne(g.group));
+    const byId = new Map(oneToOnes.map((g) => [g.groupIdB64, g]));
+
+    /** The other person of a conversation (account key hex), or `null`. */
+    const peerOf = (group: Parameters<typeof rosterOf>[0]): string | null =>
+      oneToOnePeerHex(
+        rosterOf(group).map((m) => resolveAccountKeyHex(journalHex(m.accountKey ?? m.signaturePublicKey))),
+        session.accountKeyHex,
+      );
+
+    // The asks that arrived: forget those conversations in the sent records,
+    // so steps 3 and 4 below send the offer and the bundle there again.
+    for (const ask of takeIntroductionAsks()) {
+      const entry = byId.get(ask.groupIdB64);
+      const peerHex = entry === undefined ? null : peerOf(entry.group);
+      let senderHex: string | null = null;
+      try {
+        senderHex = resolveAccountKeyHex(journalHex(base64Decode(ask.senderKeyB64)));
+      } catch {
+        senderHex = null;
+      }
+      const now = Date.now();
+      const resets = askResetsRecords({
+        oneToOne: peerHex !== null,
+        fromOtherParticipant: peerHex !== null && senderHex === peerHex,
+        lastResetAtMs: state.introductionsResentAt[ask.groupIdB64],
+        nowMs: now,
+      });
+      if (resets) await save(forgetSentRecords(state, ask.groupIdB64, now));
+    }
+
+    // What this device itself never received: asked for first, since it
+    // needs no token and must not wait on the steps below.
+    await askForMissingIntroductions({
+      conversations: oneToOnes.map((g) => ({ groupIdB64: g.groupIdB64, peerHex: peerOf(g.group) })),
+      held: await loadIntroductions(account),
+      keysOfPerson: personKeysHex,
+      holdsContactGrant: (keys) => heldClassesForPerson(session.receivedGrants(), keys).has("contact"),
+      lastAskedAt: (g) => lastProfileRequestAt(account, g),
+      recordAsked: (g, at) => recordProfileRequest(account, g, at),
+      send: async (g) => {
+        const entry = byId.get(g);
+        if (entry === undefined) return;
+        await publisher.broadcastControl(secrets, entry.group, wasm.composeProfileRequest());
+      },
+      rule: (joined, unnamed, last, now) => wasm.shouldRequestProfiles(joined, unnamed, last, now),
+      now: () => Date.now(),
+    });
+
     const name = profiles.ownProfile().displayName;
     const username = profiles.ownUsername();
 
@@ -197,12 +262,6 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
         }
       }
     }
-
-    // One-to-one conversations with contacts that can still carry a message.
-    const oneToOnes = chats
-      .groups()
-      .filter((g) => readIsActive(g.group) !== false && isOneToOne(g.group));
-    const byId = new Map(oneToOnes.map((g) => [g.groupIdB64, g]));
 
     // 3. Offer the record to every contact not sent this version yet.
     const offer = state.offer;

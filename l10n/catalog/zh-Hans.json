@@ -31,7 +31,7 @@
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "开源。无需手机号。",
+      "text": "按你的方式交流。无需手机号码。",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -3980,6 +3980,10 @@
     },
     "contacts.request.accept": {
       "text": "接受",
+      "status": "machine"
+    },
+    "contacts.request.accept_failed": {
+      "text": "无法接受。请重试。",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -8390,6 +8394,22 @@
       "text": "正在应用",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "我的所有联系人",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "仅我选择的联系人",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "仅你选择的人的联系人（{chosen}/{total}）。",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "现在仅限你选择的联系人。可在{privacy}中更改。",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "我的联系人的联系人",
       "status": "machine"
@@ -8436,6 +8456,14 @@
     },
     "who_can_find_me.list.choose": {
       "text": "选择群组和频道",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "你还没有联系人。",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "搜索联系人",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -8500,6 +8528,10 @@
     },
     "who_can_find_me.status.offline": {
       "text": "将在你重新联网后应用。",
+      "status": "machine"
+    },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "此联系人的联系人可以找到我",
       "status": "machine"
     },
     "who_can_find_me.title": {

@@ -7,6 +7,9 @@
  *
  * - a **committer delegation** is kept, newest per (sender, added account),
  *   so a sweep this device commits can write the added person's Welcome;
+ *   this account's own other devices included: one of them may propose an Add
+ *   this device sweeps, and a device never receives its own group messages, so
+ *   this is not an echo;
  * - an **introduction offer** (a contact's record for contacts of contacts)
  *   is kept only from the other participant of a one-to-one, newest per
  *   contact;
@@ -24,7 +27,7 @@ import { registerAccountMemory } from "../auth/account-memory";
 import { journalHex } from "../ds/access";
 import { loadWasm } from "../wasm";
 import type { ScopedEnvelopeKind } from "./envelope-sniff";
-import { fileDelegations } from "./received-grants";
+import { fileDelegations, otherDeviceSender } from "./received-grants";
 import { resolveAccountKeyHex } from "../contacts/address-resolver";
 import { reachSession } from "./reach-service";
 import { loadReachRow, saveReachRow } from "./reach-store";
@@ -47,10 +50,10 @@ export function keepsScopedEnvelope(
   kind: ScopedEnvelopeKind,
   facts: { readonly senderResolved: boolean; readonly fromSelf: boolean; readonly oneToOne: boolean },
 ): boolean {
-  if (!facts.senderResolved || facts.fromSelf) return false;
+  if (!facts.senderResolved) return false;
+  if (kind === "committer-delegation") return true;
+  if (facts.fromSelf) return false;
   switch (kind) {
-    case "committer-delegation":
-      return true;
     case "introduction-offer":
     case "introductions":
       return facts.oneToOne;
@@ -96,9 +99,32 @@ registerAccountMemory(
     if (introductionsCache !== null && ids.includes(introductionsCache.account)) {
       introductionsCache = null;
     }
+    introductionAsks.clear();
   },
   { signOut: true },
 );
+
+/** Group id base64 -> the sender (account key base64) of the newest profile
+ *  request not looked at yet. */
+const introductionAsks = new Map<string, string>();
+
+/**
+ * Someone other than this account sent a profile request into a conversation
+ * (ADR-0060 section 4, "A device that holds nothing asks"). The publication
+ * runtime decides whether it counts: it owns the row a reset is written to,
+ * and it may be half way through a run that would save over it.
+ */
+export function noteIntroductionsAsk(groupIdB64: string, senderKeyB64: string): void {
+  introductionAsks.set(groupIdB64, senderKeyB64);
+  setOffersTick((n) => n + 1);
+}
+
+/** The asks noted since the last call. */
+export function takeIntroductionAsks(): { readonly groupIdB64: string; readonly senderKeyB64: string }[] {
+  const asks = [...introductionAsks].map(([groupIdB64, senderKeyB64]) => ({ groupIdB64, senderKeyB64 }));
+  introductionAsks.clear();
+  return asks;
+}
 
 /** The kept introductions of the signed-in account. */
 export async function loadIntroductions(accountIdB64: string): Promise<IntroductionsRow> {
@@ -163,10 +189,11 @@ export async function intakeScopedEnvelope(args: {
   } catch {
     senderHex = null;
   }
+  const fromSelf = senderHex === session.accountKeyHex;
   if (
     !keepsScopedEnvelope(args.kind, {
       senderResolved: senderHex !== null,
-      fromSelf: senderHex === session.accountKeyHex,
+      fromSelf,
       oneToOne: args.oneToOne,
     }) ||
     senderHex === null
@@ -182,7 +209,7 @@ export async function intakeScopedEnvelope(args: {
         const addedHex = journalHex(env.addedAccountKey);
         env.free();
         await session.updateReceivedGrants((g) =>
-          fileDelegations(g, sender, addedHex, {
+          fileDelegations(g, fromSelf ? otherDeviceSender(sender) : sender, addedHex, {
             envelopeB64: base64Encode(args.payload),
             receivedAtMs: Date.now(),
             ...(args.scopeHex === undefined ? {} : { scopeHex: args.scopeHex }),

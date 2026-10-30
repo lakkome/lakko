@@ -107,6 +107,99 @@ final class ProfileRequestPolicyTests: XCTestCase {
         XCTAssertEqual(h.sent, [group])
     }
 
+    // MARK: - A device that holds nothing asks (ADR-0060 section 4)
+
+    /// Nobody is unnamed in a one-to-one with a contact, and it asks anyway:
+    /// what is missing is the offer and the bundle.
+    func testAMissingIntroductionAsksWithNobodyUnnamed() async {
+        let h = Harness()
+        h.unnamed = 0
+        await assertOutcome(.requested) {
+            await h.requester().noteIntroductionsMissing(groupIdHex: self.group, holdsContactGrant: false)
+        }
+        XCTAssertEqual(h.sent, [group])
+        XCTAssertEqual(h.recorded.first?.atMs, h.now)
+        XCTAssertEqual(h.ruleCalls.first?.joined, false)
+        XCTAssertEqual(h.ruleCalls.first?.unnamed, 1)
+    }
+
+    func testAMissingIntroductionAsksEvenWhenTheRosterCannotBeRead() async {
+        let h = Harness()
+        h.unnamed = nil
+        await assertOutcome(.requested) {
+            await h.requester().noteIntroductionsMissing(groupIdHex: self.group, holdsContactGrant: false)
+        }
+    }
+
+    /// No contact grant: at most once a day, on the stamp every request shares.
+    func testAMissingIntroductionIsThrottledByTheRequestInterval() async {
+        let h = Harness()
+        h.last = h.now - 1
+        await assertOutcome(.notDue) {
+            await h.requester().noteIntroductionsMissing(groupIdHex: self.group, holdsContactGrant: false)
+        }
+        XCTAssertTrue(h.sent.isEmpty)
+        XCTAssertTrue(h.recorded.isEmpty)
+
+        h.now += interval
+        await assertOutcome(.requested) {
+            await h.requester().noteIntroductionsMissing(groupIdHex: self.group, holdsContactGrant: false)
+        }
+    }
+
+    /// A contact grant held, never asked: the first ask goes out at once.
+    func testTheFirstAskWithAContactGrantGoesOut() async {
+        let h = Harness()
+        await assertOutcome(.requested) {
+            await h.requester().noteIntroductionsMissing(groupIdHex: self.group, holdsContactGrant: true)
+        }
+        XCTAssertEqual(h.sent, [group])
+        XCTAssertEqual(h.recorded.first?.atMs, h.now)
+        XCTAssertTrue(h.ruleCalls.isEmpty, "the seven-day rule, not the daily one")
+    }
+
+    /// A contact grant held: a day is not enough, seven are, on the same stamp.
+    func testWithAContactGrantItAsksEverySevenDays() async {
+        let h = Harness()
+        h.last = h.now
+        h.now += interval
+        await assertOutcome(.notDue) {
+            await h.requester().noteIntroductionsMissing(groupIdHex: self.group, holdsContactGrant: true)
+        }
+        XCTAssertTrue(h.sent.isEmpty)
+        XCTAssertTrue(h.recorded.isEmpty)
+
+        h.now = h.last! + ReachRules.introductionsAskWithGrantMinMs
+        await assertOutcome(.requested) {
+            await h.requester().noteIntroductionsMissing(groupIdHex: self.group, holdsContactGrant: true)
+        }
+        XCTAssertEqual(h.recorded.last?.atMs, h.now)
+    }
+
+    func testAFailedAskRecordsNothing() async {
+        for holdsContactGrant in [false, true] {
+            let h = Harness()
+            h.sendFails = true
+            await assertOutcome(.sendFailed) {
+                await h.requester().noteIntroductionsMissing(
+                    groupIdHex: self.group, holdsContactGrant: holdsContactGrant)
+            }
+            XCTAssertTrue(h.recorded.isEmpty)
+        }
+    }
+
+    func testAnEvictedDeviceDoesNotAsk() async {
+        for holdsContactGrant in [false, true] {
+            let h = Harness()
+            h.canSend = false
+            await assertOutcome(.cannotAsk) {
+                await h.requester().noteIntroductionsMissing(
+                    groupIdHex: self.group, holdsContactGrant: holdsContactGrant)
+            }
+            XCTAssertTrue(h.sent.isEmpty)
+        }
+    }
+
     // MARK: - The on-open trigger
 
     func testOpenWithEveryoneNamedAsksNothing() async {

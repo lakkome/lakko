@@ -21,8 +21,8 @@
 //! - **The setting and the reach state** (`lakko_contacts::visibility`):
 //!   [`FfiVisibilitySetting`], [`default_visibility_setting`], the two
 //!   envelopes, the orders, [`allows_scope`], [`allows_contacts_of_contacts`],
-//!   [`reach_state_version_of`]. The Settings transitions that edit a setting
-//!   live in `ui_rules.rs`.
+//!   [`allows_contact`], [`reach_state_version_of`]. The Settings
+//!   transitions that edit a setting live in `ui_rules.rs`.
 //! - **Username certificate** (`lakko_attest::username_cert`):
 //!   [`verify_username_binding`], verify only — signing is discovery's.
 //! - **Committer delegations** (§6, `lakko_contacts::committer_delegation` +
@@ -70,19 +70,22 @@ use lakko_contacts::reach::{
 };
 use lakko_contacts::visibility::{
     compose_reach_state as rust_compose_reach_state, compose_visibility as rust_compose_visibility,
-    decode_reach_state as rust_decode_reach_state, decode_visibility as rust_decode_visibility,
-    merge_reach_state as rust_merge_reach_state, reach_state_is_newer as rust_reach_state_is_newer,
-    visibility_is_newer as rust_visibility_is_newer, GroupsForm, ReachState as RustReachState,
-    ReachStateEntry as RustReachStateEntry, ScopeId as RustScopeId, ScopeKind, VisibilityError,
-    VisibilityMode, VisibilitySetting as RustVisibilitySetting, MAX_CHOSEN_SCOPES,
-    MAX_REACH_STATE_ENTRIES, MAX_SCOPE_ID_LEN,
+    contact_account_id, decode_reach_state as rust_decode_reach_state,
+    decode_visibility as rust_decode_visibility, merge_reach_state as rust_merge_reach_state,
+    reach_state_is_newer as rust_reach_state_is_newer,
+    visibility_is_newer as rust_visibility_is_newer, ContactsForm, GroupsForm,
+    ReachState as RustReachState, ReachStateEntry as RustReachStateEntry, ScopeId as RustScopeId,
+    ScopeKind, VisibilityError, VisibilityMode, VisibilitySetting as RustVisibilitySetting,
+    CONTACT_ACCOUNT_ID_LEN, MAX_CHOSEN_CONTACTS, MAX_CHOSEN_SCOPES, MAX_REACH_STATE_ENTRIES,
+    MAX_SCOPE_ID_LEN,
 };
 use lakko_crypto::secret::SecretBytes;
 use lakko_crypto::signing::VerifyingKey;
 use lakko_ds_proof::{
     check_committer_delegations as rust_check_committer_delegations,
-    delegation_for as rust_delegation_for, CommitterDelegationCheckError, Delegation,
-    DelegationError,
+    committer_envelope_due as rust_committer_envelope_due, delegation_for as rust_delegation_for,
+    CommitterDelegationCheckError, Delegation, DelegationError, SentCommitterEnvelope,
+    COMMITTER_ENVELOPE_RESEND_AFTER_MS,
 };
 
 use crate::FfiError;
@@ -809,6 +812,34 @@ impl From<GroupsForm> for FfiGroupsForm {
     }
 }
 
+/// The contacts of all contacts, or only of the chosen ones (UX 2.1.1 /
+/// 2.1.2).
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfiContactsForm {
+    /// The contacts of every contact the person has.
+    All,
+    /// Only the contacts of the ones in the chosen list.
+    Chosen,
+}
+
+impl From<FfiContactsForm> for ContactsForm {
+    fn from(f: FfiContactsForm) -> Self {
+        match f {
+            FfiContactsForm::All => Self::All,
+            FfiContactsForm::Chosen => Self::Chosen,
+        }
+    }
+}
+
+impl From<ContactsForm> for FfiContactsForm {
+    fn from(f: ContactsForm) -> Self {
+        match f {
+            ContactsForm::All => Self::All,
+            ContactsForm::Chosen => Self::Chosen,
+        }
+    }
+}
+
 /// Group or channel.
 #[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FfiScopeKind {
@@ -861,6 +892,14 @@ pub struct FfiVisibilitySetting {
     pub mode: FfiVisibilityMode,
     /// Part 2.1: contacts of my contacts. Only while `mode` is `Some`.
     pub contacts_of_contacts: bool,
+    /// Part 2.1's form. Meaningful only while part 2.1 is on, and kept
+    /// whatever the position, so it comes back with the part.
+    pub contacts_form: FfiContactsForm,
+    /// The 16-byte account ids switched on under "only the ones I choose".
+    /// Kept whatever the form. Edit it through `set_contact_chosen` and
+    /// `exclude_contact_under_all`, which check the length; this record
+    /// cannot refuse one, see [`contact_ids`].
+    pub chosen_contacts: Vec<Vec<u8>>,
     /// Part 2.2 and its form; `None` when off. Only while `mode` is `Some`.
     pub groups: Option<FfiGroupsForm>,
     /// The groups and channels switched on under "only the ones I choose".
@@ -874,11 +913,30 @@ pub struct FfiVisibilitySetting {
     pub updated_at_ms: u64,
 }
 
+/// The chosen contacts of a record, or a refusal naming the first id of the
+/// wrong length.
+///
+/// The transitions take a whole record and answer with one, and most of them
+/// cannot fail, so the conversion to the core type drops such an id rather
+/// than refusing: a malformed id names no account, so dropping it reaches
+/// nobody the person chose, and a record only ever comes from this crate.
+/// [`compose_visibility_envelope`] runs this first, so a list that was edited
+/// by hand is refused before it reaches the person's other devices.
+fn contact_ids(ids: &[Vec<u8>]) -> Result<Vec<[u8; CONTACT_ACCOUNT_ID_LEN]>, VisibilityError> {
+    ids.iter().map(|id| contact_account_id(id)).collect()
+}
+
 impl From<FfiVisibilitySetting> for RustVisibilitySetting {
     fn from(s: FfiVisibilitySetting) -> Self {
         Self {
             mode: s.mode.into(),
             contacts_of_contacts: s.contacts_of_contacts,
+            contacts_form: s.contacts_form.into(),
+            chosen_contacts: s
+                .chosen_contacts
+                .iter()
+                .filter_map(|id| contact_account_id(id).ok())
+                .collect(),
             groups: s.groups.map(Into::into),
             chosen: s.chosen.into_iter().map(Into::into).collect(),
             last_contacts_of_contacts: s.last_contacts_of_contacts,
@@ -893,6 +951,8 @@ impl From<RustVisibilitySetting> for FfiVisibilitySetting {
         Self {
             mode: s.mode.into(),
             contacts_of_contacts: s.contacts_of_contacts,
+            contacts_form: s.contacts_form.into(),
+            chosen_contacts: s.chosen_contacts.iter().map(|id| id.to_vec()).collect(),
             groups: s.groups.map(Into::into),
             chosen: s.chosen.into_iter().map(Into::into).collect(),
             last_contacts_of_contacts: s.last_contacts_of_contacts,
@@ -916,9 +976,11 @@ pub fn default_visibility_setting() -> FfiVisibilitySetting {
 ///
 /// [`FfiError::Visibility`] with the setting rule the value breaks
 /// (`someWithNoPart`, `partsOutsideSome`, `tooManyChosen`, `duplicateScope`,
+/// `tooManyChosenContacts`, `duplicateContact`, `contactIdLength`,
 /// `scopeIdLength`).
 #[uniffi::export]
 pub fn compose_visibility_envelope(setting: FfiVisibilitySetting) -> Result<Vec<u8>, FfiError> {
+    contact_ids(&setting.chosen_contacts)?;
     Ok(rust_compose_visibility(&setting.into())?)
 }
 
@@ -957,6 +1019,24 @@ pub fn allows_scope(setting: FfiVisibilitySetting, scope: FfiScopeId) -> bool {
 #[must_use]
 pub fn allows_contacts_of_contacts(setting: FfiVisibilitySetting) -> bool {
     RustVisibilitySetting::from(setting).allows_contacts_of_contacts()
+}
+
+/// Whether the contacts of `account_id` can find the person: Everyone, or
+/// Some people with part 2.1 on and either all contacts or this one chosen.
+/// A permission, not a delivery decision. An id that is not 16 bytes names
+/// no contact, so the answer is `false`.
+#[uniffi::export]
+#[must_use]
+pub fn allows_contact(setting: FfiVisibilitySetting, account_id: Vec<u8>) -> bool {
+    contact_account_id(&account_id)
+        .is_ok_and(|id| RustVisibilitySetting::from(setting).allows_contact(&id))
+}
+
+/// Most contacts the chosen list holds.
+#[uniffi::export]
+#[must_use]
+pub fn max_chosen_contacts() -> u32 {
+    u32::try_from(MAX_CHOSEN_CONTACTS).unwrap_or(u32::MAX)
 }
 
 /// Most groups and channels the chosen list holds.
@@ -1443,6 +1523,50 @@ pub fn delegation_header_value(blob: Vec<u8>) -> Result<String, FfiError> {
         .map_err(|e| delegation_error(&e))
 }
 
+fn account_keys(keys: &[Vec<u8>], what: &'static str) -> Result<Vec<[u8; 32]>, FfiError> {
+    keys.iter()
+        .map(|k| {
+            <[u8; ADDED_ACCOUNT_KEY_LEN]>::try_from(k.as_slice())
+                .map_err(|_| reach_arg("keyLength", what, ADDED_ACCOUNT_KEY_LEN, k.len()))
+        })
+        .collect()
+}
+
+/// Is a proposer's committer-delegation envelope due for a pending `Add`
+/// (ADR-0060 §6)? `sent_at_ms` is `None` when none was sent; `delegated` and
+/// `covered` describe the last one (whether it carried delegations, and the
+/// committer candidates it covered), `candidates` the group's now. The caller
+/// checks the `Add` is still pending and that it has something to send.
+///
+/// # Errors
+///
+/// [`FfiError::Reach`] `keyLength` for a key that is not 32 bytes.
+#[uniffi::export]
+pub fn committer_envelope_due(
+    sent_at_ms: Option<u64>,
+    delegated: bool,
+    covered: Vec<Vec<u8>>,
+    candidates: Vec<Vec<u8>>,
+    now_ms: u64,
+) -> Result<bool, FfiError> {
+    let covered = account_keys(&covered, "covered candidate key")?;
+    let candidates = account_keys(&candidates, "candidate key")?;
+    let last = sent_at_ms.map(|sent_at_ms| SentCommitterEnvelope {
+        sent_at_ms,
+        signed: delegated,
+        covered: &covered,
+    });
+    Ok(rust_committer_envelope_due(last, &candidates, now_ms))
+}
+
+/// How long after sending a signed committer envelope it is due again, in
+/// milliseconds.
+#[uniffi::export]
+#[must_use]
+pub const fn committer_envelope_resend_after_ms() -> u64 {
+    COMMITTER_ENVELOPE_RESEND_AFTER_MS
+}
+
 /// Most delegations one envelope carries: 16.
 #[uniffi::export]
 #[must_use]
@@ -1581,6 +1705,18 @@ mod tests {
         assert_eq!(code_of(&err), "badCount");
         assert_eq!(max_committer_delegations(), 16);
         assert_eq!(committer_delegation_blob_len(), 185);
+    }
+
+    #[test]
+    fn the_envelope_resend_rule_crosses_the_boundary_as_the_core_has_it() {
+        let due = committer_envelope_resend_after_ms();
+        let them = || vec![vec![0x11; 32]];
+        assert!(committer_envelope_due(None, false, vec![], them(), 0).unwrap());
+        assert!(!committer_envelope_due(Some(1), true, them(), them(), due).unwrap());
+        assert!(committer_envelope_due(Some(1), true, them(), them(), due + 1).unwrap());
+        assert!(committer_envelope_due(Some(1), false, vec![], them(), 2).unwrap());
+        let err = committer_envelope_due(None, true, vec![vec![0; 31]], vec![], 0).unwrap_err();
+        assert_eq!(code_of(&err), "keyLength");
     }
 
     fn code_of(e: &FfiError) -> String {
@@ -1848,9 +1984,17 @@ mod tests {
             id: vec![3; 16],
         };
         setting.chosen = vec![chosen.clone()];
+        setting.contacts_form = FfiContactsForm::Chosen;
+        setting.chosen_contacts = vec![vec![4; 16]];
         let wire = compose_visibility_envelope(setting.clone()).unwrap();
         assert_eq!(decode_visibility_envelope(wire).unwrap(), setting);
         assert!(allows_scope(setting.clone(), chosen));
+        assert!(allows_contact(setting.clone(), vec![4; 16]));
+        assert!(!allows_contact(setting.clone(), vec![5; 16]));
+        assert!(
+            !allows_contact(setting.clone(), vec![4; 15]),
+            "a malformed id names no contact"
+        );
         assert!(!allows_scope(
             setting.clone(),
             FfiScopeId {
@@ -1888,6 +2032,7 @@ mod tests {
         );
         assert!(reach_state_is_newer(12, 11) && !reach_state_is_newer(11, 11));
         assert_eq!(max_chosen_scopes(), 1024);
+        assert_eq!(max_chosen_contacts(), 4096);
         assert_eq!(max_visibility_scope_id_len(), 64);
         assert_eq!(max_reach_state_entries(), 4096);
     }
@@ -1899,6 +2044,18 @@ mod tests {
         setting.groups = None;
         let e = compose_visibility_envelope(setting).unwrap_err();
         assert!(matches!(&e, FfiError::Visibility(_)));
+        // A list edited by hand is refused, not narrowed in silence.
+        let mut setting = default_visibility_setting();
+        setting.chosen_contacts = vec![vec![1; 15]];
+        assert_eq!(
+            code_of(&compose_visibility_envelope(setting.clone()).unwrap_err()),
+            "contactIdLength"
+        );
+        setting.chosen_contacts = vec![vec![1; 16], vec![1; 16]];
+        assert_eq!(
+            code_of(&compose_visibility_envelope(setting).unwrap_err()),
+            "duplicateContact"
+        );
         assert_eq!(code_of(&e), "someWithNoPart");
         let state = FfiReachState {
             entries: vec![FfiReachStateEntry {

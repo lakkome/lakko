@@ -64,7 +64,8 @@ export interface KnownPerson {
   readonly contactFallbackName: string | null;
   readonly verifiedUsername: string | null;
   readonly isContact: boolean;
-  readonly keptGrantWireB64: string | null;
+  /** Every grant kept for them, in the order they are tried. */
+  readonly keptGrantWires: readonly string[];
 }
 
 /** One lookup hit: an account in Everyone and its public record (standard
@@ -127,6 +128,24 @@ export interface PeopleSearchDeps {
   /** Standard base64 of a grant wire. */
   encodeGrant(wire: Uint8Array): string;
   readonly ownKeyHex: string | null;
+  /** How many introduction records {@link openIntroductions} went through;
+   *  0 when it was not called. Absent: not counted. */
+  introductionRecordsHeld?(): number;
+  /** Called once when a search finishes. */
+  logCounts?(counts: SearchCounts): void;
+}
+
+/** What one finished search went through: counts only, never a name, key,
+ *  query or grant, so they are safe to log. */
+export interface SearchCounts {
+  readonly recordsHeld: number;
+  readonly recordsOpened: number;
+  /** Opened records the whole query matched. */
+  readonly keptAfterMatch: number;
+  /** Results dropped because the reach check said no. */
+  readonly refusedByReachCheck: number;
+  /** People in the answer. */
+  readonly people: number;
 }
 
 export interface PeopleSearchOutcome {
@@ -331,6 +350,8 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
   // ---- contacts of contacts ------------------------------------------
   const byIntroduction: PersonResult[] = [];
   let introFailed = false;
+  let recordsOpened = 0;
+  let keptAfterMatch = 0;
   if (probes.length > 0) {
     let opened: OpenedIntroduction[] = [];
     try {
@@ -338,6 +359,7 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
     } catch {
       opened = [];
     }
+    recordsOpened = opened.length;
     let extraChecks = 0;
     for (const intro of opened) {
       const matches =
@@ -345,6 +367,7 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
           ? username !== null && intro.username === username
           : intro.displayName !== null && deps.nameMatches(intro.displayName, query);
       if (!matches) continue;
+      keptAfterMatch += 1;
       // The record is the introduced person's own claim: its account id must
       // be the account the identity bundle publishes this key for, or a
       // record could pair its author's key with someone else's account id -
@@ -398,6 +421,7 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
   const merged = mergePeople([byUsername, byName, byIntroduction], deps.ownKeyHex);
   const people: PersonResult[] = [];
   let checkFailed = false;
+  let refusedByReachCheck = 0;
   for (const p of merged) {
     if (p.reach !== "grant") {
       people.push(p);
@@ -406,12 +430,20 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
     if (p.grantWireB64 === null) continue;
     try {
       const pk = base64Decode(p.keyB64);
-      if (await deps.reachCheck(pk, p.grantWireB64)) people.push(p);
+      if (await deps.reachCheck(pk, p.grantWireB64)) people.push({ ...p, grantChecked: true });
+      else refusedByReachCheck += 1;
     } catch {
       checkFailed = true;
     }
   }
   if (checkFailed || introFailed) legs.push("failed");
+  deps.logCounts?.({
+    recordsHeld: deps.introductionRecordsHeld?.() ?? 0,
+    recordsOpened,
+    keptAfterMatch,
+    refusedByReachCheck,
+    people: people.length,
+  });
   const found = people.length + (channel === null ? 0 : 1);
   return { people, channel, state: foldSearch(found, legs) };
 }

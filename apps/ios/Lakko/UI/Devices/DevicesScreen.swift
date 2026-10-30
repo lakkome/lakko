@@ -980,6 +980,11 @@ private struct DevicesListView: View {
         .onChange(of: state) { _, next in
             if case .ready(let devices) = next { scrollToFirstNew(devices) }
         }
+        // UX section 3 — the list follows the account: a device that joined or
+        // left while this screen is open, on any route.
+        .onReceive(DeviceRosterChanges.publisher(accountIdB64: accountIdB64)) { _ in
+            followRoster()
+        }
         // A removal left unfinished (offline, a closed app) is retried while
         // this screen is up; the rows follow the runner's pending set.
         .task {
@@ -1114,6 +1119,21 @@ private struct DevicesListView: View {
         } catch {
             NSLog("[devices] WARN device list not loaded: \(error)")
             state = .error(.key("settings.devices.error.load"))
+        }
+    }
+
+    /// The list changed under the open screen: the rows follow it in place,
+    /// and a read that fails keeps them on screen.
+    private func followRoster() {
+        removal.reload()
+        do {
+            let list = try DeviceRemoval.listDevices(
+                accountIdBytes: accountIdBytes,
+                accountIdB64: accountIdB64
+            )
+            state = .ready(list.devices)
+        } catch {
+            NSLog("[devices] WARN device list not re-read: \(error)")
         }
     }
 }

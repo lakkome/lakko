@@ -88,6 +88,8 @@ open from its header; it is not a state with a screen.
 - **Safety number** - the out-of-band check, which is the one security thing
   a person acts on and so is the one that belongs in front of them
   ([`design-system.md`](design-system.md)).
+- `Their contacts can find me`, a switch shown only while Contacts of my
+  contacts is on ([`who-can-find-me.md`](who-can-find-me.md) section 5.1).
 - Remove contact, with a confirmation. Local: it takes the person out of
   this device's list, tells them nothing, and leaves the conversation where
   it is - leaving a conversation is the conversation's own action. The

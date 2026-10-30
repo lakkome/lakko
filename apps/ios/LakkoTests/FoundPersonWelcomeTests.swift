@@ -104,6 +104,18 @@ final class FoundPersonWelcomeTests: XCTestCase {
 
     // MARK: - A found grant is held
 
+    /// UX section 6.1 — a search carries the found grant too, with the
+    /// verified mailbox it writes to.
+    func testASearchCarriesAFoundGrantWithItsMailbox() throws {
+        let c = try center(0x30)
+        let person = try key(0x01)
+        XCTAssertTrue(c.searchGrants(forAccountKeyB64: b64(person)).isEmpty)
+        XCTAssertTrue(c.keepFoundGrant(try fofGrant(0x01), accountKey: person))
+        let grants = c.searchGrants(forAccountKeyB64: b64(person))
+        XCTAssertEqual(grants.map(\.seed), [try fofGrant(0x01).seed])
+        XCTAssertEqual(grants.first?.mailbox, try openMailbox(0x01))
+    }
+
     func testAFoundGrantIsHeldAndSignsTheDelegations() throws {
         let c = try center(0x30)
         let person = try key(0x01)

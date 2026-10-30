@@ -1927,6 +1927,9 @@ private fun SessionRoot(
         return
     }
 
+    val contactsForBadge by contactsRepository.state.collectAsState()
+    val requestsWaiting = me.lakko.app.contacts.waitingRequestCount(contactsForBadge.pending)
+
     Scaffold(
         // Each screen pads by its own Scaffold; the shell contributes only the
         // tab bar (whose height is consumed below so a screen's Scaffold does
@@ -1947,23 +1950,27 @@ private fun SessionRoot(
                             onClick = { navController.navigateToTab(tab.route) },
                             icon = {
                                 val label = me.lakko.app.l10n.t(tab.labelKey)
-                                if (attention) {
-                                    val name = "$label, ${me.lakko.app.l10n.t("nav.settings.attention_a11y")}"
-                                    androidx.compose.material3.BadgedBox(
-                                        badge = { me.lakko.app.ui.devices.AttentionBadge() },
-                                        modifier = Modifier.semantics(mergeDescendants = true) {
-                                            contentDescription = name
-                                        },
-                                    ) {
-                                        Icon(
-                                            imageVector = if (selected) tab.selectedIcon else tab.icon,
-                                            contentDescription = null,
-                                        )
-                                    }
+                                val waiting = if (tab.route == Routes.CONTACTS) requestsWaiting else 0
+                                val name = if (attention) {
+                                    "$label, ${me.lakko.app.l10n.t("nav.settings.attention_a11y")}"
                                 } else {
+                                    label
+                                }
+                                androidx.compose.material3.BadgedBox(
+                                    badge = {
+                                        if (attention) {
+                                            me.lakko.app.ui.devices.AttentionBadge()
+                                        } else if (waiting > 0) {
+                                            me.lakko.app.ui.chat.UnreadBadge(count = waiting, muted = false)
+                                        }
+                                    },
+                                    modifier = Modifier.semantics(mergeDescendants = true) {
+                                        contentDescription = name
+                                    },
+                                ) {
                                     Icon(
                                         imageVector = if (selected) tab.selectedIcon else tab.icon,
-                                        contentDescription = label,
+                                        contentDescription = null,
                                     )
                                 }
                             },

@@ -175,6 +175,8 @@ internal data class ReachDoc(
     val offerSentTo: Map<String, String> = emptyMap(),
     /** One-to-one group hex -> the relayed-bundle digest last sent there. */
     val bundleSentTo: Map<String, String> = emptyMap(),
+    /** One-to-one group hex -> when an ask last reopened those two records. */
+    val introReopenedAtMs: Map<String, Long> = emptyMap(),
     /** ADR-0060 §1 ("Versions after a restore", amended 2026-10-01) — the
      *  [VersionRecovery] name of this document, `null` before it was decided
      *  on the first reconcile. */

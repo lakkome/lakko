@@ -259,6 +259,8 @@ public struct ContactsScreen: View {
                 ForEach(incoming, id: \.messageId) { request in
                     IncomingRequestRow(
                         request: request,
+                        failed: viewModel.acceptFailed.contains(request.messageId),
+                        accepting: viewModel.accepting.contains(request.messageId),
                         onAccept: { viewModel.onAcceptClicked(messageId: request.messageId) },
                         onDecline: { viewModel.onDeclineClicked(messageId: request.messageId) }
                     )
@@ -415,6 +417,9 @@ private struct ContactRow: View {
 private struct IncomingRequestRow: View {
     @ObservedObject private var l10n = Localization.shared
     let request: IncomingContactRequest
+    /// The last Accept failed: the row says so, and Accept works again.
+    let failed: Bool
+    let accepting: Bool
     let onAccept: () -> Void
     let onDecline: () -> Void
 
@@ -448,13 +453,21 @@ private struct IncomingRequestRow: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
+                        .disabled(accepting)
                         Button(action: onDecline) {
                             Text(l10n.t("contacts.request.decline")).frame(minWidth: 72)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .disabled(accepting)
                     }
                     .padding(.top, 2)
+                    if failed {
+                        Text(l10n.t("contacts.request.accept_failed"))
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoDanger)
+                            .accessibilityAddTraits(.updatesFrequently)
+                    }
                 }
             }
             .padding(.vertical, 4)

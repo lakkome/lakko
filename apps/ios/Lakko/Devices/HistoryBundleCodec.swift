@@ -4,6 +4,12 @@
 import Foundation
 import LakkoCore
 
+extension Notification.Name {
+    /// A pairing history bundle reached the message log. `userInfo` names the
+    /// account and carries, per group, the bundle's own rows and floor.
+    static let lakkoHistoryBundleFiled = Notification.Name("lakko.historyBundleFiled")
+}
+
 /// History catch-up bundle helpers on iOS (Phase 2a3d8-ui).
 ///
 /// Mirror of `apps/web/src/devices/history-bundle.ts`. Two
@@ -136,50 +142,79 @@ public enum HistoryBundleCodec {
         let existing = store.getLog(accountIdB64: accountIdB64)
             ?? MessageLogPayload(version: 1, groups: [:])
 
-        var nextGroups = existing.groups
-        var applied = 0
-
+        var decoded: [String: [PersistedMessage]] = [:]
         for g in opened.groups {
-            let hex = Self.bytesToHex(g.groupId)
-            let slot = nextGroups[hex] ?? PersistedGroup(cursor: 0, messages: [])
-            var existingIds = Set(slot.messages.map { $0.messageId })
-            var merged = slot.messages
-            for m in g.messages {
-                // G-6 step 2: decode the canonical cross-platform
-                // placeholder via the shared Rust core. Bytes from
-                // a web or Android scanner decode identically here.
-                guard let decoded = Self.decodePlaceholder(m.payloadBytes) else {
-                    continue
-                }
-                // A bookkeeping row from a sender that still carries them is
-                // dropped: it is nothing the person reads.
-                if Self.isBookkeepingSystemRow(decoded) { continue }
-                if existingIds.contains(decoded.messageId) { continue }
-                merged.append(decoded)
-                existingIds.insert(decoded.messageId)
-                applied += 1
-            }
-            // Sort by HLC-derived messageId so the timeline
-            // lands in order.
-            merged.sort { a, b in a.messageId < b.messageId }
-            nextGroups[hex] = PersistedGroup(
-                cursor: slot.cursor,
-                messages: merged,
-                // ADR-0063 — the seen state is this device's, never the
-                // bundle's; carried through untouched.
-                lastViewedMessageId: slot.lastViewedMessageId,
-                feedSeen: slot.feedSeen
-            )
+            // G-6 step 2: decode the canonical cross-platform placeholder via
+            // the shared Rust core. Bytes from a web or Android scanner decode
+            // identically here. A bookkeeping row from a sender that still
+            // carries them is dropped: it is nothing the person reads.
+            decoded[Self.bytesToHex(g.groupId), default: []] += g.messages
+                .compactMap { Self.decodePlaceholder($0.payloadBytes) }
+                .filter { !Self.isBookkeepingSystemRow($0) }
         }
+        let merged = Self.mergeBundle(held: existing.groups, decoded: decoded)
 
         store.putLog(
             accountIdB64: accountIdB64,
             payload: MessageLogPayload(
                 version: existing.version,
-                groups: nextGroups
+                groups: merged.groups
             )
         )
-        return applied
+        // A repository already running on this account keeps the whole log in
+        // memory and rewrites it from there, so it is told what just landed.
+        NotificationCenter.default.post(
+            name: .lakkoHistoryBundleFiled, object: nil,
+            userInfo: [accountUserInfoKey: accountIdB64, slotsUserInfoKey: merged.opened])
+        return merged.applied
+    }
+
+    static let accountUserInfoKey = "accountIdB64"
+    static let slotsUserInfoKey = "slots"
+
+    /// What ``mergeBundle(held:decoded:)`` made of one bundle.
+    struct MergedBundle: Equatable {
+        /// The whole log after the merge.
+        let groups: [String: PersistedGroup]
+        /// How many rows the merge added across all groups.
+        let applied: Int
+        /// Per group, the bundle's own rows and floor: what a running
+        /// repository takes in.
+        let opened: [String: PersistedGroup]
+    }
+
+    /// Merge a bundle's `decoded` rows, group by group, into the log `held` on
+    /// this device. Idempotent on `messageId`: a collision takes the held
+    /// row. The cursor and the seen state are this device's, never the
+    /// bundle's (ADR-0063), and each group's floor moves up to the highest id
+    /// the bundle carried for it, and never down ("History is not news",
+    /// `docs/ux/second-device.md` section 2).
+    static func mergeBundle(
+        held: [String: PersistedGroup],
+        decoded: [String: [PersistedMessage]]
+    ) -> MergedBundle {
+        var next = held
+        var opened: [String: PersistedGroup] = [:]
+        var applied = 0
+        for (hex, rows) in decoded {
+            let slot = next[hex] ?? PersistedGroup(cursor: 0, messages: [])
+            let merged = PairingHistory.mergeLogRows(slot.messages, rows)
+            applied += merged.added
+            let floor = PairingHistory.bundleFloor(rows)
+            next[hex] = PersistedGroup(
+                cursor: slot.cursor,
+                messages: merged.rows,
+                lastViewedMessageId: slot.lastViewedMessageId,
+                feedSeen: slot.feedSeen,
+                syncedThroughMessageId: PairingHistory.higherFloor(slot.syncedThroughMessageId, floor)
+            )
+            opened[hex] = PersistedGroup(
+                cursor: 0,
+                messages: PairingHistory.mergeLogRows([], rows).rows,
+                syncedThroughMessageId: floor
+            )
+        }
+        return MergedBundle(groups: next, applied: applied, opened: opened)
     }
 
     // MARK: - Bookkeeping rows

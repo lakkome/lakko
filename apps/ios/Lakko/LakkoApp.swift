@@ -1347,17 +1347,15 @@ private final class SessionModels: ObservableObject {
             }
         }
         return PeopleSearchSession.Ports(
-            local: { query in
+            candidates: {
                 // Contacts and the members of this device's groups and
                 // channels, with or without a grant (web `localPeople`).
-                PeopleSearch.local(
-                    query: query,
-                    candidates: PeopleSearchWiring.localCandidates(
-                        contacts: contactPairs(),
-                        groupPeopleKeys: chatRepository.allMemberAccountKeys(),
-                        profiles: ProfileDirectory.shared.receivedProfiles()),
-                    ownAccountKey: ReachCenter.shared.ownAccountKey)
+                PeopleSearchWiring.localCandidates(
+                    contacts: contactPairs(),
+                    groupPeopleKeys: chatRepository.allMemberAccountKeys(),
+                    profiles: ProfileDirectory.shared.receivedProfiles())
             },
+            ownAccountKey: { ReachCenter.shared.ownAccountKey },
             network: { query in
                 let contactKeys = Set(contactPairs().map { $0.accountKey.base64EncodedString() })
                 return await PeopleSearch.answer(
@@ -1371,6 +1369,9 @@ private final class SessionModels: ObservableObject {
                     ownAccountKey: ReachCenter.shared.ownAccountKey,
                     ports: contacts.peopleSearchPorts(),
                     lookupChannel: { try await DiscoveryClient().lookupChannel(handle: $0) })
+            },
+            reachCheck: { mailbox, seed in
+                try await contacts.peopleSearchPorts().reachCheck(mailbox, seed)
             },
             sendRequest: { person in
                 _ = try await contacts.sendContactRequest(to: person)
@@ -1416,6 +1417,11 @@ private struct SessionRoot: View, Equatable {
     private var authRepository: AuthRepository { services.authRepository }
     private var contactsRepository: ContactsRepository { services.contactsRepository }
     private var chatRepository: ChatRepository { services.chatRepository }
+
+    /// The incoming requests waiting, for the Contacts tab's badge. State of
+    /// its own, so the shell re-runs when the count changes and not on every
+    /// change of the contacts state.
+    @State private var contactRequestsWaiting = 0
 
     /// The shell's view models, in one never-publishing holder — see
     /// ``SessionModels`` for why neither the list models nor a chat model may
@@ -1518,6 +1524,7 @@ private struct SessionRoot: View, Equatable {
                     .navigationDestination(for: TabRoute.self) { routeView($0, tab: .contacts) }
             }
             .tabItem { Label(l10n.t("nav.contacts"), systemImage: "person.crop.circle") }
+            .badge(ContactsViewModel.requestsBadge(waiting: contactRequestsWaiting).map { Text($0) })
             .tag(SessionTab.contacts)
 
             NavigationStack(path: $callsPath) {
@@ -1568,6 +1575,9 @@ private struct SessionRoot: View, Equatable {
         // groups arrive on the account and device mailboxes, and a user who
         // never opens Contacts must still see a group they were added to.
         // SwiftUI cancels the task with the session root (logout, forget).
+        .onReceive(contactsVM.$repositoryState.map(\.pending.count).removeDuplicates()) {
+            contactRequestsWaiting = $0
+        }
         .task {
             while !Task.isCancelled {
                 let started = Date()

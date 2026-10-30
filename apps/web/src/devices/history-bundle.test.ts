@@ -13,7 +13,14 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as wasm from "../../wasm/lakko_ffi_wasm";
 import init from "../../wasm/lakko_ffi_wasm";
 import { WebDeviceCipher, type DeviceCipher } from "../auth/device-cipher";
-import { loadMessageLog, saveMessageLog, type PersistedMessage } from "../chat/message-log-store";
+import { appendToGroupSlot, summarizeGroupSlot } from "../chat/background-log";
+import {
+  loadMessageLog,
+  saveMessageLog,
+  updateMessageLog,
+  type MessageLogPayload,
+  type PersistedMessage,
+} from "../chat/message-log-store";
 import { FakeIndexedDb, MemoryStorage } from "../test/fake-storage";
 import { applyHistoryBundleToLog, buildHistoryBundleFromLog, isBookkeepingSystemRow } from "./history-bundle";
 
@@ -120,5 +127,109 @@ describe("bookkeeping system rows in the history bundle", () => {
     expect(await applyHistoryBundleToLog({ accountIdB64: JOINER, deviceKey: key, secret: SECRET, sealedBytes: sealed })).toBe(1);
     const log = await loadMessageLog(JOINER, key);
     expect(texts(log?.groups[GROUP_HEX]?.messages)).toEqual(["incoming:from the other person"]);
+  });
+});
+
+describe("history is not news (docs/ux/second-device.md section 2)", () => {
+  /** A bundle holding `rows`, sealed by a real sender. */
+  async function bundleOf(rows: readonly PersistedMessage[]): Promise<Uint8Array> {
+    const key = await deviceKey();
+    await saveMessageLog(SENDER, key, {
+      version: 1,
+      groups: { [GROUP_HEX]: { cursor: "9", messages: rows } },
+    });
+    const sealed = await buildHistoryBundleFromLog({ accountIdB64: SENDER, deviceKey: key, secret: SECRET });
+    if (sealed === null) throw new Error("no bundle");
+    return sealed;
+  }
+
+  const apply = (key: DeviceCipher, sealedBytes: Uint8Array): Promise<number> =>
+    applyHistoryBundleToLog({ accountIdB64: JOINER, deviceKey: key, secret: SECRET, sealedBytes });
+
+  async function slotOf(key: DeviceCipher) {
+    return (await loadMessageLog(JOINER, key))?.groups[GROUP_HEX];
+  }
+
+  it("what came with the bundle is not unread; what comes after it is", async () => {
+    const key = await deviceKey();
+    await apply(key, await bundleOf([row(2, "incoming", "old"), row(5, "incoming", "older still?")]));
+    const slot = await slotOf(key);
+    expect(slot?.syncedThroughMessageId).toBe("5");
+    expect(summarizeGroupSlot(slot, null).unread).toBe(0);
+    // A synced read position that lands later, behind the bundle.
+    expect(summarizeGroupSlot(slot, 1n).unread).toBe(0);
+    // No read position of the account moved.
+    expect(slot?.lastViewedMessageId).toBeUndefined();
+    const later = appendToGroupSlot(slot, [row(6, "incoming", "new")], 6);
+    expect(summarizeGroupSlot(later, null).unread).toBe(1);
+  });
+
+  it("a second bundle keeps the higher floor and what the slot already said", async () => {
+    const key = await deviceKey();
+    await apply(key, await bundleOf([row(8, "incoming", "newer")]));
+    await updateMessageLog(JOINER, key, (current) => {
+      const slot = current?.groups[GROUP_HEX];
+      if (current === null || slot === undefined) return null;
+      return {
+        version: current.version,
+        groups: { [GROUP_HEX]: { ...slot, lastViewedMessageId: "8", feedSeen: ["9"] } },
+      };
+    });
+    await apply(key, await bundleOf([row(3, "incoming", "older")]));
+    const slot = await slotOf(key);
+    expect(slot?.syncedThroughMessageId).toBe("8");
+    expect(slot?.lastViewedMessageId).toBe("8");
+    expect(slot?.feedSeen).toEqual(["9"]);
+    expect(slot?.messages.map((m) => m.messageId)).toEqual(["3", "8"]);
+  });
+
+  it("the floor covers a bookkeeping row another client carried, which is not filed", async () => {
+    const inputs = [
+      [1, 1, "from the other person"],
+      [4, 2, "[mls commit]"],
+    ] as const;
+    const messages = inputs.map(([id, direction, text]) => {
+      const placeholder = wasm.encodeHistoryPlaceholder(BigInt(id), direction, "t", text, []);
+      const idBytes = new Uint8Array(8);
+      idBytes[7] = id;
+      return new wasm.HistoryMessageInput(placeholder, 0, idBytes, 1n);
+    });
+    const sealed = wasm.sealHistoryBundleStructured(
+      SECRET,
+      [new wasm.HistoryGroupInput(new Uint8Array(32).fill(0xab), messages, false)],
+      4n,
+    );
+    const key = await deviceKey();
+    await apply(key, sealed);
+    const slot = await slotOf(key);
+    expect(slot?.messages).toHaveLength(1);
+    expect(slot?.syncedThroughMessageId).toBe("4");
+  });
+
+  it("does not lose what the background receive files while it is written", async () => {
+    const key = await deviceKey();
+    const sealed = await bundleOf([row(2, "incoming", "old")]);
+    const other = "cd".repeat(32);
+    const background = (hex: string, id: number): Promise<void> =>
+      updateMessageLog(JOINER, key, (current) => {
+        const groups = current?.groups ?? {};
+        return {
+          version: 1,
+          groups: { ...groups, [hex]: appendToGroupSlot(groups[hex], [row(id, "incoming", "live")], id) },
+        };
+      });
+    await Promise.all([background(other, 7), apply(key, sealed), background(GROUP_HEX, 9)]);
+    const log = await loadMessageLog(JOINER, key);
+    expect(log?.groups[other]?.messages.map((m) => m.messageId)).toEqual(["7"]);
+    expect(log?.groups[GROUP_HEX]?.messages.map((m) => m.messageId)).toEqual(["2", "9"]);
+    expect(log?.groups[GROUP_HEX]?.syncedThroughMessageId).toBe("2");
+  });
+
+  it("keeps the sends the log holds", async () => {
+    const key = await deviceKey();
+    const held = [{ conversationHex: "ee" }] as unknown as NonNullable<MessageLogPayload["held"]>;
+    await saveMessageLog(JOINER, key, { version: 1, groups: {}, held });
+    await apply(key, await bundleOf([row(2, "incoming", "old")]));
+    expect((await loadMessageLog(JOINER, key))?.held).toEqual(held);
   });
 });

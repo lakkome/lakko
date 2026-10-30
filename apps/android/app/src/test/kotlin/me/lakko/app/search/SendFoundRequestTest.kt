@@ -55,8 +55,65 @@ class SendFoundRequestTest {
     @Test
     fun `a grant the reach check refuses sends nothing`() = runTest {
         val fake = Fake(reach = false, bundleKey = key)
-        assertEquals(SendOutcome.Refused, sendFoundRequest(person(PersonReach.GRANT, grant = "Zw=="), ByteArray(0), fake))
+        assertEquals(SendOutcome.ReachRefused, sendFoundRequest(person(PersonReach.GRANT, grant = "Zw=="), ByteArray(0), fake))
         assertTrue(fake.sent.isEmpty())
+    }
+
+    /** Reach-checks by wire, with the grants held for the person. */
+    private class Held(
+        val fake: Fake,
+        val held: List<String>,
+        val answers: (String) -> Boolean,
+    ) : SendDeps by fake {
+        val checked = mutableListOf<String>()
+        var heldReads = 0
+        override suspend fun reachCheck(identityPk: ByteArray, grantWireB64: String): Boolean {
+            checked += grantWireB64
+            return answers(grantWireB64)
+        }
+
+        override fun heldGrantWires(identityPk: ByteArray): List<String> {
+            heldReads += 1
+            return held
+        }
+    }
+
+    @Test
+    fun `a row's grant that still passes is sent with and nothing else is tried`() = runTest {
+        val deps = Held(Fake(bundleKey = key), listOf("OTHER", "Zw==")) { true }
+        assertEquals(SendOutcome.Sent, sendFoundRequest(person(PersonReach.GRANT, grant = "Zw=="), ByteArray(0), deps))
+        assertEquals(listOf("Zw=="), deps.checked)
+        assertEquals(0, deps.heldReads)
+        assertEquals(listOf("bundle:Zw=="), deps.fake.sent)
+    }
+
+    @Test
+    fun `a refused row grant goes on to the others in order and sends with the first that passes`() = runTest {
+        val deps = Held(Fake(bundleKey = key), listOf("STALE", "Zw==", "LIVE", "NEVER")) { it == "LIVE" }
+        assertEquals(SendOutcome.Sent, sendFoundRequest(person(PersonReach.GRANT, grant = "Zw=="), ByteArray(0), deps))
+        assertEquals("the row's grant is not tried twice", listOf("Zw==", "STALE", "LIVE"), deps.checked)
+        assertEquals(listOf("bundle:LIVE"), deps.fake.sent)
+    }
+
+    @Test
+    fun `refused only when no held grant passes`() = runTest {
+        val deps = Held(Fake(bundleKey = key), listOf("G1", "G2")) { false }
+        assertEquals(
+            SendOutcome.ReachRefused,
+            sendFoundRequest(person(PersonReach.GRANT, grant = "Zw=="), ByteArray(0), deps),
+        )
+        assertEquals(listOf("Zw==", "G1", "G2"), deps.checked)
+        assertTrue(deps.fake.sent.isEmpty())
+    }
+
+    @Test
+    fun `a check that could not be made is a failure, not a refusal`() = runTest {
+        val deps = Held(Fake(bundleKey = key), listOf("G1", "G2")) {
+            if (it == "G1") throw IllegalStateException("offline") else false
+        }
+        assertTrue(sendFoundRequest(person(PersonReach.GRANT, grant = "Zw=="), ByteArray(0), deps) is SendOutcome.Failed)
+        assertEquals("nothing is asked past it", listOf("Zw==", "G1"), deps.checked)
+        assertTrue(deps.fake.sent.isEmpty())
     }
 
     @Test

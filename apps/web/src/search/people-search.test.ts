@@ -42,7 +42,7 @@ const NOBODY: KnownPerson = {
   contactFallbackName: null,
   verifiedUsername: null,
   isContact: false,
-  keptGrantWireB64: null,
+  keptGrantWires: [],
 };
 
 function deps(over: Partial<PeopleSearchDeps> = {}, known: Record<string, KnownPerson> = {}): PeopleSearchDeps {
@@ -228,6 +228,33 @@ describe("searchPeople: contacts of contacts", () => {
       username: null,
     });
     expect(reachCheck).toHaveBeenCalledWith(BO_KEY, `W:${toHex(FOF_WIRE)}`);
+    // What passed is marked, so it beats a kept grant nobody asked about.
+    expect(out.people[0]?.grantChecked).toBe(true);
+  });
+
+  it("logs one line of counts per finished search", async () => {
+    const logCounts = vi.fn();
+    await searchPeople(
+      "bo",
+      deps({
+        openIntroductions: async () => [
+          intro(),
+          intro({ displayName: "Someone Else" }),
+          intro({ identityPk: ANNA_KEY, accountId: ANNA_ACC, displayName: "Bo Other" }),
+        ],
+        introductionRecordsHeld: () => 7,
+        reachCheck: async (pk) => toHex(pk) === toHex(ANNA_KEY),
+        logCounts,
+      }),
+    );
+    expect(logCounts).toHaveBeenCalledTimes(1);
+    expect(logCounts).toHaveBeenCalledWith({
+      recordsHeld: 7,
+      recordsOpened: 3,
+      keptAfterMatch: 2,
+      refusedByReachCheck: 1,
+      people: 1,
+    });
   });
 
   it("drops the person silently when the reach check says no - as if not found", async () => {

@@ -91,6 +91,7 @@ import {
   type IncomingContactRequest,
   type MailboxRow,
   type IncomingMailboxEvent,
+  isAnswerUnreachable,
 } from "./client";
 import { useProfiles } from "../profile/ProfileContext";
 import { t } from "../l10n";
@@ -480,6 +481,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       requestKeyB64: base64Encode(request.fromPubkey),
       trustedKeyB64: readPin(base64Encode(fromAccountId), accountIdB64)?.pinnedSignaturePubkeyB64 ?? null,
     });
+    let answered = true;
     if (verdict === "answer") {
       // The ack is the whole of the answer on this path: the reset the check
       // just accepted (or accepted earlier) is what moves the conversation.
@@ -488,8 +490,12 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("silent ack to an existing contact failed", err instanceof Error ? err.name : "");
+        // Nothing opens their mailbox: asking again changes nothing. Any
+        // other failure keeps the request for the next pass.
+        answered = isAnswerUnreachable(err);
       }
-    } else if (verdict === "wait") {
+    }
+    if (verdict === "wait" || !answered) {
       // Kept on disk first: the cursor is about to move past this row.
       const kept = inbox?.holdWaiting(row) ?? false;
       if (kept && !waitingKnownRequests.some((w) => w.request.messageId === request.messageId)) {
@@ -652,7 +658,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             base64Decode(founded.groupIdB64),
             base64Decode(founded.welcomeB64),
             founded.targets.map((t) => ({ accountKey: base64Decode(t.accountKeyB64), isRecipient: t.isRecipient })),
-            { replyGrantB64: request.replyGrantB64 },
+            { replyGrantB64: request.replyGrantB64, answersRequest: true },
           );
         },
         forward: async (note) => {
@@ -663,7 +669,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             base64Decode(note.groupIdB64),
             base64Decode(note.welcomeB64),
             [{ accountKey: request.fromPubkey, isRecipient: true }],
-            { replyGrantB64: request.replyGrantB64 },
+            { replyGrantB64: request.replyGrantB64, answersRequest: true },
           );
           return chats.get(note.groupIdB64)?.groupIdB64 ?? null;
         },
@@ -674,6 +680,9 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           } catch (err) {
             // eslint-disable-next-line no-console
             console.warn("sendContactAck failed", err instanceof Error ? err.name : "");
+            // The Welcome landed. Nothing opening their mailbox ends it there;
+            // any other failure is taken up at the next pass.
+            if (!isAnswerUnreachable(err)) throw err;
           }
           await sync.recordLinkUse(answer.linkId, request.fromPubkey);
           setAcceptedVersion(acceptedVersion() + 1);

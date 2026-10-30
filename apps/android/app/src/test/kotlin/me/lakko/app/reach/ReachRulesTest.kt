@@ -3,6 +3,7 @@
 
 package me.lakko.app.reach
 
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -410,6 +411,135 @@ class ReachVersionRecoveryTest {
 
 /** ADR-0050 section 2.5a item 7 — the grants a Welcome writer walks. */
 class ReachWelcomeGrantOrderTest {
+    private val everyKind = listOf(
+        HeldGrantRef(ReachKind.GROUP, "g1"),
+        HeldGrantRef(ReachKind.MEMBER, "g1"),
+        HeldGrantRef(ReachKind.CHANNEL, "c1"),
+        HeldGrantRef(ReachKind.FOF, ""),
+        HeldGrantRef(ReachKind.CONTACT, ""),
+        HeldGrantRef(ReachKind.REPLY, ""),
+    )
+
+    @Test
+    fun `the answer to a request is the reply grant, then a contact grant, and nothing else`() {
+        assertEquals(
+            listOf(HeldGrantRef(ReachKind.REPLY, ""), HeldGrantRef(ReachKind.CONTACT, "")),
+            orderedWriteGrants(everyKind, WritePurpose.REPLY),
+        )
+        // A group is named: still nothing of it.
+        assertEquals(
+            listOf(HeldGrantRef(ReachKind.REPLY, ""), HeldGrantRef(ReachKind.CONTACT, "")),
+            orderedWriteGrants(everyKind, WritePurpose.REPLY, "g1"),
+        )
+    }
+
+    @Test
+    fun `a person with only a group or member grant gets no answer written`() {
+        val onlyGroup = listOf(HeldGrantRef(ReachKind.GROUP, "g1"), HeldGrantRef(ReachKind.MEMBER, "g1"))
+        assertTrue(orderedWriteGrants(onlyGroup, WritePurpose.REPLY).isEmpty())
+    }
+
+    @Test
+    fun `a stale key moves on to the next one, and a group key is never reached`() = runTest {
+        val tried = mutableListOf<String>()
+        val candidates = orderedWriteGrants(everyKind, WritePurpose.REPLY).map { ref ->
+            { ref.kind.name }
+        }
+        val outcome = firstAcceptedWrite(
+            candidates,
+            { auth: String ->
+                tried += auth
+                if (auth == "REPLY") throw IllegalStateException("401") else auth
+            },
+            { true },
+        )
+        assertEquals("CONTACT", (outcome as SignedWriteOutcome.Written).result)
+        assertEquals(listOf("REPLY", "CONTACT"), tried)
+    }
+
+    @Test
+    fun `every candidate refused is the last refusal, and nothing else was tried`() = runTest {
+        val tried = mutableListOf<String>()
+        val refusal = IllegalStateException("401")
+        val candidates = orderedWriteGrants(everyKind, WritePurpose.REPLY).map { ref ->
+            { ref.kind.name }
+        }
+        val outcome = firstAcceptedWrite<String, String>(
+            candidates,
+            { auth ->
+                tried += auth
+                throw refusal
+            },
+            { true },
+        )
+        assertEquals(refusal, (outcome as SignedWriteOutcome.Exhausted).lastRefusal)
+        assertEquals(listOf("REPLY", "CONTACT"), tried)
+    }
+
+    @Test
+    fun `a check moves past a refused key, and says no when all are refused`() = runTest {
+        val asked = mutableListOf<String>()
+        val candidates: List<() -> String?> = listOf({ "stale" }, { null }, { "live" }, { "never" })
+        assertTrue(
+            anyCandidateOpens(candidates) { auth ->
+                asked += auth
+                auth == "live"
+            },
+        )
+        assertEquals(listOf("stale", "live"), asked)
+        assertFalse(anyCandidateOpens(candidates) { false })
+        assertFalse(anyCandidateOpens(emptyList<() -> String?>()) { true })
+    }
+
+    @Test
+    fun `a check that cannot be made is not a no`() = runTest {
+        val thrown = runCatching {
+            anyCandidateOpens(listOf<() -> String?>({ "key" })) { throw IllegalStateException("offline") }
+        }.exceptionOrNull()
+        assertTrue(thrown is IllegalStateException)
+    }
+
+    @Test
+    fun `a proofless write is offered only when no grant yielded one`() = runTest {
+        val none: List<() -> String?> = listOf({ null })
+        assertEquals(
+            "open",
+            (firstAcceptedWrite(withProoflessLast(none) { "open" }, { auth: String -> auth }, { false })
+                as SignedWriteOutcome.Written).result,
+        )
+        // A refused grant never falls back to a write the DS would drop.
+        val tried = mutableListOf<String>()
+        val outcome = firstAcceptedWrite<String, String>(
+            withProoflessLast(listOf<() -> String?>({ "stale" })) { "open" },
+            { auth ->
+                tried += auth
+                throw IllegalStateException("401")
+            },
+            { true },
+        )
+        assertTrue(outcome is SignedWriteOutcome.Exhausted)
+        assertEquals(listOf("stale"), tried)
+    }
+
+    @Test
+    fun `a contact request tries every held grant in order and never a member key`() {
+        val held = listOf(
+            HeldGrantRef(ReachKind.FOF, "") to "fof",
+            HeldGrantRef(ReachKind.CHANNEL, "c1") to "channel",
+            HeldGrantRef(ReachKind.GROUP, "g2") to "group2",
+            HeldGrantRef(ReachKind.MEMBER, "aa") to "member",
+            HeldGrantRef(ReachKind.REPLY, "r") to "reply",
+            HeldGrantRef(ReachKind.CONTACT, "") to "contact",
+            HeldGrantRef(ReachKind.GROUP, "aa") to "group1",
+            // The same class and scope filed under a predecessor key.
+            HeldGrantRef(ReachKind.GROUP, "aa") to "group1-older",
+        )
+        assertEquals(
+            listOf("contact", "group1", "group1-older", "group2", "channel", "fof"),
+            contactRequestGrantsInOrder(held),
+        )
+    }
+
     @Test
     fun `every held grant is listed in the preferred order, each once`() {
         val held = listOf(

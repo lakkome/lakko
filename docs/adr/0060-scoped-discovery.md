@@ -237,6 +237,44 @@ filters by the whole query, runs the reach check, and shows the result.
   section 8 "once your contacts next open Lakko" state; the client counts
   acknowledgements from its contacts to know when to clear it.
 
+**Only the contacts I choose (2026-10-30, the maintainer's decision; UX spec
+section 2.1.2).** Part 2.1 gets the same two forms as part 2.2: all contacts
+(the default) or only the ones the person chose. Under the second form the
+record goes only to the chosen contacts, so only their contacts can find the
+person; everything after the offer works as above. The relay is the contact's
+own device and is unchanged, and the contacts are told nothing.
+
+- **The set is the owner's, synced in the setting.** `VisibilitySetting` gains
+  `contacts_form` (all / chosen) and `chosen_contacts`, a list of 16-byte account
+  ids, at most `MAX_CHOSEN_CONTACTS` (4096, chosen, not measured). Account ids,
+  because an account key changes on a rotation and a reset and the choice must
+  not. A contact with no known account id cannot be chosen.
+- **Narrowing** is the narrowing above: switching a contact off, or moving from
+  all to chosen, makes a new `fof` version, unregisters the old key at once and
+  sends a new record to the contacts still chosen. A contact switched off keeps
+  an old record until it ages out, which opens to a key the reach check refuses,
+  so a searcher's row is dropped; a modified client can still read the name and
+  username in a record it already held, the residual a removed contact leaves
+  today.
+- **Widening** sends the record to the newly chosen contact at its next poll.
+- **A device that asks** (below) is answered with an offer only by a person who
+  has chosen it, so the ask is answered with the profile alone otherwise.
+- Wire: a flag day on the visibility envelope; there is nothing to migrate.
+
+**A device that holds nothing asks (2026-10-30).** An offer and a bundle go out
+once per conversation, so a device that missed them (a new device, a sign-in on
+a device that lost its state, a dropped row) would never get them. Measured on a
+live account: a person with one contact held no record at all and found nobody
+through that contact. No new envelope carries the ask: a device that holds
+neither an offer nor a bundle from the other person of a one-to-one sends the
+existing field-less profile request (ADR-0048), at most once a day per
+conversation, or at most once a week when it already holds their `contact`
+grant (a person who does not allow contacts of contacts offers nothing, and a
+daily ask would never end). The other person's device answers with its profile
+as it always did, and also forgets that conversation in its sent records, so its
+offer and bundle go out again, at most once an hour per conversation. All three
+numbers are chosen, not measured.
+
 ### 5. Everyone, username verification, and names on the server
 
 - **Everyone** sets `open` on the mailbox and publishes in discovery: the
@@ -327,7 +365,13 @@ now carries a grant, or a delegation to a key known in advance.
   committer-delegation envelope in the group: one delegation per committer
   candidate (the owner and each admin), each to that candidate's account
   key. A delegation lives at most 24 hours, so the proposer re-sends a fresh
-  one while its proposal is pending.
+  one while its proposal is pending. Built 2026-10-30 on all three clients
+  (until then no client re-sent, in spite of this sentence): the proposing
+  device checks at the tail of each foreground poll of the group, and one
+  rule, `lakko_ds_proof::committer_envelope_due`, says when an envelope is
+  due (12 hours after a signed one, chosen; at once for a candidate it did
+  not cover). An envelope without delegations (the next bullet) names a
+  binding, which does not expire, so only a new candidate makes it due.
 - **An add of a person found by search (amended 2026-10-29, the
   maintainer's call).** Group info's Add members screen
   ([`docs/ux/conversation-info.md`](../ux/conversation-info.md) section 2.4)

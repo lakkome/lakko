@@ -11,6 +11,8 @@ This file is loaded into the context of every session automatically. Keep it sho
 
 A Telegram-class secure messenger with **E2EE by default for everything** (1×1, groups, channels, audio / video calls, broadcasts, audio rooms). Zero-trust server. All clients share a single Rust core + native UI.
 
+**Scale is a service requirement:** the number of users is potentially on par with Telegram or WhatsApp. Every design is sized for that, in traffic per device, in server storage and in work per request, before it is built; a mechanism whose cost grows with contacts times contacts, or that only works at small scale, is not acceptable as the final design.
+
 ## Architectural decisions (single source of truth — `docs/adr/`)
 
 | ADR | Decision |

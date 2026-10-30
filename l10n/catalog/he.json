@@ -31,7 +31,7 @@
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "קוד פתוח. לא נדרש מספר טלפון.",
+      "text": "תקשורת בדרך שלכם. בלי צורך במספר טלפון.",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -3980,6 +3980,10 @@
     },
     "contacts.request.accept": {
       "text": "אישור",
+      "status": "machine"
+    },
+    "contacts.request.accept_failed": {
+      "text": "לא ניתן היה לאשר. נסו שוב.",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -8390,6 +8394,22 @@
       "text": "מחילים",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "כל אנשי הקשר שלי",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "רק אלה שאבחר",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "רק אנשי הקשר של האנשים שבחרת ({chosen} מתוך {total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "עכשיו רק אנשי הקשר שבחרת. אפשר לשנות ב{privacy}.",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "אנשי הקשר של אנשי הקשר שלי",
       "status": "machine"
@@ -8436,6 +8456,14 @@
     },
     "who_can_find_me.list.choose": {
       "text": "בחירת קבוצות וערוצים",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "עדיין אין לך אנשי קשר.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "חיפוש אנשי קשר",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -8500,6 +8528,10 @@
     },
     "who_can_find_me.status.offline": {
       "text": "יוחל כשתחזרו להיות מחוברים.",
+      "status": "machine"
+    },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "אנשי הקשר שלהם יכולים למצוא אותי",
       "status": "machine"
     },
     "who_can_find_me.title": {

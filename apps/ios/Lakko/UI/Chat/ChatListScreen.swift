@@ -691,7 +691,12 @@ public struct ChatListScreen: View {
     /// receive applied while the chat was closed (``UnreadCounting``). Counting
     /// every prior row against a missing cursor would flip the whole history to
     /// unread on a cold start.
-    private static func unreadCount(
+    ///
+    /// A row the pairing history brought is never unread here, with a cursor
+    /// or without one (``PairingHistory``; the local count leaves those rows
+    /// out as they arrive). Rows of older segments carry history ids below
+    /// zero and are not counted at all.
+    static func unreadCount(
         thread: ChatThread,
         cursor: ReadCursorState?
     ) -> Int? {
@@ -710,6 +715,9 @@ public struct ChatListScreen: View {
         return thread.messages.reduce(0) { acc, msg in
             if msg.direction == .outgoing { return acc }
             if msg.messageId <= 0 { return acc }
+            if PairingHistory.isHistory(messageId: msg.messageId, floor: thread.syncedThroughMessageId) {
+                return acc
+            }
             // ADR-0063 section 5 — a message the feed showed is seen, even
             // when it sits above messages that are not.
             if thread.feedSeen.contains(msg.messageId) { return acc }

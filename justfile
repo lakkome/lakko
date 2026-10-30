@@ -501,9 +501,11 @@ dev-web:
 
 # Build the web client for the desktop app (ADR-0085) into apps/web/dist,
 # which the desktop binary embeds at compile time. Run before dev-desktop
-# whenever the web client changed.
+# whenever the web client changed. This is the dev and test build: its token
+# bucket refills on a take and the device-link answer limit is off, as on the
+# test stack. A release build must not set either.
 build-desktop-web:
-    cd apps/web && VITE_LAKKO_PLATFORM=desktop npm run build
+    cd apps/web && VITE_LAKKO_PLATFORM=desktop VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT=off VITE_LAKKO_ANON_TOKEN_REFILL=on-demand npm run build
 
 # Build, sign and run the desktop app (macOS debug build).
 #

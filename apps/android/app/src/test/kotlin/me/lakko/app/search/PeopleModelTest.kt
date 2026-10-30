@@ -20,7 +20,8 @@ class PeopleModelTest {
         name: String?,
         username: String? = null,
         contact: Boolean = false,
-        grant: String? = null,
+        grants: List<String> = emptyList(),
+        check: KeptGrantCheck? = null,
         accountIdHex: String? = "00",
     ) = LocalCandidate(
         keyB64 = key,
@@ -29,7 +30,8 @@ class PeopleModelTest {
         verifiedUsername = username,
         isContact = contact,
         accountIdHex = accountIdHex,
-        keptGrantWireB64 = grant,
+        keptGrantWiresB64 = grants,
+        keptGrantCheck = check,
     )
 
     @Test
@@ -58,7 +60,7 @@ class PeopleModelTest {
         assertEquals(PersonReach.NONE, hidden.reach)
         assertNull(hidden.username)
         val granted = localPeople(
-            listOf(candidate("g", "Granted", username = "granted", grant = "R1JBTlQ=")),
+            listOf(candidate("g", "Granted", username = "granted", check = KeptGrantCheck.Live("R1JBTlQ="))),
             "gra",
             normalize,
             null,
@@ -86,6 +88,110 @@ class PeopleModelTest {
         assertEquals("anna", merged.username)
         assertEquals("aa", merged.accountIdHex)
         assertNull(merged.grantWireB64)
+    }
+
+    @Test
+    fun `before a verdict the row is the name alone, and a username does not find it`() {
+        val waiting = candidate("w", "Waiting", username = "waiting", grants = listOf("G1", "G2"))
+        val row = localPeople(listOf(waiting), "wai", normalize, null).single()
+        assertEquals(PersonReach.NONE, row.reach)
+        assertNull(row.username)
+        assertNull(row.grantWireB64)
+        assertFalse(canAddContact(row))
+        val byUsername = candidate("w", "Someone", username = "waiting", grants = listOf("G1"))
+        assertTrue(localPeople(listOf(byUsername), "waiting", normalize, null).isEmpty())
+    }
+
+    @Test
+    fun `a live verdict offers the grant that passed, a verdict of dead offers nothing`() {
+        val held = listOf(candidate("a", "Anna", username = "anna_w", grants = listOf("G1", "G2")))
+
+        val live = localPeople(withKeptGrantChecks(held, mapOf("a" to KeptGrantCheck.Live("G2"))), "ann", normalize, null)
+            .single()
+        assertEquals(PersonReach.GRANT, live.reach)
+        assertEquals("G2", live.grantWireB64)
+        assertEquals("anna_w", live.username)
+        assertTrue(live.grantChecked)
+        assertTrue(canAddContact(live))
+
+        val dead = withKeptGrantChecks(held, mapOf("a" to KeptGrantCheck.Dead))
+        val row = localPeople(dead, "ann", normalize, null).single()
+        assertEquals(PersonReach.NONE, row.reach)
+        assertNull(row.username)
+        assertNull(row.grantWireB64)
+        assertFalse(canAddContact(row))
+        // Matched by name only: the username is not this person's handle here.
+        assertTrue(localPeople(dead, "anna_w", normalize, null).isEmpty())
+    }
+
+    @Test
+    fun `a check that could not be made leaves the row as it was without one`() {
+        val held = listOf(candidate("a", "Anna", username = "anna_w", grants = listOf("G1", "G2")))
+        val row = localPeople(withKeptGrantChecks(held, mapOf("a" to KeptGrantCheck.Unreached("G2"))), "ann", normalize, null)
+            .single()
+        assertEquals(PersonReach.GRANT, row.reach)
+        assertEquals("G2", row.grantWireB64)
+        assertEquals("anna_w", row.username)
+        assertFalse("nothing passed", row.grantChecked)
+        assertTrue(canAddContact(row))
+    }
+
+    @Test
+    fun `a contact is never checked and never waits`() {
+        val contact = candidate("c", "Cara", contact = true, grants = listOf("G1"))
+        assertEquals(PersonReach.CONTACT, localPeople(listOf(contact), "car", normalize, null).single().reach)
+        assertTrue(keptGrantsToCheck(listOf(contact), "car", normalize, null).isEmpty())
+    }
+
+    @Test
+    fun `who is checked for a text`() {
+        val byName = candidate("n", "Anna", grants = listOf("G1"))
+        val byUsername = candidate("u", "Someone", username = "annabel", grants = listOf("G2"))
+        val noGrant = candidate("x", "Anna X")
+        val otherText = candidate("o", "Bob", grants = listOf("G3"))
+        val own = candidate("me", "Anna Me", grants = listOf("G4"))
+        val unnamed = candidate("q", null, grants = listOf("G5"))
+        val all = listOf(byName, byUsername, noGrant, otherText, own, unnamed)
+        // From the first letter, by name or by username.
+        assertEquals(listOf("n", "u"), keptGrantsToCheck(all, "a", normalize, "me").map { it.keyHex })
+    }
+
+    @Test
+    fun `a verdict held for a candidate does not stop the next text asking`() {
+        val dead = candidate("d", "Anna", grants = listOf("G1")).copy(keptGrantCheck = KeptGrantCheck.Dead)
+        val live = candidate("l", "Annabel", grants = listOf("G2")).copy(keptGrantCheck = KeptGrantCheck.Live("G2"))
+        assertEquals(listOf("d", "l"), keptGrantsToCheck(listOf(dead, live), "ann", normalize, null).map { it.keyHex })
+    }
+
+    @Test
+    fun `merge prefers the grant that passed a check over one merely kept`() {
+        val kept = PersonResult("k", "k", null, "Local", null, PersonReach.GRANT, "STALE")
+        val checked = PersonResult("k", "k", "aa", "Network", "anna", PersonReach.GRANT, "LIVE", grantChecked = true)
+
+        val merged = mergePeople(listOf(listOf(kept), listOf(checked)), ownKeyHex = null).single()
+        assertEquals("LIVE", merged.grantWireB64)
+        assertTrue(merged.grantChecked)
+        assertEquals("Local", merged.name)
+        // Whichever list it stands in.
+        assertEquals(
+            "LIVE",
+            mergePeople(listOf(listOf(checked), listOf(kept)), ownKeyHex = null).single().grantWireB64,
+        )
+        // A name-only local row takes the network's checked grant.
+        val waiting = PersonResult("k", "k", null, "Local", null, PersonReach.NONE, null)
+        val overWaiting = mergePeople(listOf(listOf(waiting), listOf(checked)), ownKeyHex = null).single()
+        assertEquals(PersonReach.GRANT, overWaiting.reach)
+        assertEquals("LIVE", overWaiting.grantWireB64)
+        assertEquals("anna", overWaiting.username)
+    }
+
+    @Test
+    fun `no one found is said only when no person row stands`() {
+        assertEquals(SEARCH_NOT_FOUND, peopleSectionMessage(PeopleSearchState.NOT_FOUND, personRows = 0))
+        assertNull(peopleSectionMessage(PeopleSearchState.NOT_FOUND, personRows = 1))
+        // The other lines are not about whether anyone was found.
+        assertEquals(SEARCH_FAILED, peopleSectionMessage(PeopleSearchState.FAILED, personRows = 1))
+        assertEquals(SEARCH_OUT_OF_SEARCHES, peopleSectionMessage(PeopleSearchState.ALLOWANCE_USED, personRows = 1))
     }
 
     @Test

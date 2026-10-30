@@ -271,7 +271,7 @@ import {
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { recordRemovedDevices } from "../chat/device-readmission";
 import { isOneToOne, useProfiles } from "../profile/ProfileContext";
-import { intakeScopedEnvelope } from "../reach/scoped-intake";
+import { intakeScopedEnvelope, noteIntroductionsAsk } from "../reach/scoped-intake";
 import { useGroupNames } from "../chat/GroupNameContext";
 import { usePins } from "../chat/PinContext";
 import { useSharedChannels } from "../discover/SharedChannelsContext";
@@ -4130,6 +4130,9 @@ function ChatView(props: {
         const own = chats.identity();
         if (e.senderKey !== undefined && !(own !== null && isOwnKeyB64(own, e.senderKey))) {
           profiles.requested(props.entry.groupIdB64);
+          // ADR-0060 section 4 - the same request is how a device that missed
+          // this account's introductions asks for them again.
+          noteIntroductionsAsk(props.entry.groupIdB64, e.senderKey);
         }
         continue;
       }
@@ -4430,10 +4433,26 @@ function ChatView(props: {
       //
       // Deliberately AFTER the cursor has settled, and deliberately not awaited
       // by the poll's own error path: a sweep failure is not a poll failure.
-      void sweepNow().catch((err: unknown) => {
-        // eslint-disable-next-line no-console
-        console.warn("ADR-0045 tail sweep failed", err);
-      });
+      //
+      // ADR-0060 section 6 — then a proposer's committer envelope for an Add
+      // still waiting, after the sweep so an Add this device just landed sends
+      // nothing. Cheap when this device proposed no Add here.
+      void sweepNow()
+        .catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn("ADR-0045 tail sweep failed", err);
+        })
+        .then(() =>
+          contacts.resendCommitterEnvelopes(
+            props.requireIdentity(),
+            props.entry.group,
+            membershipEnded(),
+          ),
+        )
+        .catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn("committer envelope re-send failed", err);
+        });
       // ADR-0073 R.6 / R.7 — the conversation's continuity pass, at the tail
       // of the open chat's own poll (the background sweep leaves this group
       // to this view). Silent; a no-op unless a reset was accepted.

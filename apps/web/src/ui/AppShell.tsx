@@ -18,6 +18,8 @@ import { Show, type JSX } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
 import { paths } from "../routes/paths";
 import { useAuth } from "../auth/AuthContext";
+import { contactsBadge } from "../contacts/contact-list-model";
+import { useMailbox } from "../contacts/MailboxContext";
 import { DeviceRequestPrompt } from "../devices/DeviceRequestPrompt";
 import { AttentionBadge, DeviceAddedWatcher } from "../devices/DeviceAddedNotice";
 import { addedNotice, badgeVisible } from "../devices/added-notice";
@@ -64,6 +66,9 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
   const sync = useDeviceGroupSync();
   const navigate = useNavigate();
   const location = useLocation();
+  const mailbox = useMailbox();
+  /** The incoming contact requests waiting, on the Contacts item. */
+  const requestsBadge = (): string | null => contactsBadge(mailbox.pending().length);
 
   const username = (): string => {
     const s = auth.state();
@@ -109,6 +114,9 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
               </Show>
             </span>
             <span>{t(item.labelKey)}</span>
+            <Show when={item.href === paths.contacts ? requestsBadge() : null}>
+              {(text) => <span class="lk-badge lk-rail-badge">{text()}</span>}
+            </Show>
           </A>
         ))}
         <div class="lk-rail-spacer" />

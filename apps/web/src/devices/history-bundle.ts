@@ -44,10 +44,11 @@ import type {
 } from "../../wasm/lakko_ffi_wasm";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { historyMediaFromPersisted, persistedMediaFromOpened } from "./history-media";
+import { fileHistoryRows } from "../chat/background-log";
 import {
   loadMessageLog,
-  saveMessageLog,
-  type MessageLogPayload,
+  MESSAGE_LOG_VERSION,
+  updateMessageLog,
   type PersistedAttachment,
   type PersistedGroup,
   type PersistedMessage,
@@ -167,7 +168,15 @@ export async function buildHistoryBundleFromLog(args: {
  *
  * Existing log rows survive: per-group inserts merge by
  * `messageId` (collisions take the on-disk value to avoid
- * stomping concurrent edits).
+ * stomping concurrent edits), and everything else the slot holds
+ * stays. The write is serialized with every other writer of the
+ * log: the background receive is running by now, and a bundle
+ * written over what it filed meanwhile would lose rows that can
+ * never be decrypted again.
+ *
+ * Each group's slot also gets its history floor, the highest id
+ * the bundle carried for it: what came with the history is not
+ * news (`fileHistoryRows`, docs/ux/second-device.md section 2).
  *
  * Returns the number of rows applied (across all groups), so
  * the orchestrator can surface a "+N messages" toast.
@@ -182,52 +191,37 @@ export async function applyHistoryBundleToLog(args: {
   const opened = wasm.openHistoryBundleStructured(args.secret, args.sealedBytes);
   const openedGroups = opened.groups() as unknown[];
 
-  // Read current log (may be null on a fresh joiner) +
-  // mutate per-group entries.
-  const existing =
-    (await loadMessageLog(args.accountIdB64, args.deviceKey)) ??
-    ({ version: 1, groups: {} } as MessageLogPayload);
-
-  // Mutable working copy.
-  const nextGroups: { [hex: string]: PersistedGroup } = { ...existing.groups };
-  let applied = 0;
-
+  const bundled: {
+    readonly hex: string;
+    readonly rows: readonly PersistedMessage[];
+    readonly newest: bigint | null;
+  }[] = [];
   for (const g of openedGroups) {
     const group = g as OpenedHistoryGroup;
-    const hex = bytesToHex(group.groupId);
-    const incomingMessages = group.messages() as unknown[];
-    const slot = nextGroups[hex] ?? ({ cursor: "0", messages: [] } as PersistedGroup);
-    const existingIds = new Set(slot.messages.map((m) => m.messageId));
-    const merged = [...slot.messages];
-    for (const m of incomingMessages) {
-      const msg = m as OpenedHistoryMessage;
-      const decoded = decodeMessagePlaceholder(wasm, msg);
+    const rows: PersistedMessage[] = [];
+    let newest: bigint | null = null;
+    for (const m of group.messages() as unknown[]) {
+      const decoded = decodeMessagePlaceholder(wasm, m as OpenedHistoryMessage);
       if (decoded === null) continue;
+      const id = safeBigInt(decoded.messageId);
+      if (id !== null && (newest === null || id > newest)) newest = id;
       // A sender older than this rule (or another client) may carry them.
       if (isBookkeepingSystemRow(decoded)) continue;
-      if (existingIds.has(decoded.messageId)) continue;
-      merged.push(decoded);
-      existingIds.add(decoded.messageId);
-      applied += 1;
+      rows.push(decoded);
     }
-    // Sort by parsed messageId so the timeline lands in order.
-    // Defensive on non-numeric strings — keep their relative
-    // order via a string compare fallback.
-    merged.sort((a, b) => {
-      const ai = safeBigInt(a.messageId);
-      const bi = safeBigInt(b.messageId);
-      if (ai !== null && bi !== null) return Number(ai - bi);
-      return a.messageId < b.messageId ? -1 : a.messageId > b.messageId ? 1 : 0;
-    });
-    nextGroups[hex] = {
-      cursor: slot.cursor,
-      messages: merged,
-    };
+    bundled.push({ hex: bytesToHex(group.groupId), rows, newest });
   }
 
-  await saveMessageLog(args.accountIdB64, args.deviceKey, {
-    version: existing.version,
-    groups: nextGroups,
+  let applied = 0;
+  await updateMessageLog(args.accountIdB64, args.deviceKey, (current) => {
+    const groups: { [hex: string]: PersistedGroup } = { ...(current?.groups ?? {}) };
+    applied = 0;
+    for (const { hex, rows, newest } of bundled) {
+      const filed = fileHistoryRows(groups[hex], rows, newest);
+      groups[hex] = filed.slot;
+      applied += filed.added;
+    }
+    return { version: current?.version ?? MESSAGE_LOG_VERSION, groups };
   });
   return applied;
 }

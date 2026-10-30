@@ -127,6 +127,7 @@ class AnonTokenPoolTest {
         waitMs: Long = 5_000,
         target: (AnonTokenContext) -> Int = ::anonPoolTargetFor,
         forgotten: Set<String> = emptySet(),
+        refillOnEmptyTake: Boolean = false,
     ) = AnonTokenPool(
         core = core,
         api = api,
@@ -140,6 +141,7 @@ class AnonTokenPoolTest {
         scheduleScope = backgroundScope,
         sleep = parked,
         random = { 0.0 },
+        refillOnEmptyTake = refillOnEmptyTake,
     )
 
     /** What a store on disk keeps, without the disk: one pool per account. */
@@ -625,6 +627,55 @@ class AnonTokenPoolTest {
         advanceUntilIdle()
         pool.take(lookup)
         assertEquals(2, core.issuesFor(lookup).size)
+    }
+
+    // ------------------------------------------------------------ test builds
+
+    @Test
+    fun aReleaseTakeOnAnEmptyContextStartsNoIssuance() = runTest {
+        val core = FakeCore()
+        val pool = pool(core, FakeApi(), { alice })
+        pool.bindSession()
+        settle()
+        repeat(lookupTarget) { pool.take(lookup) }
+        val issued = core.issuesFor(lookup).size
+        assertTrue(runCatching { pool.take(lookup) }.exceptionOrNull() is AnonTokenUnavailable)
+        advanceUntilIdle()
+        assertEquals(issued, core.issuesFor(lookup).size)
+    }
+
+    @Test
+    fun aTestBuildTakeOnAnEmptyContextStartsTheIssuanceAndWaitsForIt() = runTest {
+        val core = FakeCore()
+        val api = FakeApi()
+        val pool = pool(core, api, { alice }, refillOnEmptyTake = true)
+        pool.bindSession()
+        settle()
+        repeat(lookupTarget) { pool.take(lookup) }
+        val issued = core.issuesFor(lookup).size
+        api.gate = CompletableDeferred()
+        val taken = backgroundScope.async { pool.take(lookup) }
+        runCurrent()
+        assertTrue("it waits for the issuance it started", !taken.isCompleted)
+        assertEquals(issued + 1, core.issuesFor(lookup).size)
+        api.gate!!.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(lookup, taken.await().context)
+        assertEquals(lookupTarget - 1, pool.held(lookup))
+    }
+
+    @Test
+    fun aTestBuildTakeReportsWhatItsIssuanceMet() = runTest {
+        val core = FakeCore()
+        val api = FakeApi()
+        val pool = pool(core, api, { alice }, refillOnEmptyTake = true)
+        pool.bindSession()
+        settle()
+        repeat(lookupTarget) { pool.take(lookup) }
+        api.script(lookup, AnonIssueOutcome.QuotaExhausted(retryAfterSecs = 50))
+        val err = runCatching { pool.take(lookup) }.exceptionOrNull()
+        assertTrue(err is AnonTokenQuotaExhausted)
+        assertEquals(50L, (err as AnonTokenQuotaExhausted).retryAfterSecs)
     }
 
     @Test

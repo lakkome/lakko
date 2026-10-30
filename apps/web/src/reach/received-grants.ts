@@ -396,6 +396,29 @@ export function grantsInOrderForPerson(
   return out;
 }
 
+/**
+ * The `contact` grants held for one person, under every key they have had,
+ * the one of before a rotation last and only while its address stands (rule
+ * 6). What an answer to a contact request may use after the request's own
+ * `reply` grant: a key handed out for a group, a channel or a search has
+ * nothing to do with it.
+ */
+export function contactGrantsForPerson(store: ReceivedGrants, keysHex: readonly string[]): HeldGrant[] {
+  const out: HeldGrant[] = [];
+  const seen = new Set<string>();
+  const add = (g: HeldGrant | undefined): void => {
+    if (g === undefined || seen.has(g.wireB64)) return;
+    seen.add(g.wireB64);
+    out.push(g);
+  };
+  for (const hex of keysHex) add(store.people[hex]?.contact);
+  for (const hex of keysHex) {
+    const previous = store.people[hex]?.previous?.contact;
+    if (previous !== undefined && previous.addressHex === keysHex[0]) add(previous);
+  }
+  return out;
+}
+
 /** The kept previous grants filed under `accountHex` that are still good for
  *  `addressHex`, in the class order of {@link grantsInOrder}. */
 export function previousGrantsInOrder(
@@ -452,7 +475,9 @@ export function heldClassesForPerson(
 }
 
 /** Every kept committer-delegation envelope for adds of one person, under
- *  any key they have had, newest first. */
+ *  any key they have had, newest first. One envelope is listed once per group:
+ *  the bytes of an add with no delegation are the same for every group, and
+ *  which group it is for is what authorises the write. */
 export function delegationsForPerson(
   store: ReceivedGrants,
   keysHex: readonly string[],
@@ -461,8 +486,9 @@ export function delegationsForPerson(
   const seen = new Set<string>();
   for (const hex of keysHex) {
     for (const d of delegationsFor(store, hex)) {
-      if (seen.has(d.envelopeB64)) continue;
-      seen.add(d.envelopeB64);
+      const key = `${d.scopeHex ?? ""}|${d.envelopeB64}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       out.push(d);
     }
   }
@@ -473,6 +499,17 @@ export function delegationsForPerson(
  *  it holds a grant other than a bare `member` key. UX section 6.2. */
 export function canFind(store: ReceivedGrants, accountHex: string): boolean {
   return bestGrantFor(store, accountHex) !== null;
+}
+
+/**
+ * The sender a committer envelope from ANOTHER device of this account is filed
+ * under ({@link fileDelegations}). The account key alone is this device's own
+ * record of the envelope it posted (`openCommitterEnvelope` reads it back by
+ * that key to re-send it), and the other device's envelope, which may be for
+ * another group, must not take its place.
+ */
+export function otherDeviceSender(accountHex: string): string {
+  return `${accountHex}:other-device`;
 }
 
 /** Keep the newest committer-delegation envelope per (sender, added). */

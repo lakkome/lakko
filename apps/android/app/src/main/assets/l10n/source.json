@@ -33,7 +33,7 @@
       "security_critical": true
     },
     "auth.brand.foot": {
-      "text": "Open source. No phone number required.",
+      "text": "Communication your way. No phone number required.",
       "comment": "Small line at the bottom of the brand panel."
     },
     "auth.brand.tagline": {
@@ -4162,6 +4162,10 @@
       "text": "Accept",
       "comment": "Button that accepts an incoming contact request (the person becomes a trusted contact).",
       "security_critical": true
+    },
+    "contacts.request.accept_failed": {
+      "text": "Couldn't accept. Try again.",
+      "comment": "Shown under an incoming contact request when accepting it failed and nothing happened; the request stays and Accept works again."
     },
     "contacts.request.decline": {
       "text": "Decline",
@@ -9097,6 +9101,26 @@
       "text": "Applying",
       "comment": "Accessible name of the small spinner beside Who can find me while a change is being applied."
     },
+    "who_can_find_me.contacts.all": {
+      "text": "All my contacts",
+      "comment": "Choice under Contacts of my contacts: the contacts of every contact count.",
+      "security_critical": true
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "Only the ones I choose",
+      "comment": "Choice under Contacts of my contacts: only the contacts of the people switched on in the list count. Also the title of that list.",
+      "security_critical": true
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "Only the contacts of the people you choose ({chosen} of {total}).",
+      "comment": "Line under Contacts of my contacts when only chosen contacts count. {chosen} is how many are on, {total} how many contacts the person has.",
+      "security_critical": true
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "Now only the contacts you choose. Change in {privacy}.",
+      "comment": "Shown once after turning off Their contacts can find me while all contacts counted: the setting switched to chosen ones. {privacy} is a link to Settings > Privacy and reads Privacy.",
+      "security_critical": true
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "Contacts of my contacts",
       "comment": "Switch under Some people: people the person's contacts have added can find them.",
@@ -9154,6 +9178,14 @@
     "who_can_find_me.list.choose": {
       "text": "Choose groups and channels",
       "comment": "iOS row under 'Only the ones I choose' in Settings > Privacy > Who can find me; opens the list of groups and channels to switch on one by one."
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "You have no contacts yet.",
+      "comment": "Shown in the list of contacts for Who can find me when the person has none."
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "Search contacts",
+      "comment": "Placeholder and accessible name of the search field in the contacts list of Who can find me."
     },
     "who_can_find_me.list.empty": {
       "text": "You're not in any groups or channels yet.",
@@ -9227,6 +9259,11 @@
     "who_can_find_me.status.offline": {
       "text": "Will apply when you're back online.",
       "comment": "Status line on Who can find me when a change was made offline."
+    },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "Their contacts can find me",
+      "comment": "Switch on a contact's screen: people this contact has added can find the person by username or name.",
+      "security_critical": true
     },
     "who_can_find_me.title": {
       "text": "Who can find me",

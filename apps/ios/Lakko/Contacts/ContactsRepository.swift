@@ -138,7 +138,13 @@ public final class ContactsRepository: ObservableObject {
     /// live in `@StateObject` slots at the `LakkoApp` scope and
     /// outlive any single view tree, so a `weak` reference is
     /// safe.
-    public weak var chatRepository: ChatRepository?
+    public weak var chatRepository: ChatRepository? {
+        didSet {
+            chatRepository?.owedAnswerAck = { [weak self] messageId in
+                await self?.ackOwedAnswer(requestMessageId: messageId)
+            }
+        }
+    }
 
     /// ADR-0079 section 4 — the synced link-record register: the verdict on
     /// a request's link answer, the use count, the revocations, and (reworked
@@ -646,8 +652,9 @@ public final class ContactsRepository: ObservableObject {
                     // here are Welcomes that were never this device's to open.
                     if let chatRepository = chatRepository {
                         do {
-                            _ = try await chatRepository
+                            let joined = try await chatRepository
                                 .joinGroupFromWelcome(welcomeBytes: welcomeBytes)
+                            noteAnsweredByWelcome(groupIdHex: joined)
                             // ADR-0079 section 5 — a one-to-one with a person
                             // added through their link: what was written to
                             // them goes out now, in order.
@@ -1038,6 +1045,62 @@ public final class ContactsRepository: ObservableObject {
 
     // MARK: - Accept / decline (local-state mutations)
 
+    /// Accept a request: found the one-to-one, file the contact, ack.
+    /// ``ContactAccept`` is the order and the failure rule.
+    public func acceptIncomingRequest(_ request: IncomingContactRequest) async -> ContactAccept.Outcome {
+        let bound = binding.capture()
+        return await ContactAccept.run(request: request, ports: ContactAccept.Ports(
+            found: { [weak self] request, accountId in
+                guard let chat = self?.chatRepository else { throw ContactAccept.Unavailable() }
+                let founding = try await chat.foundOneToOneAnswering(
+                    requestMessageId: request.messageId, recipientAccountId: accountId,
+                    recipientSignaturePubkey: request.fromPubkey)
+                try bound.require()
+                return founding
+            },
+            file: { [weak self] messageId, groupIdHex in
+                self?.acceptContactRequest(messageId: messageId, groupIdHex: groupIdHex)
+            },
+            ack: { [weak self] request in
+                _ = try await self?.sendContactAck(request: request)
+            }))
+    }
+
+    /// The Welcome of an accept landed late: its ack goes out now.
+    func ackOwedAnswer(requestMessageId: Int64) async {
+        guard let contact = state.accepted.first(where: { $0.request.messageId == requestMessageId }) else {
+            return
+        }
+        do {
+            _ = try await sendContactAck(request: contact.request)
+        } catch {
+            NSLog("contact accept: the ack was not delivered: %@", ContactAccept.reason(of: error))
+        }
+    }
+
+    /// A Welcome joined `groupIdHex`. When it is the one-to-one with someone
+    /// this account asked, the request was answered, whether or not the ack
+    /// ever arrives: their row under Sent goes and they are a contact. The
+    /// reply key stays until the ack, which is written with it.
+    private func noteAnsweredByWelcome(groupIdHex: String) {
+        guard let peer = chatRepository?.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) else { return }
+        let answered = SentRequests.answered(
+            byPeer: peer, in: state.sent,
+            keyOfAccount: { accountIdB64 in
+                PeerPinStore().readPin(accountIdB64: accountIdB64)
+                    .flatMap { base64Decode($0.pinnedSignaturePubkeyB64) }
+            },
+            current: { ReachCenter.shared.currentAccountKey(of: $0) })
+        guard answered.remaining.count != state.sent.count else { return }
+        state = state.with(sent: answered.remaining)
+        adoptOneToOnePeer(
+            signatureKey: peer,
+            accountId: answered.accountIdB64.flatMap(base64Decode),
+            groupIdHex: groupIdHex,
+            nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
+            createdAt: ISO8601DateFormatter().string(from: Date()))
+    }
+
     /// Mark an incoming ContactRequest as accepted locally.
     ///
     /// Moves the matching pending row to ``ContactsState/accepted``
@@ -1275,24 +1338,26 @@ public final class ContactsRepository: ObservableObject {
         }
         let client = clientFactory()
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
+        // The answer to a request goes out under its reply grant, then a
+        // contact grant, and nothing else (``ReachCenter/answerPlans(toRequester:)``).
         // ADR-0074 section 3.5a rule 6 — a refused ack re-checks the
         // requester's address once (the client derives the mailbox from the
         // same proven-predecessor store the re-check writes).
         return try await RefusedMailboxWrite.write(
-            resolve: {
-                AckAttempt(plan: ReachCenter.shared.writePlan(toAccountKey: request.fromPubkey))
-            },
+            resolve: { ReachCenter.shared.answerPlans(toRequester: request.fromPubkey) },
             recheck: {
                 await PersonAddressRecheck.recheck(
                     accountKey: request.fromPubkey, accountIdHint: request.fromAccountId)
             },
-            publish: { attempt in
-                try await client.sendContactAck(
-                    accepterSigningSeed: identity.ed25519Seed(),
-                    accepterAccountId: secrets.accountId,
-                    accepterX25519Pubkey: identity.x25519PublicKey(),
-                    originalRequest: request,
-                    plan: attempt.plan)
+            publish: { plans in
+                try await RefusedMailboxWrite.tryingPlans(plans) { plan in
+                    try await client.sendContactAck(
+                        accepterSigningSeed: identity.ed25519Seed(),
+                        accepterAccountId: secrets.accountId,
+                        accepterX25519Pubkey: identity.x25519PublicKey(),
+                        originalRequest: request,
+                        plan: plan)
+                }
             })
     }
 
@@ -1306,17 +1371,17 @@ public final class ContactsRepository: ObservableObject {
         let client = clientFactory()
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
         try await RefusedMailboxWrite.write(
-            resolve: {
-                AckAttempt(plan: ReachCenter.shared.writePlan(toAccountKey: request.fromPubkey))
-            },
+            resolve: { ReachCenter.shared.answerPlans(toRequester: request.fromPubkey) },
             recheck: {
                 await PersonAddressRecheck.recheck(
                     accountKey: request.fromPubkey, accountIdHint: request.fromAccountId)
             },
-            publish: { attempt in
-                try await client.sendLinkRefusal(
-                    inviterSigningSeed: identity.ed25519Seed(), linkId: linkId,
-                    originalRequest: request, plan: attempt.plan)
+            publish: { plans in
+                try await RefusedMailboxWrite.tryingPlans(plans) { plan in
+                    try await client.sendLinkRefusal(
+                        inviterSigningSeed: identity.ed25519Seed(), linkId: linkId,
+                        originalRequest: request, plan: plan)
+                }
             })
     }
 
@@ -1338,11 +1403,6 @@ public final class ContactsRepository: ObservableObject {
             ReachCenter.shared.retireReplies(purpose: ReplyPurpose.contact(accountId))
         }
         return true
-    }
-
-    /// One attempt at an ack: who it is addressed to and how it is signed.
-    private struct AckAttempt: Equatable {
-        let plan: MailboxWritePlan?
     }
 
     /// Compute the Signal-style safety number (Phase 1.9b3 —
@@ -2705,6 +2765,72 @@ public struct ContactsState: Equatable {
             requiresReauth: requiresReauth ?? self.requiresReauth,
             lastError: lastError
         )
+    }
+}
+
+/// Accepting a contact request: the order and the failure rule, over injected
+/// steps. Nothing is filed until the group stands, so a request whose accept
+/// failed stays listed and Accept works again; there is never an accepted
+/// contact without a chat. The ack follows only after the Welcome landed.
+public enum ContactAccept {
+
+    public enum Outcome: Equatable {
+        /// The Welcome landed; the contact is filed with its chat.
+        case accepted(groupIdHex: String)
+        /// The group stands and the requester's Welcome is owed: the contact
+        /// is filed with its chat, and the ack waits for the Welcome.
+        case welcomeOwed(groupIdHex: String)
+        /// Nothing was delivered and nothing stands: the request stays.
+        case failed
+    }
+
+    /// No chat bridge is wired.
+    public struct Unavailable: Error {}
+
+    struct Ports {
+        var found: @MainActor (_ request: IncomingContactRequest, _ accountId: Data) async throws -> AnswerFounding
+        var file: @MainActor (_ messageId: Int64, _ groupIdHex: String) -> Void
+        var ack: @MainActor (_ request: IncomingContactRequest) async throws -> Void
+    }
+
+    /// A fixed reason for a log line: never an identifier, never error text
+    /// (a DS error names the mailbox).
+    static func reason(of error: Error) -> String {
+        if error is MailboxUnknown { return "no-mailbox" }
+        if error is Unavailable { return "no-chat" }
+        if RefusedMailboxWrite.isRefusal(error) { return "refused" }
+        if case .wrapped(_, let inner)? = error as? ChatError { return reason(of: inner) }
+        if case .wrapped(let inner)? = error as? ContactsError { return reason(of: inner) }
+        return "failed"
+    }
+
+    @MainActor
+    static func run(request: IncomingContactRequest, ports: Ports) async -> Outcome {
+        guard let accountId = request.fromAccountId else {
+            NSLog("contact accept failed: no-account-id")
+            return .failed
+        }
+        let founding: AnswerFounding
+        do {
+            founding = try await ports.found(request, accountId)
+        } catch {
+            NSLog("contact accept failed: %@", reason(of: error))
+            return .failed
+        }
+        ports.file(request.messageId, founding.groupIdHex)
+        switch founding {
+        case .welcomeOwed(let groupIdHex):
+            return .welcomeOwed(groupIdHex: groupIdHex)
+        case .delivered(let groupIdHex):
+            do {
+                try await ports.ack(request)
+            } catch {
+                // The Welcome landed: the chat stands and the requester sees
+                // it. Only their reply key stays open.
+                NSLog("contact accept: the ack was not delivered: %@", reason(of: error))
+            }
+            return .accepted(groupIdHex: groupIdHex)
+        }
     }
 }
 

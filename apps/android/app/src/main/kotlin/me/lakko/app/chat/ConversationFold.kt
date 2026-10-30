@@ -76,15 +76,18 @@ public fun foldConversations(threads: List<ChatThread>, lineage: Lineage): List<
         }
         val history = ArrayList<ChatMessage>()
         var unread = head.localUnread
+        var syncedThrough = head.syncedThrough
         older.forEachIndexed { index, hex ->
             val segment = byHex[hex] ?: return@forEachIndexed
             val distance = older.size - index
             for (m in segment.messages) history += historyRowOf(m, hex, distance)
             unread += segment.localUnread
+            syncedThrough = syncedThrough + segment.syncedThrough
         }
         head.copy(
             messages = history + head.messages,
             localUnread = unread,
+            syncedThrough = syncedThrough,
             conversationHex = plan.conversationHex,
             olderSegments = older,
             segmentIndex = headSegment,
@@ -135,6 +138,20 @@ public fun rowPastReadPosition(thread: ChatThread, message: ChatMessage, positio
         SegmentRead.All -> false
         is SegmentRead.UpTo -> at.messageId > read.messageId
     }
+}
+
+/**
+ * `docs/ux/second-device.md` section 2, "History is not news": whether a row
+ * of [thread] came with the pairing history, at or below its segment's floor
+ * ([ChatThread.syncedThrough]). Such a row is never unread on this device,
+ * whatever the read position says. DS ids restart in every group, so a row is
+ * judged by its own segment's floor and its id in that segment.
+ */
+public fun rowInPairingHistory(thread: ChatThread, message: ChatMessage): Boolean {
+    val segment = message.historyOf ?: thread.groupIdHex
+    val floor = thread.syncedThrough[segment.lowercase()] ?: return false
+    val id = if (message.historyOf != null) message.historyMessageId else message.messageId
+    return id in 1..floor
 }
 
 /** The folded thread a group id (of any held segment) belongs to. */

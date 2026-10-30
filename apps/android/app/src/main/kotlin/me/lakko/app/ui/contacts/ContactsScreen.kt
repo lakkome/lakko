@@ -65,6 +65,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -301,6 +303,8 @@ public fun ContactsScreen(
                         RequestRow(
                             req = req,
                             name = nameVersion.let { directory.resolve(req.fromPubkey) },
+                            accepting = req.messageId in state.acceptingIds,
+                            acceptFailed = req.messageId in state.acceptFailedIds,
                             onAccept = { viewModel.onAcceptClicked(req.messageId) },
                             onDecline = { viewModel.onDeclineClicked(req.messageId) },
                         )
@@ -316,7 +320,9 @@ public fun ContactsScreen(
                         )
                     }
                     if (sentExpanded) {
-                        items(state.sent.distinctBy { it.messageId }, key = { "sent-${it.messageId}" }) { s -> SentRow(s) }
+                        items(state.sent.distinctBy { it.messageId }, key = { "sent-${it.messageId}" }) { s ->
+                            SentRow(s, onDismiss = { viewModel.onDismissSentClicked(s) })
+                        }
                     }
                 }
 
@@ -504,6 +510,8 @@ private fun ContactRow(row: ContactRowModel, onClick: () -> Unit) {
 private fun RequestRow(
     req: IncomingContactRequest,
     name: ResolvedName,
+    accepting: Boolean,
+    acceptFailed: Boolean,
     onAccept: () -> Unit,
     onDecline: () -> Unit,
 ) {
@@ -544,8 +552,17 @@ private fun RequestRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.padding(start = 52.dp),
         ) {
-            Button(onClick = onAccept) { Text(t("contacts.request.accept")) }
-            OutlinedButton(onClick = onDecline) { Text(t("contacts.request.decline")) }
+            Button(onClick = onAccept, enabled = !accepting) { Text(t("contacts.request.accept")) }
+            OutlinedButton(onClick = onDecline, enabled = !accepting) { Text(t("contacts.request.decline")) }
+        }
+        if (acceptFailed) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = t("contacts.request.accept_failed"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(start = 52.dp),
+            )
         }
     }
 }
@@ -574,7 +591,7 @@ private fun SentHeader(count: Int, expanded: Boolean, onToggle: () -> Unit) {
 }
 
 @Composable
-private fun SentRow(s: SentContactRequest) {
+private fun SentRow(s: SentContactRequest, onDismiss: () -> Unit) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
@@ -588,16 +605,19 @@ private fun SentRow(s: SentContactRequest) {
             personKey = me.lakko.app.ui.components.personKeyBytes(s.recipientKeyB64),
         )
         Spacer(Modifier.width(12.dp))
-        Text(
-            "@${s.recipientUsername}",
-            style = MaterialTheme.typography.bodyLarge,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            t("contacts.list.sent_waiting"),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text("@${s.recipientUsername}", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                t("contacts.list.sent_waiting"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        val dismissLabel = t("contacts.list.sent_dismiss")
+        TextButton(
+            onClick = onDismiss,
+            modifier = Modifier.semantics { contentDescription = dismissLabel },
+        ) { Text(t("common.dismiss")) }
     }
 }
 

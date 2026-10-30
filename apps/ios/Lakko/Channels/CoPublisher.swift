@@ -415,7 +415,7 @@ public enum CoPublisher {
     /// mailbox is the verified one the reply grant's binding names; the
     /// Welcome is one sealed row of kind `welcomeRendezvous`.
     static func deliverWelcome(ds: DsClient, welcome: Data, joinerKey: Data) async throws {
-        let resolve: () async throws -> MailboxWriteAttempt = {
+        let resolve: () async throws -> MailboxWritePlan = {
             let plan = await MainActor.run {
                 ReachCenter.shared.writePlan(toAccountKey: joinerKey)
             }
@@ -423,13 +423,14 @@ public enum CoPublisher {
                 NSLog("ADR-0078: no verified mailbox for the co-publisher; its Welcome was not written")
                 throw MailboxUnknown()
             }
-            return MailboxWriteAttempt(target: plan.target, auth: plan.auth)
+            return plan
         }
-        func publish(_ attempt: MailboxWriteAttempt) async throws {
-            _ = try await ds.publishMailbox(
-                pseudonym: attempt.target.address,
-                payload: try attempt.target.seal(kind: .welcomeRendezvous, body: welcome),
-                writeAuth: attempt.auth)
+        func publish(_ plan: MailboxWritePlan) async throws {
+            let row = try plan.target.seal(kind: .welcomeRendezvous, body: welcome)
+            _ = try await RefusedMailboxWrite.tryingCandidates(plan.candidates) { auth in
+                try await ds.publishMailbox(
+                    pseudonym: plan.target.address, payload: row, writeAuth: auth)
+            }
         }
         let first = try await resolve()
         do {

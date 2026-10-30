@@ -218,6 +218,33 @@ class ContactsInboxStoreTest {
     )
 
     @Test
+    fun dismissing_a_person_takes_every_request_to_them_and_nobody_else() {
+        val first = sentTo(5)
+        val again = sentTo(5).copy(messageId = 2L)
+        val other = sentTo(6)
+        assertEquals(
+            listOf(other),
+            withoutSentTo(listOf(first, again, other), first.recipientAccountIdB64),
+        )
+    }
+
+    @Test
+    fun a_welcome_from_the_person_asked_retires_the_sent_request_with_no_ack() {
+        val key = java.util.Base64.getEncoder().encodeToString(ByteArray(32) { 5 })
+        val asked = sentTo(5).copy(recipientKeyB64 = key)
+        val other = sentTo(6).copy(recipientKeyB64 = "b3RoZXI=")
+        val unknown = sentTo(7)
+        assertEquals(listOf(other, unknown), withoutSentAnsweredBy(listOf(asked, other, unknown), setOf(key)))
+        assertEquals(listOf(asked), withoutSentAnsweredBy(listOf(asked), emptySet()))
+    }
+
+    @Test
+    fun the_contacts_badge_counts_each_waiting_request_once_and_nothing_when_none_wait() {
+        assertEquals(0, waitingRequestCount(emptyList()))
+        assertEquals(2, waitingRequestCount(listOf(request(1, 1), request(2, 2), request(2, 2))))
+    }
+
+    @Test
     fun an_ack_from_a_stranger_adds_a_contact_with_their_account_id_and_retires_the_sent_request() {
         val applied = applyContactAcks(
             accepted = listOf(accepted(1)),

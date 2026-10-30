@@ -113,6 +113,10 @@ public object DeviceGroupCommits {
                 }
             } catch (cause: Throwable) {
                 android.util.Log.w("DeviceGroupCommits", "DeviceGroup change announce failed (${cause.javaClass.simpleName})")
+            } finally {
+                // The snapshot is current (`makeCurrent` ran first), whether
+                // or not the sync runtime is up to reopen it.
+                DeviceRosterChanges.note()
             }
         }
 

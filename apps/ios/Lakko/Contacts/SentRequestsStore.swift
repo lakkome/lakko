@@ -103,6 +103,21 @@ public enum SentRequests {
         sent.filter { $0.recipientAccountIdB64 != request.recipientAccountIdB64 } + [request]
     }
 
+    /// The list after a Welcome made a one-to-one with `peer`: without the row
+    /// of the person holding that key, under any of their keys, and that
+    /// row's account id. `keyOfAccount` is the key this device pinned for an
+    /// account it wrote to, `current` the person's current key.
+    public static func answered(
+        byPeer peer: Data, in sent: [SentContactRequest],
+        keyOfAccount: (String) -> Data?, current: (Data) -> Data
+    ) -> (remaining: [SentContactRequest], accountIdB64: String?) {
+        let person = current(peer)
+        func matches(_ row: SentContactRequest) -> Bool {
+            keyOfAccount(row.recipientAccountIdB64).map(current) == person
+        }
+        return (sent.filter { !matches($0) }, sent.first(where: matches)?.recipientAccountIdB64)
+    }
+
     /// The list after the person holding `recipientAccountIdB64` answered.
     public static func answered(
         recipientAccountIdB64: String, in sent: [SentContactRequest]

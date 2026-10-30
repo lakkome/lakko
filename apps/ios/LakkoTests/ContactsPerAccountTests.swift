@@ -157,6 +157,29 @@ final class ContactsPerAccountTests: XCTestCase {
             pinStore: PeerPinStore(defaults: defaults, ownerAccountIdB64: bob)).contacts.isEmpty)
     }
 
+    // MARK: - A failed accept
+
+    /// Nothing delivered and no group: the request stays listed, no contact
+    /// without a chat, and Accept works again.
+    func testAFailedAcceptLeavesTheRequestListed() async {
+        let request = contact(7, byte: 0xA1).request
+        ContactsInboxStore(defaults: defaults).save(
+            PersistedContactsInbox(cursor: 0, pending: [request]), accountIdB64: alice)
+        let session = CurrentValueSubject<String?, Never>(alice)
+        let repository = makeRepository(session)
+        await Task.yield()
+        XCTAssertEqual(repository.state.pending.map(\.messageId), [7])
+
+        let first = await repository.acceptIncomingRequest(request)
+        XCTAssertEqual(first, .failed)
+        XCTAssertEqual(repository.state.pending.map(\.messageId), [7])
+        XCTAssertTrue(repository.state.accepted.isEmpty)
+
+        let again = await repository.acceptIncomingRequest(request)
+        XCTAssertEqual(again, .failed)
+        XCTAssertEqual(repository.state.pending.map(\.messageId), [7])
+    }
+
     // MARK: - Fixtures
 
     private func makeRepository(_ session: CurrentValueSubject<String?, Never>) -> ContactsRepository {

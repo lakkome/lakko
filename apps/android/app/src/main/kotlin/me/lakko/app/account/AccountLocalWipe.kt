@@ -209,6 +209,9 @@ public object AccountLocalWipe {
         Step("pending-requests") { ctx, acct ->
             me.lakko.app.chat.SharedPrefsPendingRequestStore(ctx).clearForAccount(acct)
         },
+        Step("sent-committer-envelopes") { ctx, acct ->
+            me.lakko.app.chat.SharedPrefsSentCommitterEnvelopeStore(ctx).clearForAccount(acct)
+        },
         Step("unapplied-requests") { ctx, acct ->
             me.lakko.app.chat.SharedPrefsUnappliedRequestStore(ctx).clearForAccount(acct)
         },

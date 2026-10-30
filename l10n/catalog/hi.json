@@ -31,7 +31,7 @@
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "ओपन सोर्स। फ़ोन नंबर की ज़रूरत नहीं।",
+      "text": "बातचीत आपके तरीके से। फ़ोन नंबर की ज़रूरत नहीं।",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -3980,6 +3980,10 @@
     },
     "contacts.request.accept": {
       "text": "स्वीकार करें",
+      "status": "machine"
+    },
+    "contacts.request.accept_failed": {
+      "text": "स्वीकार नहीं हो सका। फिर से कोशिश करें।",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -8390,6 +8394,22 @@
       "text": "लागू किया जा रहा है",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "मेरे सभी संपर्क",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "केवल जिन्हें मैं चुनूँ",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "केवल आपके चुने हुए लोगों के संपर्क ({chosen} / {total})।",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "अब केवल आपके चुने हुए संपर्क। {privacy} में बदलें।",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "मेरे संपर्कों के संपर्क",
       "status": "machine"
@@ -8436,6 +8456,14 @@
     },
     "who_can_find_me.list.choose": {
       "text": "ग्रुप और चैनल चुनें",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "आपके अभी कोई संपर्क नहीं हैं।",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "संपर्क खोजें",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -8500,6 +8528,10 @@
     },
     "who_can_find_me.status.offline": {
       "text": "आपके फिर से ऑनलाइन होने पर लागू होगा।",
+      "status": "machine"
+    },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "इनके संपर्क मुझे ढूँढ सकते हैं",
       "status": "machine"
     },
     "who_can_find_me.title": {

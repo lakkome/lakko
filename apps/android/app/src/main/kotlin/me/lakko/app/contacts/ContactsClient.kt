@@ -207,7 +207,7 @@ public class ContactsClient(
          *  mailbox goes (the verified mailbox key) and what authorises it,
          *  by their signature key. `null` (or a `null` answer) writes nothing:
          *  the request is refused with no mailbox known. */
-        reachFor: ((recipientSignaturePubkey: ByteArray) -> MailboxDest?)? = null,
+        reachFor: ((recipientSignaturePubkey: ByteArray) -> List<() -> MailboxDest?>)? = null,
     ): SendResult {
         // 1. Resolve the username.
         val lookup = try {
@@ -248,7 +248,7 @@ public class ContactsClient(
             introMessage = introMessage,
             senderProfile = senderProfile,
             replyGrant = mintReply?.invoke(recipientSignaturePub),
-            dest = reachFor?.invoke(recipientSignaturePub),
+            dests = reachFor?.invoke(recipientSignaturePub).orEmpty(),
         )
 
         return SendResult(
@@ -666,6 +666,9 @@ public class ContactsClient(
          *  through search), its binding already verified against the
          *  recipient's account key. `null` writes nothing. */
         reach: MailboxDest? = null,
+        /** The destinations after [reach], tried in turn: a `401` moves on to
+         *  the next one (ADR-0050 section 2.5a item 7). */
+        reachCandidates: List<() -> MailboxDest?> = emptyList(),
         /** ADR-0079 section 2 — the answer to the recipient's own `/i/` link
          *  this request is sent through, so their device accepts it by itself.
          *  SECRET. `null` for every other request. */
@@ -697,7 +700,7 @@ public class ContactsClient(
             introMessage = introMessage,
             senderProfile = senderProfile,
             replyGrant = replyGrant,
-            dest = reach,
+            dests = listOfNotNull(reach?.let { held -> { held } }) + reachCandidates,
             linkAnswer = linkAnswer,
         )
         return SendResult(
@@ -767,7 +770,7 @@ public class ContactsClient(
         introMessage: ByteArray,
         senderProfile: FfiProfile? = null,
         mintReply: (suspend (recipientSignaturePubkey: ByteArray) -> FfiReachGrant?)? = null,
-        reachFor: ((recipientSignaturePubkey: ByteArray) -> MailboxDest?)? = null,
+        reachFor: ((recipientSignaturePubkey: ByteArray) -> List<() -> MailboxDest?>)? = null,
     ): SendResult {
         val (signaturePub, x25519Pub) = resolveVerifiedBundle(recipientAccountId)
         val publish = composeAndPublishContactRequest(
@@ -779,7 +782,7 @@ public class ContactsClient(
             introMessage = introMessage,
             senderProfile = senderProfile,
             replyGrant = mintReply?.invoke(signaturePub),
-            dest = reachFor?.invoke(signaturePub),
+            dests = reachFor?.invoke(signaturePub).orEmpty(),
         )
         return SendResult(
             recipientUsername = "",
@@ -1310,7 +1313,8 @@ public class ContactsClient(
         introMessage: ByteArray,
         senderProfile: FfiProfile?,
         replyGrant: FfiReachGrant?,
-        dest: MailboxDest?,
+        /** Where the write may go, in turn; a `401` moves on to the next. */
+        dests: List<() -> MailboxDest?>,
         linkAnswer: FfiLinkAnswer? = null,
     ): PublishedRequest {
         // ADR-0074 3.5a rule 1 - resolve before addressing. A request is
@@ -1327,9 +1331,6 @@ public class ContactsClient(
                 IllegalStateException("the recipient's account keys were rotated; fetch their current keys"),
             )
         }
-        // ADR-0078: no verified mailbox key, no write.
-        val target = dest ?: throw ContactsError.wrap(MailboxUnknown())
-
         // Sender's from_pseudonym: 32 random bytes (routing metadata only).
         val senderPseudonym = ByteArray(FROM_PSEUDONYM_LEN).also { java.security.SecureRandom().nextBytes(it) }
 
@@ -1369,23 +1370,40 @@ public class ContactsClient(
             throw ContactsError.wrap(e)
         }
 
-        val sealed = try {
-            mailboxCrypto.sealFor(target, MailboxRowKind.CONTACT_REQUEST, wireBytes)
-        } catch (e: FfiException) {
-            throw ContactsError.wrap(e)
+        val write: suspend (MailboxDest) -> me.lakko.app.ds.PublishResult = { target ->
+            val sealed = try {
+                mailboxCrypto.sealFor(target, MailboxRowKind.CONTACT_REQUEST, wireBytes)
+            } catch (e: FfiException) {
+                throw ContactsError.wrap(e)
+            }
+            try {
+                ds.publishMailbox(sealed.address, sealed.row, reach = target.auth)
+            } catch (e: DsReachRefusedError) {
+                throw ContactsError.reachRefused(e)
+            } catch (e: DsHttpError) {
+                throw ContactsError.wrap(e)
+            } catch (e: DsNetworkError) {
+                throw ContactsError.wrap(e)
+            } catch (e: DsClientArgError) {
+                throw ContactsError.wrap(e)
+            }
         }
-        val publish = try {
-            ds.publishMailbox(sealed.address, sealed.row, reach = target.auth)
-        } catch (e: DsReachRefusedError) {
-            throw ContactsError.reachRefused(e)
-        } catch (e: DsHttpError) {
-            throw ContactsError.wrap(e)
-        } catch (e: DsNetworkError) {
-            throw ContactsError.wrap(e)
-        } catch (e: DsClientArgError) {
-            throw ContactsError.wrap(e)
+        val publish = when (
+            val outcome = me.lakko.app.reach.firstAcceptedWrite(dests, write, ::isMailboxRefusal)
+        ) {
+            is me.lakko.app.reach.SignedWriteOutcome.Written -> outcome.result
+            // ADR-0078: no verified mailbox key, no write.
+            is me.lakko.app.reach.SignedWriteOutcome.Exhausted ->
+                throw outcome.lastRefusal ?: ContactsError.wrap(MailboxUnknown())
         }
         return PublishedRequest(messageId = publish.id, createdAt = publish.createdAt)
+    }
+
+    /** Whether [dest]'s grant opens its mailbox. No token is spent; a network
+     *  failure throws, it is never a no. */
+    public suspend fun checkReach(dest: MailboxDest): Boolean {
+        val auth = dest.auth ?: return false
+        return ds.checkReach(mailboxCrypto.address(dest.mailboxPk), auth.signer)
     }
 
     // -----------------------------------------------------------------
