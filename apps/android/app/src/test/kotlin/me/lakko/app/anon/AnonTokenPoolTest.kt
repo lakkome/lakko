@@ -198,6 +198,7 @@ class AnonTokenPoolTest {
                 AnonTokenContext.BLOB_READ to 4,
                 AnonTokenContext.MAILBOX_WRITE to 4,
                 AnonTokenContext.CALL_JOIN to 4,
+                AnonTokenContext.CIRCLE_CLAIM to 2,
             ),
             firstBatch,
         )
@@ -302,6 +303,7 @@ class AnonTokenPoolTest {
                 "blob-read",
                 "mailbox-write",
                 "call-join",
+                "circle-claim",
             ),
             AnonTokenContext.entries.map { it.wire },
         )

@@ -290,4 +290,38 @@ final class ContactsPresentationTests: XCTestCase {
         XCTAssertFalse(copy.contains("registered"))
         XCTAssertFalse(copy.contains("anna"))
     }
+
+    // MARK: - A row under Sent
+
+    private func sentRequest(username: String, name: String?) -> SentContactRequest {
+        SentContactRequest(
+            recipientUsername: username, recipientAccountIdB64: "AA==", messageId: 1, createdAt: "",
+            recipientName: name)
+    }
+
+    func testASentRowShowsTheNameAsFoundWithTheUsernameUnderIt() {
+        let row = ContactListPresentation.sentRow(sentRequest(username: "qa_1", name: "Qa Ann"))
+        XCTAssertEqual(row.name, "Qa Ann")
+        XCTAssertEqual(row.username, "@qa_1")
+    }
+
+    func testASentRowWithoutANameFallsBackToTheUsernameOnce() {
+        let bare = ContactListPresentation.sentRow(sentRequest(username: "qa_1", name: nil))
+        XCTAssertEqual(bare.name, "@qa_1")
+        XCTAssertNil(bare.username)
+        let same = ContactListPresentation.sentRow(sentRequest(username: "qa_1", name: "@qa_1"))
+        XCTAssertEqual(same.name, "@qa_1")
+        XCTAssertNil(same.username)
+        let neither = ContactListPresentation.sentRow(sentRequest(username: "", name: nil))
+        XCTAssertNil(neither.name)
+        XCTAssertNil(neither.username)
+    }
+
+    func testARowStoredBeforeTheNameWasKeptStillDecodes() throws {
+        let json = #"[{"recipientUsername":"a","recipientAccountIdB64":"AA==","messageId":1,"createdAt":"","intro":""}]"#
+        let rows = SentRequests.decode(Data(json.utf8))
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertNil(rows[0].recipientName)
+        XCTAssertNil(rows[0].recipientKeyB64)
+    }
 }

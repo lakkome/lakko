@@ -236,6 +236,12 @@ public fun ChatListScreen(
     val visible = remember(rows, query) {
         rows.filter { conversationRowMatchesQuery(query, it.title, it.preview) }
     }
+    // The people whose one-to-one is among the matching conversations.
+    val visibleChatPeers = remember(visible) {
+        visible.mapNotNullTo(HashSet()) { row ->
+            row.peerKeyB64.takeIf { row.kind == ConversationRowKind.CHAT }
+        }
+    }
     val synchronizing = remember(state) { repository.isSynchronizing() }
 
     // docs/ux/chat-folders.md — the person's folders, in their order.
@@ -440,6 +446,7 @@ public fun ChatListScreen(
                                         query = ""
                                         onOpenContact(key)
                                     },
+                                    chatPeersB64 = visibleChatPeers,
                                 )
                             }
                         } else {

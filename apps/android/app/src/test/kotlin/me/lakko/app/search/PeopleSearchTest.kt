@@ -33,6 +33,7 @@ class PeopleSearchTest {
         val reachChecks = mutableListOf<String>()
         val verifiedWith = mutableListOf<ByteArray>()
         val counts = mutableListOf<SearchCounts>()
+        var usernameRounds = 0
     }
 
     /** A configurable fake. Everything the test does not set answers
@@ -50,6 +51,7 @@ class PeopleSearchTest {
         var reachThrows: Boolean = false,
         var certificateValid: Boolean = true,
         var nameLookupThrows: Throwable? = null,
+        var usernameOprfFails: Throwable? = null,
     ) : PeopleSearchDeps {
         override fun canonicalUsername(typed: String): String? =
             typed.trim().trimStart('@').lowercase().takeIf { it.matches(Regex("[a-z0-9_]{3,32}")) }
@@ -64,7 +66,11 @@ class PeopleSearchTest {
 
         override suspend fun lookupChannel(handle: String): String? = null
 
-        override suspend fun usernameOprf(username: String) = OprfResult(output("u:$username"), lookup("u:$username"))
+        override suspend fun usernameOprf(username: String): OprfResult {
+            usernameOprfFails?.let { throw it }
+            rec.usernameRounds += 1
+            return OprfResult(output("u:$username"), lookup("u:$username"))
+        }
 
         override suspend fun accountOfUsernameLookupKey(lookupKey: ByteArray): LookupHit? {
             rec.usernameLookups += lookupKey
@@ -332,5 +338,117 @@ class PeopleSearchTest {
         assertEquals("@anna", p.name)
         assertEquals("anna", p.username)
         assertEquals(PersonReach.OPEN, p.reach)
+    }
+
+    // --- a name match shows the username a username match shows ---------------
+
+    private val certificate = "cert".toByteArray()
+
+    private fun everyone(username: String?, cert: ByteArray? = certificate, key: ByteArray = aliceKey, id: ByteArray = aliceAccount) =
+        Fake(
+            nameHits = listOf(LookupHit(id, "rec".toByteArray())),
+            bundleKeys = mapOf(searchHex(id) to key),
+            opened = mapOf("rec|out:n:anna" to OpenedPublicRecord(key, id, "Anna Weber", null, username, cert)),
+        )
+
+    @Test
+    fun `a name match shows a certified username`() = runTest {
+        val fake = everyone("qref3d5")
+        val person = searchPeople("anna", fake).people.single()
+        assertEquals("qref3d5", person.username)
+        assertArrayEquals(lookup("u:qref3d5"), fake.rec.verifiedWith.single())
+    }
+
+    @Test
+    fun `a certificate that does not verify shows no username, and the row stays`() = runTest {
+        val fake = everyone("qref3d5").apply { certificateValid = false }
+        val person = searchPeople("anna", fake).people.single()
+        assertNull(person.username)
+        assertEquals(PersonReach.OPEN, person.reach)
+    }
+
+    @Test
+    fun `a record with no certificate shows no username and spends nothing`() = runTest {
+        val fake = everyone("qref3d5", cert = null)
+        assertNull(searchPeople("anna", fake).people.single().username)
+        assertTrue(fake.rec.verifiedWith.isEmpty())
+    }
+
+    @Test
+    fun `no more usernames are checked than the cap`() = runTest {
+        val ids = (1..5).map { n -> ByteArray(16) { n.toByte() } }
+        val keys = (1..5).map { n -> ByteArray(32) { (n + 40).toByte() } }
+        val fake = Fake(
+            nameHits = ids.mapIndexed { i, id -> LookupHit(id, "rec$i".toByteArray()) },
+            bundleKeys = ids.indices.associate { searchHex(ids[it]) to keys[it] },
+            opened = ids.indices.associate {
+                "rec$it|out:n:anna" to OpenedPublicRecord(keys[it], ids[it], "Anna $it", null, "anna_$it", certificate)
+            },
+        )
+        val people = searchPeople("anna", fake).people
+        assertEquals(5, people.size)
+        assertEquals(MAX_EXTRA_USERNAME_CHECKS, people.count { it.username != null })
+        assertEquals(MAX_EXTRA_USERNAME_CHECKS, fake.rec.verifiedWith.size)
+    }
+
+    @Test
+    fun `a failed token costs the username, never the row`() = runTest {
+        val fake = everyone("qref3d5").apply { usernameOprfFails = IllegalStateException("out of tokens") }
+        val person = searchPeople("anna", fake).people.single()
+        assertNull(person.username)
+        assertEquals(PersonReach.OPEN, person.reach)
+    }
+
+    @Test
+    fun `name hits and introductions share one cap`() = runTest {
+        val ids = (1..2).map { n -> ByteArray(16) { n.toByte() } }
+        val keys = (1..2).map { n -> ByteArray(32) { (n + 40).toByte() } }
+        val introIds = (1..2).map { n -> ByteArray(16) { (n + 20).toByte() } }
+        val introKeys = (1..2).map { n -> ByteArray(32) { (n + 60).toByte() } }
+        val fake = Fake(
+            nameHits = ids.mapIndexed { i, id -> LookupHit(id, "rec$i".toByteArray()) },
+            bundleKeys = ids.indices.associate { searchHex(ids[it]) to keys[it] } +
+                introIds.indices.associate { searchHex(introIds[it]) to introKeys[it] },
+            opened = ids.indices.associate {
+                "rec$it|out:n:anna" to OpenedPublicRecord(keys[it], ids[it], "Anna $it", null, "anna_$it", certificate)
+            },
+            introductions = introIds.indices.map {
+                OpenedIntroduction(
+                    identityPk = introKeys[it], accountId = introIds[it], displayName = "Anna Intro $it",
+                    username = "anna_i$it", usernameCertificate = certificate, fofWire = ByteArray(1), via = ProbeVia.TERM,
+                )
+            },
+        )
+        // Two name hits and two introductions: four claims, three proofs.
+        searchPeople("anna", fake)
+        assertEquals(MAX_EXTRA_USERNAME_CHECKS, fake.rec.verifiedWith.size)
+    }
+
+    @Test
+    fun `a lookup key is fetched once, and a failed one is not kept`() = runTest {
+        val kept = KeptUsernameLookupKeys()
+        var fetched = 0
+        val fetch: suspend (String) -> ByteArray = { fetched += 1; it.toByteArray() }
+        kept.get("anna", fetch)
+        assertArrayEquals("anna".toByteArray(), kept.get("anna", fetch))
+        assertEquals(1, fetched)
+        val failed = runCatching { kept.get("bob") { throw IllegalStateException("no token") } }
+        assertTrue(failed.isFailure)
+        assertArrayEquals("bob".toByteArray(), kept.get("bob", fetch))
+    }
+
+    @Test
+    fun `the oldest lookup key goes first`() = runTest {
+        val kept = KeptUsernameLookupKeys(max = 2)
+        var fetched = 0
+        val fetch: suspend (String) -> ByteArray = { fetched += 1; it.toByteArray() }
+        kept.get("a", fetch)
+        kept.get("b", fetch)
+        kept.get("c", fetch)
+        kept.get("c", fetch)
+        kept.get("b", fetch)
+        assertEquals(3, fetched)
+        kept.get("a", fetch)
+        assertEquals(4, fetched)
     }
 }

@@ -20,15 +20,27 @@ import type { LocalCandidate, PersonResult } from "./people";
 import type { PeopleSearchOutcome } from "./people-search";
 import type { SendOutcome } from "./send-request";
 
-const { searchPeople, sendFoundRequest, recordSentRequest, reachCheck, held } = vi.hoisted(() => ({
+const { searchPeople, sendFoundRequest, recordSentRequest, reachCheck, held, sentList, contactList } = vi.hoisted(() => ({
   searchPeople: vi.fn<(query: string) => Promise<PeopleSearchOutcome>>(),
   sendFoundRequest: vi.fn<(person: PersonResult) => Promise<SendOutcome>>(),
   recordSentRequest: vi.fn(),
   reachCheck: vi.fn<(key: Uint8Array, wire: string) => Promise<boolean>>(),
   held: { candidates: [] as LocalCandidate[] },
+  sentList: { records: [] as Record<string, unknown>[], changed: (): void => {}, version: (): number => 0 },
+  contactList: {
+    rows: [] as { signaturePubkeyB64: string; accountIdHex?: string }[],
+    listeners: new Set<() => void>(),
+  },
 }));
 
-vi.mock("@solidjs/router", () => ({ A: (p: { children: unknown }) => p.children }));
+vi.mock("@solidjs/router", () => ({
+  A: (p: { href: string; children: unknown }) => {
+    const link = document.createElement("a");
+    link.setAttribute("href", p.href);
+    link.textContent = String(p.children);
+    return link;
+  },
+}));
 vi.mock("../auth/AuthContext", () => ({
   useAuth: () => ({ identitySecrets: () => null, state: () => ({ kind: "anonymous" }) }),
 }));
@@ -40,13 +52,29 @@ vi.mock("../chat/persist-hooks", () => ({
   sessionAccountOf: () => null,
 }));
 vi.mock("../profile/ProfileContext", () => ({
-  useProfiles: () => ({ version: () => 0, ownProfileEnvelope: async () => null, learnUsername: () => {} }),
+  useProfiles: () => ({
+    version: () => 0,
+    ownProfileEnvelope: async () => null,
+    learnUsername: () => {},
+    resolve: () => ({ username: "@boblind" }),
+  }),
 }));
 vi.mock("../reach/reach-service", () => ({
   reachSession: () => ({ accountIdB64: "ACC", accountKeyHex: "00" }),
 }));
 vi.mock("../contacts/client", () => ({ ContactsClient: class {} }));
-vi.mock("../contacts/sent-requests", () => ({ recordSentRequest: (...a: unknown[]) => recordSentRequest(...a) }));
+vi.mock("../contacts/local-store", () => ({
+  loadAccepted: () => contactList.rows,
+  subscribeAcceptedChanged: (listener: () => void) => {
+    contactList.listeners.add(listener);
+    return () => contactList.listeners.delete(listener);
+  },
+}));
+vi.mock("../contacts/sent-requests", () => ({
+  recordSentRequest: (...a: unknown[]) => recordSentRequest(...a),
+  loadSentRequests: () => sentList.records,
+  sentRequestsVersion: () => sentList.version(),
+}));
 vi.mock("../wasm", () => ({
   loadWasm: async () => ({
     nameQueryTerm: (q: string) => q.split(" ").find((w) => w.length >= 3),
@@ -86,7 +114,7 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
-function mount(): (text: string) => void {
+function mount(over: { chatPeers?: () => ReadonlySet<string>; chatHref?: (key: string) => string | null } = {}) {
   const [query, setQuery] = createSignal("");
   renderUi(() => (
     <PeopleSearch
@@ -95,21 +123,44 @@ function mount(): (text: string) => void {
       conversationMatches={() => 0}
       groupPeopleKeys={() => []}
       onOpenChannel={() => {}}
+      {...(over.chatPeers === undefined ? {} : { chatPeersB64: over.chatPeers })}
+      {...(over.chatHref === undefined ? {} : { chatHrefOf: over.chatHref })}
     />
   ));
   return setQuery;
 }
 
+/** The address book took a row: what `upsertAccepted` does, listeners at once. */
+function aContactCameIn(row: { signaturePubkeyB64: string; accountIdHex?: string }): void {
+  contactList.rows = [...contactList.rows, row];
+  for (const listener of contactList.listeners) listener();
+}
+
 const buttonsLabelled = (label: string): HTMLButtonElement[] =>
   all<HTMLButtonElement>("button").filter((b) => b.textContent?.trim() === label);
+
+/** What the store does on a real send: the list holds the person. */
+function theListChanged(records: Record<string, unknown>[]): void {
+  sentList.records = records;
+  sentList.changed();
+}
 
 beforeEach(() => {
   vi.useFakeTimers();
   searchPeople.mockReset();
   sendFoundRequest.mockReset();
   recordSentRequest.mockReset();
+  recordSentRequest.mockImplementation((_account: string, record: Record<string, unknown>) =>
+    theListChanged([...sentList.records, record]),
+  );
   reachCheck.mockReset();
   held.candidates = [];
+  contactList.rows = [];
+  contactList.listeners.clear();
+  sentList.records = [];
+  const [version, setVersion] = createSignal(0);
+  sentList.version = version;
+  sentList.changed = () => setVersion((v) => v + 1);
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -246,7 +297,7 @@ describe("PeopleSearch (UX 6.1)", () => {
       expect(sendFoundRequest.mock.calls[0]?.[0]).toMatchObject({ grantWireB64: "LIVE", grantChecked: true });
     });
 
-    it("runs one check per person however much is typed", async () => {
+    it("runs one check per person at a time, and asks again on the next text", async () => {
       held.candidates = [kept("b2", { keptGrantWires: ["ONE"] })];
       reachCheck.mockResolvedValue(true);
       const type = mount();
@@ -254,9 +305,40 @@ describe("PeopleSearch (UX 6.1)", () => {
       type("b");
       type("bo");
       await flush();
+      expect(reachCheck).toHaveBeenCalledTimes(1);
       type("bob");
       await flush();
-      expect(reachCheck).toHaveBeenCalledTimes(1);
+      expect(reachCheck).toHaveBeenCalledTimes(2);
+    });
+
+    it("a person who left between two texts stops being offered, in one session", async () => {
+      held.candidates = [kept("c1", { keptGrantWires: ["ONE"] })];
+      reachCheck.mockResolvedValue(true);
+      const type = mount();
+      await flush();
+      type("bo");
+      await flush();
+      expect(addButtons()).toHaveLength(1);
+      reachCheck.mockResolvedValue(false);
+      type("bob");
+      await flush();
+      expect(addButtons()).toHaveLength(0);
+      expect(document.body.textContent).toContain("Bob Lind");
+      expect(document.body.textContent).not.toContain("@boblind");
+    });
+
+    it("a connection failure leaves a held verdict standing", async () => {
+      held.candidates = [kept("c2", { keptGrantWires: ["ONE"] })];
+      reachCheck.mockResolvedValue(false);
+      const type = mount();
+      await flush();
+      type("bo");
+      await flush();
+      expect(addButtons()).toHaveLength(0);
+      reachCheck.mockRejectedValue(new Error("offline"));
+      type("bob");
+      await flush();
+      expect(addButtons()).toHaveLength(0);
     });
 
     it("leaves a name, no button and no match by username when every grant is refused", async () => {
@@ -303,7 +385,7 @@ describe("PeopleSearch (UX 6.1)", () => {
       expect(document.body.textContent).toContain(t("common.open"));
     });
 
-    it("a send the reach check refused keeps the sentence and loses the button and the username", async () => {
+    it("a send the reach check refused keeps the sentence and the username, and loses the button", async () => {
       held.candidates = [kept("b6", { keptGrantWires: ["ONE"] })];
       reachCheck.mockResolvedValue(true);
       sendFoundRequest.mockResolvedValue({ kind: "refused", byReachCheck: true });
@@ -315,7 +397,159 @@ describe("PeopleSearch (UX 6.1)", () => {
       await flush();
       expect(document.body.textContent).toContain(t("search.people.request_refused"));
       expect(addButtons()).toHaveLength(0);
+      expect(document.body.textContent).toContain("@boblind");
+    });
+
+    it("the refused line lasts until the text changes, and the row then says what the check says", async () => {
+      held.candidates = [kept("b8", { keptGrantWires: ["ONE"] })];
+      reachCheck.mockResolvedValue(true);
+      sendFoundRequest.mockResolvedValue({ kind: "refused", byReachCheck: true });
+      const type = mount();
+      await flush();
+      type("bo");
+      await flush();
+      addButtons()[0]!.click();
+      await flush();
+      expect(document.body.textContent).toContain(t("search.people.request_refused"));
+
+      // They widened who can find them.
+      type("bob");
+      await flush();
+      expect(document.body.textContent).not.toContain(t("search.people.request_refused"));
+      expect(addButtons()).toHaveLength(1);
+    });
+
+    it("the refused line goes with the check: a person still out of reach is a name alone", async () => {
+      held.candidates = [kept("b9", { keptGrantWires: ["ONE"] })];
+      reachCheck.mockResolvedValue(true);
+      sendFoundRequest.mockResolvedValue({ kind: "refused", byReachCheck: true });
+      const type = mount();
+      await flush();
+      type("bo");
+      await flush();
+      addButtons()[0]!.click();
+      await flush();
+      reachCheck.mockResolvedValue(false);
+      type("bob");
+      await flush();
+      expect(document.body.textContent).not.toContain(t("search.people.request_refused"));
       expect(document.body.textContent).not.toContain("@boblind");
+      expect(addButtons()).toHaveLength(0);
+    });
+
+    it("a person found by name alone goes in the Sent list too, or the row would offer Add contact again", async () => {
+      held.candidates = [kept("d1", { keptGrantWires: ["ONE"], verifiedUsername: null })];
+      reachCheck.mockResolvedValue(true);
+      sendFoundRequest.mockResolvedValue({ kind: "sent" });
+      const type = mount();
+      await flush();
+      type("bo");
+      await flush();
+      addButtons()[0]!.click();
+      await flush();
+      expect(recordSentRequest.mock.calls[0]?.[1]).toMatchObject({
+        recipientUsername: "",
+        recipientName: "Bob Lind",
+      });
+      expect(document.body.textContent).toContain(t("search.people.request_sent"));
+      expect(addButtons()).toHaveLength(0);
+    });
+
+    it("Request sent comes from the list: declined and dismissed, the row offers Add contact again", async () => {
+      held.candidates = [kept("d2", { keptGrantWires: ["ONE"] })];
+      reachCheck.mockResolvedValue(true);
+      sendFoundRequest.mockResolvedValue({ kind: "sent" });
+      const type = mount();
+      await flush();
+      type("bo");
+      await flush();
+      addButtons()[0]!.click();
+      await flush();
+      expect(document.body.textContent).toContain(t("search.people.request_sent"));
+
+      theListChanged([]);
+      await flush();
+      expect(document.body.textContent).not.toContain(t("search.people.request_sent"));
+      expect(addButtons()).toHaveLength(1);
+    });
+
+    it("a request sent earlier reads Request sent on a fresh field", async () => {
+      held.candidates = [kept("d3", { keptGrantWires: ["ONE"], accountIdHex: "0102" })];
+      theListChanged([{ recipientAccountIdHex: "0102", recipientUsername: "", sentAtMs: 1 }]);
+      reachCheck.mockResolvedValue(true);
+      const type = mount();
+      await flush();
+      type("bo");
+      await flush();
+      expect(document.body.textContent).toContain(t("search.people.request_sent"));
+      expect(addButtons()).toHaveLength(0);
+    });
+
+    it("acceptance with the text in the field: never Add contact between Sent and the contact", async () => {
+      searchPeople.mockResolvedValue({ people: [anna("e1")], channel: null, state: { kind: "found" } });
+      sendFoundRequest.mockResolvedValue({ kind: "sent" });
+      const type = mount();
+      await flush();
+      type("anna9");
+      await flush();
+      vi.advanceTimersByTime(500);
+      await flush();
+      buttonsLabelled(t("search.people.add_contact"))[0]!.click();
+      await flush();
+      expect(document.body.textContent).toContain(t("search.people.request_sent"));
+
+      // The ack: the contact first, then the Sent record goes.
+      aContactCameIn({ signaturePubkeyB64: "AAAA", accountIdHex: "0102" });
+      await flush();
+      expect(buttonsLabelled(t("search.people.add_contact"))).toHaveLength(0);
+      theListChanged([]);
+      await flush();
+      expect(buttonsLabelled(t("search.people.add_contact"))).toHaveLength(0);
+      expect(document.body.textContent).toContain(t("common.open"));
+    });
+
+    it("a contact whose conversation matched leaves People, heading and line included", async () => {
+      searchPeople.mockResolvedValue({ people: [], channel: null, state: { kind: "not-found" } });
+      held.candidates = [kept("e2", { isContact: true })];
+      const type = mount({ chatPeers: () => new Set(["AAAA"]) });
+      await flush();
+      type("bob");
+      await flush();
+      vi.advanceTimersByTime(500);
+      await flush();
+      expect(document.body.textContent).not.toContain("Bob Lind");
+      expect(document.body.textContent).not.toContain(t("search.people.heading"));
+      expect(document.body.textContent).not.toContain(t("search.people.not_found"));
+    });
+
+    it("Open under People opens the conversation", async () => {
+      held.candidates = [kept("e3", { isContact: true })];
+      const type = mount({ chatHref: (key) => (key === "AAAA" ? "/chat/abc" : null) });
+      await flush();
+      type("bob");
+      await flush();
+      expect(all<HTMLAnchorElement>("a").map((a) => a.getAttribute("href"))).toEqual(["/chat/abc"]);
+    });
+
+    it("Open with no conversation yet opens the contact, whose Message creates one", async () => {
+      held.candidates = [kept("e4", { isContact: true })];
+      const type = mount({ chatHref: () => null });
+      await flush();
+      type("bob");
+      await flush();
+      expect(all<HTMLAnchorElement>("a")[0]?.getAttribute("href")).toContain("/contacts");
+    });
+
+    it("no People heading stands alone: below 3 characters with no row it is gone", async () => {
+      held.candidates = [];
+      const type = mount();
+      await flush();
+      type("zz");
+      await flush();
+      vi.advanceTimersByTime(1000);
+      await flush();
+      expect(document.body.textContent).not.toContain(t("search.people.heading"));
+      expect(document.body.textContent).not.toContain(t("search.people.not_found"));
     });
 
     it("says No one found only when no person stands under People", async () => {

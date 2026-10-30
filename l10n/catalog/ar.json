@@ -8330,6 +8330,10 @@
       "text": "اختر المجموعات والقنوات",
       "status": "machine"
     },
+    "who_can_find_me.list.choose_contacts": {
+      "text": "اختر جهات الاتصال",
+      "status": "machine"
+    },
     "who_can_find_me.list.contacts_empty": {
       "text": "ليست لديك جهات اتصال بعد.",
       "status": "machine"

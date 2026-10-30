@@ -81,7 +81,32 @@ public class OpenedPublicRecord(
     public val displayName: String?,
     /** ADR-0078 - the 97-byte mailbox binding the record carries. */
     public val mailboxBinding: ByteArray? = null,
+    /** The username the person claims, with the certificate that proves it;
+     *  shown only once [PeopleSearchDeps.verifyUsername] accepted the two. */
+    public val username: String? = null,
+    public val usernameCertificate: ByteArray? = null,
 )
+
+/** How many username lookup keys a search keeps in memory. Chosen, not measured. */
+public const val MAX_KEPT_USERNAME_LOOKUP_KEYS: Int = 64
+
+/** The lookup keys of usernames proved so far, oldest dropped first. Lost with
+ *  the process; a lookup key opens nothing. */
+public class KeptUsernameLookupKeys(private val max: Int = MAX_KEPT_USERNAME_LOOKUP_KEYS) {
+    private val held = LinkedHashMap<String, ByteArray>()
+
+    /** The key for [username], from [fetch] when none is kept. A failed
+     *  [fetch] keeps nothing. */
+    public suspend fun get(username: String, fetch: suspend (String) -> ByteArray): ByteArray {
+        synchronized(held) { held[username] }?.let { return it }
+        val key = fetch(username)
+        synchronized(held) {
+            held[username] = key
+            while (held.size > max) held.remove(held.keys.first())
+        }
+        return key
+    }
+}
 
 /** A channel the typed handle names. */
 public data class FoundChannel(val idHex: String, val handle: String)
@@ -103,6 +128,10 @@ public interface PeopleSearchDeps {
 
     /** One OPRF round over a username (one anonymous token). */
     public suspend fun usernameOprf(username: String): OprfResult
+
+    /** A username's lookup key, to prove a certificate with: kept, so a person
+     *  found again costs no token ([KeptUsernameLookupKeys]). */
+    public suspend fun usernameLookupKey(username: String): ByteArray = usernameOprf(username).lookupKey
 
     /** `/discovery/lookup` by the username's LOOKUP KEY. */
     public suspend fun accountOfUsernameLookupKey(lookupKey: ByteArray): LookupHit?
@@ -170,8 +199,8 @@ public data class PeopleSearchOutcome(
     val state: PeopleSearchState,
 )
 
-/** At most this many usernames of introduction results are verified per
- *  search beyond the typed one: each costs an OPRF evaluation, i.e. one
+/** At most this many usernames of name and introduction results are verified
+ *  per search beyond the typed one: each costs an OPRF evaluation, i.e. one
  *  anonymous token. The rest show their name without a username. */
 public const val MAX_EXTRA_USERNAME_CHECKS: Int = 3
 
@@ -271,6 +300,9 @@ public fun foundKeyIsPublished(
 
 private class BundleKey(val b64: String, val hex: String, val bytes: ByteArray)
 
+/** A username a public record claims for a name hit, not verified yet. */
+private class ClaimedUsername(val keyHex: String, val accountId: ByteArray, val username: String, val certificate: ByteArray)
+
 private suspend fun identityKey(deps: PeopleSearchDeps, accountId: ByteArray): BundleKey? {
     val key = deps.identityKeyOf(accountId) ?: return null
     if (key.size != IDENTITY_KEY_LEN) return null
@@ -339,6 +371,7 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
     }
 
     // ---- one name term ------------------------------------------------
+    val claims: MutableList<ClaimedUsername> = Collections.synchronizedList(mutableListOf())
     val nameLeg = async {
         if (term == null) return@async emptyList<PersonResult>()
         try {
@@ -358,7 +391,14 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
                 resultFor(
                     deps, key.b64, key.hex, searchHex(hit.accountId), PersonReach.OPEN,
                     published, null, null, recordBindingB64(record),
-                )?.let { out += it }
+                )?.let { found ->
+                    out += found
+                    val claimed = record?.username
+                    val certificate = record?.usernameCertificate
+                    if (found.username == null && claimed != null && certificate != null) {
+                        claims += ClaimedUsername(found.keyHex, hit.accountId, claimed, certificate)
+                    }
+                }
             }
             legs += LegOutcome.ANSWERED
             out
@@ -372,7 +412,40 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
 
     val channel = channelLeg.await()
     val byUsername = usernameLeg.await()
-    val byName = nameLeg.await()
+    val namedOnly = nameLeg.await()
+
+    // A username is shown only when verified: the certificate must bind its
+    // lookup key to the account. The typed one's key is at hand; any other
+    // costs a token, so they are capped together.
+    var extraChecks = 0
+    suspend fun verifiedUsername(claimed: String, certificate: ByteArray, accountId: ByteArray): String? {
+        val round = usernameRound
+        val lookupKey: ByteArray? = if (claimed == username && round != null) {
+            round.lookupKey
+        } else if (extraChecks < MAX_EXTRA_USERNAME_CHECKS) {
+            extraChecks += 1
+            try {
+                deps.usernameLookupKey(claimed)
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (_: Throwable) {
+                null
+            }
+        } else {
+            null
+        }
+        val verified = lookupKey != null && deps.verifyUsername(certificate, lookupKey, accountId)
+        return claimed.takeIf { verified }
+    }
+
+    // The row of a name match shows the username as the row of a username
+    // match does (UX section 6.1).
+    val byName = namedOnly.map { person ->
+        val claim = synchronized(claims) { claims.firstOrNull { it.keyHex == person.keyHex } }
+            ?: return@map person
+        val verified = verifiedUsername(claim.username, claim.certificate, claim.accountId)
+        person.copy(username = shownUsername(verified, person.reach))
+    }
 
     // ---- contacts of contacts ----------------------------------------
     val byIntroduction = mutableListOf<PersonResult>()
@@ -389,7 +462,6 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
             emptyList()
         }
         recordsOpened = opened.size
-        var extraChecks = 0
         for (intro in opened) {
             val matches = when (intro.via) {
                 ProbeVia.USERNAME -> username != null && intro.username == username
@@ -411,28 +483,12 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
                 continue
             }
             if (!bound) continue
-            var verified: String? = null
             val claimed = intro.username
             val certificate = intro.usernameCertificate
-            if (claimed != null && certificate != null) {
-                val round = usernameRound
-                val lookupKey: ByteArray? = if (claimed == username && round != null) {
-                    round.lookupKey
-                } else if (extraChecks < MAX_EXTRA_USERNAME_CHECKS) {
-                    extraChecks += 1
-                    try {
-                        deps.usernameOprf(claimed).lookupKey
-                    } catch (cancel: CancellationException) {
-                        throw cancel
-                    } catch (_: Throwable) {
-                        null
-                    }
-                } else {
-                    null
-                }
-                if (lookupKey != null && deps.verifyUsername(certificate, lookupKey, intro.accountId)) {
-                    verified = claimed
-                }
+            val verified = if (claimed != null && certificate != null) {
+                verifiedUsername(claimed, certificate, intro.accountId)
+            } else {
+                null
             }
             val keyB64 = searchKeyB64(intro.identityPk)
             val name = intro.displayName

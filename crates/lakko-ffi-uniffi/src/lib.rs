@@ -44,6 +44,7 @@ pub mod auth;
 pub mod backup;
 pub mod call_relay;
 pub mod channels;
+pub mod circle;
 pub mod contacts;
 pub mod device_card;
 pub mod device_link;
@@ -753,6 +754,21 @@ pub enum FfiError {
     /// `keyLength` / `subIdLength` for an argument of the wrong length.
     #[error("{0}")]
     PushWake(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0086 circle directories - appended, for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// A circle operation was refused (`circle.rs`). The message is
+    /// `"<code>: <reason>"` with the frozen codes of
+    /// `lakko_circle::CircleError` (`length`, `unknownFormat`, `malformed`,
+    /// `authentication`, `seal`, `wrongEpoch`, `headerMismatch`, `notAMember`,
+    /// `treeFull`, `empty`, `writePending`, `overflow`, `filterTooLarge`,
+    /// `cardTooLong`, `rowOutOfRange`) or `keyLength` / `tagLength` /
+    /// `wrapLength` for an argument of the wrong length. `headerMismatch`
+    /// from `circleMemberEpochKey` means the header is stale or partial, or
+    /// this contact was removed.
+    #[error("{0}")]
+    Circle(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

@@ -1231,6 +1231,7 @@ private final class SessionModels: ObservableObject {
     let contactsPeopleSearch: PeopleSearchModel
     private var chatModels: [String: ChatViewModel] = [:]
     private var sharedChannelsWatch: AnyCancellable?
+    private var contactsWatch: AnyCancellable?
 
     init(services: AppServices, account: SessionAccount) {
         let accountIdB64 = account.accountIdB64
@@ -1280,6 +1281,13 @@ private final class SessionModels: ObservableObject {
         peopleSearchSession = searchSession
         chatsPeopleSearch = PeopleSearchModel(session: searchSession)
         contactsPeopleSearch = PeopleSearchModel(session: searchSession)
+        // A search row says what is true now: someone who became a contact, or
+        // who left the outgoing list, changes it with the text still standing.
+        // `$state` fires before the property is set, so the read comes after.
+        contactsWatch = Self.contactsChanges(contacts)
+            .sink { [weak searchSession] in
+                MainActor.assumeIsolated { searchSession?.noteContactsChanged() }
+            }
         let hub = chatRepository.sharedChannels
         // ADR-0059 section 6 — the listed channels this device follows, as the
         // share rule reads them: subscribed (a subscriber key is held), listed
@@ -1335,6 +1343,25 @@ private final class SessionModels: ObservableObject {
             .sink { _ in Task { @MainActor in await hub.resendChanged() } }
     }
 
+    /// Fires on the main queue after the contacts or the outgoing list changed.
+    private static func contactsChanges(_ contacts: ContactsRepository) -> AnyPublisher<Void, Never> {
+        struct Seen: Equatable {
+            let keys: [Data]
+            let sent: [Int64]
+        }
+        let seen: AnyPublisher<Seen, Never> = contacts.$state
+            .map { state in
+                Seen(keys: state.accepted.map { $0.request.fromPubkey }, sent: state.sent.map { $0.messageId })
+            }
+            .eraseToAnyPublisher()
+        return seen
+            .removeDuplicates()
+            .dropFirst()
+            .map { _ in () }
+            .receive(on: DispatchQueue.main)
+            .eraseToAnyPublisher()
+    }
+
     /// The search field's ports (web `search/wiring.ts`): no rule of its own
     /// lives here.
     private static func peopleSearchPorts(
@@ -1376,9 +1403,15 @@ private final class SessionModels: ObservableObject {
                 _ = try await contacts.sendContactRequest(to: person)
             },
             alreadyRequested: { person in
-                guard let accountId = person.accountId else { return false }
-                let idB64 = base64Encode(accountId)
-                return contacts.state.sent.contains { $0.recipientAccountIdB64 == idB64 }
+                SentRequests.holds(
+                    contacts.state.sent, accountKey: person.accountKey, accountId: person.accountId)
+            },
+            heldGrants: { ReachCenter.shared.searchGrants(forAccountKeyB64: $0.base64EncodedString()) },
+            isContact: { person in
+                contacts.state.accepted.contains {
+                    $0.request.fromPubkey == person.accountKey
+                        || (person.accountId != nil && $0.request.fromAccountId == person.accountId)
+                }
             })
     }
 
@@ -1416,6 +1449,27 @@ private struct SessionRoot: View, Equatable {
     private var authRepository: AuthRepository { services.authRepository }
     private var contactsRepository: ContactsRepository { services.contactsRepository }
     private var chatRepository: ChatRepository { services.chatRepository }
+
+    /// The contacts of "Only the ones I choose", sorted as the Contacts screen
+    /// sorts them. A contact with no account id cannot be chosen.
+    private func visibilityContactRows() -> [VisibilityContactRow] {
+        let accepted = contactsRepository.state.accepted.filter { $0.request.fromAccountId != nil }
+        let byId = Dictionary(
+            accepted.map { (base64Encode($0.request.fromAccountId ?? Data()), $0) },
+            uniquingKeysWith: { first, _ in first })
+        let items = byId.map { id, contact in
+            let resolved = ProfileDirectory.shared.resolve(signatureKey: contact.request.fromPubkey)
+            return ContactListPresentation.Item(
+                id: id, name: resolved.name, username: resolved.verifiedUsername,
+                isPlaceholder: resolved.isPlaceholder)
+        }
+        return ContactListPresentation.sections(items).flatMap(\.ids).compactMap { id in
+            guard let contact = byId[id], let accountId = contact.request.fromAccountId else { return nil }
+            let resolved = ProfileDirectory.shared.resolve(signatureKey: contact.request.fromPubkey)
+            return VisibilityContactRow(
+                accountId: accountId, accountKey: contact.request.fromPubkey, name: resolved.name)
+        }
+    }
 
     /// The incoming requests waiting, for the Contacts tab's badge. State of
     /// its own, so the shell re-runs when the count changes and not on every
@@ -1719,6 +1773,12 @@ private struct SessionRoot: View, Equatable {
                 }
                 ReachCenter.shared.channelIdsProvider = { [channelsState] in
                     channelsState.channels.compactMap { CoPublisher.hexToData($0.id) }
+                }
+                ReachCenter.shared.contactsProvider = { [contactsRepository] in
+                    contactsRepository.state.accepted.compactMap { contact in
+                        guard let id = contact.request.fromAccountId else { return nil }
+                        return (accountKey: contact.request.fromPubkey, accountId: id)
+                    }
                 }
                 ReachCenter.shared.allScopesProvider = { [chatRepository, channelsState] in
                     let groups = chatRepository.state.threads
@@ -2201,7 +2261,8 @@ private struct SessionRoot: View, Equatable {
                         id: channel.id,
                         scope: FfiScopeId(kind: .channel, id: id),
                         title: name.isEmpty ? "@" + channel.handle : name)
-                })
+                },
+                contacts: visibilityContactRows())
         case .inviteLanding(let slug):
             InviteLandingScreen(
                 viewModel: InviteLandingViewModel(

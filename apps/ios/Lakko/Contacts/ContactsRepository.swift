@@ -140,8 +140,8 @@ public final class ContactsRepository: ObservableObject {
     /// safe.
     public weak var chatRepository: ChatRepository? {
         didSet {
-            chatRepository?.owedAnswerAck = { [weak self] messageId in
-                await self?.ackOwedAnswer(requestMessageId: messageId)
+            chatRepository?.owedAnswerAck = { [weak self] messageId, groupIdHex in
+                await self?.ackOwedAnswer(requestMessageId: messageId, groupIdHex: groupIdHex)
             }
         }
     }
@@ -281,8 +281,10 @@ public final class ContactsRepository: ObservableObject {
         let sent = sentStore.load(accountIdB64: accountIdB64)
         boundAccountIdB64 = accountIdB64
         loadingBoundRows = true
+        // One person is one row, also for rows stored before that was so.
+        let rows = Self.reconciled(accepted: accepted, pending: persisted.pending)
         state = state.with(
-            pending: persisted.pending, accepted: accepted, sent: sent, outstandingInvites: [],
+            pending: rows.pending, accepted: rows.accepted, sent: sent, outstandingInvites: [],
             cursor: persisted.cursor)
         loadingBoundRows = false
         invited = PendingContactStore.load(accountIdB64: accountIdB64)
@@ -383,9 +385,19 @@ public final class ContactsRepository: ObservableObject {
                 recipientAccountIdB64: base64Encode(accountId),
                 messageId: result.messageId,
                 createdAt: result.createdAt,
-                intro: SentRequests.storedIntro(introMessage)),
+                intro: SentRequests.storedIntro(introMessage),
+                recipientName: person.displayName,
+                recipientKeyB64: base64Encode(person.accountKey)),
             to: state.sent))
         return result
+    }
+
+    /// Stop waiting for a request that was not answered: the row under Sent
+    /// goes, and search can offer the person again. Local; the person is told
+    /// nothing, and a request they already hold stays theirs to answer.
+    public func dismissSentRequest(_ request: SentContactRequest) {
+        state = state.with(sent: SentRequests.answered(
+            recipientAccountIdB64: request.recipientAccountIdB64, in: state.sent))
     }
 
     /// A contact request against a bundle in hand, with rule 6 of ADR-0074
@@ -436,6 +448,10 @@ public final class ContactsRepository: ObservableObject {
         }
     }
 
+    /// Kept across searches, and across accounts: a lookup key names a
+    /// username, which is the same for everyone, and opens nothing.
+    private let usernameLookupKeys = KeptUsernameLookupKeys()
+
     /// The production lookups a people search makes.
     public func peopleSearchPorts() -> PeopleSearchPorts {
         let factory = clientFactory
@@ -463,6 +479,7 @@ public final class ContactsRepository: ObservableObject {
                     return ReachCenter.shared.currentAccountKey(of: key)
                 }
             })
+            .with(kept: usernameLookupKeys)
     }
 
     /// ADR-0060 section 6 — an outgoing request carries a fresh `reply` grant
@@ -770,6 +787,9 @@ public final class ContactsRepository: ObservableObject {
             // undecided link requests.
             handOverJoinedPendingContacts()
             await revokeLinksRevokedElsewhere()
+            // An accept whose Welcome is owed: at launch (the first poll) and
+            // on every poll.
+            await chatRepository?.resolveAllOwedAnswers()
             if undecidedArrived || !LinkRequestInbox(accountIdB64: pollAccountIdB64).rows().isEmpty {
                 await decideLinkRequests()
             }
@@ -897,11 +917,14 @@ public final class ContactsRepository: ObservableObject {
         // conversation remains (seen on web 2026-10-24: a removed contact
         // came back on the next load).
         guard !removedKeys.contains(signatureKey) else { return false }
-        guard let next = Self.adopting(
+        let next = Self.adopting(
             state.accepted, signatureKey: signatureKey, accountId: accountId,
-            groupIdHex: groupIdHex, nowMs: nowMs, createdAt: createdAt)
-        else { return false }
-        state = state.with(accepted: next)
+            groupIdHex: groupIdHex, nowMs: nowMs, createdAt: createdAt) ?? state.accepted
+        // A request from them is gone with it (a process that died inside an
+        // accept left both), carried on the row so its ack can still go out.
+        let rows = Self.reconciled(accepted: next, pending: state.pending)
+        guard rows.accepted != state.accepted || rows.pending != state.pending else { return false }
+        state = state.with(pending: rows.pending, accepted: rows.accepted)
         return true
     }
 
@@ -942,6 +965,72 @@ public final class ContactsRepository: ObservableObject {
             chatRepository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) == signatureKey
                 && chatRepository.isActive(groupIdHex: groupIdHex) == true
         }
+    }
+
+    /// One person is one row, and a request whose contact exists is gone:
+    /// two rows of one key become one, and a pending request from a contact
+    /// moves onto that contact's row. Pure.
+    nonisolated static func reconciled(
+        accepted: [AcceptedContact], pending: [IncomingContactRequest]
+    ) -> (accepted: [AcceptedContact], pending: [IncomingContactRequest]) {
+        var rows: [AcceptedContact] = []
+        for row in accepted {
+            if let idx = rows.firstIndex(where: { $0.request.fromPubkey == row.request.fromPubkey }) {
+                rows[idx] = merging(rows[idx], with: row)
+            } else {
+                rows.append(row)
+            }
+        }
+        var left: [IncomingContactRequest] = []
+        for request in pending {
+            if rows.contains(where: { $0.request.fromPubkey == request.fromPubkey }) {
+                rows = accepting(request, into: rows, groupIdHex: nil)
+            } else {
+                left.append(request)
+            }
+        }
+        return (rows, left)
+    }
+
+    /// The accepted list with `request` accepted: one more row, or, when the
+    /// person already has one, that row carrying the request. A rename, a
+    /// recorded chat and the keys they held stay. The row takes the request's
+    /// id, which is what its owed ack is found by.
+    nonisolated static func accepting(
+        _ request: IncomingContactRequest, into accepted: [AcceptedContact], groupIdHex: String?
+    ) -> [AcceptedContact] {
+        guard let idx = accepted.firstIndex(where: { $0.request.fromPubkey == request.fromPubkey }) else {
+            return accepted + [AcceptedContact(request: request, groupIdHex: groupIdHex)]
+        }
+        var rows = accepted
+        rows[idx] = merging(
+            accepted[idx], with: AcceptedContact(request: request, groupIdHex: groupIdHex))
+        return rows
+    }
+
+    /// Two rows of one person as one. A mailbox request beats a synthetic
+    /// one (``syntheticContactMessageId(signatureKey:)``), the later of two
+    /// mailbox requests wins; nothing either row knew is lost.
+    private nonisolated static func merging(
+        _ held: AcceptedContact, with other: AcceptedContact
+    ) -> AcceptedContact {
+        let request = other.request.messageId > 0 || held.request.messageId < 0 ? other.request : held.request
+        let previous = (held.previousKeysB64 ?? []) + (other.previousKeysB64 ?? [])
+        var seen = Set<String>()
+        let keys = previous.filter { seen.insert($0).inserted }
+        return AcceptedContact(
+            request: IncomingContactRequest(
+                messageId: request.messageId,
+                fromPubkey: request.fromPubkey,
+                fromAccountId: request.fromAccountId ?? held.request.fromAccountId ?? other.request.fromAccountId,
+                fromPseudonym: request.fromPseudonym,
+                validAfterMs: request.validAfterMs,
+                intro: request.intro,
+                profile: request.profile,
+                createdAt: request.createdAt),
+            groupIdHex: held.groupIdHex ?? other.groupIdHex,
+            displayName: held.displayName ?? other.displayName,
+            previousKeysB64: keys.isEmpty ? nil : keys)
     }
 
     /// The pure half of ``adoptOneToOnePeer(signatureKey:accountId:groupIdHex:nowMs:createdAt:)``:
@@ -1066,8 +1155,10 @@ public final class ContactsRepository: ObservableObject {
             }))
     }
 
-    /// The Welcome of an accept landed late: its ack goes out now.
-    func ackOwedAnswer(requestMessageId: Int64) async {
+    /// The Welcome of an accept landed late: its ack goes out now. A request
+    /// still listed (the process died inside the accept) is filed first.
+    func ackOwedAnswer(requestMessageId: Int64, groupIdHex: String) async {
+        acceptContactRequest(messageId: requestMessageId, groupIdHex: groupIdHex)
         guard let contact = state.accepted.first(where: { $0.request.messageId == requestMessageId }) else {
             return
         }
@@ -1092,13 +1183,17 @@ public final class ContactsRepository: ObservableObject {
             },
             current: { ReachCenter.shared.currentAccountKey(of: $0) })
         guard answered.remaining.count != state.sent.count else { return }
-        state = state.with(sent: answered.remaining)
-        adoptOneToOnePeer(
+        // The contact first, and only then the row under Sent: a search row
+        // reads the two, and must never find them in neither and offer Add
+        // contact to someone who accepted. Asking them was a decision to have
+        // them back, so a removal does not hold here.
+        restoreRemovedContact(
             signatureKey: peer,
             accountId: answered.accountIdB64.flatMap(base64Decode),
             groupIdHex: groupIdHex,
             nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
             createdAt: ISO8601DateFormatter().string(from: Date()))
+        state = state.with(sent: answered.remaining)
     }
 
     /// Mark an incoming ContactRequest as accepted locally.
@@ -1120,9 +1215,9 @@ public final class ContactsRepository: ObservableObject {
         let accepted = pending[idx]
         var remaining = pending
         remaining.remove(at: idx)
-        let newAccepted = state.accepted + [
-            AcceptedContact(request: accepted, groupIdHex: groupIdHex)
-        ]
+        // One person is one row: a one-to-one already made them a contact
+        // when a process died inside the accept.
+        let newAccepted = Self.accepting(accepted, into: state.accepted, groupIdHex: groupIdHex)
         state = state.with(pending: remaining, accepted: newAccepted)
     }
 
@@ -1167,9 +1262,13 @@ public final class ContactsRepository: ObservableObject {
         }
         // ADR-0060 sections 1 and 4 — the removed person held this account's
         // `contact` and `fof` keys: rotate both (the old keys are unregistered
-        // at once), and forget what they offered and relayed.
+        // at once), and forget what they offered and relayed. A removed
+        // contact leaves the chosen list (UX section 4.1); adding them back
+        // brings them in switched off. Dropping them there already rotated
+        // `fof`.
         ReachCenter.shared.rotate(.contact)
-        ReachCenter.shared.rotate(.fof)
+        let dropped = ReachCenter.shared.dropChosenContacts(removed.compactMap(\.request.fromAccountId))
+        if !dropped { ReachCenter.shared.rotate(.fof) }
         for contact in removed {
             ReachCenter.shared.dropIntroductions(
                 fromAccountKeyB64: base64Encode(contact.request.fromPubkey))
@@ -2932,19 +3031,29 @@ public struct SentContactRequest: Equatable, Codable {
     /// The intro the person wrote, kept so a re-send after a key rotation
     /// carries it (ADR-0074 section 3.5a rule 5). Empty when none.
     public let intro: String
+    /// The name the person was found under, `nil` when the request went out
+    /// by username alone: the Sent row shows it.
+    public let recipientName: String?
+    /// The person's account key (base64) as found: the Sent row's photo, and
+    /// one of the two things a search row is matched to this list by.
+    public let recipientKeyB64: String?
 
     public init(
         recipientUsername: String,
         recipientAccountIdB64: String,
         messageId: Int64,
         createdAt: String,
-        intro: String = ""
+        intro: String = "",
+        recipientName: String? = nil,
+        recipientKeyB64: String? = nil
     ) {
         self.recipientUsername = recipientUsername
         self.recipientAccountIdB64 = recipientAccountIdB64
         self.messageId = messageId
         self.createdAt = createdAt
         self.intro = intro
+        self.recipientName = recipientName
+        self.recipientKeyB64 = recipientKeyB64
     }
 }
 

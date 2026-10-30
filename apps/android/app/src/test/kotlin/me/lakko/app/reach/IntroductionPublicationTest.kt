@@ -9,9 +9,12 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.lakko_ffi_uniffi.FfiContactsForm
 import uniffi.lakko_ffi_uniffi.FfiIntroductionPayload
 import uniffi.lakko_ffi_uniffi.FfiReachClass
 import uniffi.lakko_ffi_uniffi.FfiReachGrant
+import uniffi.lakko_ffi_uniffi.FfiVisibilityMode
+import uniffi.lakko_ffi_uniffi.FfiVisibilitySetting
 import uniffi.lakko_ffi_uniffi.OprfResult
 
 /**
@@ -57,6 +60,7 @@ class IntroductionPublicationTest {
         username: String? = "anna",
         offered: List<String> = emptyList(),
         groups: List<String> = listOf("g1", "g2"),
+        offerTo: List<String> = groups,
     ) = IntroPublicationInputs(
         contactsOfContacts = fofOn,
         fofVersion = fofVersion,
@@ -68,6 +72,7 @@ class IntroductionPublicationTest {
         accountId = ByteArray(16) { 2 },
         offeredRecordsHex = offered,
         oneToOneGroups = groups,
+        offerGroups = offerTo,
         nowMs = 1000,
     )
 
@@ -285,5 +290,96 @@ class IntroductionPublicationTest {
             IntroIntake.Drop,
             decideIntroIntake(ScopedEnvelopeKind.VISIBILITY, ByteArray(0), { it }, { 0uL }),
         )
+    }
+
+    // --- only the contacts I choose ------------------------------------------
+
+    private val idA = ByteArray(16) { 0xA }
+    private val idB = ByteArray(16) { 0xB }
+
+    private fun allowedTo(form: FfiContactsForm, peers: Map<String, ByteArray?>, chosen: Set<ByteArray>) =
+        offerGroups(form, peers.keys.toList(), { peers[it] }) { id ->
+            form == FfiContactsForm.ALL || chosen.any { it.contentEquals(id) }
+        }
+
+    @Test
+    fun `under all every contact gets the record, known id or not`() {
+        val peers = mapOf("g1" to idA, "g2" to null)
+        assertEquals(listOf("g1", "g2"), allowedTo(FfiContactsForm.ALL, peers, emptySet()))
+    }
+
+    @Test
+    fun `under chosen only a chosen contact gets it, and no known id gets none`() {
+        val peers = mapOf("g1" to idA, "g2" to idB, "g3" to null)
+        assertEquals(listOf("g2"), allowedTo(FfiContactsForm.CHOSEN, peers, setOf(idB)))
+        assertEquals(emptyList<String>(), allowedTo(FfiContactsForm.CHOSEN, peers, emptySet()))
+    }
+
+    @Test
+    fun `the offer goes to the allowed contacts and the bundle to every contact`() = runTest {
+        val r = Recorder()
+        publishIntroductions(
+            IntroPublicationState(),
+            inputs(offered = listOf("aa"), groups = listOf("g1", "g2"), offerTo = listOf("g2")),
+            ops(r),
+        )
+        assertEquals(listOf("g2"), r.sent.filter { it.second.startsWith("offer") }.map { it.first })
+        assertEquals(listOf("g1", "g2"), r.sent.filter { it.second == "bundle" }.map { it.first })
+    }
+
+    @Test
+    fun `an ask from a contact not allowed gets no offer`() = runTest {
+        val r = Recorder()
+        val state = publishIntroductions(IntroPublicationState(), inputs(offerTo = listOf("g2")), ops(r))
+        r.sent.clear()
+        val reopened = reopenedByAsk(state, "g1", oneToOne = true, fromOtherPerson = true, nowMs = 1000)!!
+        publishIntroductions(reopened, inputs(offerTo = listOf("g2")), ops(r))
+        assertTrue(r.sent.none { it.second.startsWith("offer") })
+    }
+
+    @Test
+    fun `a new version is built and offered only to the contacts still allowed`() = runTest {
+        val r = Recorder()
+        val state = publishIntroductions(IntroPublicationState(), inputs(fofVersion = 2), ops(r))
+        r.sent.clear()
+        publishIntroductions(state, inputs(fofVersion = 3, offerTo = listOf("g2")), ops(r))
+        assertEquals(listOf("g2"), r.sent.map { it.first })
+    }
+
+    @Test
+    fun `a widened contact gets the record held, with no new version`() = runTest {
+        val r = Recorder()
+        val state = publishIntroductions(IntroPublicationState(), inputs(offerTo = listOf("g2")), ops(r))
+        r.sent.clear()
+        publishIntroductions(state, inputs(offerTo = listOf("g1", "g2")), ops(r))
+        assertEquals(listOf("g1"), r.sent.map { it.first })
+    }
+
+    private fun setting(chosen: List<ByteArray>, form: FfiContactsForm = FfiContactsForm.CHOSEN) = FfiVisibilitySetting(
+        mode = FfiVisibilityMode.SOME,
+        contactsOfContacts = true,
+        contactsForm = form,
+        chosenContacts = chosen,
+        groups = null,
+        chosen = emptyList(),
+        lastContactsOfContacts = true,
+        lastGroups = null,
+        updatedAtMs = 1uL,
+    )
+
+    @Test
+    fun `a removed contact leaves the chosen list`() {
+        val after = withoutChosenContact(setting(listOf(idA, idB)), idA.copyOf())!!
+        assertEquals(1, after.chosenContacts.size)
+        assertTrue(after.chosenContacts.single().contentEquals(idB))
+        assertNull("not on the list: nothing to change", withoutChosenContact(setting(listOf(idB)), idA))
+    }
+
+    @Test
+    fun `the setting reads as the narrowing rule reads it`() {
+        val reach = setting(listOf(idA)).contactsReach()
+        assertTrue(reach.onlyChosen)
+        assertEquals(setOf(reachHex(idA)), reach.chosenHex)
+        assertEquals(false, setting(emptyList(), FfiContactsForm.ALL).contactsReach().onlyChosen)
     }
 }

@@ -68,6 +68,14 @@ fn key32(bytes: &[u8], what: &str) -> Result<[u8; 32], FfiError> {
     })
 }
 
+impl DsProofSigner {
+    /// Wrap a core signer, for a sibling module that derives its own key
+    /// (`circle.rs`).
+    pub(crate) const fn from_inner(inner: Inner) -> Self {
+        Self { inner }
+    }
+}
+
 #[uniffi::export]
 impl DsProofSigner {
     /// A reach-key signer (ADR-0060 §2) at [`ds_reach_epoch`]: signs a write

@@ -1083,9 +1083,10 @@ public class ReachManager internal constructor(
      *
      * ADR-0078 section 9, decision 4 — a change made HERE also rotates the
      * `group` and `channel` keys, so a group or channel the setting no longer
-     * allows stops holding a working key (one key serves them all). A setting
-     * adopted from another device arrives with that device's bumped counters
-     * and is not rotated again.
+     * allows stops holding a working key (one key serves them all), and `fof`
+     * when it narrowed which contacts get the record ([settingChangeRotation]).
+     * A setting adopted from another device arrives with that device's bumped
+     * counters and is not rotated again.
      */
     public suspend fun updateVisibility(chosen: FfiVisibilitySetting) {
         val b = binding.get() ?: return
@@ -1100,7 +1101,8 @@ public class ReachManager internal constructor(
         val stateEnvelope = lock.withLock {
             if (binding.get() !== b) return
             doc = doc.copy(visibilityHex = reachHex(envelope))
-            val stateEnvelope = bumpLocked(listOf(ReachKind.GROUP, ReachKind.CHANNEL))
+            val stateEnvelope =
+                bumpLocked(settingChangeRotation(previous?.contactsReach(), stamped.contactsReach()))
             store.save(b.accountIdB64, doc)
             syncLocked(b, System.currentTimeMillis())
             stateEnvelope
@@ -1119,6 +1121,12 @@ public class ReachManager internal constructor(
         } catch (cause: Throwable) {
             Log.w(LOG_TAG, "applying the setting to profiles failed: ${cause.javaClass.simpleName}")
         }
+    }
+
+    /** A removed contact leaves the chosen list (UX section 4.1). */
+    public suspend fun forgetChosenContact(accountId: ByteArray) {
+        val setting = currentVisibility() ?: return
+        withoutChosenContact(setting, accountId)?.let { updateVisibility(it) }
     }
 
     /** Retry after a failure (the screen's Retry action). */

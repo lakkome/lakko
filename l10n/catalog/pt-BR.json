@@ -8330,6 +8330,10 @@
       "text": "Escolha grupos e canais",
       "status": "machine"
     },
+    "who_can_find_me.list.choose_contacts": {
+      "text": "Escolher contatos",
+      "status": "machine"
+    },
     "who_can_find_me.list.contacts_empty": {
       "text": "Você ainda não tem contatos.",
       "status": "machine"

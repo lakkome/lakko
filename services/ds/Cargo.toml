@@ -67,6 +67,10 @@ lakko-ds-proof.workspace = true
 # this graph through lakko-ds-proof.
 lakko-contacts.workspace = true
 
+# ADR-0086 - the sizes and the id rule of a circle directory, and the digest of
+# a write. Nothing here parses a directory: a directory is ciphertext.
+lakko-circle.workspace = true
+
 # ADR-0053 section 4 - the knock (a non-member's request to join) is the one
 # unauthenticated write to a claimed group; since ADR-0054 S3 it spends an
 # anonymous token (context `ds-knock`) through the shared spend gate and

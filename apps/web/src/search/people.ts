@@ -236,6 +236,42 @@ export function mergePeople(
   return order.map((k) => byKey.get(k)!);
 }
 
+/** Who the contact list holds. */
+export interface ContactSet {
+  readonly keysB64: ReadonlySet<string>;
+  readonly accountIdsHex: ReadonlySet<string>;
+}
+
+/**
+ * The rows as the contact list stands now. An answer was built when it was
+ * asked, so a person who became a contact since would still offer **Add
+ * contact**, and the moment their request leaves the Sent list that row would
+ * offer a second request. By account id too: their key may have rotated.
+ */
+export function asContacts(people: readonly PersonResult[], contacts: ContactSet): PersonResult[] {
+  return people.map((p) => {
+    if (p.reach === "contact") return p;
+    const isContact =
+      contacts.keysB64.has(p.keyB64) || (p.accountIdHex !== null && contacts.accountIdsHex.has(p.accountIdHex));
+    if (!isContact) return p;
+    const { openBindingB64: _binding, grantChecked: _checked, ...rest } = p;
+    return { ...rest, reach: "contact", grantWireB64: null };
+  });
+}
+
+/**
+ * The rows under People in Chats. `chatPeersB64` are the people whose
+ * one-to-one is among the matching conversations: a contact among them stands
+ * there, so they are not listed twice. A person who is no contact keeps their
+ * row, and with it the way to add them.
+ */
+export function peopleRows(
+  people: readonly PersonResult[],
+  chatPeersB64: ReadonlySet<string>,
+): PersonResult[] {
+  return people.filter((p) => !(p.reach === "contact" && chatPeersB64.has(p.keyB64)));
+}
+
 /** Lower-case hex of a byte string. */
 export function toHex(bytes: Uint8Array): string {
   let out = "";

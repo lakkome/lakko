@@ -144,4 +144,19 @@ class SentRequestsStoreTest {
     fun `a refused write re-checks one person's address every five minutes`() {
         assertEquals(5L * 60 * 1000, ADDRESS_RECHECK_INTERVAL_MS)
     }
+
+    @Test
+    fun `the name a person was found under is kept with the record`() {
+        val kept = sent(1).copy(recipientName = "Kaj Ulm", recipientUsername = "")
+        val back = decodeSentRequests(encodeSentRequests(listOf(kept)))!!.single()
+        assertEquals("Kaj Ulm", back.recipientName)
+        assertEquals("", back.recipientUsername)
+    }
+
+    @Test
+    fun `a record stored before the name was kept still reads`() {
+        val old = """[{"recipientUsername":"bob","recipientAccountIdB64":"${accountA}",""" +
+            """"messageId":1,"createdAt":"2026-10-11T10:00:00Z"}]"""
+        assertNull(decodeSentRequests(old.toByteArray())!!.single().recipientName)
+    }
 }

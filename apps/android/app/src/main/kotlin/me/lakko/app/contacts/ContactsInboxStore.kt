@@ -313,6 +313,60 @@ public fun withoutSentAnsweredBy(
 ): List<SentContactRequest> =
     if (answeredKeysB64.isEmpty()) sent else sent.filterNot { it.recipientKeyB64 in answeredKeysB64 }
 
+/** The contact list and the Sent list once these people answered. */
+public data class AnsweredRequests(
+    val accepted: List<AcceptedContact>,
+    val sent: List<SentContactRequest>,
+    /** `true` when [accepted] differs from the input and must be persisted. */
+    val acceptedChanged: Boolean,
+)
+
+/**
+ * The person asked joined this device to a one-to-one: they are a contact, in
+ * the same step that retires their Sent entry, so there is no moment with
+ * neither. Between the two a search row would offer a second request. The
+ * account id comes from the Sent entry; [answered] is account key (standard
+ * base64) -> the one-to-one. A person with no Sent entry is left to the
+ * one-to-one rule.
+ */
+public fun applyAnsweringWelcomes(
+    accepted: List<AcceptedContact>,
+    sent: List<SentContactRequest>,
+    answered: Map<String, String>,
+    nowMs: ULong,
+    createdAt: String,
+): AnsweredRequests {
+    var next = accepted
+    var changed = false
+    val decoder = java.util.Base64.getDecoder()
+    for ((keyB64, groupIdHex) in answered) {
+        val asked = sent.firstOrNull { it.recipientKeyB64 == keyB64 } ?: continue
+        val key = decoder.decode(keyB64)
+        val accountId = try {
+            decoder.decode(asked.recipientAccountIdB64)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+        adoptingOneToOnePeer(next, key, accountId, groupIdHex, nowMs, createdAt)?.let {
+            next = it
+            changed = true
+        }
+        // A row the one-to-one rule wrote first may hold no account id yet.
+        val index = next.indexOfFirst { it.request.fromPubkey.contentEquals(key) }
+        if (index >= 0 && next[index].request.fromAccountId == null && accountId != null) {
+            val row = next[index]
+            next = next.toMutableList().also {
+                it[index] = row.copy(request = row.request.copy(fromAccountId = accountId))
+            }
+            changed = true
+        }
+    }
+    return AnsweredRequests(next, withoutSentAnsweredBy(sent, answered.keys), changed)
+}
+
+/** The length of a contact's account id. */
+internal const val CONTACT_ACCOUNT_ID_LEN: Int = 16
+
 /** The Sent list once the person with this account id is dismissed from it. */
 public fun withoutSentTo(
     sent: List<SentContactRequest>,

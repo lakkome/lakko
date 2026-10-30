@@ -1036,12 +1036,6 @@ public final class ChatViewModel: ObservableObject {
         // pending set, so a transfer that has just been swept is judged on the
         // state it produced rather than the state it replaced.
         refreshNewOwnerNotice()
-        // UX §2 — the leave notice goes the moment the leave lands.
-        if MembershipActionNotice.leaveNoticeClears(
-            shown: leaveNoticeShown, membershipEnded: membershipHasEnded) {
-            membershipNotice = nil
-            leaveNoticeShown = false
-        }
     }
 
     // MARK: - ADR-0045 UX §7 — the automatic re-send of a queue-full refusal
@@ -2314,6 +2308,15 @@ public final class ChatViewModel: ObservableObject {
     /// call buttons (`ChatScreen`'s toolbar).
     private func refreshMembership() {
         membership = repository.membershipStateNow(groupIdHex: groupIdHex)
+        // UX §2 — the leave notice goes the moment the leave lands. Here, not
+        // in `refreshMembers()`: a poll is what usually sees the landing, and
+        // the screen read "Leave requested" beside the frozen list until
+        // reopened.
+        if MembershipActionNotice.leaveNoticeClears(
+            shown: leaveNoticeShown, membershipEnded: membershipHasEnded) {
+            membershipNotice = nil
+            leaveNoticeShown = false
+        }
         let owed = claimTeardownSteps(membership, alreadyRun: &teardownClaimed)
         guard !owed.isEmpty else { return }
         for step in owed {

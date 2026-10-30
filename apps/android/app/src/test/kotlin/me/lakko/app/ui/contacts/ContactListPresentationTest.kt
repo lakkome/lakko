@@ -196,4 +196,17 @@ class InviteLinkRowsTest {
         assertEquals("Expires in 59m", describeInviteExpiry(now + 59 * min, now).en)
         assertEquals("Expires in 1m", describeInviteExpiry(now + 30_000L, now).en)
     }
+
+    @Test
+    fun `a sent row shows the name it was found under, then the username`() {
+        assertEquals(SentRowText("Kaj Ulm", "@kaj_u"), sentRowText("Kaj Ulm", "kaj_u"))
+        assertEquals("found by name alone", SentRowText("Kaj Ulm", null), sentRowText("Kaj Ulm", ""))
+    }
+
+    @Test
+    fun `a sent row says the username once and stands without a name`() {
+        assertEquals(SentRowText("@kaj_u", null), sentRowText("@kaj_u", "kaj_u"))
+        assertEquals(SentRowText("@kaj_u", null), sentRowText(null, "kaj_u"))
+        assertEquals(SentRowText("@kaj_u", null), sentRowText("  ", "kaj_u"))
+    }
 }

@@ -220,7 +220,9 @@ describe("the reset", () => {
 
   it("makes the offer and the bundle go out to that conversation alone", () => {
     const next = forgetSentRecords(state, "g1", NOW);
-    expect(offerTargets(next, true, ["g1", "g2"])).toEqual(["g1"]);
+    expect(offerTargets(next, true, ["g1", "g2"], () => true)).toEqual(["g1"]);
+    // A contact not allowed gets no offer for the ask either.
+    expect(offerTargets(next, true, ["g1", "g2"], () => false)).toEqual([]);
     expect(bundleTargets(next, "d", ["g1", "g2"])).toEqual(["g1"]);
   });
 

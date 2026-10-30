@@ -159,6 +159,76 @@ final class ContactRemovalTests: XCTestCase {
         XCTAssertEqual(relaunched.state.accepted.map(\.request.fromPubkey), [key])
     }
 
+    // MARK: - One person is one row (QA re-walk 2026-10-30)
+
+    private func adopted(byte: UInt8, group: String) -> AcceptedContact {
+        let key = Data(repeating: byte, count: 32)
+        return AcceptedContact(
+            request: IncomingContactRequest(
+                messageId: ContactsRepository.syntheticContactMessageId(signatureKey: key),
+                fromPubkey: key, fromAccountId: nil, fromPseudonym: Data(count: 32),
+                validAfterMs: 0, intro: nil, createdAt: ""),
+            groupIdHex: group)
+    }
+
+    func testASecondAcceptLeavesOneRowCarryingTheRequest() {
+        var held = adopted(byte: 0xA1, group: "g1")
+        held.displayName = "Renamed"
+        let rows = ContactsRepository.accepting(
+            request(7, byte: 0xA1), into: [held], groupIdHex: "g1")
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].request.messageId, 7, "its owed ack is found by this id")
+        XCTAssertEqual(rows[0].groupIdHex, "g1")
+        XCTAssertEqual(rows[0].displayName, "Renamed")
+        XCTAssertEqual(rows[0].request.fromAccountId, Data(repeating: 0xA1, count: 16))
+    }
+
+    func testARequestWhoseContactExistsIsGone() {
+        let other = request(8, byte: 0xB2)
+        let rows = ContactsRepository.reconciled(
+            accepted: [adopted(byte: 0xA1, group: "g1")],
+            pending: [request(7, byte: 0xA1), other])
+        XCTAssertEqual(rows.pending, [other])
+        XCTAssertEqual(rows.accepted.map(\.request.messageId), [7])
+    }
+
+    func testTwoRowsOfOnePersonBecomeOneKeepingWhatEitherKnew() {
+        var named = contact(7, byte: 0xA1)
+        named.displayName = "Renamed"
+        let rows = ContactsRepository.reconciled(
+            accepted: [named, adopted(byte: 0xA1, group: "g1"), contact(9, byte: 0xB2)], pending: [])
+        XCTAssertEqual(rows.accepted.count, 2)
+        XCTAssertEqual(rows.accepted[0].request.messageId, 7, "a mailbox request beats a synthetic one")
+        XCTAssertEqual(rows.accepted[0].groupIdHex, "g1")
+        XCTAssertEqual(rows.accepted[0].displayName, "Renamed")
+    }
+
+    func testRowsStoredTwiceAreOneAfterARestart() {
+        seed([contact(7, byte: 0xA1), adopted(byte: 0xA1, group: "g1")])
+        let repository = makeRepository()
+        XCTAssertEqual(repository.state.accepted.map(\.request.messageId), [7])
+        XCTAssertEqual(persisted().count, 1, "healed on disk too")
+    }
+
+    func testAOneToOneWithSomeoneWhoAskedTakesTheirRequestOntoTheContact() {
+        let inbox = ContactsInboxStore(defaults: UserDefaults(suiteName: suiteName)!)
+        inbox.save(PersistedContactsInbox(pending: [request(7, byte: 0xA1)]), accountIdB64: account)
+        let repository = ContactsRepository(
+            authRepository: AuthRepository.offline(
+                authClientFactory: { Offline.auth() },
+                persistence: NoSessionPersistence(),
+                nowMs: { 1_000_000 }),
+            inboxStore: inbox,
+            accountBinding: Just<String?>(account).eraseToAnyPublisher())
+        XCTAssertEqual(repository.state.pending.count, 1)
+        repository.adoptOneToOnePeer(
+            signatureKey: Data(repeating: 0xA1, count: 32), accountId: nil, groupIdHex: "g1",
+            nowMs: 1, createdAt: "")
+        XCTAssertTrue(repository.state.pending.isEmpty)
+        XCTAssertEqual(repository.state.accepted.map(\.request.messageId), [7])
+        XCTAssertEqual(repository.state.accepted.first?.groupIdHex, "g1")
+    }
+
     // MARK: - Fixtures
 
     private func makeRepository() -> ContactsRepository {

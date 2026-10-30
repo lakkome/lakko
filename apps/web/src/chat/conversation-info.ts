@@ -69,6 +69,7 @@ const SECTION_NAMES = [
   "remove-contact",
   "add-contact",
   "delete-chat",
+  "their-contacts-can-find-me",
   /* A group (spec section 2.2). */
   "group-name",
   "rename-group",
@@ -132,6 +133,10 @@ export interface PersonInfoCapabilities {
   readonly membershipEnded: boolean;
   /** The person is on this device's contact list. */
   readonly isContact: boolean;
+  /** Contacts of my contacts is on in "Who can find me", and this contact can
+   *  be named in the setting (`docs/ux/who-can-find-me.md` section 5.1). Left
+   *  out it reads off. */
+  readonly contactsOfContactsOn?: boolean;
 }
 
 /** What the viewer may do in a group, as the chat already knows it. */
@@ -247,7 +252,7 @@ export function personInfoSections(
   if (rules === null) return [];
   return known(
     rules.personInfoSections(
-      new rules.PersonInfoCapabilities(caps.membershipEnded, caps.isContact),
+      new rules.PersonInfoCapabilities(caps.membershipEnded, caps.isContact, caps.contactsOfContactsOn ?? false),
     ),
   );
 }

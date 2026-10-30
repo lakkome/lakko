@@ -5,6 +5,8 @@ package me.lakko.app.ui.settings
 
 import me.lakko.app.l10n.UiText
 import me.lakko.app.reach.ReachApplyStatus
+import me.lakko.app.ui.contacts.ContactRowModel
+import me.lakko.app.ui.contacts.contactSections
 
 /*
  * `docs/ux/who-can-find-me.md` — the pure half of the "Who can find me"
@@ -25,13 +27,33 @@ public enum class FindMeScopeKind { GROUP, CHANNEL }
 /** One group or channel the person is in, as the list shows it. */
 public data class FindMeScope(val kind: FindMeScopeKind, val idHex: String, val name: String)
 
-/** The setting as the screen reads it. [chosen] holds `kind:idHex` keys. */
+/** One contact, as the list of section 4.1 shows it. A contact with no known
+ *  account id cannot be chosen, so it is not one of these. */
+public data class FindMeContact(
+    val accountIdHex: String,
+    val keyB64: String,
+    val name: String,
+    val username: String?,
+    val placeholder: Boolean,
+)
+
+/** The setting as the screen reads it. [chosen] holds `kind:idHex` keys,
+ *  [chosenContacts] lower-case account id hex. */
 public data class FindMeModel(
     val mode: FindMeMode,
     val contactsOfContacts: Boolean,
     val groupsForm: FindMeForm?,
     val chosen: Set<String>,
-)
+    val contactsForm: FindMeForm = FindMeForm.ALL,
+    val chosenContacts: Set<String> = emptySet(),
+) {
+    /** Contacts of my contacts is on (UX section 5.1, under either form). */
+    public val contactsPartOn: Boolean get() = mode == FindMeMode.SOME && contactsOfContacts
+}
+
+/** Whether `Their contacts can find me` shows on for a contact. */
+public fun contactSwitchOn(model: FindMeModel, accountIdHex: String): Boolean =
+    model.contactsForm == FindMeForm.ALL || accountIdHex.lowercase() in model.chosenContacts
 
 /** The key [FindMeModel.chosen] holds for [scope]. */
 public fun FindMeScope.chosenKey(): String = "${kind.name}:${idHex.lowercase()}"
@@ -48,10 +70,18 @@ public data class FindMeRows(
     val scopeCount: Int,
     /** The helper text under "Members of my groups and channels". */
     val membersHelper: UiText,
+    /** All / Only the ones I choose, under the first part. */
+    val showContactsForm: Boolean,
+    /** The helper text under "Contacts of my contacts". */
+    val contactsHelper: UiText,
 )
 
 /** Section 3's rows for [model] over the groups and channels [scopes]. */
-public fun findMeRows(model: FindMeModel, scopes: List<FindMeScope>): FindMeRows {
+public fun findMeRows(
+    model: FindMeModel,
+    scopes: List<FindMeScope>,
+    contacts: List<FindMeContact> = emptyList(),
+): FindMeRows {
     val some = model.mode == FindMeMode.SOME
     val chosenCount = scopes.count { it.chosenKey() in model.chosen }
     val helper = if (model.groupsForm == FindMeForm.CHOSEN) {
@@ -62,12 +92,25 @@ public fun findMeRows(model: FindMeModel, scopes: List<FindMeScope>): FindMeRows
     } else {
         FIND_ME_MEMBERS_ALL_HELPER
     }
+    val contactsHelper = if (model.contactsForm == FindMeForm.CHOSEN) {
+        UiText(
+            "who_can_find_me.contacts_chosen_helper",
+            texts = mapOf(
+                "chosen" to contacts.count { it.accountIdHex.lowercase() in model.chosenContacts }.toString(),
+                "total" to contacts.size.toString(),
+            ),
+        )
+    } else {
+        FIND_ME_FOF_HELPER
+    }
     return FindMeRows(
         showParts = some,
         showForm = some && model.groupsForm != null,
         chosenCount = chosenCount,
         scopeCount = scopes.size,
         membersHelper = helper,
+        showContactsForm = model.contactsPartOn,
+        contactsHelper = contactsHelper,
     )
 }
 
@@ -82,6 +125,13 @@ public fun findMeStatusLine(status: ReachApplyStatus): UiText? = when (status) {
 /** Groups first, then channels, each by name (UX section 4). */
 public fun sortedFindMeScopes(scopes: List<FindMeScope>): List<FindMeScope> =
     scopes.sortedWith(compareBy<FindMeScope> { it.kind.ordinal }.thenBy { it.name.lowercase() })
+
+/** UX section 4.1 — sorted as the Contacts screen sorts them. */
+public fun sortedFindMeContacts(contacts: List<FindMeContact>): List<FindMeContact> {
+    val byId = contacts.associateBy { it.accountIdHex }
+    val rows = contacts.map { ContactRowModel(it.accountIdHex, it.name, it.username, it.placeholder) }
+    return contactSections(rows).flatMap { it.rows }.mapNotNull { byId[it.key] }
+}
 
 /** UX section 3 — the screen's explanation under the title: two sentences
  *  joined through `common.sentence_pair`. */

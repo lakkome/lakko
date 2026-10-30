@@ -111,6 +111,8 @@ use crate::AppState;
 ///   every subscription of the device. 400 a day is chosen, not measured: a
 ///   device in about a hundred groups can re-send all of them a few times a
 ///   day; the earlier 100 assumed one registration per device.
+/// - `circle-claim` (ADR-0086): an account claims one directory, again after a
+///   key reset or a tree started over. 10 a day is chosen, not measured.
 const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
     (TokenContext::DiscoveryLookup, 300),
     (TokenContext::DiscoveryRegister, 10),
@@ -124,6 +126,7 @@ const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
     (TokenContext::BlobRead, 96),
     (TokenContext::MailboxWrite, 50),
     (TokenContext::CallJoin, 100),
+    (TokenContext::CircleClaim, 10),
 ];
 
 /// The `call-join` quota per epoch of a young account (ADR-0078 section 2,

@@ -12,6 +12,16 @@ struct VisibilityScopeRow: Identifiable, Equatable {
     let title: String
 }
 
+/// One contact in the "Only the ones I choose" list of Contacts of my contacts
+/// (`docs/ux/who-can-find-me.md` section 4.1).
+struct VisibilityContactRow: Identifiable, Equatable {
+    let accountId: Data
+    let accountKey: Data
+    let name: String
+
+    var id: Data { accountId }
+}
+
 /// The pure half of the screen: what its rows say, rendered in the interface
 /// language on every read (the web `COPY`). Host-tested.
 enum WhoCanFindMeCopy {
@@ -36,6 +46,26 @@ enum WhoCanFindMeCopy {
         Localization.text(
             "who_can_find_me.members_excluded_notice",
             texts: ["privacy": t("settings.section.privacy")])
+    }
+
+    /// The notice after a contact's switch moved the setting to "Only the
+    /// ones I choose".
+    static var contactsExcludedNotice: String {
+        Localization.text(
+            "who_can_find_me.contacts_excluded_notice",
+            texts: ["privacy": t("settings.section.privacy")])
+    }
+
+    /// "Only the contacts of the people you choose (N of M)", N counting only
+    /// people who are still contacts.
+    static func contactsChosenHelper(setting: FfiVisibilitySetting, all: [Data]) -> String {
+        let chosen = Set(setting.chosenContacts)
+        return Localization.text(
+            "who_can_find_me.contacts_chosen_helper",
+            texts: [
+                "chosen": String(all.filter { chosen.contains($0) }.count),
+                "total": String(all.count),
+            ])
     }
 
     /// "Only the ones you choose (N of M)", N counting only scopes that still
@@ -67,8 +97,10 @@ struct WhoCanFindMeScreen: View {
     @ObservedObject var reach: ReachCenter
     let groups: [VisibilityScopeRow]
     let channels: [VisibilityScopeRow]
+    let contacts: [VisibilityContactRow]
 
     @State private var showingList = false
+    @State private var showingContactsList = false
     /// Set when 2.1 is turned on, until this device knows it spread.
     @State private var fofSpreading = false
     @ObservedObject private var l10n = Localization.shared
@@ -112,6 +144,18 @@ struct WhoCanFindMeScreen: View {
             })
     }
 
+    private var contactsForm: Binding<FfiContactsForm> {
+        Binding(
+            get: { setting.contactsForm },
+            set: { form in
+                let wasChosen = setting.contactsForm == .chosen
+                reach.updateSetting(setContactsForm(setting: setting, form: form))
+                // Section 3: selecting "Only the ones I choose" for the first
+                // time opens the list straight away.
+                if form == .chosen, !wasChosen { showingContactsList = true }
+            })
+    }
+
     var body: some View {
         List {
             Section {
@@ -133,10 +177,34 @@ struct WhoCanFindMeScreen: View {
             if setting.mode == .some {
                 Section {
                     Toggle(l10n.t("who_can_find_me.contacts_of_contacts"), isOn: contactsOfContacts)
+                    if setting.contactsOfContacts {
+                        LakkoInlinePicker(selection: contactsForm, options: [
+                            LakkoPickerOption(value: FfiContactsForm.all, label: l10n.t("who_can_find_me.contacts.all")),
+                            LakkoPickerOption(value: FfiContactsForm.chosen, label: l10n.t("who_can_find_me.contacts.chosen"))
+                        ])
+                        if setting.contactsForm == .chosen {
+                            Button {
+                                showingContactsList = true
+                            } label: {
+                                HStack {
+                                    Text(l10n.t("who_can_find_me.list.choose_contacts"))
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.footnote.weight(.semibold))
+                                        .foregroundStyle(Color.lakkoTextMuted)
+                                }
+                            }
+                        }
+                    }
                 } footer: {
-                    Text(fofSpreading && setting.contactsOfContacts
-                        ? WhoCanFindMeCopy.contactsOfContactsSpreading
-                        : WhoCanFindMeCopy.contactsOfContactsHelper)
+                    if fofSpreading && setting.contactsOfContacts {
+                        Text(WhoCanFindMeCopy.contactsOfContactsSpreading)
+                    } else if setting.contactsOfContacts && setting.contactsForm == .chosen {
+                        Text(WhoCanFindMeCopy.contactsChosenHelper(
+                            setting: setting, all: contacts.map(\.accountId)))
+                    } else {
+                        Text(WhoCanFindMeCopy.contactsOfContactsHelper)
+                    }
                 }
                 Section {
                     Toggle(l10n.t("who_can_find_me.groups"), isOn: groupsVisible)
@@ -173,6 +241,9 @@ struct WhoCanFindMeScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(isPresented: $showingList) {
             ChosenScopesScreen(reach: reach, groups: groups, channels: channels)
+        }
+        .navigationDestination(isPresented: $showingContactsList) {
+            ChosenContactsScreen(reach: reach, contacts: contacts)
         }
     }
 
@@ -269,16 +340,97 @@ struct ChosenScopesScreen: View {
     }
 }
 
+/// The "Only the ones I choose" list of Contacts of my contacts (UX spec
+/// section 4.1): a switch per contact, sorted as the Contacts screen sorts them.
+struct ChosenContactsScreen: View {
+    @ObservedObject var reach: ReachCenter
+    let contacts: [VisibilityContactRow]
+    @State private var query = ""
+    @ObservedObject private var l10n = Localization.shared
+
+    private var filtered: [VisibilityContactRow] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return contacts }
+        return contacts.filter { $0.name.lowercased().contains(q) }
+    }
+
+    private func binding(_ row: VisibilityContactRow) -> Binding<Bool> {
+        Binding(
+            get: { reach.setting.chosenContacts.contains(row.accountId) },
+            set: { on in
+                guard let next = try? setContactChosen(
+                    setting: reach.setting, accountId: row.accountId, on: on) else { return }
+                reach.updateSetting(next)
+            })
+    }
+
+    var body: some View {
+        List {
+            if contacts.isEmpty {
+                Text(l10n.t("who_can_find_me.list.contacts_empty"))
+                    .foregroundStyle(Color.lakkoTextMuted)
+            } else if filtered.isEmpty {
+                Text(l10n.t("who_can_find_me.list.no_match"))
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
+            ForEach(filtered) { row in
+                Toggle(isOn: binding(row)) {
+                    HStack(spacing: 12) {
+                        InitialsAvatar(
+                            name: row.name, identity: base64Encode(row.accountKey), size: 32,
+                            photo: .person(row.accountKey))
+                        Text(row.name)
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle(l10n.t("who_can_find_me.contacts.chosen"))
+        .navigationBarTitleDisplayMode(.inline)
+        .modifier(SearchWhenLong(
+            count: contacts.count, query: $query, promptKey: "who_can_find_me.list.contacts_search"))
+    }
+}
+
 /// A search field only when there is more than a screen of rows (section 4).
 private struct SearchWhenLong: ViewModifier {
     let count: Int
     @Binding var query: String
+    var promptKey = "who_can_find_me.list.search"
 
     func body(content: Content) -> some View {
         if count > 10 {
-            content.searchable(text: $query, prompt: Localization.shared.t("who_can_find_me.list.search"))
+            content.searchable(text: $query, prompt: Localization.shared.t(promptKey))
         } else {
             content
+        }
+    }
+}
+
+/// `Their contacts can find me` on a contact's screen (UX spec section 5.1).
+/// Whether it stands is the shared info rule; under "All" it shows on, and
+/// turning it off switches the part to "Only the ones I choose" with every
+/// other contact on, said once in place.
+struct TheirContactsCanFindMeSection: View {
+    let accountId: Data
+    @ObservedObject private var reach = ReachCenter.shared
+    @State private var switchedToChosen = false
+    @ObservedObject private var l10n = Localization.shared
+
+    var body: some View {
+        Section {
+            Toggle(l10n.t("who_can_find_me.their_contacts_can_find_me"), isOn: Binding(
+                get: {
+                    reach.setting.contactsForm == .all
+                        || reach.setting.chosenContacts.contains(accountId)
+                },
+                set: { on in
+                    if reach.setContactCanFindMe(accountId: accountId, on: on) { switchedToChosen = true }
+                }))
+        } footer: {
+            if switchedToChosen {
+                Text(WhoCanFindMeCopy.contactsExcludedNotice)
+            }
         }
     }
 }

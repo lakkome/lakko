@@ -9048,6 +9048,10 @@
       "text": "Choose groups and channels",
       "comment": "iOS row under 'Only the ones I choose' in Settings > Privacy > Who can find me; opens the list of groups and channels to switch on one by one."
     },
+    "who_can_find_me.list.choose_contacts": {
+      "text": "Choose contacts",
+      "comment": "Row under Contacts of my contacts that opens the list of contacts."
+    },
     "who_can_find_me.list.contacts_empty": {
       "text": "You have no contacts yet.",
       "comment": "Shown in the list of contacts for Who can find me when the person has none."

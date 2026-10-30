@@ -51,7 +51,21 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
 
     /// The process-wide pool, fed by ``AuthRepository``.
     public static let shared = AnonTokenPool(
-        issuer: AuthAnonTokenIssuer(), store: KeychainAnonTokenStore())
+        issuer: AuthAnonTokenIssuer(), store: KeychainAnonTokenStore(),
+        refillOnEmptyTake: AnonTokenPool.refillsOnEmptyTakeInThisBuild)
+
+    /// Whether a take that finds its bucket empty may start an issuance in
+    /// this build: only a debug build, so a test walk never stops on a limit
+    /// (`docs/ux/who-can-find-me.md`; limits have their own tests). A release
+    /// build keeps the rule of ADR-0078 section 8: a take never starts an
+    /// issuance.
+    public static var refillsOnEmptyTakeInThisBuild: Bool {
+#if DEBUG
+        true
+#else
+        false
+#endif
+    }
 
     /// Never hold more than this per context.
     public static let maxHeld = 32
@@ -75,6 +89,9 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
     private let waitSeconds: TimeInterval
     private let random: @Sendable () -> Double
     private let sleep: @Sendable (TimeInterval) async -> Void
+    /// A take on an empty bucket starts the issuance and waits for it, as it
+    /// waits for a scheduled refill. `false` is the release rule.
+    private let refillOnEmptyTake: Bool
 
     private let lock = NSLock()
     private var accountKey: String?
@@ -106,8 +123,10 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
         random: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) },
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
-        }
+        },
+        refillOnEmptyTake: Bool = false
     ) {
+        self.refillOnEmptyTake = refillOnEmptyTake
         self.issuer = issuer
         self.store = store
         self.now = now
@@ -267,7 +286,8 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
         let binding = lock.withLock { generation }
         if let token = pop(context, binding: binding) { return token }
         // ADR-0078 section 8: a take never starts an issuance. It may wait for
-        // one the schedule already runs.
+        // one the schedule already runs. Test builds only: an empty bucket
+        // starts one (``refillsOnEmptyTakeInThisBuild``).
         let pending: Task<Void, Never>? = try lock.withLock {
             guard sessionToken != nil else { throw AnonTokenUnavailable.noSession }
             if let until = quotaUntil[context], until.timeIntervalSince(now()) > 0 {
@@ -276,6 +296,7 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
             }
             if let running = refills[context] { return running }
             if initialPending.contains(context) { return schedules[context] }
+            if refillOnEmptyTake, !forgotten { return try startRefillLocked(context) }
             return nil
         }
         if let pending {
@@ -311,7 +332,8 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
 
     /// The refill in flight for `context`, starting one when there is none.
     /// Throws when no refill can start: no session, or the allowance is known
-    /// to be used up. Called with the lock held, by the schedule only.
+    /// to be used up. Called with the lock held: by the schedule, and in a
+    /// test build by a take that found its bucket empty.
     private func startRefillLocked(_ context: AnonTokenContext) throws -> Task<Void, Never> {
         if let running = refills[context] { return running }
         guard let sessionToken else { throw AnonTokenUnavailable.noSession }

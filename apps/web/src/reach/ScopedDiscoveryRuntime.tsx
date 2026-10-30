@@ -26,9 +26,11 @@ import { useChats } from "../chat/ChatContext";
 import { ChatClient, rosterOf } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
 import { personKeysHex, resolveAccountKeyHex } from "../contacts/address-resolver";
+import { loadAccepted } from "../contacts/local-store";
 import { journalHex } from "../ds/access";
 import { lastProfileRequestAt, recordProfileRequest } from "../profile/profile-request";
 import { isOneToOne, useProfiles } from "../profile/ProfileContext";
+import { accountIdBytes, NO_ACCOUNT_ID } from "../settings/contact-visibility";
 import { loadWasm } from "../wasm";
 import {
   askForMissingIntroductions,
@@ -39,6 +41,7 @@ import {
   everyoneAction,
   everyoneKey,
   forgetSentRecords,
+  mayOfferTo,
   offerKey,
   offerNeedsRebuild,
   offerTargets,
@@ -263,11 +266,24 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
       }
     }
 
-    // 3. Offer the record to every contact not sent this version yet.
+    // 3. Offer the record to every contact the setting allows who was not
+    //    sent this version yet. An ask reaches this step like a new contact:
+    //    a contact not allowed gets no offer for it either.
     const offer = state.offer;
     if (offer !== null) {
       const offerBytes = wasm.composeIntroductionOffer(base64Decode(offer.recordB64));
-      for (const g of offerTargets(state, fof, [...byId.keys()])) {
+      const contacts = loadAccepted(account).map((c) => ({
+        keyHex: journalHex(base64Decode(c.signaturePubkeyB64)),
+        accountIdHex: c.accountIdHex ?? null,
+      }));
+      const allowsContact = (hex: string | null): boolean =>
+        wasm.allowsContact(setting, (hex === null ? null : accountIdBytes(hex)) ?? NO_ACCOUNT_ID);
+      const allowed = (g: string): boolean => {
+        const entry = byId.get(g);
+        const peer = entry === undefined ? null : peerOf(entry.group);
+        return peer !== null && mayOfferTo(personKeysHex(peer), contacts, allowsContact);
+      };
+      for (const g of offerTargets(state, fof, [...byId.keys()], allowed)) {
         const entry = byId.get(g);
         if (entry === undefined) continue;
         await publisher.broadcastControl(secrets, entry.group, offerBytes);

@@ -513,6 +513,7 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 // ADR-0061 - a localization catalog or bundle refusal; not a
                 // membership refusal.
                 is FfiException.L10n,
+                is FfiException.Circle,
                 // The local three-word check of the recovery phrase and the
                 // keys a passkey restores; not membership refusals.
                 is FfiException.PhraseCheck,

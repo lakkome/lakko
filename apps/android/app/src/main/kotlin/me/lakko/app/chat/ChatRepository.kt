@@ -2227,6 +2227,11 @@ public class ChatRepository(
         visibilityListener?.invoke(setting)
     }
 
+    /** The account id of the contact holding a one-to-one peer's key, when
+     *  one is known. Installed by the contacts repository. */
+    @Volatile
+    internal var contactAccountId: ((peerKey: ByteArray) -> ByteArray?)? = null
+
     /** ADR-0060 §5 / §4 — Everyone publication and introduction offers,
      *  installed by the app shell. */
     @Volatile
@@ -2344,10 +2349,26 @@ public class ChatRepository(
         // this join lands never re-sends. Launched, never awaited: the publish
         // takes the per-group lock itself.
         profileRequestScope.launchSession { requestProfilesBestEffort(groupIdHex, joinedJustNow = true) }
+        // The sweep in flight listed its groups before this one existed and
+        // holds them for up to its whole long poll, so this group's first rows
+        // (the other person's name among them) would wait for the next sweep:
+        // up to 30 s of a contact under a fingerprint and no first message.
+        profileRequestScope.launchSession { pollJoinedGroup(groupIdHex) }
         // ADR-0060 §4 — a new one-to-one gets the introduction record and the
         // relayed bundle.
         runIntroductionsBestEffort()
         return groupIdHex
+    }
+
+    private suspend fun pollJoinedGroup(groupIdHex: String) {
+        try {
+            repeat(JOINED_GROUP_POLLS) { pollGroup(groupIdHex, waitSecs = JOINED_GROUP_POLL_WAIT_SECS) }
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            // The next sweep lists this group.
+            android.util.Log.w("ChatRepository", "first poll of a joined group failed: ${cause.javaClass.simpleName}")
+        }
     }
 
     /**
@@ -5363,6 +5384,12 @@ public class ChatRepository(
                     accountId = account.accountId,
                     offeredRecordsHex = reach.offeredIntroductionRecordsHex(),
                     oneToOneGroups = oneToOnes,
+                    offerGroups = me.lakko.app.reach.offerGroups(
+                        form = setting.contactsForm,
+                        oneToOneGroups = oneToOnes,
+                        peerAccountId = { g -> oneToOnePeerKey(g)?.let { contactAccountId?.invoke(it) } },
+                        allowsContact = { uniffi.lakko_ffi_uniffi.allowsContact(setting, it) },
+                    ),
                     nowMs = System.currentTimeMillis(),
                 ),
                 ops = me.lakko.app.reach.IntroPublicationOps(
@@ -14579,3 +14606,9 @@ private class GroupRecord(
         }
     }
 }
+
+/** How many long polls a newly joined group gets of its own, and how long each
+ *  waits: its first rows are this device's own profile, then the other
+ *  person's. Together about one sweep. Chosen, not measured. */
+private const val JOINED_GROUP_POLLS: Int = 3
+private const val JOINED_GROUP_POLL_WAIT_SECS: Int = 10

@@ -42,9 +42,12 @@ import me.lakko.app.search.RowAction
 import me.lakko.app.search.RowSendState
 import me.lakko.app.search.keptGrantsToCheck
 import me.lakko.app.search.mergePeople
+import me.lakko.app.search.peopleRows
 import me.lakko.app.search.peopleSectionMessage
 import me.lakko.app.search.personRowView
 import me.lakko.app.search.rowSendState
+import me.lakko.app.search.showsPeopleHeading
+import me.lakko.app.search.withCurrentContacts
 import me.lakko.app.ui.components.LakkoAvatar
 
 /**
@@ -77,6 +80,9 @@ internal fun PeopleSearchSection(
     noLocalMatchKey: String? = "chats.search.no_results",
     /** People already listed above (standard base64 account keys), left out. */
     excludeKeysB64: Set<String> = emptySet(),
+    /** The people whose one-to-one is among the conversations above (standard
+     *  base64 account keys): a contact among them is left out. */
+    chatPeersB64: Set<String> = emptySet(),
 ) {
     val context = LocalContext.current
     val profileVersion by me.lakko.app.profile.ProfileDirectory.get(context).version.collectAsState()
@@ -97,8 +103,12 @@ internal fun PeopleSearchSection(
     val view by session.view.collectAsState()
     val sends by session.sendStates.collectAsState()
     val shown = view.shown.takeIf { view.asks }
-    val people = remember(local, shown, ownKeyHex, excludeKeysB64) {
-        mergePeople(listOf(local, shown?.people.orEmpty()), ownKeyHex).filter { it.keyB64 !in excludeKeysB64 }
+    val contactKeys = remember(contactsState.accepted) {
+        contactsState.accepted.mapTo(HashSet()) { java.util.Base64.getEncoder().encodeToString(it.request.fromPubkey) }
+    }
+    val people = remember(local, shown, ownKeyHex, excludeKeysB64, chatPeersB64, contactKeys) {
+        val merged = mergePeople(listOf(local, shown?.people.orEmpty()), ownKeyHex)
+        peopleRows(withCurrentContacts(merged, contactKeys), excludeKeysB64, chatPeersB64)
     }
     val channel = shown?.channel
     val state = view.state
@@ -113,7 +123,8 @@ internal fun PeopleSearchSection(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             )
         }
-        if (people.isNotEmpty() || channel != null || view.asks) {
+        val line = peopleSectionMessage(state, people.size)
+        if (showsPeopleHeading(people.size, channel != null, view.searching, line != null)) {
             Heading(searching = view.searching)
         }
         for (person in people) {
@@ -130,7 +141,7 @@ internal fun PeopleSearchSection(
                 onClick = { onOpenChannel(channel.idHex, channel.handle) },
             )
         }
-        peopleSectionMessage(state, people.size)?.let {
+        line?.let {
             Text(
                 it.text(),
                 style = MaterialTheme.typography.bodySmall,

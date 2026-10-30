@@ -86,6 +86,32 @@ public struct FoundPerson: Equatable, Identifiable {
         return next
     }
 
+    /// This person written to with `kept`: the row's grant was refused and
+    /// `kept` passed, or the grant the row already carries.
+    func writing(with kept: KeptGrant) -> FoundPerson {
+        FoundPerson(
+            accountKey: accountKey, accountId: accountId, displayName: displayName,
+            username: username, writeSeed: kept.seed, reach: .grant, mailbox: kept.mailbox,
+            grant: grant, reachChecked: true)
+    }
+
+    /// This person after they became a contact, with the text still in the
+    /// field: the row opens them, and nothing about how they were reached
+    /// stays on it.
+    var asContact: FoundPerson {
+        FoundPerson(
+            accountKey: accountKey, accountId: accountId, displayName: displayName,
+            username: username, writeSeed: nil, reach: .contact, mailbox: mailbox)
+    }
+
+    /// This person with a username a certificate proved.
+    func withProvenUsername(_ proven: String) -> FoundPerson {
+        FoundPerson(
+            accountKey: accountKey, accountId: accountId, displayName: displayName,
+            username: proven, writeSeed: writeSeed, reach: reach, mailbox: mailbox,
+            grant: grant, reachChecked: reachChecked)
+    }
+
     /// This person as a row that offers nothing: the name alone, no username
     /// and no button.
     var nameOnly: FoundPerson {
@@ -141,9 +167,10 @@ public struct KnownPerson: Equatable {
     /// Every grant kept for them, best first: contact, each group, each
     /// channel, the found one, never a bare `member` grant
     /// (``ReachRules/searchGrants(from:)``). What a local row offers is the
-    /// first one once a check said so.
+    /// first one once a check said so; the others stay, and the send tries
+    /// them.
     public var keptGrants: [KeptGrant]
-    /// The one grant left in ``keptGrants`` passed a reach check.
+    /// The first grant in ``keptGrants`` passed a reach check.
     public var keptGrantChecked: Bool
     /// They hold grants no verdict speaks for yet: the row shows the name
     /// alone until one arrives.
@@ -353,6 +380,10 @@ public struct PeopleSearchPorts {
     /// Read after ``identityKey`` ran, so a rotation that fetch proved is
     /// already in the map. Defaults to "no rotation known".
     public var currentKey: (Data) async -> Data = { $0 }
+    /// A username's LOOKUP KEY, to prove a certificate a record carries. One
+    /// OPRF round, one anonymous token, unless the key is kept
+    /// (``KeptUsernameLookupKeys``). Defaults to ``usernameOprf``.
+    public var usernameLookupKey: (String) async throws -> Data
 
     public init(
         lookupUsername: @escaping (Data) async throws -> PublicAccountHit?,
@@ -370,6 +401,7 @@ public struct PeopleSearchPorts {
         self.identityKey = identityKey
         self.reachCheck = reachCheck
         self.verifyCertificate = verifyCertificate
+        self.usernameLookupKey = { try await usernameOprf($0).lookupKey }
     }
 
     /// These ports with the proven-predecessor resolver given.
@@ -377,6 +409,46 @@ public struct PeopleSearchPorts {
         var next = self
         next.currentKey = currentKey
         return next
+    }
+
+    /// These ports with the lookup keys of usernames read through `kept`.
+    public func with(kept: KeptUsernameLookupKeys) -> PeopleSearchPorts {
+        var next = self
+        let fetch = usernameLookupKey
+        next.usernameLookupKey = { username in
+            if let held = await kept.key(for: username) { return held }
+            let key = try await fetch(username)
+            await kept.keep(key, for: username)
+            return key
+        }
+        return next
+    }
+}
+
+/// The lookup keys of usernames proved so far, oldest dropped first, so a
+/// person found again costs no token. In memory only: a lookup key opens
+/// nothing, and it is lost with the process.
+public actor KeptUsernameLookupKeys {
+    /// How many are kept. Chosen, not measured.
+    public static let maxKept = 64
+
+    private var held: [String: Data] = [:]
+    private var order: [String] = []
+    private let max: Int
+
+    public init(max: Int = KeptUsernameLookupKeys.maxKept) {
+        self.max = max
+    }
+
+    public func key(for username: String) -> Data? {
+        held[username]
+    }
+
+    public func keep(_ key: Data, for username: String) {
+        if held.updateValue(key, forKey: username) == nil { order.append(username) }
+        while order.count > max {
+            held[order.removeFirst()] = nil
+        }
     }
 }
 
@@ -392,6 +464,13 @@ public enum PeopleSearch {
     /// UX section 6.1 — how long the person must stop typing before the field
     /// asks the network. Chosen, not measured.
     public static let networkDebounceMs: UInt64 = 500
+
+    /// UX section 6.1 — how long a network answer is reused for its text, a
+    /// not-found included. Past it the text is asked again the next time it
+    /// is typed: a person may have widened who can find them. Checked when a
+    /// text is asked; no timer re-asks an unchanged text. Chosen, not
+    /// measured.
+    public static let answerKeptSeconds: TimeInterval = 60
 
     /// UX section 6.1 — whether the typed text asks the network at all: from
     /// three characters (a leading `@` ignored), and only when the text could
@@ -415,10 +494,11 @@ public enum PeopleSearch {
         return normalizeForMatch(bare)
     }
 
-    /// At most this many usernames of introduction results are verified per
-    /// search beyond the typed one: each verification costs an OPRF round,
-    /// i.e. one anonymous token (web `MAX_EXTRA_USERNAME_CHECKS`). The rest
-    /// show their name without a username.
+    /// At most this many usernames a record states are verified per search
+    /// beyond the typed one, public records of a name match and introductions
+    /// together: each verification costs an OPRF round, i.e. one anonymous
+    /// token (web `MAX_EXTRA_USERNAME_CHECKS`). The rest show their name
+    /// without a username.
     public static let maxExtraUsernameChecks = 3
 
     /// Normalise for local matching: letter case and accents never matter,
@@ -484,11 +564,12 @@ public enum PeopleSearch {
     // MARK: - A kept grant is checked before it is offered (UX section 6.1)
 
     /// The candidates as the local match should see them: with a live
-    /// verdict, the grant that passed; with a dead one, no grant, so reach is
-    /// `none`, the username is not shown and they match by name only; with
-    /// none yet, waiting for it. `unanswered` are the people whose check could
-    /// not be asked (a network failure): they stay as they are, and the send
-    /// checks again. A contact is never checked.
+    /// verdict, the grant that passed comes first and the others stay for the
+    /// send; with a dead one, no grant, so reach is `none`, the username is
+    /// not shown and they match by name only; with none yet, waiting for it.
+    /// `unanswered` are the people whose check could not be asked (a network
+    /// failure): they stay as they are, and the send checks again. A contact
+    /// is never checked.
     public static func applying(
         verdicts: [Data: ReachVerdict], unanswered: Set<Data>, to candidates: [LocalCandidate]
     ) -> [LocalCandidate] {
@@ -498,7 +579,7 @@ public enum PeopleSearch {
             if let verdict = verdicts[c.accountKey], verdict.covers(c.known.keptGrants) {
                 switch verdict {
                 case .live(let grant):
-                    c.known.keptGrants = [grant]
+                    c.known.keptGrants = [grant] + c.known.keptGrants.filter { $0 != grant }
                     c.known.keptGrantChecked = true
                 case .dead:
                     c.known.keptGrants = []
@@ -511,14 +592,15 @@ public enum PeopleSearch {
     }
 
     /// The candidates to ask about for `query`: those who hold grants, are
-    /// not contacts, have no verdict that covers them and match the query
-    /// with their grants in hand, so a kept grant's username counts.
+    /// not contacts and match the query with their grants in hand, so a kept
+    /// grant's username counts. Whatever verdict is held: an answer speaks
+    /// for one text only, since a person's reach changes while the field is
+    /// open (UX section 6.1, "A row says what is true now").
     public static func needingReachCheck(
-        query: String, candidates: [LocalCandidate], verdicts: [Data: ReachVerdict], ownAccountKey: Data?
+        query: String, candidates: [LocalCandidate], ownAccountKey: Data?
     ) -> [LocalCandidate] {
         let open = candidates.filter { c in
             !c.known.isContact && !c.known.keptGrants.isEmpty
-                && verdicts[c.accountKey]?.covers(c.known.keptGrants) != true
         }
         let matched = Set(local(query: query, candidates: open, ownAccountKey: ownAccountKey).map(\.accountKey))
         return open.filter { matched.contains($0.accountKey) }
@@ -538,6 +620,21 @@ public enum PeopleSearch {
             }
         }
         return .dead(checkedSeeds: Set(grants.map(\.seed)))
+    }
+
+    /// The grant a send writes with: the row's when it still passes, else the
+    /// first of `held` (every grant this device holds for the person, read
+    /// fresh) that does, in the usual order. `nil` when every one was
+    /// refused. Throws what the check throws: a connection failure is no
+    /// refusal.
+    public static func reachingGrant(
+        row: KeptGrant?, held: [KeptGrant], check: (MailboxTarget, Data) async throws -> Bool
+    ) async throws -> KeptGrant? {
+        var tried = Set<Data>()
+        for grant in (row.map { [$0] } ?? []) + held where tried.insert(grant.seed).inserted {
+            if try await check(grant.mailbox, grant.seed) { return grant }
+        }
+        return nil
     }
 
     /// Merge result lists into one keyed on the account key (web
@@ -703,7 +800,8 @@ public enum PeopleSearch {
         }
 
         // 2. One name term (the query's longest word), in Everyone.
-        var byName: [FoundPerson] = []
+        var namedOnly: [FoundPerson] = []
+        var nameClaims: [Data: (username: String, certificate: Data, accountId: Data)] = [:]
         var nameOprf: OprfResult?
         if let term = nameQueryTerm(query: query) {
             do {
@@ -730,16 +828,50 @@ public enum PeopleSearch {
                               key: key, accountId: hit.accountId, known: k, foundReach: .open,
                               foundName: published, foundUsername: nil, seed: nil,
                               mailbox: Self.mailbox(of: record)) else { continue }
-                    byName.append(r)
+                    namedOnly.append(r)
+                    if r.username == nil, let claimed = record?.username,
+                       let certificate = record?.usernameCertificate {
+                        nameClaims[r.accountKey] = (claimed, certificate, hit.accountId)
+                    }
                 }
             } catch {
                 note(error)
             }
         }
 
+        // A username a record states shows only once its certificate binds
+        // its lookup key to the account. The typed one's key is at hand; any
+        // other costs a token, so they are capped together. A failed token
+        // costs the username, never the row.
+        var extraChecks = 0
+        func provenUsername(_ claimed: String, certificate: Data, accountId: Data) async -> String? {
+            var lookupKey: Data?
+            if let u = usernameOprf, claimed == u.canonical {
+                lookupKey = u.oprf.lookupKey
+            } else if extraChecks < maxExtraUsernameChecks {
+                extraChecks += 1
+                lookupKey = try? await ports.usernameLookupKey(claimed)
+            }
+            guard let lookupKey, await ports.verifyCertificate(certificate, lookupKey, accountId) else {
+                return nil
+            }
+            return claimed
+        }
+        // The row of a name match shows the username as the row of a username
+        // match does (UX section 6.1).
+        var byName: [FoundPerson] = []
+        for person in namedOnly {
+            if let claim = nameClaims[person.accountKey],
+               let proven = await provenUsername(
+                   claim.username, certificate: claim.certificate, accountId: claim.accountId) {
+                byName.append(person.withProvenUsername(proven))
+            } else {
+                byName.append(person)
+            }
+        }
+
         // 3. Contacts of contacts: the introduction records, matched locally.
         var byIntroduction: [FoundPerson] = []
-        var extraChecks = 0
         var recordsOpened = 0
         var recordsKept = 0
         for record in records {
@@ -772,16 +904,7 @@ public enum PeopleSearch {
             }
             var verified: String?
             if let claimed = payload.username, let cert = payload.usernameCertificate {
-                var lookupKey: Data?
-                if let u = usernameOprf, claimed == u.canonical {
-                    lookupKey = u.oprf.lookupKey
-                } else if extraChecks < maxExtraUsernameChecks {
-                    extraChecks += 1
-                    lookupKey = try? await ports.usernameOprf(claimed).lookupKey
-                }
-                if let lookupKey, await ports.verifyCertificate(cert, lookupKey, payload.accountId) {
-                    verified = claimed
-                }
+                verified = await provenUsername(claimed, certificate: cert, accountId: payload.accountId)
             }
             let name = payload.displayName ?? verified.map { "@\($0)" }
                 ?? displayFingerprint(personKey)
@@ -988,9 +1111,10 @@ enum PeopleSearchWiring {
 }
 
 /// The search field's session (UX section 6.1), shared by the field at the top
-/// of Chats and the one at the top of Contacts: the answers already asked, the
-/// searches in flight, and each found person's request state. A text asked
-/// once is not asked again while the app runs.
+/// of Chats and the one at the top of Contacts: the answers of the last
+/// ``PeopleSearch/answerKeptSeconds``, the searches in flight, and each found
+/// person's request state. A row says what is true now: nothing it says may
+/// need a restart to become correct.
 @MainActor
 public final class PeopleSearchSession: ObservableObject {
 
@@ -1009,9 +1133,15 @@ public final class PeopleSearchSession: ObservableObject {
         /// Send the contact request to a result, at once, with no
         /// introduction text.
         public var sendRequest: @MainActor (FoundPerson) async throws -> Void
-        /// Whether a request to this person is already on its way (the sent
-        /// log): the row then reads "Request sent".
+        /// Whether the outgoing list (Contacts > Sent) holds this person, by
+        /// account key or account id: the row then reads "Request sent", and
+        /// only then.
         public var alreadyRequested: @MainActor (FoundPerson) -> Bool
+        /// Every grant this device holds for an account key NOW, in the order
+        /// they are tried. Read fresh: one may have arrived since the row.
+        public var heldGrants: @MainActor (Data) -> [KeptGrant]
+        /// Whether this person is a contact now.
+        public var isContact: @MainActor (FoundPerson) -> Bool
 
         public init(
             candidates: @escaping @MainActor () -> [LocalCandidate],
@@ -1019,7 +1149,9 @@ public final class PeopleSearchSession: ObservableObject {
             network: @escaping @MainActor (String) async -> PeopleSearchAnswer,
             reachCheck: @escaping @MainActor (MailboxTarget, Data) async throws -> Bool,
             sendRequest: @escaping @MainActor (FoundPerson) async throws -> Void,
-            alreadyRequested: @escaping @MainActor (FoundPerson) -> Bool = { _ in false }
+            alreadyRequested: @escaping @MainActor (FoundPerson) -> Bool = { _ in false },
+            heldGrants: (@MainActor (Data) -> [KeptGrant])? = nil,
+            isContact: @escaping @MainActor (FoundPerson) -> Bool = { _ in false }
         ) {
             self.candidates = candidates
             self.ownAccountKey = ownAccountKey
@@ -1027,6 +1159,10 @@ public final class PeopleSearchSession: ObservableObject {
             self.reachCheck = reachCheck
             self.sendRequest = sendRequest
             self.alreadyRequested = alreadyRequested
+            self.heldGrants = heldGrants ?? { key in
+                candidates().first { $0.accountKey == key }?.known.keptGrants ?? []
+            }
+            self.isContact = isContact
         }
     }
 
@@ -1034,8 +1170,9 @@ public final class PeopleSearchSession: ObservableObject {
     /// everyone this device knows. Chosen, not measured.
     public static let maxConcurrentReachChecks = 4
 
-    /// Request states by account key; a person with none is idle unless the
-    /// sent log already holds a request to them.
+    /// Request states by account key: a send under way, or the line it left
+    /// (refused, failed), which lasts until the text changes. "Request sent"
+    /// is not held here: it is read from the outgoing list.
     @Published public private(set) var requests: [Data: PersonRequestState] = [:]
 
     /// The answers about kept grants, by account key.
@@ -1044,34 +1181,43 @@ public final class PeopleSearchSession: ObservableObject {
     let reachChanged = PassthroughSubject<Void, Never>()
 
     let ports: Ports
-    private var answers: [String: PeopleSearchAnswer] = [:]
+    private var answers: [String: (answer: PeopleSearchAnswer, at: TimeInterval)] = [:]
+    /// A clock that never runs backwards, in seconds.
+    private let uptime: @MainActor () -> TimeInterval
     private var inFlight: [String: Task<PeopleSearchAnswer, Never>] = [:]
     /// The people whose last check could not be asked.
     private var unansweredChecks: Set<Data> = []
     private var reachQueue: [LocalCandidate] = []
     private var reachChecks: [Data: Task<Void, Never>] = [:]
 
-    public init(ports: Ports) {
+    public init(
+        ports: Ports,
+        uptime: @escaping @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    ) {
         self.ports = ports
+        self.uptime = uptime
     }
 
-    /// The answer remembered for `key`, if any.
+    /// The answer remembered for `key`, while it is young enough to reuse.
     public func remembered(_ key: String) -> PeopleSearchAnswer? {
-        answers[key]
+        guard let held = answers[key] else { return nil }
+        if uptime() - held.at < PeopleSearch.answerKeptSeconds { return held.answer }
+        answers[key] = nil
+        return nil
     }
 
     /// The answer for `key`: the remembered one, the one already being asked,
     /// or a new network search. A search is never cancelled once asked (its
     /// tokens are spent), so a text typed away from and back to joins it.
     func answer(key: String, query: String) async -> PeopleSearchAnswer {
-        if let held = answers[key] { return held }
+        if let held = remembered(key) { return held }
         if let running = inFlight[key] { return await running.value }
         let network = ports.network
         let task = Task { @MainActor in await network(query) }
         inFlight[key] = task
         let result = await task.value
         inFlight[key] = nil
-        if result.remembered { answers[key] = result }
+        if result.remembered { answers[key] = (result, uptime()) }
         return result
     }
 
@@ -1085,12 +1231,13 @@ public final class PeopleSearchSession: ObservableObject {
             ownAccountKey: ports.ownAccountKey())
     }
 
-    /// Ask about everyone matching `query` who holds grants and has no
-    /// verdict yet, the newest text first. Nobody is asked about twice at the
-    /// same time, whichever field typed it.
+    /// Ask about everyone matching `query` who holds grants, whatever verdict
+    /// is held, the newest text first: the last answer stays on screen until
+    /// this one arrives. Nobody is asked about twice at the same time,
+    /// whichever field typed it.
     public func checkReach(query: String) {
         let needed = PeopleSearch.needingReachCheck(
-            query: query, candidates: ports.candidates(), verdicts: verdicts,
+            query: query, candidates: ports.candidates(),
             ownAccountKey: ports.ownAccountKey()
         ).filter { reachChecks[$0.accountKey] == nil }
         let keys = Set(needed.map(\.accountKey))
@@ -1103,7 +1250,7 @@ public final class PeopleSearchSession: ObservableObject {
             let candidate = reachQueue.removeFirst()
             let key = candidate.accountKey
             let grants = candidate.known.keptGrants
-            guard reachChecks[key] == nil, verdicts[key]?.covers(grants) != true else { continue }
+            guard reachChecks[key] == nil else { continue }
             let check = ports.reachCheck
             reachChecks[key] = Task { @MainActor [weak self] in
                 let verdict = await PeopleSearch.reachVerdict(grants: grants) { mailbox, seed in
@@ -1130,9 +1277,7 @@ public final class PeopleSearchSession: ObservableObject {
     private func recordRefused(_ person: FoundPerson) {
         guard person.reach == .grant else { return }
         var seeds = Set(person.writeSeed.map { [$0] } ?? [])
-        if let held = ports.candidates().first(where: { $0.accountKey == person.accountKey }) {
-            seeds.formUnion(held.known.keptGrants.map(\.seed))
-        }
+        seeds.formUnion(ports.heldGrants(person.accountKey).map(\.seed))
         verdicts[person.accountKey] = .dead(checkedSeeds: seeds)
         unansweredChecks.remove(person.accountKey)
         reachChanged.send()
@@ -1145,20 +1290,57 @@ public final class PeopleSearchSession: ObservableObject {
         }
     }
 
-    /// The row state of `person`.
+    /// The row state of `person`: "Request sent" exactly while the outgoing
+    /// list holds them. Declined and dismissed, or accepted, the row goes
+    /// back to what the check says.
     public func requestState(for person: FoundPerson) -> PersonRequestState {
-        if let held = requests[person.accountKey] { return held }
-        return ports.alreadyRequested(person) ? .sent : .idle
+        if ports.alreadyRequested(person) { return .sent }
+        return requests[person.accountKey] ?? .idle
+    }
+
+    /// The text changed: a refused or failed line goes, so the row reflects
+    /// the new check. A request on its way stays claimed.
+    public func textChanged() {
+        let kept = requests.filter { $0.value == .sending }
+        if kept.count != requests.count { requests = kept }
+    }
+
+    /// The contacts or the outgoing list changed: every row is read again.
+    public func noteContactsChanged() {
+        objectWillChange.send()
+        reachChanged.send()
+    }
+
+    /// `person` with the grant the send writes with: the row's when it still
+    /// passes, else any other this device holds for them now. None passing is
+    /// a refusal; a check that could not be made throws.
+    private func writable(_ person: FoundPerson) async throws -> FoundPerson {
+        guard person.reach == .grant else { return person }
+        let row: KeptGrant?
+        if let seed = person.writeSeed, let mailbox = person.mailbox {
+            row = KeptGrant(seed: seed, mailbox: mailbox)
+        } else {
+            row = nil
+        }
+        let check = ports.reachCheck
+        guard let grant = try await PeopleSearch.reachingGrant(
+            row: row, held: ports.heldGrants(person.accountKey),
+            check: { mailbox, seed in try await check(mailbox, seed) }
+        ) else {
+            throw ContactsError.requestRefused
+        }
+        return person.writing(with: grant)
     }
 
     /// **Add contact**: send the request at once; the row reads "Request
-    /// sent" on success, the refusal or the failure otherwise.
+    /// sent" once the outgoing list holds it, the refusal or the failure
+    /// otherwise.
     public func addContact(_ person: FoundPerson) async {
         guard person.canAddContact, requestState(for: person).offersAdd else { return }
         requests[person.accountKey] = .sending
         do {
-            try await ports.sendRequest(person)
-            requests[person.accountKey] = .sent
+            try await ports.sendRequest(try await writable(person))
+            requests[person.accountKey] = nil
         } catch {
             let state = PersonRequestState.after(error: error)
             requests[person.accountKey] = state
@@ -1201,6 +1383,7 @@ public final class PeopleSearchModel: ObservableObject {
         self.session = session
         self.sleep = sleep
         // Sent on the main actor, and a subject calls its sink at once.
+        // A verdict arrived, or the contacts or the outgoing list changed.
         reachSubscription = session.reachChanged.sink { [weak self] in
             MainActor.assumeIsolated { self?.refreshLocal() }
         }
@@ -1219,6 +1402,7 @@ public final class PeopleSearchModel: ObservableObject {
         let current = generation
         pending?.cancel()
         pending = nil
+        session.textChanged()
         refreshLocal()
         if !typed.isEmpty { session.checkReach(query: typed) }
         let key = PeopleSearch.searchKey(typed)
@@ -1257,12 +1441,28 @@ public final class PeopleSearchModel: ObservableObject {
     /// network learned about them merged in), then the people only the
     /// network found. `showsLocalContacts` is `false` in Contacts, whose list
     /// already shows the matching contacts.
-    public func rows(showsLocalContacts: Bool) -> (local: [FoundPerson], network: [FoundPerson]) {
-        let merged = PeopleSearch.merge([local, answer?.people ?? []], ownAccountKey: nil)
+    ///
+    /// A person who became a contact while the text stands leaves the network
+    /// part at once, whatever the remembered answer says of them. `chatPeers`
+    /// are the people whose one-to-one is among the matching conversations: a
+    /// contact among them stands there already, so they are not listed twice.
+    /// Someone who is no contact keeps their row, and the way to add them.
+    public func rows(
+        showsLocalContacts: Bool, chatPeers: Set<Data> = []
+    ) -> (local: [FoundPerson], network: [FoundPerson]) {
+        let merged = PeopleSearch.merge([local, answer?.people ?? []], ownAccountKey: nil).map { person in
+            person.reach != .contact && session.ports.isContact(person) ? person.asContact : person
+        }
         let localKeys = Set(local.map(\.accountKey))
+        func isLocal(_ person: FoundPerson) -> Bool {
+            localKeys.contains(person.accountKey) || person.reach == .contact
+        }
+        func listedAbove(_ person: FoundPerson) -> Bool {
+            person.reach == .contact && (!showsLocalContacts || chatPeers.contains(person.accountKey))
+        }
         return (
-            merged.filter { localKeys.contains($0.accountKey) && (showsLocalContacts || $0.reach != .contact) },
-            merged.filter { !localKeys.contains($0.accountKey) })
+            merged.filter { isLocal($0) && !listedAbove($0) },
+            merged.filter { !isLocal($0) })
     }
 
     /// The network part's state, `nil` while nothing was answered.
@@ -1272,9 +1472,11 @@ public final class PeopleSearchModel: ObservableObject {
 
     /// The line under People. "No one found" says nobody stands there, so it
     /// goes whenever a person row does.
-    public func peopleMessage(includesChannels: Bool, showsLocalContacts: Bool) -> String? {
+    public func peopleMessage(
+        includesChannels: Bool, showsLocalContacts: Bool, chatPeers: Set<Data> = []
+    ) -> String? {
         let state = networkState(includesChannels: includesChannels)
-        let rows = rows(showsLocalContacts: showsLocalContacts)
+        let rows = rows(showsLocalContacts: showsLocalContacts, chatPeers: chatPeers)
         if state == .notFound, !rows.local.isEmpty || !rows.network.isEmpty { return nil }
         return state?.message
     }

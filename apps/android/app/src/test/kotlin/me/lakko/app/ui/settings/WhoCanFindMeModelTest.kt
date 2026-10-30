@@ -10,6 +10,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.lakko_ffi_uniffi.FfiContactsForm
+import uniffi.lakko_ffi_uniffi.FfiVisibilityMode
+import uniffi.lakko_ffi_uniffi.FfiVisibilitySetting
 
 /** `docs/ux/who-can-find-me.md` sections 3, 4 and 8 — what the screen shows. */
 class WhoCanFindMeModelTest {
@@ -69,5 +72,87 @@ class WhoCanFindMeModelTest {
         assertNull(findMeStatusLine(ReachApplyStatus.APPLYING))
         assertEquals(FIND_ME_OFFLINE, findMeStatusLine(ReachApplyStatus.OFFLINE))
         assertEquals(FIND_ME_FAILED, findMeStatusLine(ReachApplyStatus.FAILED))
+    }
+
+    private fun contact(idHex: String, name: String, placeholder: Boolean = false, username: String? = null) =
+        FindMeContact(idHex, "k$idHex", name, username, placeholder)
+
+    @Test
+    fun `the contacts form shows only under the part`() {
+        val on = FindMeModel(FindMeMode.SOME, true, null, emptySet())
+        assertTrue(findMeRows(on, emptyList()).showContactsForm)
+        assertFalse(findMeRows(on.copy(contactsOfContacts = false), emptyList()).showContactsForm)
+        assertFalse(findMeRows(on.copy(mode = FindMeMode.EVERYONE), emptyList()).showContactsForm)
+    }
+
+    @Test
+    fun `the helper says N of M under chosen and the usual text under all`() {
+        val model = FindMeModel(
+            FindMeMode.SOME, true, null, emptySet(),
+            contactsForm = FindMeForm.CHOSEN,
+            chosenContacts = setOf("aa", "gone"),
+        )
+        val helper = findMeRows(model, emptyList(), listOf(contact("aa", "Ann"), contact("bb", "Bob"))).contactsHelper
+        assertEquals("who_can_find_me.contacts_chosen_helper", helper.key)
+        assertEquals(mapOf("chosen" to "1", "total" to "2"), helper.texts)
+        assertEquals(
+            FIND_ME_FOF_HELPER,
+            findMeRows(model.copy(contactsForm = FindMeForm.ALL), emptyList()).contactsHelper,
+        )
+    }
+
+    @Test
+    fun `nobody switched on is zero of M`() {
+        val model = FindMeModel(FindMeMode.SOME, true, null, emptySet(), contactsForm = FindMeForm.CHOSEN)
+        val helper = findMeRows(model, emptyList(), listOf(contact("aa", "Ann"))).contactsHelper
+        assertEquals(mapOf("chosen" to "0", "total" to "1"), helper.texts)
+    }
+
+    @Test
+    fun `a contact's switch shows on under all and its own state under chosen`() {
+        val model = FindMeModel(FindMeMode.SOME, true, null, emptySet())
+        assertTrue(contactSwitchOn(model, "AA"))
+        val chosen = model.copy(contactsForm = FindMeForm.CHOSEN, chosenContacts = setOf("aa"))
+        assertTrue(contactSwitchOn(chosen, "AA"))
+        assertFalse(contactSwitchOn(chosen, "bb"))
+    }
+
+    @Test
+    fun `the switch on a contact needs the part on, under either form`() {
+        val model = FindMeModel(FindMeMode.SOME, true, null, emptySet())
+        assertTrue(model.contactsPartOn)
+        assertTrue(model.copy(contactsForm = FindMeForm.CHOSEN).contactsPartOn)
+        assertFalse(model.copy(contactsOfContacts = false).contactsPartOn)
+        assertFalse(model.copy(mode = FindMeMode.NOBODY).contactsPartOn)
+    }
+
+    @Test
+    fun `contacts sort as the Contacts screen sorts them, an unnamed one by username under the hash`() {
+        val sorted = sortedFindMeContacts(
+            listOf(
+                contact("cc", "Zoe"),
+                contact("aa", "anna"),
+                contact("bb", "Member", placeholder = true, username = "1bot"),
+            ),
+        )
+        assertEquals(listOf("aa", "cc", "bb"), sorted.map { it.accountIdHex })
+    }
+
+    @Test
+    fun `the model reads the form and the ids from the setting`() {
+        val id = ByteArray(16) { 0xAB.toByte() }
+        val model = FfiVisibilitySetting(
+            mode = FfiVisibilityMode.SOME,
+            contactsOfContacts = true,
+            contactsForm = FfiContactsForm.CHOSEN,
+            chosenContacts = listOf(id),
+            groups = null,
+            chosen = emptyList(),
+            lastContactsOfContacts = true,
+            lastGroups = null,
+            updatedAtMs = 1uL,
+        ).toModel()
+        assertEquals(FindMeForm.CHOSEN, model.contactsForm)
+        assertEquals(setOf("ab".repeat(16)), model.chosenContacts)
     }
 }

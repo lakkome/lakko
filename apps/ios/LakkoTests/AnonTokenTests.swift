@@ -173,6 +173,7 @@ final class AnonTokenPoolTests: XCTestCase {
             "discovery-lookup", "discovery-register", "invite-consume", "ds-knock",
             "push-register", "channel-subscribe", "directory-search",
             "vault-claim", "blob-upload", "blob-read", "mailbox-write", "call-join",
+            "circle-claim",
         ])
         XCTAssertEqual(AnonTokenRoute.headerName, "x-lakko-anon-token")
     }
@@ -220,6 +221,7 @@ final class AnonTokenPoolTests: XCTestCase {
             .channelSubscribe: 4, .directorySearch: 4,
             .vaultClaim: 8, .blobUpload: 4, .blobRead: 4,
             .mailboxWrite: 4,
+            .circleClaim: 2,
             .callJoin: 4,
         ]
         XCTAssertEqual(Set(expected.keys), Set(AnonTokenContext.allCases), "every context has a pinned policy")
@@ -277,6 +279,52 @@ final class AnonTokenPoolTests: XCTestCase {
         XCTAssertNil(pool.takeIfAvailable(.pushRegister))
         try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertTrue(issuer.calls.isEmpty)
+    }
+
+    /// ADR-0078 section 8 — a release build: an empty bucket waits for the
+    /// schedule, and a take never starts an issuance.
+    func testATakeOnAnEmptyBucketStartsNoIssuanceByDefault() async throws {
+        let issuer = FakeIssuer()
+        let pool = AnonTokenPool(
+            issuer: issuer, waitSeconds: 0, random: { 0 },
+            sleep: { _ in try? await Task.sleep(nanoseconds: UInt64.max) })
+        pool.configure(accountKey: "A", sessionToken: "s1")
+        await pool.runScheduledRefills()
+        for _ in 0..<AnonTokenContext.pushRegister.poolTarget { _ = pool.takeIfAvailable(.pushRegister) }
+        let before = issuer.calls.count
+        do {
+            _ = try await pool.take(.pushRegister)
+            XCTFail("expected no token")
+        } catch {
+            XCTAssertEqual(error as? AnonTokenUnavailable, .timedOut)
+        }
+        XCTAssertEqual(issuer.calls.count, before, "a take never starts an issuance")
+    }
+
+    /// A test build: a walk never stops on a limit. The take starts the
+    /// issuance and waits for it.
+    func testATakeOnAnEmptyBucketRefillsItInATestBuild() async throws {
+        let issuer = FakeIssuer()
+        let pool = AnonTokenPool(
+            issuer: issuer, random: { 0 },
+            sleep: { _ in try? await Task.sleep(nanoseconds: UInt64.max) },
+            refillOnEmptyTake: true)
+        pool.configure(accountKey: "A", sessionToken: "s1")
+        await pool.runScheduledRefills()
+        for _ in 0..<AnonTokenContext.pushRegister.poolTarget { _ = pool.takeIfAvailable(.pushRegister) }
+        let before = issuer.calls.count
+        let token = try await pool.take(.pushRegister)
+        XCTAssertEqual(token.context, AnonTokenContext.pushRegister.rawValue)
+        XCTAssertEqual(issuer.calls.count, before + 1)
+        XCTAssertEqual(pool.count(.pushRegister), AnonTokenContext.pushRegister.poolTarget - 1)
+    }
+
+    func testOnlyADebugBuildRefillsOnATake() {
+#if DEBUG
+        XCTAssertTrue(AnonTokenPool.refillsOnEmptyTakeInThisBuild)
+#else
+        XCTAssertFalse(AnonTokenPool.refillsOnEmptyTakeInThisBuild)
+#endif
     }
 
     func testAUsedUpAllowanceSurfacesAndIsRemembered() async throws {

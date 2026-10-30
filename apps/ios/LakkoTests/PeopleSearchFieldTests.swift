@@ -36,6 +36,11 @@ final class PeopleSearchFieldTests: XCTestCase {
     private final class Recorder {
         var asked: [String] = []
         var sent: [Data] = []
+        /// The seed each send wrote with.
+        var sentSeeds: [Data?] = []
+        /// Grants the send reads fresh, when set; else the candidates' own.
+        var held: [Data: [KeptGrant]]?
+        var contacts: Set<Data> = []
         var answer: PeopleSearchAnswer = PeopleSearchAnswer(people: [])
         var sendError: Error?
         var candidates: [LocalCandidate] = []
@@ -47,6 +52,16 @@ final class PeopleSearchFieldTests: XCTestCase {
         /// While set, every reach check waits for `releaseChecks()`.
         var holdChecks = false
         var heldChecks: [CheckedContinuation<Void, Never>] = []
+        /// While set, a send waits for `releaseSend()`.
+        var holdSend = false
+        var heldSends: [CheckedContinuation<Void, Never>] = []
+
+        func releaseSend() {
+            holdSend = false
+            let held = heldSends
+            heldSends = []
+            held.forEach { $0.resume() }
+        }
 
         func releaseChecks() {
             holdChecks = false
@@ -80,7 +95,9 @@ final class PeopleSearchFieldTests: XCTestCase {
                 name: name, verifiedUsername: username, isContact: isContact, keptGrants: grants))
     }
 
-    private func session(_ rec: Recorder) -> PeopleSearchSession {
+    private func session(
+        _ rec: Recorder, uptime: @escaping @MainActor () -> TimeInterval = { 0 }
+    ) -> PeopleSearchSession {
         PeopleSearchSession(ports: PeopleSearchSession.Ports(
             candidates: { rec.candidates },
             ownAccountKey: { nil },
@@ -97,10 +114,21 @@ final class PeopleSearchFieldTests: XCTestCase {
                 return answer
             },
             sendRequest: { person in
+                if rec.holdSend {
+                    await withCheckedContinuation { rec.heldSends.append($0) }
+                }
                 if let error = rec.sendError { throw error }
                 rec.sent.append(person.accountKey)
+                rec.sentSeeds.append(person.writeSeed)
+                // The repository files it under Sent before it returns.
+                rec.requested.insert(person.accountKey)
             },
-            alreadyRequested: { rec.requested.contains($0.accountKey) }))
+            alreadyRequested: { rec.requested.contains($0.accountKey) },
+            heldGrants: { key in
+                rec.held?[key] ?? rec.candidates.first { $0.accountKey == key }?.known.keptGrants ?? []
+            },
+            isContact: { rec.contacts.contains($0.accountKey) }),
+            uptime: uptime)
     }
 
     private func instantModel(_ session: PeopleSearchSession) -> PeopleSearchModel {
@@ -305,7 +333,9 @@ final class PeopleSearchFieldTests: XCTestCase {
         XCTAssertEqual(row?.reach, PersonReach.none)
         XCTAssertNil(row?.username)
         XCTAssertEqual(row?.canAddContact, false)
-        XCTAssertEqual(rec.checked, [kept(1).seed, kept(2).seed], "a verdict is not asked for again")
+        XCTAssertEqual(
+            rec.checked, [kept(1).seed, kept(2).seed, kept(1).seed, kept(2).seed],
+            "a verdict speaks for one text: the new text asks again")
     }
 
     func testACheckThatThrowsRecordsNoVerdictAndTheRowBehavesAsBefore() async {
@@ -437,10 +467,259 @@ final class PeopleSearchFieldTests: XCTestCase {
         XCTAssertEqual(state.message(canAddContact: false),
                        Localization.text("search.people.request_refused"))
 
-        // Neither grant is asked about again for this person.
+        // The refused line lasts until the text changes, and the new text
+        // asks about both grants again.
         rec.checked = []
         await type("anna w", into: model)
-        XCTAssertTrue(rec.checked.isEmpty)
+        XCTAssertEqual(rec.checked.count, 1, "the first grant passes, so the check stops there")
+        XCTAssertEqual(session.requestState(for: after!), .idle)
+    }
+
+    // MARK: - A row says what is true now
+
+    func testEveryChangeOfTheTextChecksAgainWhateverVerdictIsHeld() async {
+        let rec = Recorder()
+        rec.candidates = [candidate(4, grants: [kept(1)])]
+        let model = instantModel(session(rec))
+        await type("anna", into: model)
+        XCTAssertEqual(model.local.first?.canAddContact, true)
+
+        // They left the group: their key rotated while the field stood.
+        rec.reaches = { _ in false }
+        await type("anna w", into: model)
+        XCTAssertEqual(model.local.first?.canAddContact, false, "no restart needed")
+        XCTAssertNil(model.local.first?.username)
+
+        // And a dead verdict comes back to life just the same.
+        rec.reaches = { _ in true }
+        await type("anna we", into: model)
+        XCTAssertEqual(model.local.first?.canAddContact, true)
+    }
+
+    func testTheLastAnswerStaysUntilTheNewOneArrives() async {
+        let rec = Recorder()
+        rec.candidates = [candidate(4, grants: [kept(1)])]
+        let model = instantModel(session(rec))
+        await type("anna", into: model)
+        rec.holdChecks = true
+        model.update(query: "anna w")
+        await drain()
+        XCTAssertEqual(model.local.first?.canAddContact, true, "the row does not flicker")
+        rec.reaches = { _ in false }
+        rec.releaseChecks()
+        await model.settle()
+        XCTAssertEqual(model.local.first?.canAddContact, false)
+    }
+
+    func testACheckThatCouldNotBeMadeLeavesTheHeldVerdict() async {
+        let rec = Recorder()
+        rec.candidates = [candidate(4, grants: [kept(1)])]
+        rec.reaches = { _ in false }
+        let shared = session(rec)
+        let model = instantModel(shared)
+        await type("anna", into: model)
+        XCTAssertEqual(model.local.first?.canAddContact, false)
+
+        rec.reaches = { _ in nil }
+        await type("anna w", into: model)
+        XCTAssertEqual(model.local.first?.canAddContact, false, "a connection failure changes nothing")
+        XCTAssertEqual(shared.verdicts[candidate(4).accountKey], .dead(checkedSeeds: [kept(1).seed]))
+    }
+
+    func testALiveVerdictKeepsTheOtherGrantsForTheSend() {
+        let c = candidate(4, grants: [kept(1), kept(2), kept(3)])
+        let applied = PeopleSearch.applying(
+            verdicts: [c.accountKey: .live(kept(2))], unanswered: [], to: [c])
+        XCTAssertEqual(applied[0].known.keptGrants, [kept(2), kept(1), kept(3)])
+        XCTAssertTrue(applied[0].known.keptGrantChecked)
+    }
+
+    func testTheSendTriesEveryGrantHeldNowInOrder() async {
+        let rec = Recorder()
+        rec.candidates = [candidate(4, grants: [kept(1)])]
+        let shared = session(rec)
+        let model = instantModel(shared)
+        await type("anna", into: model)
+        let row = model.local[0]
+
+        // The row's grant died and two others arrived since the row was drawn.
+        rec.held = [row.accountKey: [kept(1), kept(2), kept(3)]]
+        let live = kept(3).seed
+        rec.reaches = { $0 == live }
+        rec.checked = []
+        await shared.addContact(row)
+        XCTAssertEqual(rec.checked, [kept(1).seed, kept(2).seed, kept(3).seed])
+        XCTAssertEqual(rec.sentSeeds, [live], "the send goes with the first that passes")
+    }
+
+    func testASendIsRefusedOnlyWhenNoGrantPassesAndNothingGoesOut() async {
+        let rec = Recorder()
+        rec.candidates = [candidate(4, grants: [kept(1), kept(2)])]
+        let shared = session(rec)
+        let model = instantModel(shared)
+        await type("anna", into: model)
+        let row = model.local[0]
+        rec.reaches = { _ in false }
+        await shared.addContact(row)
+        XCTAssertTrue(rec.sent.isEmpty)
+        XCTAssertEqual(shared.requestState(for: row), .refused)
+        XCTAssertEqual(
+            shared.verdicts[row.accountKey], .dead(checkedSeeds: [kept(1).seed, kept(2).seed]))
+    }
+
+    func testAConnectionFailureAtTheSendIsNoRefusal() async {
+        let rec = Recorder()
+        rec.candidates = [candidate(4, grants: [kept(1)])]
+        let shared = session(rec)
+        let model = instantModel(shared)
+        await type("anna", into: model)
+        let row = model.local[0]
+        rec.reaches = { _ in nil }
+        await shared.addContact(row)
+        XCTAssertTrue(rec.sent.isEmpty)
+        XCTAssertEqual(shared.requestState(for: row), .failed)
+        XCTAssertEqual(shared.verdicts[row.accountKey], .live(kept(1)), "the verdict stands")
+    }
+
+    func testAnAnswerIsReusedForSixtySecondsAFoundAndANotFoundAlike() async {
+        for people in [[person(1)], []] {
+            let rec = Recorder()
+            rec.answer = PeopleSearchAnswer(people: people)
+            var now: TimeInterval = 100
+            let shared = session(rec, uptime: { now })
+            let model = instantModel(shared)
+            await type("anna", into: model)
+            await type("annab", into: model)
+            now += PeopleSearch.answerKeptSeconds - 1
+            await type("anna", into: model)
+            XCTAssertEqual(rec.asked, ["anna", "annab"])
+
+            now += 2
+            // A person widened who can find them: the new answer replaces it.
+            rec.answer = PeopleSearchAnswer(people: [person(2)])
+            await type("annab", into: model)
+            XCTAssertEqual(rec.asked, ["anna", "annab", "annab"])
+            XCTAssertEqual(model.answer?.people.map(\.accountKey), [person(2).accountKey])
+        }
+    }
+
+    func testAnUnchangedTextIsNotAskedAgainWhenItsAnswerAges() async {
+        let rec = Recorder()
+        var now: TimeInterval = 0
+        let model = instantModel(session(rec, uptime: { now }))
+        await type("anna", into: model)
+        now += PeopleSearch.answerKeptSeconds * 10
+        await type("anna", into: model)
+        XCTAssertEqual(rec.asked, ["anna"], "no timer: the age is read when a text is asked")
+    }
+
+    func testARefusedOrFailedLineLastsUntilTheTextChangesAndASendStaysClaimed() async {
+        let rec = Recorder()
+        let shared = session(rec)
+        let model = instantModel(shared)
+        await type("anna", into: model)
+        rec.sendError = ContactsError.requestRefused
+        await shared.addContact(person(1))
+        rec.sendError = Offline()
+        await shared.addContact(person(2))
+        XCTAssertEqual(shared.requests, [person(1).accountKey: .refused, person(2).accountKey: .failed])
+
+        await type("anna w", into: model)
+        XCTAssertTrue(shared.requests.isEmpty)
+        XCTAssertEqual(shared.requestState(for: person(1)), .idle)
+
+        rec.sendError = nil
+        rec.holdSend = true
+        let sending = Task { await shared.addContact(person(3)) }
+        await drain()
+        await type("anna we", into: model)
+        XCTAssertEqual(shared.requestState(for: person(3)), .sending)
+        rec.releaseSend()
+        await sending.value
+    }
+
+    func testRequestSentComesFromTheOutgoingListAlone() async {
+        let rec = Recorder()
+        let shared = session(rec)
+        await shared.addContact(person(1))
+        XCTAssertEqual(shared.requestState(for: person(1)), .sent)
+
+        // Declined and dismissed, or accepted: gone from the list.
+        rec.requested = []
+        XCTAssertEqual(shared.requestState(for: person(1)), .idle)
+        XCTAssertTrue(shared.requestState(for: person(1)).offersAdd)
+    }
+
+    func testTheOutgoingListMatchesByKeyOrByAccountId() {
+        let key = Data(repeating: 1, count: 32)
+        let id = Data(repeating: 2, count: 16)
+        let row = SentContactRequest(
+            recipientUsername: "", recipientAccountIdB64: base64Encode(id), messageId: 1, createdAt: "",
+            recipientKeyB64: base64Encode(key))
+        XCTAssertTrue(SentRequests.holds([row], accountKey: key, accountId: nil))
+        XCTAssertTrue(SentRequests.holds(
+            [row], accountKey: Data(repeating: 9, count: 32), accountId: id), "their key rotated")
+        XCTAssertFalse(SentRequests.holds(
+            [row], accountKey: Data(repeating: 9, count: 32), accountId: nil))
+    }
+
+    func testAPersonWhoBecameAContactLeavesPeopleAtOnce() async {
+        let rec = Recorder()
+        let anna = person(1)
+        rec.answer = PeopleSearchAnswer(people: [anna])
+        let shared = session(rec)
+        let contacts = instantModel(shared)
+        let chats = instantModel(shared)
+        await type("anna", into: contacts)
+        await type("anna", into: chats)
+        XCTAssertEqual(contacts.rows(showsLocalContacts: false).network.map(\.accountKey), [anna.accountKey])
+
+        // Accepted with the text still in the field; the answer still names
+        // them as someone to add, and the local match does not find them.
+        rec.contacts = [anna.accountKey]
+        shared.noteContactsChanged()
+        let inContacts = contacts.rows(showsLocalContacts: false)
+        XCTAssertTrue(inContacts.local.isEmpty && inContacts.network.isEmpty, "the Contacts list shows them")
+        XCTAssertNil(
+            contacts.peopleMessage(includesChannels: false, showsLocalContacts: false),
+            "and no heading stands with no row")
+        let inChats = chats.rows(showsLocalContacts: true)
+        XCTAssertTrue(inChats.network.isEmpty)
+        XCTAssertEqual(inChats.local.map(\.reach), [.contact])
+    }
+
+    func testAContactWhoseChatMatchesIsNotListedTwice() async {
+        let rec = Recorder()
+        rec.candidates = [candidate(4, isContact: true)]
+        let model = instantModel(session(rec))
+        await type("anna", into: model)
+        let key = candidate(4).accountKey
+        XCTAssertEqual(model.rows(showsLocalContacts: true).local.map(\.accountKey), [key])
+
+        let rows = model.rows(showsLocalContacts: true, chatPeers: [key])
+        XCTAssertTrue(rows.local.isEmpty && rows.network.isEmpty, "the chat row stands above")
+    }
+
+    func testSomeoneWhoIsNoContactKeepsTheirRowBesideTheirChat() async {
+        let rec = Recorder()
+        rec.candidates = [candidate(4, grants: [kept(1)])]
+        let model = instantModel(session(rec))
+        await type("anna", into: model)
+        let rows = model.rows(showsLocalContacts: true, chatPeers: [candidate(4).accountKey])
+        XCTAssertEqual(rows.local.map(\.accountKey), [candidate(4).accountKey], "the way to add them stays")
+    }
+
+    func testAKnownPersonWhoBecameAContactIsReadAgainWithTheTextStanding() async {
+        let rec = Recorder()
+        rec.candidates = [candidate(4, grants: [kept(1)])]
+        let shared = session(rec)
+        let model = instantModel(shared)
+        await type("anna", into: model)
+        XCTAssertEqual(model.local.first?.reach, .grant)
+
+        rec.candidates = [candidate(4, isContact: true, grants: [kept(1)])]
+        shared.noteContactsChanged()
+        XCTAssertEqual(model.local.first?.reach, .contact)
     }
 
     func testAnOrdinaryFailureRecordsNoVerdict() async {

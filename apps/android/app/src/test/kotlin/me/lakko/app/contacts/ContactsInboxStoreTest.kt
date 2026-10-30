@@ -5,6 +5,7 @@ package me.lakko.app.contacts
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -370,5 +371,40 @@ class ContactsInboxStoreTest {
         assertEquals(1, oldKey[0].toInt())
         // The claim alone replaces nothing: without a proof it is two rows.
         assertEquals(5, mergeFetchedRequests(pending, emptyList(), fetched.take(1) + fetched.drop(2)).pending.size)
+    }
+
+    private val askedKey = ByteArray(32) { 5 }
+    private val askedKeyB64 = java.util.Base64.getEncoder().encodeToString(askedKey)
+    private fun asked() = sentTo(5).copy(recipientKeyB64 = askedKeyB64)
+
+    @Test
+    fun answered_welcome_writes_the_contact_in_the_step_that_retires_the_sent_entry() {
+        val out = applyAnsweringWelcomes(emptyList(), listOf(asked()), mapOf(askedKeyB64 to "ab"), 1uL, "now")
+        assertTrue(out.sent.isEmpty())
+        assertTrue(out.acceptedChanged)
+        val row = out.accepted.single()
+        assertTrue(row.request.fromPubkey.contentEquals(askedKey))
+        assertEquals("ab", row.groupIdHex)
+        assertEquals(
+            asked().recipientAccountIdB64,
+            java.util.Base64.getEncoder().encodeToString(row.request.fromAccountId),
+        )
+    }
+
+    @Test
+    fun a_row_the_one_to_one_rule_wrote_first_gets_the_account_id() {
+        val first = adoptingOneToOnePeer(emptyList(), askedKey, null, "ab", 1uL, "now")!!
+        val out = applyAnsweringWelcomes(first, listOf(asked()), mapOf(askedKeyB64 to "ab"), 2uL, "now")
+        assertEquals(1, out.accepted.size)
+        assertTrue(out.acceptedChanged)
+        assertEquals(16, out.accepted.single().request.fromAccountId?.size)
+    }
+
+    @Test
+    fun a_welcome_from_someone_not_asked_writes_nothing_here() {
+        val out = applyAnsweringWelcomes(emptyList(), listOf(sentTo(6)), mapOf(askedKeyB64 to "ab"), 1uL, "now")
+        assertTrue(out.accepted.isEmpty())
+        assertFalse(out.acceptedChanged)
+        assertEquals(1, out.sent.size)
     }
 }

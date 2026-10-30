@@ -5,20 +5,29 @@
  * The contact requests this account has sent, per account, in
  * `localStorage`, so the Contacts pane can show them under "Sent" with a
  * waiting label (docs/ux/client-redesign.md section 5.3) until the
- * recipient's acceptance lands in the address book. Only the username and
- * the account id are kept here; the intro text is kept apart, sealed under
- * the device key (`sent-request-intros.ts`). A record goes when the request
+ * recipient's acceptance lands in the address book. The name the person was
+ * found under, their username and their account id are kept here; the intro
+ * text is kept apart, sealed under the device key
+ * (`sent-request-intros.ts`). A record goes when the request
  * is answered, when the person dismisses it, and with the account wipe.
  *
  * The rules (dedup, which rows are still waiting) live in
  * `contact-list-model.ts`; this file is the storage.
  */
+import { createSignal, type Accessor } from "solid-js";
+
 import {
   upsertSentRequest,
   type SentRequestRecord,
 } from "./contact-list-model";
 
 const KEY_PREFIX = "lakko.contacts.sent.v1:";
+
+const [version, setVersion] = createSignal(0);
+
+/** Reactive: moves whenever a record is written or dropped, so the Sent list
+ *  and a search row read the store again. */
+export const sentRequestsVersion: Accessor<number> = version;
 
 function keyFor(accountIdB64: string): string {
   return `${KEY_PREFIX}${accountIdB64}`;
@@ -30,7 +39,8 @@ function isRecord(value: unknown): value is SentRequestRecord {
   return (
     typeof v["recipientUsername"] === "string" &&
     typeof v["recipientAccountIdHex"] === "string" &&
-    typeof v["sentAtMs"] === "number"
+    typeof v["sentAtMs"] === "number" &&
+    (v["recipientName"] === undefined || typeof v["recipientName"] === "string")
   );
 }
 
@@ -49,11 +59,9 @@ export function loadSentRequests(accountIdB64: string): SentRequestRecord[] {
 
 function save(accountIdB64: string, list: readonly SentRequestRecord[]): void {
   if (typeof localStorage === "undefined") return;
-  if (list.length === 0) {
-    localStorage.removeItem(keyFor(accountIdB64));
-    return;
-  }
-  localStorage.setItem(keyFor(accountIdB64), JSON.stringify(list));
+  if (list.length === 0) localStorage.removeItem(keyFor(accountIdB64));
+  else localStorage.setItem(keyFor(accountIdB64), JSON.stringify(list));
+  setVersion((v) => v + 1);
 }
 
 /** Remember a request just sent. */
@@ -82,4 +90,5 @@ export function forgetSentRequest(
 export function clearSentRequests(accountIdB64: string): void {
   if (typeof localStorage === "undefined") return;
   localStorage.removeItem(keyFor(accountIdB64));
+  setVersion((v) => v + 1);
 }

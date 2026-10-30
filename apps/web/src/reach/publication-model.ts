@@ -11,7 +11,8 @@
  *   name, the username or its certificate changed, withdrawn on leaving;
  * - the **introduction record** (contacts of contacts), rebuilt when 2.1 is
  *   on and the `fof` key version, the name or the username changed, and
- *   offered to every contact who has not been sent this version yet;
+ *   offered to every contact the setting allows who has not been sent this
+ *   version yet;
  * - the **bundle** this account relays to its contacts: the records its
  *   contacts offered, re-sent when that set changed;
  * - the **ask**: an offer and a bundle go out once per conversation, so a
@@ -98,15 +99,43 @@ export function offerNeedsRebuild(
   return contactsOfContacts && (held === null || held.key !== key);
 }
 
-/** The conversations the current record has not been sent to yet. */
+/** A contact as the offer step reads it. */
+export interface OfferContact {
+  /** Their account key (hex). */
+  readonly keyHex: string;
+  readonly accountIdHex: string | null;
+}
+
+/**
+ * Whether the record may go to the other person of a one-to-one
+ * (`docs/ux/who-can-find-me.md` sections 1 and 4.1): someone the list holds,
+ * under any key they have had, whom the setting allows. A person the viewer
+ * removed keeps the conversation and never the record. `allows` is the core's
+ * `allowsContact`, asked with `null` for a contact with no known account id.
+ */
+export function mayOfferTo(
+  peerKeysHex: readonly string[],
+  contacts: readonly OfferContact[],
+  allows: (accountIdHex: string | null) => boolean,
+): boolean {
+  const contact = contacts.find((c) => peerKeysHex.includes(c.keyHex));
+  return contact !== undefined && allows(contact.accountIdHex);
+}
+
+/**
+ * The conversations the current record has not been sent to yet, and may be
+ * (`allowed`). One passed over is not recorded, so a contact switched on later
+ * gets the record at the next pass with no new key.
+ */
 export function offerTargets(
   state: PublicationState,
   contactsOfContacts: boolean,
   oneToOneGroups: readonly string[],
+  allowed: (groupIdB64: string) => boolean,
 ): string[] {
   const offer = state.offer;
   if (!contactsOfContacts || offer === null) return [];
-  return oneToOneGroups.filter((g) => state.offerSentTo[g] !== offer.key);
+  return oneToOneGroups.filter((g) => state.offerSentTo[g] !== offer.key && allowed(g));
 }
 
 /** A stable digest of a set of record wires (order-independent). */

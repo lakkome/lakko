@@ -598,15 +598,23 @@ private fun SentRow(s: SentContactRequest, onDismiss: () -> Unit) {
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 6.dp),
     ) {
+        val text = sentRowText(s.recipientName, s.recipientUsername)
         LakkoAvatar(
-            name = s.recipientUsername,
+            name = text.title.trimStart('@'),
             seed = s.recipientAccountIdB64,
             size = 40.dp,
             personKey = me.lakko.app.ui.components.personKeyBytes(s.recipientKeyB64),
         )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text("@${s.recipientUsername}", style = MaterialTheme.typography.bodyLarge)
+            Text(text.title, style = MaterialTheme.typography.bodyLarge)
+            text.username?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Text(
                 t("contacts.list.sent_waiting"),
                 style = MaterialTheme.typography.bodySmall,

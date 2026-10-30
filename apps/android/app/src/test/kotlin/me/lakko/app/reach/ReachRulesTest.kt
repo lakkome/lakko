@@ -565,4 +565,38 @@ class ReachWelcomeGrantOrderTest {
         assertFalse(HeldGrantRef(ReachKind.MEMBER, "zz") in order)
         assertEquals(order.first(), pickWriteGrant(held, WritePurpose.WELCOME, "aa"))
     }
+
+    // --- only the contacts I choose ------------------------------------------
+
+    private val all = ContactsReach(onlyChosen = false, chosenHex = emptySet())
+    private fun chosen(vararg ids: String) = ContactsReach(onlyChosen = true, chosenHex = ids.toSet())
+
+    @Test
+    fun `moving from all to chosen narrows`() {
+        assertTrue(contactsNarrowed(all, chosen("a", "b")))
+        assertTrue(contactsNarrowed(all.copy(chosenHex = setOf("a")), chosen("a")))
+    }
+
+    @Test
+    fun `switching a contact off narrows and switching one on does not`() {
+        assertTrue(contactsNarrowed(chosen("a", "b"), chosen("a")))
+        assertFalse(contactsNarrowed(chosen("a"), chosen("a", "b")))
+        assertFalse(contactsNarrowed(chosen("a"), chosen("a")))
+    }
+
+    @Test
+    fun `going back to all is widening`() {
+        assertFalse(contactsNarrowed(chosen("a"), all))
+        assertFalse(contactsNarrowed(all, all))
+        assertFalse("no setting before: nothing narrowed", contactsNarrowed(null, chosen("a")))
+    }
+
+    @Test
+    fun `a change of the setting rotates fof only when it narrowed`() {
+        assertEquals(listOf(ReachKind.GROUP, ReachKind.CHANNEL), settingChangeRotation(chosen("a"), chosen("a", "b")))
+        assertEquals(
+            listOf(ReachKind.GROUP, ReachKind.CHANNEL, ReachKind.FOF),
+            settingChangeRotation(chosen("a", "b"), chosen("b")),
+        )
+    }
 }

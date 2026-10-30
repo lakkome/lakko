@@ -29,6 +29,22 @@ public data class ContactRowModel(
 /** A letter section of the alphabetical list: the header and its rows. */
 public data class ContactSection(val letter: String, val rows: List<ContactRowModel>)
 
+/** What a row of Contacts > Sent says: [title], then [username] when it is more
+ *  than the title already said. */
+public data class SentRowText(val title: String, val username: String?)
+
+/** A Sent row for the name a person was found under and their username (empty
+ *  for a person found by name alone). */
+public fun sentRowText(name: String?, username: String): SentRowText {
+    val handle = username.takeIf { it.isNotEmpty() }?.let { "@$it" }
+    val shown = name?.trim()?.takeIf { it.isNotEmpty() }
+    return when {
+        shown == null -> SentRowText(handle.orEmpty(), null)
+        shown == handle -> SentRowText(shown, null)
+        else -> SentRowText(shown, handle)
+    }
+}
+
 /** The header for rows whose name does not start with a letter. */
 public const val OTHER_SECTION: String = "#"
 

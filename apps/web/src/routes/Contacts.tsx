@@ -79,12 +79,13 @@ import {
   type AcceptedContact,
 } from "../contacts/local-store";
 import { useMailbox } from "../contacts/MailboxContext";
-import { forgetSentRequest, loadSentRequests } from "../contacts/sent-requests";
+import { forgetSentRequest, loadSentRequests, sentRequestsVersion } from "../contacts/sent-requests";
 import { forgetSentIntro } from "../contacts/sent-request-intros";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { onContactRemoved } from "../reach/reach-service";
+import { forgetChosenContact } from "../settings/visibility-actions";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon } from "../ui/icons";
 import { t } from "../l10n";
@@ -182,9 +183,8 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   });
 
   // ---- sent requests --------------------------------------------
-  const [sentVersion, setSentVersion] = createSignal(0);
   const sent = createMemo<SentRequestRecord[]>(() => {
-    sentVersion();
+    sentRequestsVersion();
     const account = accountIdB64();
     if (account === null) return [];
     const acceptedHexes = new Set<string>();
@@ -200,7 +200,6 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     if (account === null) return;
     forgetSentRequest(account, record.recipientAccountIdHex);
     void forgetSentIntro(account, record.recipientAccountIdHex);
-    setSentVersion((v) => v + 1);
   }
 
   // ---- incoming requests ----------------------------------------
@@ -299,6 +298,13 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     // ADR-0060 section 1 — a removed contact keeps the `contact` key we handed
     // them; rotating it (and the `fof` key) makes it stop working at once.
     void onContactRemoved(base64Decode(contact.signaturePubkeyB64));
+    // Adding them back brings them in switched off (who-can-find-me 4.1).
+    if (contact.accountIdHex !== undefined) {
+      void forgetChosenContact(contact.accountIdHex).catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("[privacy] a removed contact stayed in the chosen list", err);
+      });
+    }
   }
   /** ADR-0048 §5 — the viewer's LOCAL RENAME of a contact. A blank value
    *  clears it, so the contact's own name shows again. Re-upserts by the
@@ -610,7 +616,6 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
             scope="contacts"
             query={filter}
             groupPeopleKeys={groupPeopleKeys}
-            onSent={() => setSentVersion((v) => v + 1)}
           />
         )}
         onAdd={(mode) => {
@@ -693,6 +698,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
               // next opened.
               membershipEnded={chatMembershipEnded(c())}
               isContact={selectedIsContact()}
+              accountIdHex={c().accountIdHex ?? null}
               onAddContact={() => onAddBack(c())}
               onDeleteChat={
                 chatMembershipEnded(c()) ? () => void onDeleteChat(c()) : null

@@ -60,6 +60,8 @@ lakko-sync.workspace = true
 # ADR-0064 / ADR-0065: the conversation vault (names and keys, sealed
 # objects, the storage request proof, the saved-record codec, the merge).
 lakko-vault.workspace = true
+# ADR-0086: circle directories (the key tree, the filter, sealed rows).
+lakko-circle.workspace = true
 lakko-crypto.workspace = true
 # G-4 (ADR-0007 §6) — identity supersession proof surface for the
 # rotation-on-recover (sign) + peer-side verify paths.

@@ -145,7 +145,9 @@ public enum SpentGrants {
                     recipientUsername: old?.recipientUsername ?? replacement.recipientUsername,
                     recipientAccountIdB64: recipientAccountIdB64,
                     messageId: replacement.messageId, createdAt: replacement.createdAt,
-                    intro: old?.intro ?? replacement.intro)
+                    intro: old?.intro ?? replacement.intro,
+                    recipientName: old?.recipientName,
+                    recipientKeyB64: old?.recipientKeyB64)
             ]
         }
     }

@@ -29,15 +29,17 @@ The setting has three positions:
      - **2.1.1 All of them.** The contacts of every contact the person has.
      - **2.1.2 Only the ones I choose.** The contacts of the contacts the
        person has switched on, one by one.
-   - **2.2 Members of my groups and channels**, in one of two forms, never
-     both:
-     - **2.2.1 All of them.** Every member of every group and channel the
-       person is in.
-     - **2.2.2 Only the ones I choose.** The members of the groups and
-       channels the person has switched on, one by one.
-3. **Everyone.** Anyone finds the person by username and by name.
+   - **2.2 Members of my groups**, in one of two forms, never both:
+     - **2.2.1 All of them.** Every member of every group the person is in.
+     - **2.2.2 Only the ones I choose.** The members of the groups the person
+       has switched on, one by one.
+   - **2.3 Subscribers of my channels**, in the same two forms:
+     - **2.3.1 All of them.** Every subscriber of every channel the person
+       follows.
+     - **2.3.2 Only the ones I choose.** The subscribers of the channels the
+       person has switched on, one by one.
 
-Choosing 1 turns 2 and 3 off, choosing 3 turns 1 and 2 off, and 2.1 and 2.2
+Choosing 1 turns 2 and 3 off, choosing 3 turns 1 and 2 off, and 2.1, 2.2 and 2.3
 combine freely.
 
 **Knowing someone is not permission to reach them.** Knowing a person's
@@ -46,7 +48,9 @@ does not let you send them a contact request or a message. Only the setting
 (through search) or a link from them does. Existing contacts are unaffected:
 a contact can always write.
 
-**Default for a new account: Some people, with 2.1.1 and 2.2.1 on.**
+**Default for a new account: Some people, with 2.1.1 and 2.2.1 on and 2.3 off**
+(decided 2026-10-30). A group is mostly people who know each other; a channel can
+be a million strangers, and being findable lets any of them send a request.
 
 ## 2. Where the setting lives
 
@@ -73,8 +77,11 @@ People with your invite link or QR code can always reach you.
       [x] Contacts of my contacts
             (•) All my contacts
             ( ) Only the ones I choose          >
-      [x] Members of my groups and channels
-            (•) All groups and channels
+      [x] Members of my groups
+            (•) All my groups
+            ( ) Only the ones I choose          >
+      [ ] Subscribers of my channels
+            (•) All my channels
             ( ) Only the ones I choose          >
 ( ) Everyone
 ```
@@ -91,7 +98,7 @@ Controls, top to bottom:
     back on selects Some people again.
   - Choosing **Some people** from Nobody or Everyone restores the parts the
     person last had on; if they never had any, the default parts (2.1.1 and
-    2.2.1).
+    2.2.1, with 2.3 off).
 - **All / Only the ones I choose** is a single choice, one under each part,
   shown only while that part is on.
 - **Only the ones I choose** has a disclosure that opens its list (section 4
@@ -340,6 +347,13 @@ The screen must not claim more than has happened.
 - **A failure to apply** (the server refused, the device lost its session):
   "Couldn't update who can find you. Try again." with a Retry action, and
   the rows show what is actually in effect.
+
+**Under the mechanism of [ADR-0086](../adr/0086-circle-directories.md)** (proposed,
+not built): a contact switched off, and a person removed from a contact list, stop
+working at once, and no other device has to do anything. A new device finds people
+through contacts more completely over its first sessions, starting with the contacts
+it uses most; nothing on screen speaks of it, and a person not found yet reads like
+anyone not found.
 
 ## 9. States of the screen
 
