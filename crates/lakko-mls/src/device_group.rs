@@ -1181,6 +1181,54 @@ mod tests {
         [0x5E; 32]
     }
 
+    /// C-88 at this entry point, which is narrower than a conversation's: an
+    /// active DeviceGroup is refused, typed, and so is an ENDED one, which a
+    /// Welcome does not replace here. A device that lost its place rejoins on
+    /// a fresh [`Identity`] (ADR-0081), so it never reaches a stored group, and
+    /// this change does not add a second way back.
+    #[test]
+    fn a_welcome_replaces_no_device_group() {
+        let account: AccountId = [0x7A; 16];
+        let id_a = Identity::generate("device-A").expect("generate A");
+        let mut group_a =
+            DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).expect("create founder");
+        let id_b = Identity::generate("device-B").expect("generate B");
+        let addition = group_a
+            .add_device(&id_a, id_b.create_key_package().expect("KP"))
+            .expect("add B");
+        let welcome = crate::group::encode_message(&addition.welcome).expect("welcome");
+        let mut group_b = DeviceGroup::join_from_welcome(&welcome, &id_b, &account).expect("joins");
+
+        let err = DeviceGroup::join_from_welcome(&welcome, &id_b, &account)
+            .err()
+            .expect("an active group is not replaced");
+        assert_eq!(
+            err.refusal_reason(),
+            Some(crate::RefusalReason::GroupStillActive)
+        );
+
+        let leaf_b = group_b.as_group().own_leaf_index().u32();
+        let removal = group_a.remove_device_at(&id_a, leaf_b).expect("remove B");
+        group_b
+            .process_incoming(&id_b, &removal)
+            .expect("B applies");
+        assert!(!group_b.is_active());
+
+        let addition = group_a
+            .add_device(&id_a, id_b.create_key_package().expect("KP"))
+            .expect("add B again");
+        let welcome = crate::group::encode_message(&addition.welcome).expect("welcome");
+        let err = DeviceGroup::join_from_welcome(&welcome, &id_b, &account)
+            .err()
+            .expect("an ended group is not replaced here");
+        assert_eq!(err.refusal_reason(), None, "the plain refusal, got {err}");
+        let gid = group_b.group_id();
+        assert!(!DeviceGroup::load_by_group_id(&id_b, &account, &gid)
+            .unwrap()
+            .expect("the ended group is still stored")
+            .is_active());
+    }
+
     /// The retired account-id derivation, recomputed here only to show the
     /// new id is not it.
     fn retired_v1_group_id(account_id: &AccountId) -> Vec<u8> {

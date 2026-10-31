@@ -18,6 +18,18 @@ final class PendingContactsTests: XCTestCase {
             username: username, addedAtMs: at, linkId: Data(repeating: 7, count: 16))
     }
 
+    func testAPersonAddedThroughTheirLinkIsHeldByKeyOrAccountId() {
+        let invited = [contact("aa", key: 1)]
+        XCTAssertTrue(PendingContacts.holds(
+            invited, accountKey: Data(repeating: 1, count: 32), accountId: nil))
+        XCTAssertTrue(PendingContacts.holds(
+            invited, accountKey: Data(repeating: 9, count: 32), accountId: Data([0xaa])))
+        XCTAssertFalse(PendingContacts.holds(
+            invited, accountKey: Data(repeating: 9, count: 32), accountId: Data([0xbb])))
+        XCTAssertFalse(PendingContacts.holds(
+            invited, accountKey: Data(repeating: 9, count: 32), accountId: nil))
+    }
+
     /// Add racing a link that went dead: the consume answers dead and nothing
     /// is kept, no pending contact and no request.
     @MainActor

@@ -269,8 +269,19 @@ field is open, so nothing a row says may need an app restart to become correct:
 - A network answer kept for a text is reused for at most 60 seconds (chosen, not
   measured), a found answer and a not-found one alike.
 - A row's refused or failed line lasts until the text changes.
-- **Request sent** is read from the Sent list: declined, dismissed or accepted,
-  the row goes back to what the check says.
+- **Request sent** is read from the Sent list, and from the people added through
+  their invite link who have not answered: declined, dismissed or accepted, the
+  row goes back to what the check says.
+- One person, one row (2026-10-31). A person the list above already shows, a
+  contact or someone added through their link, is not repeated under **People**,
+  in Contacts and in Chats. A person with a conversation who is no contact keeps
+  their row under **People**, and with it the way to add them.
+- A contact the list cannot match yet, because their name has not arrived, stands
+  under **People** until it can, so the field is never blank.
+- The name a person was found under is theirs until their own profile arrives, so
+  a new contact is never listed as a stand-in.
+- The line that nothing matches shows only when nothing stands in the field, no
+  list row and no person under **People**.
 
 **What goes away:** the "Search people" row of the Chats search, the "Add by
 username" form in Contacts (its username field, its message field and its

@@ -5094,14 +5094,6 @@
       "text": "{count, plural, one {# вложение} few {# вложения} many {# вложений} other {# вложения}}",
       "status": "machine"
     },
-    "feed.banner.dismiss": {
-      "text": "Понятно",
-      "status": "machine"
-    },
-    "feed.banner.local": {
-      "text": "Лента показывает сообщения, которые получило это устройство.",
-      "status": "machine"
-    },
     "feed.divider.new": {
       "text": "Новое",
       "status": "machine"

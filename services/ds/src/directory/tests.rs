@@ -13,12 +13,20 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use lakko_anon_token::{TokenContext, TOKEN_HEADER};
 use lakko_circle::{
-    directory_path, member_epoch_key, open_filter, open_row, path_nodes, row_epoch, DirectoryHead,
-    DirectoryWrite, DirectoryWriter, EpochKey, FilterEntry, MemberGrant, Wrap, HEAD_LEN, ROW_LEN,
+    directory_path, member_epoch_key, open_card, open_filter, open_row, path_nodes, row_epoch,
+    seal_card, DirectoryHead, DirectoryWrite, DirectoryWriter, EpochKey, FilterEntry, MemberGrant,
+    Wrap, HEAD_LEN, ROW_LEN,
 };
 use lakko_ds_proof::{SigningKey, PROOF_HEADER_NAME};
 
 use crate::test_support::{app, fresh_name, send, send_with, token_at, Req};
+
+/// The OPRF output these rows are sealed under: the DS never sees one.
+const TERM: [u8; 64] = [0x4c; 64];
+
+fn card(plain: &[u8]) -> Vec<u8> {
+    seal_card(plain, &[TERM]).unwrap()
+}
 
 fn writer(tag: u8) -> DirectoryWriter {
     DirectoryWriter::create(&fresh_name(tag)).unwrap()
@@ -217,7 +225,7 @@ async fn reads_need_the_current_key_and_a_removal_ends_the_old_one_at_once() {
     let (mut w, owner) = claimed(&app, 0x93).await;
     let bob = w.add_member().unwrap();
     let carol = w.add_member().unwrap();
-    w.put_row(0, b"anna".to_vec()).unwrap();
+    w.put_row(0, card(b"anna")).unwrap();
     w.set_filter(vec![entry(1, 0)], 1).unwrap();
     flush(&app, &mut w, &owner).await;
 
@@ -241,7 +249,10 @@ async fn reads_need_the_current_key_and_a_removal_ends_the_old_one_at_once() {
     let (status, row) = read_with(&app, &row_uri(&w, 0), Some(&signer), 1).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(row.len(), ROW_LEN);
-    assert_eq!(open_row(&key, 0, &row).unwrap(), b"anna");
+    assert_eq!(
+        open_card(&open_row(&key, 0, &row).unwrap(), &TERM).unwrap(),
+        b"anna"
+    );
 
     // Katya removes Bob. His key is refused from that moment.
     w.remove_members(&[bob.leaf]).unwrap();
@@ -281,7 +292,7 @@ async fn a_repeated_proof_is_refused() {
     };
     let (mut w, owner) = claimed(&app, 0x94).await;
     let bob = w.add_member().unwrap();
-    w.put_row(0, b"x".to_vec()).unwrap();
+    w.put_row(0, card(b"x")).unwrap();
     w.set_filter(vec![], 1).unwrap();
     flush(&app, &mut w, &owner).await;
     let key = member_key(&app, &w, &bob).await.unwrap();
@@ -319,7 +330,7 @@ async fn a_write_is_the_owners_and_names_the_next_version() {
     };
     let (mut w, owner) = claimed(&app, 0x95).await;
 
-    w.put_row(0, b"one".to_vec()).unwrap();
+    w.put_row(0, card(b"one")).unwrap();
     let first = w.take_write().unwrap().unwrap();
 
     // Not the owner: the uniform refusal.
@@ -338,7 +349,7 @@ async fn a_write_is_the_owners_and_names_the_next_version() {
     assert_eq!(status, StatusCode::CONFLICT);
 
     // A version that skips ahead: refused.
-    w.put_row(1, b"two".to_vec()).unwrap();
+    w.put_row(1, card(b"two")).unwrap();
     let mut second = w.take_write().unwrap().unwrap();
     second.version += 1;
     let (status, _) = send_write(&app, &second, &owner, None).await;
@@ -370,7 +381,7 @@ async fn a_device_behind_a_removal_cannot_write_under_the_old_epoch() {
     // The other device still thinks Bob is in, and queues a row at epoch 1.
     let mut behind = DirectoryWriter::restore(&seed, &state).unwrap();
     assert_eq!(behind.epoch(), 1);
-    behind.put_row(0, b"late".to_vec()).unwrap();
+    behind.put_row(0, card(b"late")).unwrap();
     let write = behind.take_write().unwrap().unwrap();
     assert_eq!(write.epoch, 1);
     let (status, _) = send_write(&app, &write, &owner, None).await;
@@ -457,10 +468,10 @@ async fn a_row_can_be_replaced_and_deleted() {
     };
     let (mut w, owner) = claimed(&app, 0x9A).await;
     let bob = w.add_member().unwrap();
-    w.put_row(0, b"first".to_vec()).unwrap();
-    w.put_row(1, b"second".to_vec()).unwrap();
+    w.put_row(0, card(b"first")).unwrap();
+    w.put_row(1, card(b"second")).unwrap();
     flush(&app, &mut w, &owner).await;
-    w.put_row(0, b"changed".to_vec()).unwrap();
+    w.put_row(0, card(b"changed")).unwrap();
     w.delete_row(1).unwrap();
     flush(&app, &mut w, &owner).await;
 
@@ -469,7 +480,10 @@ async fn a_row_can_be_replaced_and_deleted() {
     let (status, row) = read_with(&app, &row_uri(&w, 0), Some(&signer), 1).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(row_epoch(&row).unwrap(), 1);
-    assert_eq!(open_row(&key, 0, &row).unwrap(), b"changed");
+    assert_eq!(
+        open_card(&open_row(&key, 0, &row).unwrap(), &TERM).unwrap(),
+        b"changed"
+    );
     let (status, _) = read_with(&app, &row_uri(&w, 1), Some(&signer), 1).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
@@ -507,7 +521,7 @@ async fn the_owner_deletes_everything_and_can_start_over() {
     let token = claim_token();
     send_write(&app, &claim, &owner, Some(&token)).await;
     let bob = w.add_member().unwrap();
-    w.put_row(0, b"x".to_vec()).unwrap();
+    w.put_row(0, card(b"x")).unwrap();
     w.set_filter(vec![], 1).unwrap();
     w.remove_members(&[bob.leaf]).unwrap();
     flush(&app, &mut w, &owner).await;

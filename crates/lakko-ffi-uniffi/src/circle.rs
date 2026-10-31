@@ -18,13 +18,21 @@
 //! 4. [`CircleEpochKey::read_signer`] signs the filter and row reads;
 //! 5. [`CircleEpochKey::previous`] walks the chain down to the epoch a filter
 //!    or a row names ([`circle_filter_epoch`], [`circle_row_epoch`]);
-//! 6. [`CircleFilter::lookup`] tests a term tag.
+//! 6. [`CircleFilter::lookup`] tests a term tag;
+//! 7. [`CircleEpochKey::open_row`] gives a sealed card, and [`circle_open_card`]
+//!    opens it with the OPRF output of the term searched for.
+//!
+//! A row carries a card the person it describes sealed with
+//! [`circle_seal_card`]: the epoch key opens every row, and every contact of the
+//! owner holds it, so only the term keeps a card from a contact who has not
+//! searched for it. The owner stores what it was offered and cannot read it.
 //!
 //! The filter test is local. Nothing here touches the network.
 //!
 //! Every refusal is [`FfiError::Circle`] with the message `"<code>: <reason>"`.
 //! The code is the frozen `lakko_circle::CircleError::code()`, or `keyLength`,
-//! `tagLength`, `wrapLength` for an argument of the wrong length.
+//! `tagLength`, `wrapLength`, `outputLength` for an argument of the wrong
+//! length.
 //!
 //! Not on the notification extension surface: a background process does not
 //! search (ADR-0086 section 4 has no background work).
@@ -34,10 +42,10 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lakko_circle::{
-    directory_path, filter_header, member_epoch_key, open_filter, open_row, path_nodes, row_epoch,
-    CircleError, DirectoryHead, DirectoryWrite, DirectoryWriter, EpochKey, FilterEntry,
-    MemberGrant, OpenedFilter, Wrap, GRANT_LEN, MAX_ROWS_PER_TERM, MAX_ROWS_PER_WRITE,
-    OWNER_PROOF_EPOCH, ROW_CARD_MAX_LEN, TAG_LEN_BYTES, WRAP_LEN,
+    directory_path, filter_header, member_epoch_key, open_card, open_filter, open_row, path_nodes,
+    row_epoch, seal_card, CircleError, DirectoryHead, DirectoryWrite, DirectoryWriter, EpochKey,
+    FilterEntry, MemberGrant, OpenedFilter, Wrap, GRANT_LEN, MAX_ROWS_PER_TERM, MAX_ROWS_PER_WRITE,
+    OPRF_OUTPUT_LEN, OWNER_PROOF_EPOCH, ROW_CARD_MAX_LEN, SEALED_CARD_LEN, TAG_LEN_BYTES, WRAP_LEN,
 };
 use lakko_crypto::SecretBytes;
 use lakko_ds_proof::DsProofSigner as InnerSigner;
@@ -273,11 +281,13 @@ impl CircleWriter {
         Ok(self.lock().remove_members(&leaves)?)
     }
 
-    /// Queue a card as row `index`.
+    /// Queue a card as row `index`. Pass the bytes [`circle_seal_card`] gave
+    /// the person the card describes: a plain card here would be readable by
+    /// every contact of this owner.
     ///
     /// # Errors
     ///
-    /// [`FfiError::Circle`]: `cardTooLong`, `rowOutOfRange`.
+    /// [`FfiError::Circle`]: `cardNotSealed`, `rowOutOfRange`.
     pub fn put_row(&self, index: u32, card: Vec<u8>) -> Result<(), FfiError> {
         Ok(self.lock().put_row(index, card)?)
     }
@@ -376,7 +386,7 @@ impl CircleEpochKey {
         }))
     }
 
-    /// Open row `index`, sealed at this epoch, to its card.
+    /// Open row `index`, sealed at this epoch, to the sealed card inside it.
     ///
     /// # Errors
     ///
@@ -503,6 +513,39 @@ pub fn circle_row_epoch(row: Vec<u8>) -> Result<u64, FfiError> {
     Ok(row_epoch(&row)?)
 }
 
+/// Seal `card` under the search terms of the person it describes. Each of
+/// `term_outputs`, 64-byte OPRF outputs, opens it, and nothing else does: not
+/// the epoch key, not a term tag. Every sealed card has one length.
+///
+/// # Errors
+///
+/// [`FfiError::Circle`]: `empty`, `tooManyTerms`, `cardTooLong`, `outputLength`.
+#[uniffi::export]
+pub fn circle_seal_card(card: Vec<u8>, term_outputs: Vec<Vec<u8>>) -> Result<Vec<u8>, FfiError> {
+    let mut outputs = Vec::with_capacity(term_outputs.len());
+    for output in &term_outputs {
+        outputs.push(fixed::<OPRF_OUTPUT_LEN>(
+            output,
+            "outputLength",
+            "an OPRF output",
+        )?);
+    }
+    Ok(seal_card(&card, &outputs)?)
+}
+
+/// Open a sealed card with the 64-byte OPRF output of a search term.
+///
+/// # Errors
+///
+/// [`FfiError::Circle`]: `authentication` when the term is not on the card or
+/// the bytes were changed; `length`, `unknownFormat`, `malformed`,
+/// `outputLength`.
+#[uniffi::export]
+pub fn circle_open_card(sealed: Vec<u8>, oprf_output: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    let output = fixed::<OPRF_OUTPUT_LEN>(&oprf_output, "outputLength", "an OPRF output")?;
+    Ok(open_card(&sealed, &output)?)
+}
+
 /// The path of a directory on the Delivery Service, without a prefix. Its
 /// routes hang off it: `/header`, `/filter`, `/rows/<index>`.
 ///
@@ -534,12 +577,21 @@ pub const fn circle_grant_len() -> u32 {
     value
 }
 
-/// The longest card a row carries.
+/// The most bytes a row carries: one sealed card.
 #[uniffi::export]
 #[must_use]
 pub const fn circle_row_card_max_len() -> u32 {
     #[allow(clippy::cast_possible_truncation)] // a small constant
     let value = ROW_CARD_MAX_LEN as u32;
+    value
+}
+
+/// The length of every sealed card.
+#[uniffi::export]
+#[must_use]
+pub const fn circle_sealed_card_len() -> u32 {
+    #[allow(clippy::cast_possible_truncation)] // a small constant
+    let value = SEALED_CARD_LEN as u32;
     value
 }
 
@@ -613,7 +665,12 @@ mod tests {
         let writer = circle_writer_create(&identity(1)).unwrap();
         let bob = writer.add_member().unwrap();
         let carol = writer.add_member().unwrap();
-        writer.put_row(0, b"anna".to_vec()).unwrap();
+        writer
+            .put_row(
+                0,
+                circle_seal_card(b"anna".to_vec(), vec![vec![9; 64]]).unwrap(),
+            )
+            .unwrap();
         writer
             .set_filter(
                 vec![CircleFilterEntry {
@@ -702,9 +759,65 @@ mod tests {
         assert_eq!(key.read_signer().epoch(), 1);
     }
 
-    // The longest card `lakko_contacts` can compose today fits a row.
-    const _: () =
-        assert!(lakko_contacts::introduction::INTRODUCTION_PAYLOAD_MAX_LEN <= ROW_CARD_MAX_LEN);
+    // The longest card `lakko_contacts` can compose today can be sealed, under
+    // the most terms an introduction record carries, and the OPRF output the
+    // two crates speak of is one length.
+    const _: () = {
+        use lakko_circle::{CARD_MAX_LEN, MAX_CARD_TERMS};
+        use lakko_contacts::introduction as contacts;
+        assert!(contacts::INTRODUCTION_PAYLOAD_MAX_LEN <= CARD_MAX_LEN);
+        assert!(contacts::MAX_INTRODUCTION_TERMS == MAX_CARD_TERMS);
+        assert!(contacts::OPRF_OUTPUT_LEN == OPRF_OUTPUT_LEN);
+    };
+
+    #[test]
+    fn a_row_holds_a_sealed_card() {
+        assert_eq!(circle_row_card_max_len(), circle_sealed_card_len());
+        assert_eq!(circle_sealed_card_len(), 2893);
+    }
+
+    #[test]
+    fn a_card_opens_with_its_terms_only() {
+        let terms = vec![vec![1u8; 64], vec![2u8; 64]];
+        let sealed = circle_seal_card(b"anna".to_vec(), terms.clone()).unwrap();
+        assert_eq!(sealed.len(), circle_sealed_card_len() as usize);
+        for term in terms {
+            assert_eq!(
+                circle_open_card(sealed.clone(), term).unwrap(),
+                b"anna".to_vec()
+            );
+        }
+        let refused = circle_open_card(sealed, vec![3u8; 64]);
+        assert!(matches!(refused, Err(FfiError::Circle(m)) if m.starts_with("authentication:")));
+    }
+
+    #[test]
+    fn a_card_refuses_a_bad_argument_with_a_code() {
+        let sealed = circle_seal_card(b"x".to_vec(), vec![vec![1u8; 64]]).unwrap();
+        let short = circle_open_card(sealed, vec![1u8; 63]);
+        assert!(matches!(short, Err(FfiError::Circle(m)) if m.starts_with("outputLength:")));
+        let short = circle_seal_card(b"x".to_vec(), vec![vec![1u8; 63]]);
+        assert!(matches!(short, Err(FfiError::Circle(m)) if m.starts_with("outputLength:")));
+        let none = circle_seal_card(b"x".to_vec(), Vec::new());
+        assert!(matches!(none, Err(FfiError::Circle(m)) if m.starts_with("empty:")));
+        let many = circle_seal_card(b"x".to_vec(), vec![vec![1u8; 64]; 66]);
+        assert!(matches!(many, Err(FfiError::Circle(m)) if m.starts_with("tooManyTerms:")));
+    }
+
+    #[test]
+    fn the_tag_the_clients_compute_is_not_the_term_key() {
+        // `fof_tag` is the real derivation in `lakko-contacts`; the golden is
+        // the one `lakko_circle::card` pins with no dependency on that crate.
+        let output = [0x42u8; 64];
+        let tag = lakko_contacts::introduction::fof_tag(&output);
+        let golden: [u8; 32] = [
+            0x47, 0xb9, 0xf9, 0x4e, 0xea, 0xbc, 0x18, 0xc6, 0xca, 0x51, 0xfe, 0x6f, 0x23, 0x74,
+            0xc6, 0xe3, 0x33, 0xdc, 0x34, 0xb2, 0x0f, 0x22, 0x31, 0xd8, 0xae, 0x58, 0xad, 0x80,
+            0x61, 0x34, 0x87, 0x3d,
+        ];
+        assert_eq!(tag, golden);
+        assert_ne!(lakko_circle::term_key(&output).as_bytes(), &tag);
+    }
 
     #[test]
     fn a_grant_is_sixty_nine_bytes() {

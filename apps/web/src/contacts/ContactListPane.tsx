@@ -58,8 +58,12 @@ export interface ContactListPaneProps {
   readonly filter: () => string;
   readonly onFilter: (value: string) => void;
   /** The people half of the search field, rendered under the contacts while
-   *  something is typed. */
-  readonly people: () => JSX.Element;
+   *  something is typed. It is told who the list shows, and whether the
+   *  account has any list row (the line that nothing matches needs one). */
+  readonly people: (
+    listedKeysB64: () => ReadonlySet<string>,
+    anyListRow: () => boolean,
+  ) => JSX.Element;
   readonly onAdd: (mode: AddMode) => void;
   readonly pending: () => readonly IncomingContactRequest[];
   readonly pendingBusy: () => boolean;
@@ -108,12 +112,14 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
         kind: "invited",
         p,
         name: invitedName(p),
-        username: p.username.length > 0 ? p.username : null,
+        username: p.username.length > 0 ? `@${p.username}` : null,
       }),
     ),
   ];
   const matching = (): ListRow[] =>
     rows().filter((r) => matchesContactQuery(props.filter(), r.name, r.username));
+  const listedKeysB64 = (): ReadonlySet<string> =>
+    new Set(matching().map((r) => (r.kind === "contact" ? r.c.signaturePubkeyB64 : r.p.signaturePubkeyB64)));
   const groups = (): ReturnType<typeof groupByLetter<ListRow>> =>
     groupByLetter(matching(), (r) => r.name);
   const requests = (): IncomingContactRequest[] => sortIncomingRequests(props.pending());
@@ -282,14 +288,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
             </div>
           }
         >
-          <Show
-            when={groups().length > 0}
-            fallback={
-              <Show when={rows().length > 0}>
-                <p class="lk-pane-nomatch">{t("contacts.list.no_match")}</p>
-              </Show>
-            }
-          >
+          <Show when={groups().length > 0}>
             <For each={groups()}>
               {(group) => (
                 <>
@@ -333,7 +332,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
             </For>
           </Show>
         </Show>
-        <Show when={searching()}>{props.people()}</Show>
+        <Show when={searching()}>{props.people(listedKeysB64, () => rows().length > 0)}</Show>
       </div>
     </aside>
   );

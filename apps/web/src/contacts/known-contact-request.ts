@@ -118,6 +118,26 @@ export function establishedContactOfAccount<T extends ContactAccountRow>(
   );
 }
 
+/**
+ * The contact row under the key that signed a request, or `undefined`.
+ *
+ * A request reaches this code with its signature verified, so the sender
+ * holds that key, and a row under the same key is that person whatever the
+ * row says about their account: a row with no account id, or one no pin or
+ * binding vouches for yet, is still a contact and must be answered. Treating
+ * it as a stranger's request drops it silently (the inbox keeps no request
+ * from a contact's key) and leaves the sender waiting for good. A member who
+ * claimed someone else's account id gains nothing: the comparison is with the
+ * key that signed.
+ */
+export function contactSignedBy<T extends ContactAccountRow>(
+  accepted: readonly T[],
+  requestKeyB64: string,
+): T | undefined {
+  if (requestKeyB64.length === 0) return undefined;
+  return accepted.find((c) => c.signaturePubkeyB64 === requestKeyB64);
+}
+
 /** The keys a pin names for an account: the pinned key and its proven
  *  predecessors; empty when the account is not pinned. */
 export function pinKeysOf(

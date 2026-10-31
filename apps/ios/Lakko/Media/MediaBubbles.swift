@@ -17,6 +17,20 @@ import SwiftUI
 /// any byte is written, so a bubble either plays authenticated bytes or shows
 /// `Couldn't play this message`.
 
+private struct MediaColumnWidthKey: EnvironmentKey {
+    static let defaultValue: CGFloat? = nil
+}
+
+extension EnvironmentValues {
+    /// `docs/ux/feed.md` section 3 — the width of the column a media bubble
+    /// sits in, where that can be narrower than the bubble. `nil` in the chat,
+    /// whose bubbles take their own boxes.
+    var mediaColumnWidth: CGFloat? {
+        get { self[MediaColumnWidthKey.self] }
+        set { self[MediaColumnWidthKey.self] = newValue }
+    }
+}
+
 /// Upload state of an outgoing media message still in the send queue.
 public enum MediaUploadState: Equatable {
     case uploading(Double)
@@ -88,6 +102,7 @@ struct VoiceBubble: View {
 
     @EnvironmentObject private var media: ChatMediaController
     @EnvironmentObject private var live: MediaLiveState
+    @Environment(\.mediaColumnWidth) private var columnWidth
     /// When the touch now on the waveform went down — see ``VoiceSeekGate``.
     @State private var waveformPressStart: Date?
     /// `client-redesign.md` — whether the message action menu is on screen, and
@@ -96,6 +111,7 @@ struct VoiceBubble: View {
 
     private var tint: Color { incoming ? Color.lakkoText : Color.lakkoAccentForeground }
     private var isPending: Bool { upload != nil }
+    private var waveformWidth: CGFloat { InlineMedia.voiceWaveformWidth(within: columnWidth) }
     private var active: ChatMediaController.VoicePlayback? {
         live.voice?.key == mediaKey ? live.voice : nil
     }
@@ -143,7 +159,7 @@ struct VoiceBubble: View {
                         }
                     }
                 }
-                .frame(width: 170)
+                .frame(width: waveformWidth)
             }
             if upload == .failed {
                 NotSentButton(onRetry: onRetry)
@@ -205,7 +221,7 @@ struct VoiceBubble: View {
                         // context menu was reaching for React or Delete, not
                         // for a point in the audio.
                         guard active != nil, VoiceSeekGate.acceptsSeek(pressSeconds: held) else { return }
-                        media.seekVoice(key: mediaKey, fraction: value.location.x / 170)
+                        media.seekVoice(key: mediaKey, fraction: value.location.x / waveformWidth)
                     }
             )
             .accessibilityElement()
@@ -530,8 +546,12 @@ struct VideoNoteBubble: View {
     @EnvironmentObject private var media: ChatMediaController
     @StateObject private var model = VideoNotePlayerModel()
     @AppStorage(MediaPrefs.autoplayKey) private var autoplay = false
+    @Environment(\.mediaColumnWidth) private var columnWidth
 
     private var busy: Bool { model.starting || media.loadingKeys.contains(mediaKey) }
+    private var side: CGFloat {
+        InlineMedia.fit(CGSize(width: Self.diameter, height: Self.diameter), within: columnWidth).width
+    }
 
     var body: some View {
         VStack(alignment: incoming ? .leading : .trailing, spacing: 4) {
@@ -583,7 +603,7 @@ struct VideoNoteBubble: View {
                     }
                     .allowsHitTesting(false)
                 }
-                .frame(width: Self.diameter, height: Self.diameter)
+                .frame(width: side, height: side)
                 .contentShape(Circle())
             }
             .buttonStyle(.plain)
@@ -647,13 +667,15 @@ struct GifBubble: View {
     @State private var failed = false
     @State private var failure: MediaLoadFailure = .failed
     @State private var fullScreen = false
+    @Environment(\.mediaColumnWidth) private var columnWidth
 
     private var size: CGSize {
         let w = Double(ref.width ?? 1)
         let h = Double(ref.height ?? 1)
         let aspect = w > 0 && h > 0 ? h / w : 1
         let width = Self.maxWidth
-        return CGSize(width: width, height: min(320, max(80, width * aspect)))
+        return InlineMedia.fit(
+            CGSize(width: width, height: min(320, max(80, width * aspect))), within: columnWidth)
     }
 
     private var inline: InlineMediaType? { InlineMedia.inlineType(mime: ref.mime) }

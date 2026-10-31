@@ -96,6 +96,41 @@ export function incomingAvatar(p: IncomingProfile): AvatarData | null {
 /** Length of an auth account id, in bytes. */
 export const ACCOUNT_ID_BYTES = 16;
 
+/** The stamp a name found by search is filed at (`ProfileApi.fileFoundName`):
+ *  any profile the person sent is strictly newer and replaces it. */
+export const FOUND_NAME_STAMP = 0n;
+
+/** Whether a row is only what a search found, with the person's own profile
+ *  still to come. Nothing a person publishes looks like this: their own
+ *  profile carries their account id. */
+export function awaitsOwnProfile(p: StoredProfile | undefined): boolean {
+  return (
+    p !== undefined &&
+    p.updatedAtMs === FOUND_NAME_STAMP &&
+    p.accountIdHex === null &&
+    (p.usernameCertificateB64 ?? null) === null
+  );
+}
+
+/** A person who never set a name publishes at stamp 0, level with a name
+ *  found for them: theirs still replaces it. A profile saying nothing does
+ *  not: it would put the stand-in back. */
+export function replacesFoundName(held: StoredProfile | undefined, incoming: StoredProfile): boolean {
+  return (
+    awaitsOwnProfile(held) &&
+    !awaitsOwnProfile(incoming) &&
+    (incoming.displayName !== null || incoming.username !== null)
+  );
+}
+
+/** What a pairing state bundle carries of a row; `null` for nothing. A found
+ *  username stands on this device's own verdict, which does not travel: with
+ *  no certificate the new device would refuse it. */
+export function forStateBundle(p: StoredProfile): StoredProfile | null {
+  if (!awaitsOwnProfile(p) || p.username === null) return p;
+  return p.displayName === null ? null : { ...p, username: null };
+}
+
 /** A not-newer re-send that carries an account id or a username
  *  certificate the held row lacks: the held row with those filled in, when
  *  the two are the same profile (same stamp); `null` when nothing is to be
@@ -238,7 +273,8 @@ export class ProfileStore {
       // than the row; never let the row overwrite it.
       if (row !== null && this.loadedAccount === accountId) {
         for (const [key, p] of row.profiles) {
-          if (decideIngest(this.profiles.get(key), p.updatedAtMs, this.isNewer) === "store") {
+          const held = this.profiles.get(key);
+          if (replacesFoundName(held, p) || decideIngest(held, p.updatedAtMs, this.isNewer) === "store") {
             this.profiles.set(key, p);
           }
         }
@@ -275,7 +311,7 @@ export class ProfileStore {
     if (this.loadedAccount !== accountId) return false;
     const incoming = toStored(profile);
     const held = this.profiles.get(senderKeyB64);
-    if (decideIngest(held, incoming.updatedAtMs, this.isNewer) === "keep") {
+    if (!replacesFoundName(held, incoming) && decideIngest(held, incoming.updatedAtMs, this.isNewer) === "keep") {
       // The same profile sent again (a growth or request answer carries the
       // stamp it was set at) is not newer, but it can carry an account id the
       // held row never had: rows filed before the envelope carried one, or by

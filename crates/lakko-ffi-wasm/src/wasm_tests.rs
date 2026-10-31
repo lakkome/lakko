@@ -276,3 +276,29 @@ fn a_membership_refusal_is_thrown_as_an_error_carrying_its_reason() {
          must reach the outstanding verdict, so no plain retry is offered",
     );
 }
+
+/// `groupStillActive` carries the group as an own property too: the caller has
+/// to know which journal to read, and it must not parse that out of a sentence.
+#[wasm_bindgen_test]
+fn a_group_still_active_refusal_is_thrown_with_the_group_id() {
+    let alice = Identity::from_seed(&[0xD2u8; 64]).expect("alice");
+    let group = Group::new(&alice, crate::mls::GroupKind::Group).expect("group");
+
+    let refused = group
+        .delete_locally(&alice)
+        .expect_err("an active group is not deleted");
+
+    assert!(refused.is_instance_of::<js_sys::Error>());
+    assert_eq!(
+        js_sys::Reflect::get(&refused, &JsValue::from_str("refusalReason"))
+            .expect("get")
+            .as_string()
+            .as_deref(),
+        Some("groupStillActive"),
+    );
+    let id: js_sys::Uint8Array =
+        js_sys::Reflect::get(&refused, &JsValue::from_str("refusalGroupId"))
+            .expect("get")
+            .unchecked_into();
+    assert_eq!(id.to_vec(), group.group_id().expect("group id"));
+}

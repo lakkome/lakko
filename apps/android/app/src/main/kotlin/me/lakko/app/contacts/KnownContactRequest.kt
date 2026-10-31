@@ -110,3 +110,18 @@ public fun establishedContactOfAccount(
             (c.keyB64 in pinKeysB64 || c.keyB64 == bindingKeyB64)
     }.takeIf { it >= 0 }
 }
+
+/**
+ * Whether a contact row sits under the key that signed a request.
+ *
+ * A request reaches this code with its signature verified, so the sender
+ * holds that key, and a row under the same key is that person whatever the
+ * row says about their account: a row with no account id, or one no pin or
+ * binding vouches for yet, is still a contact and must be answered. Treating
+ * it as a stranger's request drops it silently (the inbox keeps no request
+ * from a contact's key) and leaves the sender waiting for good. A member who
+ * claimed someone else's account id gains nothing: the comparison is with the
+ * key that signed.
+ */
+public fun isContactKey(requestKeyB64: String, rowKeysB64: List<String>): Boolean =
+    requestKeyB64.isNotEmpty() && requestKeyB64 in rowKeysB64

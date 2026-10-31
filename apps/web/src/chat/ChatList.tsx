@@ -398,6 +398,9 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     return out;
   };
 
+  /** The people added through their link whose row is on screen. */
+  const listedInvited = (): ReadonlySet<string> => new Set(invitedRows().map((p) => p.signaturePubkeyB64));
+
   /** The route of the one-to-one with a person, whatever the list shows. */
   const chatHrefOf = (personKeyB64: string): string | null => {
     const g = chats.groups().find((candidate) => chatPeerOf(candidate) === personKeyB64);
@@ -861,7 +864,8 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               conversationMatches={() => visibleRows().length}
               groupPeopleKeys={groupPeopleKeys}
               onOpenChannel={openFoundChannel}
-              chatPeersB64={visibleChatPeers}
+              listedB64={listedInvited}
+              standingAboveB64={visibleChatPeers}
               chatHrefOf={chatHrefOf}
             />
           </Show>

@@ -10,6 +10,7 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import me.lakko.app.contacts.PendingContact
 import me.lakko.app.contacts.SentContactRequest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -141,6 +142,71 @@ class PeopleSearchSessionTest {
         advanceTimeBy(2_000)
         runCurrent()
         assertEquals(listOf("anna", "annab"), h.asked)
+    }
+
+    @Test
+    fun `a contact removed with the text standing is asked again at once`() = runTest {
+        val h = Harness(this)
+        h.answer = { PeopleSearchOutcome(listOf(person("Anna", PersonReach.CONTACT)), null, PeopleSearchState.FOUND) }
+        h.session.onQuery("anna")
+        advanceTimeBy(600)
+        runCurrent()
+        assertEquals(listOf("anna"), h.asked)
+
+        h.answer = { found("Anna") }
+        h.session.onContacts(emptySet())
+        runCurrent()
+
+        assertEquals(listOf("anna", "anna"), h.asked)
+        assertEquals(PersonReach.OPEN, h.session.view.value.shown?.people?.single()?.reach)
+    }
+
+    @Test
+    fun `a contact change that leaves the answer true asks nothing`() = runTest {
+        val h = Harness(this)
+        h.answer = { PeopleSearchOutcome(listOf(person("Anna", PersonReach.CONTACT)), null, PeopleSearchState.FOUND) }
+        h.session.onQuery("anna")
+        advanceTimeBy(600)
+        runCurrent()
+        h.session.onContacts(setOf("k1"))
+        runCurrent()
+        assertEquals(listOf("anna"), h.asked)
+    }
+
+    @Test
+    fun `a remembered answer about a removed contact is not reused`() = runTest {
+        val h = Harness(this)
+        h.answer = { q ->
+            if (q == "anna") {
+                PeopleSearchOutcome(listOf(person("Anna", PersonReach.CONTACT)), null, PeopleSearchState.FOUND)
+            } else {
+                found("Bert")
+            }
+        }
+        h.session.onQuery("anna")
+        advanceTimeBy(600)
+        runCurrent()
+        h.session.onQuery("bert")
+        advanceTimeBy(600)
+        runCurrent()
+        h.session.onContacts(emptySet())
+        runCurrent()
+        h.session.onQuery("anna")
+        advanceTimeBy(600)
+        runCurrent()
+        assertEquals(listOf("anna", "bert", "anna"), h.asked)
+    }
+
+    @Test
+    fun `a person added through their link reads request sent`() {
+        val anna = person("Anna")
+        val invited = PendingContact(
+            accountIdHex = "aa", signaturePubkeyB64 = Base64.getEncoder().encodeToString(ByteArray(32) { 1 }),
+            x25519PubkeyB64 = "", displayName = "", username = "", addedAtMs = 0, linkIdHex = "",
+        )
+        assertTrue(OutgoingRequests.of(emptyList(), listOf(invited)).holds(anna))
+        assertTrue(OutgoingRequests.of(emptyList(), listOf(invited)).holds(anna.copy(keyHex = "ff", accountIdHex = "aa")))
+        assertFalse(OutgoingRequests.of(emptyList(), emptyList()).holds(anna))
     }
 
     private fun TestScope.agingMemory() = PeopleSearchMemory(nowMs = { testScheduler.currentTime })

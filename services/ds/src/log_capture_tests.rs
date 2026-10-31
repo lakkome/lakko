@@ -35,7 +35,9 @@ async fn no_identifier_reaches_the_log_on_journal_and_mailbox_routes() {
     // refusal of a read under no key.
     let mut directory = lakko_circle::DirectoryWriter::create(&fresh_name(0x65)).unwrap();
     let owner = lakko_ds_proof::SigningKey::from_seed(directory.owner_signing_seed().as_bytes());
-    directory.put_row(0, b"card".to_vec()).unwrap();
+    directory
+        .put_row(0, lakko_circle::seal_card(b"card", &[[0x4c; 64]]).unwrap())
+        .unwrap();
     directory.set_filter(vec![], 1).unwrap();
     let first_write = directory.take_write().unwrap().unwrap();
     let claim_uri = first_write.path();

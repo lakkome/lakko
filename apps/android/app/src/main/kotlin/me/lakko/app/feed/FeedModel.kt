@@ -12,7 +12,8 @@ package me.lakko.app.feed
  * [FeedCore]. This file only turns the per-group timelines and the
  * channel-post log into the flat conversation and candidate lists the ranking
  * reads, and keeps a reference from each candidate back to the row it came
- * from. Plain data in, plain data out: no Compose, no FFI, no storage.
+ * from. Plain data in, plain data out: no Compose, no storage, and no FFI call
+ * ([FeedAttachment.ref] is a generated record, which loads no native code).
  *
  * One-to-one chats never reach it: the caller passes groups and channels only
  * (UX spec section 3).
@@ -80,8 +81,16 @@ public fun groupFeedSources(
     return out
 }
 
-/** One attachment as the feed draws it. */
-public data class FeedAttachment(val kind: String?, val mime: String?)
+/**
+ * One attachment as the feed draws it. [ref] is the attachment the timeline
+ * holds, which a media bubble downloads and opens (ADR-0047); `null` for an
+ * attachment with no blob to fetch.
+ */
+public data class FeedAttachment(
+    val kind: String?,
+    val mime: String?,
+    val ref: uniffi.lakko_ffi_uniffi.AttachmentRef? = null,
+)
 
 /** One reaction as the feed counts it. */
 public data class FeedReaction(val reactorKeyB64: String, val emoji: String)

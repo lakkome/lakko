@@ -291,6 +291,21 @@ class StateBundleV3Test {
     }
 
     @Test
+    fun `a found name is carried without its username, and a username alone not at all`() {
+        val named = b64(ByteArray(32) { 10 })
+        val bare = b64(ByteArray(32) { 11 })
+        val composed = ArrayList<PeerProfile>()
+        val carried = StateBundle.carriedProfiles(
+            mapOf(named to PeerProfile("Elin Holm", "elin", 0uL), bare to PeerProfile(null, "bert", 0uL)),
+            ownKeysB64 = emptySet(),
+            ownAccountIdHex = null,
+            compose = { p -> composed += p; byteArrayOf(1) },
+        )
+        assertEquals(listOf(named), carried.map { it.personKeyB64 })
+        assertEquals(listOf(PeerProfile("Elin Holm", null, 0uL)), composed)
+    }
+
+    @Test
     fun `a pending record maps its link id between hex and base64`() {
         val contact = pending()
         val carried = StateBundle.carriedPendingContacts(listOf(contact), emptyList(), mapOf(

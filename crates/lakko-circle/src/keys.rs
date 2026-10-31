@@ -17,6 +17,8 @@
 //! row wrap key     = derive("lakko/circle/row-wrap/v1", epoch key)
 //! filter seal key  = derive("lakko/circle/filter-seal/v1", epoch key)
 //! filter hash key  = derive("lakko/circle/filter-hash/v1", epoch key)
+//! term key         = derive("lakko/circle/term-key/v1", oprf_output)
+//! card slot pad    = BLAKE3-keyed(term key, "lakko/circle/card-slot/v1" || salt)
 //! ```
 //!
 //! `derive` is BLAKE3 `derive_key`. Each context is frozen and used for one
@@ -27,6 +29,12 @@
 //! the Delivery Service checks a claim by the name, as it does for a mailbox,
 //! so nobody can squat a person's directory, and the id is derived from the
 //! account seed without the server being able to link it to anything.
+//!
+//! **Why the term key is not the term tag.** Both come from the same OPRF
+//! output, and the tag is `derive("lakko/fof/tag/v1", oprf_output)` in
+//! `lakko-contacts`. The owner of a directory holds the tags of everyone in it
+//! to build the filter, so a tag must open nothing: the two derivations are
+//! one-way and neither gives the other.
 //!
 //! **Why the salt.** Leaf keys are a pure function of the owner seed, so the
 //! tree state a device keeps holds no secret. A tree started over with the
@@ -49,6 +57,9 @@ pub const DIRECTORY_ID_LEN: usize = 32;
 pub const SALT_LEN: usize = 16;
 /// Length of a wrapped key: nonce, the 32-byte key, the AEAD tag.
 pub const WRAP_LEN: usize = NONCE_LEN + KEY_LEN + TAG_LEN;
+/// Length of an OPRF output (`lakko_contacts::introduction::OPRF_OUTPUT_LEN`,
+/// pinned equal in the FFI crates, which see both).
+pub const OPRF_OUTPUT_LEN: usize = 64;
 
 /// Context of the owner seed. Frozen.
 pub const OWNER_CONTEXT: &str = "lakko/circle/owner/v1";
@@ -74,6 +85,10 @@ pub const ROW_WRAP_CONTEXT: &str = "lakko/circle/row-wrap/v1";
 pub const FILTER_SEAL_CONTEXT: &str = "lakko/circle/filter-seal/v1";
 /// Context of the key a filter hashes terms under. Frozen.
 pub const FILTER_HASH_CONTEXT: &str = "lakko/circle/filter-hash/v1";
+/// Context of the key a search term opens a card with. Frozen.
+pub const TERM_KEY_CONTEXT: &str = "lakko/circle/term-key/v1";
+/// What a term key hashes, before the salt, for a card slot's pad. Frozen.
+pub const CARD_SLOT_DOMAIN: &[u8] = b"lakko/circle/card-slot/v1";
 
 /// A derivation output, zeroed on drop.
 pub(crate) fn derive(context: &str, material: &[u8]) -> SecretBytes<KEY_LEN> {
@@ -111,6 +126,13 @@ pub fn directory_id(owner_pk: &[u8; KEY_LEN]) -> [u8; DIRECTORY_ID_LEN] {
 #[must_use]
 pub fn directory_owner_matches(id: &[u8; DIRECTORY_ID_LEN], owner_pk: &[u8; KEY_LEN]) -> bool {
     directory_id(owner_pk) == *id
+}
+
+/// The key the search term with this OPRF output opens a card with. Holding
+/// the term's tag does not give it.
+#[must_use]
+pub fn term_key(oprf_output: &[u8; OPRF_OUTPUT_LEN]) -> SecretBytes<KEY_LEN> {
+    derive(TERM_KEY_CONTEXT, oprf_output)
 }
 
 /// The key of `leaf` at `stamp` in the tree with this salt.
@@ -267,6 +289,7 @@ mod tests {
             ROW_WRAP_CONTEXT,
             FILTER_SEAL_CONTEXT,
             FILTER_HASH_CONTEXT,
+            TERM_KEY_CONTEXT,
         ];
         let unique: std::collections::BTreeSet<_> = contexts.iter().collect();
         assert_eq!(unique.len(), contexts.len());

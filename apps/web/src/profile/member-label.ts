@@ -27,3 +27,11 @@ export function memberNameOf(resolved: ResolvedName): string {
 export function memberListLabelOf(resolved: ResolvedName): string {
   return resolved.source === "fingerprint" ? UNNAMED_MEMBER() : resolved.listLabel;
 }
+
+/** What the viewer's own avatar is lettered from when it has no photo: their
+ *  display name, the username only when there is none. */
+export function ownAvatarLabel(displayName: string | null, username: string): string {
+  const name = displayName?.trim() ?? "";
+  if (name.length > 0) return name;
+  return username.length > 0 ? username : "?";
+}

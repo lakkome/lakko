@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import me.lakko.app.contacts.PendingContact
 import me.lakko.app.contacts.SentContactRequest
 import me.lakko.app.l10n.UiText
 
@@ -94,11 +95,20 @@ public data class OutgoingRequests(val keysHex: Set<String>, val accountIdsHex: 
         /** Nobody. */
         public val NONE: OutgoingRequests = OutgoingRequests(emptySet(), emptySet())
 
-        /** The people in this Sent list. A value that is not base64 names no one. */
-        public fun of(sent: List<SentContactRequest>): OutgoingRequests = OutgoingRequests(
-            keysHex = sent.mapNotNullTo(HashSet()) { hexOfBase64(it.recipientKeyB64) },
-            accountIdsHex = sent.mapNotNullTo(HashSet()) { hexOfBase64(it.recipientAccountIdB64) },
-        )
+        /**
+         * The people in this Sent list, and [invited]: those added through
+         * their invite link who have not answered yet. The request went out
+         * when Add was pressed, so a row for them reads "Request sent" like
+         * any other and offers no second request. A value that is not base64
+         * names no one.
+         */
+        public fun of(sent: List<SentContactRequest>, invited: List<PendingContact> = emptyList()): OutgoingRequests =
+            OutgoingRequests(
+                keysHex = sent.mapNotNullTo(HashSet()) { hexOfBase64(it.recipientKeyB64) } +
+                    invited.mapNotNull { hexOfBase64(it.signaturePubkeyB64) },
+                accountIdsHex = sent.mapNotNullTo(HashSet()) { hexOfBase64(it.recipientAccountIdB64) } +
+                    invited.map { it.accountIdHex },
+            )
 
         private fun hexOfBase64(b64: String?): String? = try {
             b64?.let { searchHex(java.util.Base64.getDecoder().decode(it)) }
@@ -200,6 +210,13 @@ public class PeopleSearchMemory(
     internal fun remember(key: String, outcome: PeopleSearchOutcome) {
         if (outcome.state == PeopleSearchState.FOUND || outcome.state == PeopleSearchState.NOT_FOUND) {
             answered[key] = Kept(outcome, nowMs())
+        }
+    }
+
+    /** Forget every answer [stale] calls no longer true. */
+    internal fun forgetWhere(stale: (PeopleSearchOutcome) -> Boolean) {
+        for ((key, kept) in answered) {
+            if (stale(kept.outcome)) answered.remove(key, kept)
         }
     }
 
@@ -342,6 +359,25 @@ public class PeopleSearchSession(
             delay(debounceMs)
             ask(key, bare)
         }
+    }
+
+    /**
+     * The contact list changed under the answers: one that calls someone a
+     * contact who is no longer one is false ([namesFormerContact]). It is
+     * forgotten, and the one on screen is asked again at once, since nothing
+     * else would ask while the text stands.
+     */
+    public fun onContacts(contactKeysB64: Set<String>) {
+        val stale = { outcome: PeopleSearchOutcome -> namesFormerContact(outcome.people, contactKeysB64) }
+        memory.forgetWhere(stale)
+        val shown = mutable.value.shown ?: return
+        val key = currentKey ?: return
+        val bare = bareSearchText(lastText.orEmpty())
+        if (!stale(shown)) return
+        waiting?.cancel()
+        waiting = null
+        mutable.update { it.copy(shown = null, searching = true) }
+        ask(key, bare)
     }
 
     // The question itself is its own job: typing on after it went out must not

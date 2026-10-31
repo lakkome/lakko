@@ -5296,14 +5296,6 @@
       "text": "{count, plural, one {# attachment} other {# attachments}}",
       "comment": "Stands in for text in a Feed item whose message carries only attachments, when there are several."
     },
-    "feed.banner.dismiss": {
-      "text": "Got it",
-      "comment": "Button that dismisses the one-time note at the top of the Feed."
-    },
-    "feed.banner.local": {
-      "text": "Your feed shows messages this device has received.",
-      "comment": "One-time note at the top of the Feed: it is built only from what reached this device."
-    },
     "feed.divider.new": {
       "text": "New",
       "comment": "Divider in the Feed above the items that arrived since the reader last looked."

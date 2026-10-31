@@ -87,7 +87,8 @@ internal fun PeopleSearchSection(
     val context = LocalContext.current
     val profileVersion by me.lakko.app.profile.ProfileDirectory.get(context).version.collectAsState()
     val contactsState by service.contactsState.collectAsState()
-    val outgoing = remember(contactsState.sent) { OutgoingRequests.of(contactsState.sent) }
+    val invited by service.invited.collectAsState()
+    val outgoing = remember(contactsState.sent, invited) { OutgoingRequests.of(contactsState.sent, invited) }
     LaunchedEffect(outgoing) { session.onOutgoing(outgoing) }
     val ownKeyHex = remember(profileVersion) { service.ownKeyHex() }
     val candidates = remember(query, profileVersion, contactsState.accepted) {
@@ -106,6 +107,7 @@ internal fun PeopleSearchSection(
     val contactKeys = remember(contactsState.accepted) {
         contactsState.accepted.mapTo(HashSet()) { java.util.Base64.getEncoder().encodeToString(it.request.fromPubkey) }
     }
+    LaunchedEffect(contactKeys) { session.onContacts(contactKeys) }
     val people = remember(local, shown, ownKeyHex, excludeKeysB64, chatPeersB64, contactKeys) {
         val merged = mergePeople(listOf(local, shown?.people.orEmpty()), ownKeyHex)
         peopleRows(withCurrentContacts(merged, contactKeys), excludeKeysB64, chatPeersB64)

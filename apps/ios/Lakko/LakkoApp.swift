@@ -1406,6 +1406,8 @@ private final class SessionModels: ObservableObject {
             alreadyRequested: { person in
                 SentRequests.holds(
                     contacts.state.sent, accountKey: person.accountKey, accountId: person.accountId)
+                    || PendingContacts.holds(
+                        contacts.invited, accountKey: person.accountKey, accountId: person.accountId)
             },
             heldGrants: { ReachCenter.shared.searchGrants(forAccountKeyB64: $0.base64EncodedString()) },
             isContact: { person in

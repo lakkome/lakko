@@ -5601,7 +5601,7 @@ public class ChatRepository(
             me.lakko.app.profile.countUnnamedMembers(
                 memberKeys = rows.map { it.signaturePublicKey },
                 ownKey = ownKey,
-                isPlaceholder = { key -> profileDirectory.resolve(key).isPlaceholder },
+                isPlaceholder = { key -> profileDirectory.awaitsProfile(key) },
             )
         }
         val stamp = profileRequestPolicy.decide(

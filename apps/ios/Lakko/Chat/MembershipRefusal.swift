@@ -253,6 +253,7 @@ public let allMembershipRefusalReasons: [FfiRefusalReason] = [
     .oneToOneMembershipFixed,
     .oneToOneHasNoRoles,
     .groupKindChanged,
+    .groupStillActive,
 ]
 
 /// The reasons that deliberately share §6's fail-closed row.
@@ -280,6 +281,8 @@ public let allMembershipRefusalReasons: [FfiRefusalReason] = [
 /// - `notACommitter`, `sweepAlreadyStaged` — sweep-side. §8: the committer
 ///   sees "in the steady state, nothing", and `ChatRepository` swallows sweep
 ///   failures by design. A sentence here would have no reader.
+/// - `groupStillActive` — a Welcome for a group this device still holds. It
+///   answers no action of the person's, and the client holds the Welcome.
 /// - `proposalsPending` — refuses a **direct** commit, and a client takes the
 ///   direct path only in a group with no role table, where the pending set is
 ///   permanently empty. Unreachable by construction rather than by policy.
@@ -292,6 +295,7 @@ public let membershipRefusalsCollapsedToFallback: Set<FfiRefusalReason> = [
     .notACommitter,
     .proposalsPending,
     .sweepAlreadyStaged,
+    .groupStillActive,
 ]
 
 /// The fact half of a reason's copy, plus the invitation to try again when
@@ -336,7 +340,8 @@ private func refusalCopy(_ reason: FfiRefusalReason) -> RefusalCopy {
     // The recorded collapses. Listed individually rather than as a `default`
     // so that adding a reason to the core forces a decision here.
     case .notAMember, .leafUpdateRefused, .unsupportedProposal, .noRoleTable,
-        .roleTableWouldVanish, .notACommitter, .proposalsPending, .sweepAlreadyStaged:
+        .roleTableWouldVanish, .notACommitter, .proposalsPending, .sweepAlreadyStaged,
+        .groupStillActive:
         return RefusalCopy(membershipRefusalFallbackMessage)
     }
 }
@@ -428,6 +433,7 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
             case .MembershipOneToOneMembershipFixed: return .oneToOneMembershipFixed
             case .MembershipOneToOneHasNoRoles: return .oneToOneHasNoRoles
             case .MembershipGroupKindChanged: return .groupKindChanged
+            case .MembershipGroupStillActive: return .groupStillActive
 
             // Everything that is NOT a membership refusal. Enumerated rather
             // than defaulted, so a new `FfiError` variant has to be classified

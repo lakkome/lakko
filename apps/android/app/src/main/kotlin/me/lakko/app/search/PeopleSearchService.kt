@@ -5,9 +5,11 @@ package me.lakko.app.search
 
 import android.content.Context
 import java.util.Base64
+import kotlinx.coroutines.flow.StateFlow
 import me.lakko.app.chat.AllowanceKind
 import me.lakko.app.contacts.ContactsError
 import me.lakko.app.contacts.ContactsRepository
+import me.lakko.app.contacts.PendingContact
 import me.lakko.app.contacts.grantMailboxPkOrNull
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.l10n.UiText
@@ -42,6 +44,9 @@ public class PeopleSearchService(
             null
         }
     }
+
+    /** The people added through their invite link who have not answered yet. */
+    public val invited: StateFlow<List<PendingContact>> get() = contacts.invited
 
     /** This account's key hex, `null` without a reach session. */
     public fun ownKeyHex(): String? = reach().ownAccountKey()?.let(::searchHex)

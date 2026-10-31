@@ -227,11 +227,10 @@ public fun ContactsScreen(
             key != null && onOpenContact != null -> onOpenContact(contactRouteKey(key))
         }
     }
-    // The contacts the filter lists above the People part, which leaves them out.
+    // The people the filter lists above the People part, contacts and pending
+    // contacts alike; the People part leaves them out.
     val listedKeys = remember(sections, byKey) {
-        sections.flatMap { it.rows }.mapNotNullTo(HashSet()) { row ->
-            byKey[row.key]?.let { base64Encode(it.request.fromPubkey) }
-        }
+        listedPersonKeys(sections) { rowKey -> byKey[rowKey]?.let { base64Encode(it.request.fromPubkey) } }
     }
     val pending = remember(state.pending) { sortRequestsNewestFirst(state.pending) { it.messageId } }
 

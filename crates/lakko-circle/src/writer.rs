@@ -33,13 +33,14 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use lakko_crypto::{random, SecretBytes};
 
+use crate::card::is_sealed_card;
 use crate::codec::Reader;
 use crate::epoch::EpochKey;
 use crate::error::CircleError;
 use crate::filter::{seal_filter, FilterEntry, FilterStats, MAX_ROWS};
 use crate::head::{DirectoryHead, MemberGrant, HEAD_LEN};
 use crate::keys::{self, hex, DIRECTORY_ID_LEN, KEY_LEN, SALT_LEN};
-use crate::row::{seal_row, ROW_CARD_MAX_LEN};
+use crate::row::seal_row;
 use crate::tree::{TreeOwner, TreeUpdate, Wrap};
 
 const FORMAT_V1: u8 = 0x01;
@@ -339,12 +340,16 @@ impl DirectoryWriter {
 
     /// Queue a card as row `index`.
     ///
+    /// A client passes what the person the card describes sealed
+    /// ([`crate::card::seal_card`]). A plain card is refused: every contact of
+    /// this owner holds the key to the row.
+    ///
     /// # Errors
     ///
-    /// [`CircleError::CardTooLong`] or [`CircleError::RowOutOfRange`].
+    /// [`CircleError::CardNotSealed`] or [`CircleError::RowOutOfRange`].
     pub fn put_row(&mut self, index: u32, card: Vec<u8>) -> Result<(), CircleError> {
-        if card.len() > ROW_CARD_MAX_LEN {
-            return Err(CircleError::CardTooLong);
+        if !is_sealed_card(&card) {
+            return Err(CircleError::CardNotSealed);
         }
         if index >= MAX_ROWS {
             return Err(CircleError::RowOutOfRange);

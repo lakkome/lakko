@@ -609,13 +609,15 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       <ContactListPane
         filter={filter}
         onFilter={setFilter}
-        people={() => (
+        people={(listedKeysB64, anyListRow) => (
           // `docs/ux/who-can-find-me.md` section 6.1 - the same field as in
           // Chats; here it matches only people.
           <PeopleSearch
             scope="contacts"
             query={filter}
             groupPeopleKeys={groupPeopleKeys}
+            listedB64={listedKeysB64}
+            noMatchLine={() => (anyListRow() ? t("contacts.list.no_match") : null)}
           />
         )}
         onAdd={(mode) => {

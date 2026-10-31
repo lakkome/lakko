@@ -16,6 +16,30 @@ final class ContactsPresentationTests: XCTestCase {
         Item(id: id, name: name, username: username, isPlaceholder: placeholder)
     }
 
+    // MARK: - One person, one row
+
+    /// What the search field leaves out in Contacts: every row the list shows
+    /// for the text, an invited one too; never a row it does not.
+    func testTheListedKeysAreThePeopleOfTheRowsShown() {
+        func contact(_ id: Int64, _ byte: UInt8) -> AcceptedContact {
+            AcceptedContact(request: IncomingContactRequest(
+                messageId: id, fromPubkey: Data(repeating: byte, count: 32),
+                fromAccountId: nil, fromPseudonym: Data(count: 32), validAfterMs: 0,
+                intro: nil, createdAt: ""))
+        }
+        func invited(_ hex: String, _ byte: UInt8) -> PendingContact {
+            PendingContact(
+                accountIdHex: hex, signaturePubkey: Data(repeating: byte, count: 32),
+                x25519Pubkey: Data(count: 32), displayName: "Anna", username: "", addedAtMs: 0,
+                linkId: Data(count: 16))
+        }
+        let keys = ContactRowId.listedKeys(
+            shown: [.contact(1), .invited("aa")],
+            accepted: [contact(1, 1), contact(2, 2)],
+            invited: [invited("aa", 3), invited("bb", 4)])
+        XCTAssertEqual(keys, [Data(repeating: 1, count: 32), Data(repeating: 3, count: 32)])
+    }
+
     // MARK: - Grouping
 
     func testIndexLetterIsTheUppercasedFirstLetterOrTheCatchAll() {

@@ -682,12 +682,16 @@ they will cross-check.
 **Order:** the roster's order, unchanged. Sorting admins to the top would be a
 soft version of the filter this section rejects.
 
-**Empty picker.** A group of one is reachable (everyone else left or was
+**Empty picker.** ~~A group of one is reachable (everyone else left or was
 removed). The picker is never opened empty: `Transfer ownership` renders
 disabled with `There is no one else in this group to transfer it to.` That is
 an honest terminal state — there is no design that produces a successor out of
 an empty roster — and it is not the dead end §11.6 was about, since the owner
-of a one-person group is not being kept anywhere against their will.
+of a one-person group is not being kept anywhere against their will.~~
+**Amended 2026-10-31 ([`group-and-channel-privacy.md`](group-and-channel-privacy.md)
+section 11):** a group of one is now an ordinary group, made on purpose, so its owner
+needs a way out. The exit block holds `Delete group` alone, and neither `Transfer
+ownership` nor `Leave group` is shown.
 
 #### 6.1.4 The outgoing-owner choice: a real decision, pre-selected but never defaulted
 
@@ -964,6 +968,29 @@ distinguished from a *first observation*. Fail-open when absent.
 - **Nothing about the flow is gated on either.**
 
 ### 6.2 When your own membership ends — the state no client handles
+
+> **Amended 2026-10-31 — decision 3 of [ADR-0087](../adr/0087-group-and-channel-handles-and-privacy.md)
+> reverses the outcome of this section, by the maintainer's decision.** A person
+> removed from a group loses it: the row leaves their list and the history is wiped
+> from their devices; added again, they see only new messages. Leaving does the same
+> (proposed). What is below was built around keeping the transcript, and it is kept as
+> the record of why that was thought right. The spec is now
+> [`group-and-channel-privacy.md`](group-and-channel-privacy.md) section 9.
+>
+> | Section here | Status |
+> |---|---|
+> | §6.2.1 what the core does | **Stands.** It is what makes the new trigger sound: reads still work after the commit. |
+> | §6.2.2 `is_active` | **Stands, narrowed.** The trigger is `is_active` false **and** no leaf of this account in the frozen roster, so a device briefly dropped while its account stays in the group (ADR-0050) keeps its history. |
+> | §6.2.3 left or removed | **Stands** for the notice: a person who left gets none. "Nothing says who" stands. |
+> | §6.2.4 the chat stays in the list | **Reversed.** The row goes. `Delete this chat` is no longer offered on a group. |
+> | §6.2.5 composer, terminal row, draft | **Reversed.** No terminal row, no bar. A non-empty draft in an open chat is shown once in the notice, selectable. |
+> | §6.2.6 the history stays | **Reversed.** It is wiped, and so is the MLS group, through a `Group::delete` (§6.2.12's follow-up is now required). |
+> | §6.2.7 frozen roster | **Reversed.** There is no panel to open. |
+> | §6.2.8 what must stop | **Stands, and grows:** the stores to wipe, a register that carries the end to the account's other devices, and the vault. |
+> | §6.2.9 the owner cannot reach this | **Stands.** |
+> | §6.2.10 rejoining | **Reversed in part.** No old transcript comes back: stores were wiped. In a public group a removed person can ask again; a private group offers them nothing. |
+> | §6.2.11 what this must not do | **"No silent deletion of anything" is reversed**, and that is why a removed person is told once. The rest stands. |
+> | §6.2.12 what this needs | **Superseded** by ADR-0087 section 9. |
 
 **Why here, and the numbering fact first.** §6.1 nested rather than inserted a
 top-level section because the seven sections after §6 are cross-referenced by

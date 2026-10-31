@@ -273,6 +273,106 @@ final class FeedTests: XCTestCase {
         XCTAssertEqual(FeedDraft.shareFileName(FeedDraft.blank(name: "!!!")), "feed.lakkofeed")
     }
 
+    // MARK: - The item (UX spec section 3)
+
+    private func attachment(_ byte: UInt8, mime: String?, kind: String? = nil) -> AttachmentRef {
+        AttachmentRef(
+            blobId: Data(repeating: byte, count: 32), key: Data(count: 32), nonce: Data(count: 12),
+            mime: mime, size: 1, name: nil, kind: kind)
+    }
+
+    private func carrying(_ attachments: [AttachmentRef], text: String = "", labels: [String]? = nil) -> FeedMessage {
+        FeedMessage(
+            messageId: 1, direction: .incoming, text: text, timeMs: now,
+            attachmentLabels: labels ?? attachments.map { _ in "Label" },
+            attachments: attachments)
+    }
+
+    func testMediaRefsAreWhatTheTimelineDrawsAsABubble() {
+        let photo = attachment(1, mime: "image/jpeg")
+        let video = attachment(2, mime: "video/mp4")
+        let gif = attachment(3, mime: "image/gif", kind: "gif")
+        let voice = attachment(4, mime: "audio/mp4", kind: "voice")
+        let note = attachment(5, mime: "video/mp4", kind: "video_note")
+        let pdf = attachment(6, mime: "application/pdf")
+        // The sender chose the kind; the MIME type decides.
+        let disguised = attachment(7, mime: "text/html", kind: "voice")
+        let unknownKind = attachment(8, mime: "image/png", kind: "hologram")
+        let noMime = attachment(9, mime: nil)
+
+        let refs = FeedCopy.mediaRefs(carrying([photo, pdf, video, gif, disguised, voice, note, unknownKind, noMime]))
+
+        XCTAssertEqual(refs, [photo, video, gif, voice, note])
+    }
+
+    func testAChannelPostHasNoMedia() {
+        let input = FeedModel.buildInput(context(
+            groupMessages: [],
+            posts: [PersistedChannelPost(cursor: 7, serverTsMs: now - 10, text: "post")]))
+        XCTAssertEqual(FeedCopy.mediaRefs(input.refs[0].message), [])
+    }
+
+    func testAMediaOnlyItemHasNoTextLine() {
+        let photo = attachment(1, mime: "image/jpeg")
+        XCTAssertEqual(FeedCopy.itemBody(carrying([photo])), "")
+        XCTAssertEqual(FeedCopy.itemBody(carrying([photo], text: "  \n ")), "")
+    }
+
+    func testAnItemKeepsItsText() {
+        let photo = attachment(1, mime: "image/jpeg")
+        XCTAssertEqual(FeedCopy.itemBody(carrying([photo], text: "look")), "look")
+    }
+
+    func testAFileStaysALineOfText() {
+        let pdf = attachment(1, mime: "application/pdf")
+        XCTAssertEqual(FeedCopy.itemBody(carrying([pdf], labels: ["File"])), "File")
+    }
+
+    func testAFileBesideAPhotoKeepsItsLine() {
+        let refs = [attachment(1, mime: "image/jpeg"), attachment(2, mime: "application/pdf")]
+        XCTAssertEqual(FeedCopy.itemBody(carrying(refs, labels: ["Photo", "File"])), "File")
+    }
+
+    func testTwoFilesBesideAPhotoAreCounted() {
+        let refs = [
+            attachment(1, mime: "image/jpeg"), attachment(2, mime: "application/pdf"),
+            attachment(3, mime: "application/pdf"),
+        ]
+        let line = FeedCopy.itemBody(carrying(refs, labels: ["Photo", "File", "File"]))
+        XCTAssertEqual(line, Localization.text("feed.attachments.count", counts: ["count": 2]))
+    }
+
+    /// A folded reply and the editor's preview draw no bubble, so a media-only
+    /// message must still say what it is there.
+    func testWhereNoBubbleIsDrawnTheLabelStays() {
+        let photo = attachment(1, mime: "image/jpeg")
+        XCTAssertEqual(FeedCopy.body(carrying([photo], labels: ["Photo"])), "Photo")
+    }
+
+    func testAMessageWhoseAttachmentsChangedIsADifferentMessage() {
+        let photo = carrying([attachment(1, mime: "image/jpeg")])
+        let other = carrying([attachment(2, mime: "image/jpeg")])
+        XCTAssertNotEqual(photo, other)
+        XCTAssertEqual(photo, carrying([attachment(1, mime: "image/jpeg")]))
+    }
+
+    func testTheAvatarIdentityIsTheConversationNotTheGroup() {
+        let moved = FeedSource(
+            kind: .group, idHex: groupHex, title: "T", muted: false, audience: 2,
+            conversationHex: "root")
+        XCTAssertEqual(moved.key, "root")
+        let channel = FeedSource(kind: .channel, idHex: channelHex, title: "C", muted: false, audience: 0)
+        XCTAssertEqual(channel.key, channelHex)
+    }
+
+    func testTheColumnIsWhatTheCardLeavesBesideTheAvatar() {
+        // 390 - 2 x 16 list - 2 x 12 card - 40 avatar - 12 gap.
+        XCTAssertEqual(FeedLayout.columnWidth(viewport: 390), 282)
+        // The content width stops at 720.
+        XCTAssertEqual(FeedLayout.columnWidth(viewport: 1366), 644)
+        XCTAssertEqual(FeedLayout.columnWidth(viewport: 0), 0)
+    }
+
     func testSelectionStorageValues() {
         XCTAssertEqual(FeedSelection(storageValue: "for-me"), .preset(.forMe))
         XCTAssertEqual(FeedSelection(storageValue: "custom:abc"), .saved("abc"))

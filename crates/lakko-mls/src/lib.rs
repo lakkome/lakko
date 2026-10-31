@@ -36,7 +36,7 @@ pub mod welcome_rendezvous;
 
 pub use device_binding::{account_key_of_credential, DeviceBinding, DEVICE_BINDING_LEN};
 pub use device_group::{AccountId, AccountSeed, DeviceGroup, MAX_SERVICE_ENVELOPE_LEN};
-pub use error::{Error, Result};
+pub use error::{group_id_hex, Error, Result};
 pub use group::{
     epoch_after_message, epoch_of_message, is_external_join_proposal_for, Group, Incoming,
     MemberAddition, MemberRecord, ProposalCommit, GROUP_ID_LEN,

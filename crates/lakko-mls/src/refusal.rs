@@ -263,6 +263,17 @@ pub enum RefusalReason {
     /// (the `0xFF03` extension, or its entry in `RequiredCapabilities`). The
     /// kind is fixed at creation and no commit changes it.
     GroupKindChanged,
+
+    // ---- Rejoin (ADR-0045 amendment of 2026-10-31, C-88) --------------------
+    /// This device still holds the group as active, so a Welcome into it cannot
+    /// land and its local state cannot be deleted. A Welcome replaces an ended
+    /// group only: a device that has not seen its own removal yet has to apply
+    /// it first, and a Welcome for a group it is really still in is a duplicate
+    /// or a forgery, neither of which may overwrite a live chat.
+    ///
+    /// Carried by [`crate::Error::GroupStillActive`], which names the group, so
+    /// the caller knows which journal to read.
+    GroupStillActive,
 }
 
 impl RefusalReason {
@@ -272,7 +283,7 @@ impl RefusalReason {
     /// Exists so a test can assert over the whole set — adding a variant without
     /// classifying it deliberately then fails a test rather than defaulting
     /// silently — and so an FFI surface can enumerate without re-listing.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::NotAMember,
         Self::AddNotOwnerOrAdmin,
         Self::RemoveNotOwnerOrAdmin,
@@ -296,6 +307,7 @@ impl RefusalReason {
         Self::OneToOneMembershipFixed,
         Self::OneToOneHasNoRoles,
         Self::GroupKindChanged,
+        Self::GroupStillActive,
     ];
 
     /// What the caller should do about this refusal.
@@ -324,6 +336,10 @@ impl RefusalReason {
             // `SweepAlreadyStaged` is here because it resolves only when *this*
             // caller reaches the outstanding verdict — merge or abandon —
             // which is the definition of not resolving on its own.
+            //
+            // `GroupStillActive` is here for the same reason: nothing a
+            // committer does resolves it. This device has to apply its own
+            // removal, and until it has, the identical call is refused.
             Self::LeafUpdateRefused
             | Self::UnsupportedProposal
             | Self::NoRoleTable
@@ -334,7 +350,8 @@ impl RefusalReason {
             | Self::NoSuchJoinRequest
             | Self::JoinerAlreadyAMember
             | Self::DeviceLimitReached
-            | Self::GroupKindChanged => RefusalDisposition::DoNotRetry,
+            | Self::GroupKindChanged
+            | Self::GroupStillActive => RefusalDisposition::DoNotRetry,
 
             // An authority answer.
             Self::NotAMember
@@ -397,6 +414,7 @@ impl RefusalReason {
             Self::OneToOneMembershipFixed => "oneToOneMembershipFixed",
             Self::OneToOneHasNoRoles => "oneToOneHasNoRoles",
             Self::GroupKindChanged => "groupKindChanged",
+            Self::GroupStillActive => "groupStillActive",
         }
     }
 }

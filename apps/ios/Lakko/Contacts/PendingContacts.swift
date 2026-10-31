@@ -113,6 +113,15 @@ public enum PendingContacts {
 
     /// The name shown: the stated display name, else `@username`, else `nil`
     /// (the caller's catalog fallback).
+    /// Whether a person is among those added through their invite link who
+    /// have not answered yet. The request went out when Add was pressed, so a
+    /// search row reads "Request sent" for them and offers no second request.
+    /// By account id too: their key may have rotated since.
+    public static func holds(_ invited: [PendingContact], accountKey: Data, accountId: Data?) -> Bool {
+        let idHex = accountId.map { groupIdHex($0) }
+        return invited.contains { $0.signaturePubkey == accountKey || $0.accountIdHex == idHex }
+    }
+
     public static func name(_ contact: PendingContact) -> String? {
         let trimmed = contact.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty { return trimmed }

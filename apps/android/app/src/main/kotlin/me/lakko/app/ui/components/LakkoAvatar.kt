@@ -203,6 +203,36 @@ public fun rememberOwnAvatar(): AvatarRefs? {
 }
 
 /**
+ * The name the owner's initials come from when they have no photo: their
+ * display name, their username when they have none. "You" is a label, not a
+ * name, so a caller keeps [fallback] only when neither is known yet.
+ */
+@Composable
+public fun rememberOwnAvatarName(fallback: String): String {
+    if (LocalInspectionMode.current) return fallback
+    val context = LocalContext.current
+    val revision by me.lakko.app.profile.OwnProfileStore.revision.collectAsState()
+    val account = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64
+    return remember(account, revision, fallback) {
+        val id = account?.let {
+            try {
+                java.util.Base64.getDecoder().decode(it)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        } ?: return@remember fallback
+        val own = try {
+            me.lakko.app.profile.OwnProfileStore.load(context, id)
+        } catch (_: Throwable) {
+            null
+        }
+        own?.displayName?.takeIf { it.isNotBlank() }
+            ?: own?.username?.takeIf { it.isNotBlank() }
+            ?: fallback
+    }
+}
+
+/**
  * A person's signature key from either of the two spellings the screens
  * carry it in (standard base64, the profile store's; unpadded base64url, the
  * contact routes'), or `null`.

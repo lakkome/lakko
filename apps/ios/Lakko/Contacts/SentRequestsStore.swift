@@ -116,6 +116,36 @@ public enum SentRequests {
         sent.filter { $0.recipientAccountIdB64 != request.recipientAccountIdB64 } + [request]
     }
 
+    /// The row of the person holding `recipientAccountIdB64`, if any.
+    public static func row(
+        recipientAccountIdB64: String, in sent: [SentContactRequest]
+    ) -> SentContactRequest? {
+        sent.last { $0.recipientAccountIdB64 == recipientAccountIdB64 }
+    }
+
+    /// What `row` found its person under, as a claim for the key that answered
+    /// it (`docs/ux/who-can-find-me.md` section 6.1, "the name a person was
+    /// found under is theirs until their own profile arrives"), at stamp 0 so
+    /// any profile of theirs replaces it.
+    ///
+    /// `nil` unless that key is exactly the one the row found: an answer names
+    /// its account id itself, so a row matched by account id says nothing
+    /// about who signed, and a found name must not go to them. A person who
+    /// rotated between the search and the answer waits for their profile.
+    /// `nil` too for a row with no name, and for a fingerprint, which names
+    /// nobody. A name that is only `@username` is the username, not a name.
+    public static func foundClaim(_ row: SentContactRequest, signatureKey: Data) -> ProfileClaim? {
+        guard let name = row.recipientName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !name.isEmpty,
+              row.recipientKeyB64.flatMap(base64Decode) == signatureKey,
+              name != displayFingerprint(signatureKey) else { return nil }
+        let username = row.recipientUsername.isEmpty ? nil : row.recipientUsername
+        return ProfileClaim(
+            displayName: name == username.map { "@\($0)" } ? nil : name,
+            username: username,
+            updatedAtMs: 0)
+    }
+
     /// The list after a Welcome made a one-to-one with `peer`: without the row
     /// of the person holding that key, under any of their keys, and that
     /// row's account id. `keyOfAccount` is the key this device pinned for an

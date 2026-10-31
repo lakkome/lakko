@@ -260,16 +260,40 @@ export function asContacts(people: readonly PersonResult[], contacts: ContactSet
 }
 
 /**
- * The rows under People in Chats. `chatPeersB64` are the people whose
- * one-to-one is among the matching conversations: a contact among them stands
- * there, so they are not listed twice. A person who is no contact keeps their
- * row, and with it the way to add them.
+ * Whether an answer names as a contact someone who is no longer one. Such a
+ * row is wrong twice: the person has no way to be added from it, and in
+ * Contacts it is hidden as "listed above", where they no longer stand.
+ */
+export function namesFormerContact(people: readonly PersonResult[], contacts: ContactSet): boolean {
+  return people.some(
+    (p) =>
+      p.reach === "contact" &&
+      !contacts.keysB64.has(p.keyB64) &&
+      !(p.accountIdHex !== null && contacts.accountIdsHex.has(p.accountIdHex)),
+  );
+}
+
+/**
+ * The rows under People: one person, one row (UX 6.1).
+ *
+ * `listedB64` are the people a list row above shows: a contact, or someone
+ * added through their link. They leave People whatever their reach.
+ *
+ * `chatPeersB64` are the people whose one-to-one matched (Chats). Only a
+ * contact among them leaves: a removed person with a chat keeps their row,
+ * and with it the way to add them.
+ *
+ * A contact who stands in neither (their name has not arrived, so nothing
+ * matches them yet) keeps a row here, so the field is never blank.
  */
 export function peopleRows(
   people: readonly PersonResult[],
+  listedB64: ReadonlySet<string>,
   chatPeersB64: ReadonlySet<string>,
 ): PersonResult[] {
-  return people.filter((p) => !(p.reach === "contact" && chatPeersB64.has(p.keyB64)));
+  return people.filter(
+    (p) => !listedB64.has(p.keyB64) && !(p.reach === "contact" && chatPeersB64.has(p.keyB64)),
+  );
 }
 
 /** Lower-case hex of a byte string. */

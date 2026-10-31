@@ -18,6 +18,7 @@ import {
   localPeople,
   matchesLoosely,
   mergePeople,
+  namesFormerContact,
   peopleRows,
   searchNormalizer,
   shownUsername,
@@ -298,14 +299,42 @@ describe("the rows under People in Chats", () => {
   });
 
   it("a contact whose one-to-one matched stands there and leaves People", () => {
-    expect(peopleRows([person("A", "contact")], new Set(["A"]))).toEqual([]);
+    expect(peopleRows([person("A", "contact")], new Set(), new Set(["A"]))).toEqual([]);
   });
 
   it("a contact with no matching conversation stays", () => {
-    expect(peopleRows([person("A", "contact")], new Set(["B"]))).toHaveLength(1);
+    expect(peopleRows([person("A", "contact")], new Set(), new Set(["B"]))).toHaveLength(1);
   });
 
   it("a person who is no contact keeps their row, and the way to add them", () => {
-    expect(peopleRows([person("A", "open")], new Set(["A"]))).toHaveLength(1);
+    expect(peopleRows([person("A", "open")], new Set(), new Set(["A"]))).toHaveLength(1);
+  });
+
+  it("a contact the list does not show yet keeps a row, so the field is not blank", () => {
+    expect(peopleRows([person("A", "contact")], new Set(), new Set())).toHaveLength(1);
+  });
+
+  it("a person a list row shows leaves People whatever their reach", () => {
+    for (const reach of ["contact", "open", "grant", "none"] as const) {
+      expect(peopleRows([person("A", reach)], new Set(["A"]), new Set())).toEqual([]);
+    }
+  });
+
+  it("the list hides only the people it shows", () => {
+    expect(peopleRows([person("A", "open"), person("B", "open")], new Set(["A"]), new Set())).toEqual([
+      person("B", "open"),
+    ]);
+  });
+
+  it("an answer that calls a removed contact a contact is false", () => {
+    const contacts = { keysB64: new Set(["B"]), accountIdsHex: new Set<string>() };
+    expect(namesFormerContact([person("A", "contact")], contacts)).toBe(true);
+    expect(namesFormerContact([person("B", "contact")], contacts)).toBe(false);
+    expect(namesFormerContact([person("A", "open")], contacts)).toBe(false);
+  });
+
+  it("a rotated key is still the contact: the account id names them", () => {
+    const rotated = { ...person("NEW", "contact"), accountIdHex: "aa" };
+    expect(namesFormerContact([rotated], { keysB64: new Set(), accountIdsHex: new Set(["aa"]) })).toBe(false);
   });
 });

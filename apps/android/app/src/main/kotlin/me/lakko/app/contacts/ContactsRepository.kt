@@ -868,7 +868,14 @@ public class ContactsRepository(
      */
     private suspend fun handleKnownContactRequest(request: IncomingContactRequest): Boolean {
         val fromAccountId = request.fromAccountId ?: return false
-        if (establishedContact(fromAccountId) == null) return false
+        if (establishedContact(fromAccountId) == null &&
+            !isContactKey(
+                base64Encode(request.fromPubkey),
+                mutableState.value.accepted.map { base64Encode(it.request.fromPubkey) },
+            )
+        ) {
+            return false
+        }
         val check = checkContactIdentity(fromAccountId)
         val verdict = knownContactRequestVerdict(
             senderIsContact = true,
@@ -900,7 +907,7 @@ public class ContactsRepository(
                     Log.w(TAG, "ADR-0073: silent ack to an existing contact failed: ${cause.javaClass.simpleName}")
                 }
             }
-            KnownRequestVerdict.DROP -> Unit
+            KnownRequestVerdict.DROP -> Log.w(TAG, "contacts inbox: a request from a contact's account was dropped")
         }
         // Answered or dropped: it waits no longer.
         dropWaiting(request.messageId)
@@ -1734,6 +1741,15 @@ public class ContactsRepository(
                     val supersedes: (ByteArray, ByteArray) -> Boolean = { newKey, oldKey ->
                         keyPrecedes(base64Encode(oldKey), base64Encode(newKey), links) ||
                             provenNow.any { it.second.contentEquals(newKey) && it.third.contentEquals(oldKey) }
+                    }
+                    // A person who answered is a contact from here on and
+                    // their profile comes after: the name they were found
+                    // under stands in for it, filed before the row appears
+                    // and while the Sent record still holds it.
+                    profileDirectory?.let { directory ->
+                        for (found in foundNamesOfAnswers(mutableState.value.sent, acks, answeredBy.keys)) {
+                            directory.onFoundPersonAnswered(found.signatureKeyB64, found.displayName, found.verifiedUsername)
+                        }
                     }
                     var dropped: List<IncomingContactRequest> = emptyList()
                     var acceptedChanged = false

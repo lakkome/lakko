@@ -114,16 +114,26 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
-function mount(over: { chatPeers?: () => ReadonlySet<string>; chatHref?: (key: string) => string | null } = {}) {
+function mount(
+  over: {
+    chatPeers?: () => ReadonlySet<string>;
+    chatHref?: (key: string) => string | null;
+    listed?: () => ReadonlySet<string>;
+    noMatchLine?: () => string | null;
+    scope?: "chats" | "contacts";
+  } = {},
+) {
   const [query, setQuery] = createSignal("");
   renderUi(() => (
     <PeopleSearch
-      scope="chats"
+      scope={over.scope ?? "chats"}
       query={query}
       conversationMatches={() => 0}
       groupPeopleKeys={() => []}
       onOpenChannel={() => {}}
-      {...(over.chatPeers === undefined ? {} : { chatPeersB64: over.chatPeers })}
+      {...(over.listed === undefined ? {} : { listedB64: over.listed })}
+      {...(over.noMatchLine === undefined ? {} : { noMatchLine: over.noMatchLine })}
+      {...(over.chatPeers === undefined ? {} : { standingAboveB64: over.chatPeers })}
       {...(over.chatHref === undefined ? {} : { chatHrefOf: over.chatHref })}
     />
   ));
@@ -164,6 +174,104 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("one person, one row (UX 6.1)", () => {
+  const found = { people: [anna("a1")], channel: null, state: { kind: "found" } } as PeopleSearchOutcome;
+
+  it("a person a list row shows has no row under People, Request sent or not", async () => {
+    searchPeople.mockResolvedValue(found);
+    sentList.records = [{ recipientAccountIdHex: "0102", recipientKeyB64: "AAAA" }];
+    const type = mount({ listed: () => new Set(["AAAA"]) });
+    await flush();
+    type("onea");
+    await flush();
+    vi.advanceTimersByTime(500);
+    await flush();
+    expect(document.body.textContent).not.toContain("Anna Weber");
+    expect(document.body.textContent).not.toContain(t("search.people.heading"));
+  });
+
+  it("a person who is not listed keeps the row", async () => {
+    searchPeople.mockResolvedValue(found);
+    const type = mount({ listed: () => new Set(["BBBB"]) });
+    await flush();
+    type("oneb");
+    await flush();
+    vi.advanceTimersByTime(500);
+    await flush();
+    expect(document.body.textContent).toContain("Anna Weber");
+  });
+});
+
+describe("the line that nothing matches (UX 6.1)", () => {
+  const line = (): string => t("contacts.list.no_match");
+  const contacts = {
+    scope: "contacts" as const,
+    listed: () => new Set<string>(),
+    noMatchLine: line,
+  };
+
+  it("stands alone under three characters, when nothing is asked", async () => {
+    const type = mount(contacts);
+    await flush();
+    type("zz");
+    await flush();
+    expect(document.body.textContent).toContain(line());
+  });
+
+  it("waits while a search is coming and while it is out", async () => {
+    let answer: (o: PeopleSearchOutcome) => void = () => {};
+    searchPeople.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    const type = mount(contacts);
+    await flush();
+    type("zzz");
+    await flush();
+    expect(document.body.textContent).not.toContain(line());
+    vi.advanceTimersByTime(500);
+    await flush();
+    expect(document.body.textContent).not.toContain(line());
+    answer({ people: [], channel: null, state: { kind: "not-found" } });
+    await flush();
+    expect(document.body.textContent).toContain(line());
+  });
+
+  it("never stands above a person under People", async () => {
+    searchPeople.mockResolvedValue({ people: [anna("a1")], channel: null, state: { kind: "found" } });
+    const type = mount(contacts);
+    await flush();
+    type("ann");
+    await flush();
+    vi.advanceTimersByTime(500);
+    await flush();
+    expect(document.body.textContent).toContain("Anna Weber");
+    expect(document.body.textContent).not.toContain(line());
+  });
+
+  it("never stands below a list row", async () => {
+    const type = mount({ ...contacts, listed: () => new Set(["CCCC"]) });
+    await flush();
+    type("zz");
+    await flush();
+    expect(document.body.textContent).not.toContain(line());
+  });
+
+  it("is not said to an account with no list row at all", async () => {
+    const type = mount({ ...contacts, noMatchLine: () => null });
+    await flush();
+    type("zz");
+    await flush();
+    expect(document.querySelector(".lk-pane-nomatch")).toBeNull();
+  });
+
+  it("is Chats' own line in Chats", async () => {
+    const type = mount();
+    await flush();
+    type("zz");
+    await flush();
+    expect(document.body.textContent).toContain(t("chats.search.no_results"));
+    expect(document.body.textContent).not.toContain(line());
+  });
 });
 
 describe("PeopleSearch (UX 6.1)", () => {

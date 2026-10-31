@@ -127,6 +127,29 @@ public enum InlineMedia {
         return CGSize(width: max(mediaMinSide, min(mediaMaxWidth, w)), height: max(mediaMinSide, min(mediaMaxHeight, h)))
     }
 
+    /// `docs/ux/feed.md` section 3 — a bubble box in a column narrower than
+    /// the box: scaled down with its aspect kept, never up. `nil` (the chat,
+    /// which has no column) or a width that says nothing leaves it alone.
+    public static func fit(_ box: CGSize, within width: CGFloat?) -> CGSize {
+        guard let width, width > 0, box.width > width else { return box }
+        let scale = width / box.width
+        return CGSize(width: width, height: box.height * scale)
+    }
+
+    /// The voice bubble's waveform and its time row.
+    public static let voiceWaveformWidth: CGFloat = 170
+    /// The play disc and the gap beside the waveform.
+    public static let voiceControlsWidth: CGFloat = 48
+    /// A waveform shorter than this is no longer something to aim at.
+    public static let voiceWaveformMinWidth: CGFloat = 80
+
+    /// The waveform's width in a column of `width`: what the column leaves
+    /// beside the play disc, at most the chat's width.
+    public static func voiceWaveformWidth(within width: CGFloat?) -> CGFloat {
+        guard let width, width > 0 else { return voiceWaveformWidth }
+        return max(voiceWaveformMinWidth, min(voiceWaveformWidth, width - voiceControlsWidth))
+    }
+
     /// Sender side: a pixel size scaled down proportionally to fit
     /// ``maxWireDimension``, never up. `nil` for a zero dimension.
     public static func wireDimensions(width: Int, height: Int) -> (width: UInt32, height: UInt32)? {

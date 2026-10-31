@@ -14,7 +14,8 @@
 //! | [`tree`] | the one-way key tree; [`tree::TreeOwner`] the owner's side, [`tree::member_epoch_key`] a contact's |
 //! | [`epoch`] | [`EpochKey`], and the chain that reaches older epochs |
 //! | [`filter`] | the static retrieval filter from a term tag to its rows |
-//! | [`row`] | sealed rows |
+//! | [`card`] | a card sealed under its search terms, which an epoch key does not open |
+//! | [`row`] | sealed rows, each holding one sealed card |
 //! | [`head`] | the public head, and the grant a contact holds |
 //! | [`writer`] | [`DirectoryWriter`], which turns changes into one atomic write |
 //!
@@ -34,7 +35,7 @@
 //! | Filter, bytes per term | 3.79 | 3.64 |
 //! | False positives per filter | 1.3e-5 | 6.0e-4 |
 //! | Edges stored | 15,300 bytes | 982,980 bytes |
-//! | One row | 865 bytes | 865 bytes |
+//! | One row | 2,992 bytes | 2,992 bytes |
 //!
 //! [ADR-0086]: ../../../docs/adr/0086-circle-directories.md
 
@@ -42,6 +43,7 @@
 
 mod codec;
 
+pub mod card;
 pub mod epoch;
 pub mod error;
 pub mod filter;
@@ -56,6 +58,10 @@ pub mod fuzz_api;
 
 pub use lakko_crypto::SecretBytes;
 
+pub use card::{
+    is_sealed_card, open_card, seal_card, CARD_MAX_LEN, CARD_PADDED_LEN, MAX_CARD_TERMS,
+    SEALED_CARD_LEN,
+};
 pub use epoch::EpochKey;
 pub use error::CircleError;
 pub use filter::{
@@ -65,7 +71,7 @@ pub use filter::{
 pub use head::{DirectoryHead, MemberGrant, GRANT_LEN, HEAD_LEN};
 pub use keys::{
     directory_id, directory_owner_matches, owner_public_key, owner_seed, owner_signing_seed,
-    write_digest, DIRECTORY_ID_LEN, KEY_LEN, SALT_LEN, WRAP_LEN,
+    term_key, write_digest, DIRECTORY_ID_LEN, KEY_LEN, OPRF_OUTPUT_LEN, SALT_LEN, WRAP_LEN,
 };
 pub use row::{open_row, row_epoch, seal_row, ROW_CARD_MAX_LEN, ROW_LEN};
 pub use tree::{

@@ -195,6 +195,61 @@ final class PeopleSearchFieldTests: XCTestCase {
         XCTAssertEqual(rec.asked, ["anna"], "a text that cannot be a name asks nothing")
     }
 
+    func testAContactRemovedWithTheTextStandingIsAskedAgainAndCanBeAdded() async {
+        let rec = Recorder()
+        rec.contacts = [person(1).accountKey]
+        rec.answer = PeopleSearchAnswer(people: [person(1, reach: .contact)])
+        let shared = session(rec)
+        let model = instantModel(shared)
+        await type("anna", into: model)
+        XCTAssertEqual(rec.asked, ["anna"])
+
+        rec.contacts = []
+        rec.answer = PeopleSearchAnswer(people: [person(1, reach: .open)])
+        shared.noteContactsChanged()
+        await drain()
+        await model.settle()
+
+        XCTAssertEqual(rec.asked, ["anna", "anna"])
+        XCTAssertEqual(model.rows(showsLocalContacts: false).network.map(\.reach), [.open])
+    }
+
+    func testRetypingATextDoesNotReuseAnAnswerThatCallsARemovedContactAContact() async {
+        let rec = Recorder()
+        rec.contacts = [person(1).accountKey]
+        rec.answer = PeopleSearchAnswer(people: [person(1, reach: .contact)])
+        let shared = session(rec)
+        let model = instantModel(shared)
+        await type("anna", into: model)
+        await type("bert", into: model)
+        rec.contacts = []
+        await type("anna", into: model)
+        XCTAssertEqual(rec.asked, ["anna", "bert", "anna"])
+    }
+
+    func testAContactChangeThatLeavesTheAnswerTrueAsksNothing() async {
+        let rec = Recorder()
+        rec.answer = PeopleSearchAnswer(people: [person(1)])
+        let shared = session(rec)
+        let model = instantModel(shared)
+        await type("anna", into: model)
+        shared.noteContactsChanged()
+        await drain()
+        await model.settle()
+        XCTAssertEqual(rec.asked, ["anna"])
+    }
+
+    func testAContactTheListDoesNotShowYetKeepsARowUnderPeople() async {
+        let rec = Recorder()
+        rec.contacts = [person(1).accountKey]
+        rec.answer = PeopleSearchAnswer(people: [person(1, reach: .contact)])
+        let model = instantModel(session(rec))
+        await type("anna", into: model)
+        XCTAssertEqual(model.rows(showsLocalContacts: true, chatPeers: []).local.count, 1)
+        XCTAssertTrue(
+            model.rows(showsLocalContacts: true, chatPeers: [person(1).accountKey]).local.isEmpty)
+    }
+
     func testATextAskedOnceIsNotAskedAgainInTheSession() async {
         let rec = Recorder()
         rec.answer = PeopleSearchAnswer(people: [person(1)])
@@ -707,6 +762,50 @@ final class PeopleSearchFieldTests: XCTestCase {
         await type("anna", into: model)
         let rows = model.rows(showsLocalContacts: true, chatPeers: [candidate(4).accountKey])
         XCTAssertEqual(rows.local.map(\.accountKey), [candidate(4).accountKey], "the way to add them stays")
+    }
+
+    /// One person, one row: someone added through their link stands in the
+    /// list, and the Request sent row under People is a second one of them.
+    func testAPersonAListRowShowsStandsNowhereUnderPeople() async {
+        let rec = Recorder()
+        rec.candidates = [candidate(4, grants: [kept(1)])]
+        let added = person(5, name: "Anna Lind")
+        rec.answer = PeopleSearchAnswer(people: [added])
+        rec.requested = [added.accountKey]
+        let session = session(rec)
+        let model = instantModel(session)
+        await type("anna", into: model)
+
+        let unlisted = model.rows(showsLocalContacts: true)
+        XCTAssertEqual(unlisted.network.map(\.accountKey), [added.accountKey])
+        XCTAssertEqual(session.requestState(for: added), .sent, "the row the list repeats")
+
+        let listed = model.rows(showsLocalContacts: true, listed: [added.accountKey])
+        XCTAssertTrue(listed.network.isEmpty, "the list row stands for them")
+        XCTAssertEqual(listed.local.map(\.accountKey), [candidate(4).accountKey], "and for nobody else")
+
+        let both: Set<Data> = [added.accountKey, candidate(4).accountKey]
+        let none = model.rows(showsLocalContacts: true, listed: both)
+        XCTAssertTrue(none.local.isEmpty && none.network.isEmpty, "whatever their reach, in either part")
+        XCTAssertFalse(model.showsAnything(includesChannels: true, showsLocalContacts: true, listed: both))
+        XCTAssertNil(
+            model.peopleMessage(includesChannels: true, showsLocalContacts: true, listed: both),
+            "and no line stands with no row")
+    }
+
+    /// `listed` and `chatPeers` are two rules: a person whose chat matched
+    /// keeps the way to add them unless a list row shows them.
+    func testAChatPeerIsNotAListedPerson() async {
+        let rec = Recorder()
+        rec.candidates = [candidate(4, grants: [kept(1)])]
+        let model = instantModel(session(rec))
+        await type("anna", into: model)
+        let key = candidate(4).accountKey
+
+        XCTAssertEqual(
+            model.rows(showsLocalContacts: true, chatPeers: [key]).local.map(\.accountKey), [key])
+        XCTAssertTrue(
+            model.rows(showsLocalContacts: true, listed: [key], chatPeers: [key]).local.isEmpty)
     }
 
     func testAKnownPersonWhoBecameAContactIsReadAgainWithTheTextStanding() async {

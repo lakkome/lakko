@@ -690,44 +690,7 @@ public final class ContactsRepository: ObservableObject {
                     // batch was in flight: the ack belongs to the old
                     // account, never to whoever is bound now.
                     guard boundAccountIdB64 == pollAccountIdB64 else { continue }
-                    // The recipient of one of our outgoing requests pressed
-                    // Accept. The signature was verified in the UniFFI layer,
-                    // so this is the moment the person becomes a contact on
-                    // this side too: the Welcome that follows creates the
-                    // chat, never the contact row (a requester whose request
-                    // was accepted on Android had a named chat and an empty
-                    // Contacts tab, seen live on 2026-09-16). One row per
-                    // person; the matching sent request is retired.
-                    let alreadyKnown = state.accepted.contains {
-                        $0.request.fromPubkey == ack.accepterPubkey
-                    }
-                    let accepterAccountIdB64 = base64Encode(ack.accepterAccountId)
-                    // ADR-0060 — the request was answered: its `reply` key goes.
-                    ReachCenter.shared.retireReplies(
-                        purpose: ReplyPurpose.contact(ack.accepterAccountId))
-                    let remainingSent = SentRequests.answered(
-                        recipientAccountIdB64: accepterAccountIdB64, in: state.sent)
-                    if alreadyKnown {
-                        if remainingSent.count != state.sent.count {
-                            state = state.with(sent: remainingSent)
-                        }
-                        continue
-                    }
-                    let syntheticRequest = IncomingContactRequest(
-                        messageId: ack.messageId,
-                        fromPubkey: ack.accepterPubkey,
-                        fromAccountId: ack.accepterAccountId,
-                        fromPseudonym: ack.ackToPseudonym,
-                        validAfterMs: ack.acceptedAtMs,
-                        intro: nil,
-                        createdAt: ack.createdAt
-                    )
-                    state = state.with(
-                        accepted: state.accepted + [
-                            AcceptedContact(request: syntheticRequest, groupIdHex: nil)
-                        ],
-                        sent: remainingSent
-                    )
+                    applyContactAck(ack)
                     continue
                 }
             }
@@ -1169,6 +1132,59 @@ public final class ContactsRepository: ObservableObject {
         }
     }
 
+    /// An ack from the recipient of one of this account's outgoing requests:
+    /// they pressed Accept. The signature was verified in the UniFFI layer,
+    /// so this is the moment the person becomes a contact on this side too:
+    /// the Welcome that follows creates the chat, never the contact row (a
+    /// requester whose request was accepted on Android had a named chat and
+    /// an empty Contacts tab, seen live on 2026-09-16). One row per person;
+    /// the matching sent request is retired.
+    func applyContactAck(_ ack: IncomingContactAck) {
+        let alreadyKnown = state.accepted.contains {
+            $0.request.fromPubkey == ack.accepterPubkey
+        }
+        let accepterAccountIdB64 = base64Encode(ack.accepterAccountId)
+        // ADR-0060 — the request was answered: its `reply` key goes.
+        ReachCenter.shared.retireReplies(
+            purpose: ReplyPurpose.contact(ack.accepterAccountId))
+        // Before the row goes: it holds the name they were found under.
+        fileFoundName(
+            answering: SentRequests.row(recipientAccountIdB64: accepterAccountIdB64, in: state.sent),
+            signatureKey: ack.accepterPubkey)
+        let remainingSent = SentRequests.answered(
+            recipientAccountIdB64: accepterAccountIdB64, in: state.sent)
+        if alreadyKnown {
+            if remainingSent.count != state.sent.count {
+                state = state.with(sent: remainingSent)
+            }
+            return
+        }
+        let syntheticRequest = IncomingContactRequest(
+            messageId: ack.messageId,
+            fromPubkey: ack.accepterPubkey,
+            fromAccountId: ack.accepterAccountId,
+            fromPseudonym: ack.ackToPseudonym,
+            validAfterMs: ack.acceptedAtMs,
+            intro: nil,
+            createdAt: ack.createdAt
+        )
+        state = state.with(
+            accepted: state.accepted + [
+                AcceptedContact(request: syntheticRequest, groupIdHex: nil)
+            ],
+            sent: remainingSent
+        )
+    }
+
+    /// `docs/ux/who-can-find-me.md` section 6.1 — the person holding
+    /// `signatureKey` answered `row`: the name it found them under stands
+    /// until their own profile arrives.
+    private func fileFoundName(answering row: SentContactRequest?, signatureKey: Data) {
+        guard let row, let claim = SentRequests.foundClaim(row, signatureKey: signatureKey) else { return }
+        ProfileDirectory.shared.fileFoundName(
+            claim, signatureKeyB64: base64Encode(signatureKey), accountIdB64: boundAccountIdB64)
+    }
+
     /// A Welcome joined `groupIdHex`. When it is the one-to-one with someone
     /// this account asked, the request was answered, whether or not the ack
     /// ever arrives: their row under Sent goes and they are a contact. The
@@ -1183,6 +1199,11 @@ public final class ContactsRepository: ObservableObject {
             },
             current: { ReachCenter.shared.currentAccountKey(of: $0) })
         guard answered.remaining.count != state.sent.count else { return }
+        // Usually ahead of the ack, which then finds no row to read the name
+        // from.
+        fileFoundName(
+            answering: answered.accountIdB64.flatMap { SentRequests.row(recipientAccountIdB64: $0, in: state.sent) },
+            signatureKey: peer)
         // The contact first, and only then the row under Sent: a search row
         // reads the two, and must never find them in neither and offer Add
         // contact to someone who accepted. Asking them was a decision to have
@@ -1332,7 +1353,11 @@ public final class ContactsRepository: ObservableObject {
             return false
         }
         // Read BEFORE the check below, which may write a first pin.
-        guard establishedContact(ofAccountId: fromAccountId) != nil else { return false }
+        guard establishedContact(ofAccountId: fromAccountId) != nil
+            || KnownContactRequest.isContactKey(
+                base64Encode(request.fromPubkey),
+                in: state.accepted.map { base64Encode($0.request.fromPubkey) })
+        else { return false }
         let check: KnownContactRequest.Check
         do {
             check = try await client.checkContactIdentity(accountId: fromAccountId) != nil
@@ -1367,6 +1392,7 @@ public final class ContactsRepository: ObservableObject {
             // Kept on disk: the cursor is about to move past this row.
             waiting.hold(request, accountIdB64: accountIdB64)
         case .drop:
+            NSLog("contacts inbox: a request from a contact's account was dropped")
             waiting.drop(messageId: request.messageId, accountIdB64: accountIdB64)
         }
         return true

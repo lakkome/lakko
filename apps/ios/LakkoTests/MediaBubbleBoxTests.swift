@@ -290,6 +290,53 @@ final class MediaBubbleBoxTests: XCTestCase {
             "a sliver GIF was not floored at 80 pt (measured \(sliver.height))")
     }
 
+    // MARK: - In a column (`docs/ux/feed.md` section 3)
+
+    /// Nothing inside a feed item may be cut by its edge, and a phone with
+    /// Display Zoom leaves the column narrower than a chat bubble. The chat's
+    /// boxes, asserted above, are what a bubble takes with no column.
+    func testABubbleTakesTheColumnItSitsIn() throws {
+        try assertTheMeasurementTechniqueMeasures()
+        let column: CGFloat = 212
+
+        let photo = measure(
+            PhotoBubble(ref: photoRef(width: 1600, height: 800)).environment(\.mediaColumnWidth, column))
+        XCTAssertEqual(photo.width, column, accuracy: 1)
+        XCTAssertEqual(photo.height, column / 2, accuracy: 1, "the photo lost its aspect")
+
+        let video = measure(
+            VideoBubble(ref: videoRef(width: 1600, height: 800)).environment(\.mediaColumnWidth, column))
+        XCTAssertEqual(video.width, column, accuracy: 1)
+
+        let gif = measure(gifBubble(width: 400, height: 200).environment(\.mediaColumnWidth, column))
+        XCTAssertEqual(gif.width, column, accuracy: 1)
+        XCTAssertEqual(gif.height, column / 2, accuracy: 1, "the GIF lost its aspect")
+
+        let note = measure(videoNoteBubble(incoming: true).environment(\.mediaColumnWidth, column))
+        XCTAssertEqual(note.width, column, accuracy: 1)
+    }
+
+    /// The feed brings the chat's fill along with a voice message, and the
+    /// bubble with its fill still has to fit the column.
+    func testAVoiceMessageWithItsFillFitsTheColumn() throws {
+        try assertTheMeasurementTechniqueMeasures()
+        let ref = AttachmentRef(
+            blobId: Data(repeating: 0xA1, count: 32),
+            key: Data(repeating: 0xA2, count: 32),
+            nonce: Data(repeating: 0xA3, count: 12),
+            mime: "audio/mp4",
+            size: 40_000,
+            name: "voice.m4a",
+            kind: "voice",
+            durationMs: 12_000
+        )
+        for column: CGFloat in [212, 282] {
+            let voice = measure(FeedMediaBubble(ref: ref, incoming: false).environment(\.mediaColumnWidth, column))
+            XCTAssertGreaterThan(voice.width, 0)
+            XCTAssertLessThanOrEqual(voice.width, column, "the voice bubble overflows a \(column) pt column")
+        }
+    }
+
     // MARK: - Harness
 
     /// The spec's box for a pixel size, from the one function that owns it.

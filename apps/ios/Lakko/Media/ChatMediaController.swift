@@ -44,6 +44,15 @@ public final class ChatMediaController: ObservableObject {
         }
     }
 
+    /// `docs/ux/feed.md` section 3 — a screen that only plays what was already
+    /// sent or received. Nothing there records or uploads, so a send is
+    /// refused rather than given a conversation to land in.
+    public static var playbackOnlyPort: Port {
+        Port(
+            sendAttachment: { _, _ in throw MediaCaptureError.startFailed },
+            sessionToken: { nil })
+    }
+
     public enum DeniedResource: Equatable {
         case microphone
         case camera
@@ -753,6 +762,12 @@ public final class ChatMediaController: ObservableObject {
     }
 
     public func isPlayed(_ key: String) -> Bool { playedKeys.contains(key) }
+
+    /// Read the played marks again. A chat reads them when it opens; a screen
+    /// that outlives the chats opened from it reads them each time it returns.
+    public func reloadPlayed() {
+        playedKeys = Set(prefs.playedKeys())
+    }
 
     public func markPlayed(_ key: String) {
         guard !playedKeys.contains(key) else { return }

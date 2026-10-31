@@ -4978,14 +4978,6 @@
       "text": "{count, plural, one {# پیوست} other {# پیوست}}",
       "status": "machine"
     },
-    "feed.banner.dismiss": {
-      "text": "متوجه شدم",
-      "status": "machine"
-    },
-    "feed.banner.local": {
-      "text": "فید شما پیام‌هایی را نشان می‌دهد که این دستگاه دریافت کرده است.",
-      "status": "machine"
-    },
     "feed.divider.new": {
       "text": "جدید",
       "status": "machine"

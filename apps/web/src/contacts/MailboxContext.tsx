@@ -55,6 +55,7 @@ import { installAddressRecheck } from "../reach/mailbox-write";
 import { reachSession, reachSessionSignal } from "../reach/reach-service";
 import { DiscoveryClient } from "../discovery/client";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
+import { applyContactAck } from "./contact-ack";
 import { waitingSentRequests } from "./contact-list-model";
 import { forgetInviteLinkSecret } from "./invite-link-secrets";
 import { listMintedLinks } from "./minted-links";
@@ -65,8 +66,8 @@ import {
   revokeMintedLink,
   type OwnLinkRevokeOutcome,
 } from "./own-links";
-import { forgetSentRequest, loadSentRequests, recordSentRequest } from "./sent-requests";
-import { forgetSentIntro, sentIntroFor } from "./sent-request-intros";
+import { loadSentRequests, recordSentRequest } from "./sent-requests";
+import { sentIntroFor } from "./sent-request-intros";
 import {
   installSpentRunners,
   requestsToResend,
@@ -100,10 +101,9 @@ import {
   accountKeysOf,
   loadAccepted,
   readPin,
-  upsertAccepted,
-  type AcceptedContact,
 } from "./local-store";
 import {
+  contactSignedBy,
   establishedContactOfAccount,
   knownContactRequestVerdict,
   pinKeysOf,
@@ -463,10 +463,12 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     // only from the peer's own profile establishes nothing, so a member who
     // claimed this account's id cannot make its request vanish.
     const fromAccountIdB64 = base64Encode(fromAccountId);
-    const known = establishedContactOfAccount(loadAccepted(accountIdB64), groupIdHex(fromAccountId), {
-      pinKeysB64: pinKeysOf(accountKeysOf(fromAccountIdB64, accountIdB64)),
-      bindingKeyB64: readVerifiedBinding(fromAccountIdB64, accountIdB64)?.keyB64 ?? null,
-    });
+    const accepted = loadAccepted(accountIdB64);
+    const known =
+      establishedContactOfAccount(accepted, groupIdHex(fromAccountId), {
+        pinKeysB64: pinKeysOf(accountKeysOf(fromAccountIdB64, accountIdB64)),
+        bindingKeyB64: readVerifiedBinding(fromAccountIdB64, accountIdB64)?.keyB64 ?? null,
+      }) ?? contactSignedBy(accepted, base64Encode(request.fromPubkey));
     if (known === undefined) return false;
     let check: KnownRequestCheck;
     try {
@@ -502,6 +504,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         waitingKnownRequests.push({ request, row });
       }
       return true;
+    }
+    if (verdict === "drop") {
+      // eslint-disable-next-line no-console
+      console.warn("contacts inbox: a request from a contact's account was dropped", check);
     }
     // Answered or dropped: it waits no longer.
     inbox?.dropWaiting(request.messageId);
@@ -1021,30 +1027,11 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           void reachSession()?.closeRepliesTo(journalHex(base64Decode(refused.signaturePubkeyB64)));
         } else {
           // 1.9b1: contact-ack — the recipient of our ContactRequest pressed
-          // Accept. The signature is verified, so even a stale ack is a
-          // legitimate accept by the holder of `accepterPubkey`.
-          const accepter: AcceptedContact = {
-            signaturePubkeyB64: base64Encode(ev.ack.accepterPubkey),
-            x25519PubkeyB64: base64Encode(ev.ack.accepterX25519Pubkey),
-            // ADR-0048 — the name comes from the resolver; a re-delivered ack
-            // must not wipe a rename the user already gave this contact.
-            displayName:
-              loadAccepted(accountIdB64).find(
-                (c) => c.signaturePubkeyB64 === base64Encode(ev.ack.accepterPubkey),
-              )?.displayName ?? "",
-            acceptedAtMs: Date.now(),
-            // The peer's account_id (hex), kept with the contact (founding a
-            // one-to-one, the backup).
-            accountIdHex: groupIdHex(ev.ack.accepterAccountId),
-          };
-          // Durable, and keyed by the captured account: recorded even when
-          // the session has ended since.
-          upsertAccepted(accepter, accountIdB64);
-          // Answered: the sent record and the intro kept for a re-send go
-          // (durable, keyed by the captured account).
-          const answeredHex = groupIdHex(ev.ack.accepterAccountId);
-          forgetSentRequest(accountIdB64, answeredHex);
-          void forgetSentIntro(accountIdB64, answeredHex);
+          // Accept.
+          applyContactAck(ev.ack, accountIdB64, {
+            current,
+            fileFoundName: (key, found) => profiles.fileFoundName(key, found),
+          });
           if (current()) setAcceptedVersion(acceptedVersion() + 1);
         }
       }

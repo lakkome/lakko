@@ -39,6 +39,9 @@ pub(crate) struct MlsFailure {
     /// poisoned lock). `None` is meaningful: it tells a client "this is not a
     /// permission answer", which it renders with its fail-closed fallback.
     pub(crate) reason: Option<MlsRefusalReason>,
+    /// The group a `groupStillActive` refusal names, and `None` for every
+    /// other failure. Becomes `err.refusalGroupId`.
+    pub(crate) group_id: Option<Vec<u8>>,
 }
 
 impl From<lakko_mls::Error> for MlsFailure {
@@ -46,6 +49,10 @@ impl From<lakko_mls::Error> for MlsFailure {
         Self {
             reason: e.refusal_reason(),
             message: e.to_string(),
+            group_id: match e {
+                lakko_mls::Error::GroupStillActive { group_id } => Some(group_id),
+                _ => None,
+            },
         }
     }
 }
@@ -55,6 +62,7 @@ impl From<String> for MlsFailure {
         Self {
             message,
             reason: None,
+            group_id: None,
         }
     }
 }
@@ -64,6 +72,7 @@ impl From<&str> for MlsFailure {
         Self {
             message: message.to_string(),
             reason: None,
+            group_id: None,
         }
     }
 }
@@ -73,7 +82,9 @@ impl MlsFailure {
     /// `instanceof Error`, `.message` and a stack all work as before) carrying
     /// two extra own properties when this is a membership refusal —
     /// `refusalReason` (the stable code) and `refusalDisposition`
-    /// (`"retryLater"` / `"doNotRetry"` / `"notPermitted"`).
+    /// (`"retryLater"` / `"doNotRetry"` / `"notPermitted"`). A
+    /// `groupStillActive` refusal also carries `refusalGroupId`, a
+    /// `Uint8Array`, so the caller knows which journal to read.
     ///
     /// Properties rather than a message prefix: a caller reads
     /// `err.refusalReason`, it parses nothing, and adding the fields breaks no
@@ -94,6 +105,14 @@ impl MlsFailure {
                 target,
                 &JsValue::from_str("refusalDisposition"),
                 &JsValue::from_str(reason.disposition().code()),
+            );
+        }
+        if let Some(group_id) = self.group_id {
+            let target: &JsValue = err.as_ref();
+            let _ = js_sys::Reflect::set(
+                target,
+                &JsValue::from_str("refusalGroupId"),
+                &js_sys::Uint8Array::from(group_id.as_slice()).into(),
             );
         }
         err.into()
@@ -1916,6 +1935,20 @@ impl Group {
         Ok(g.is_active())
     }
 
+    /// Delete this group's state from `identity`'s storage, for a group this
+    /// device is out of (C-88). This is local: it tells nobody anything and
+    /// does not leave the group. Repeating it changes nothing. Persist the
+    /// snapshot afterwards.
+    ///
+    /// Throws a `groupStillActive` refusal (`err.refusalGroupId`), changing
+    /// nothing, when the group stored under this id is active, which also
+    /// covers a stale handle of a group a Welcome has since replaced.
+    #[wasm_bindgen(js_name = deleteLocally)]
+    pub fn delete_locally(&self, identity: &Identity) -> Result<(), JsValue> {
+        self.delete_locally_core(identity)
+            .map_err(MlsFailure::into_js)
+    }
+
     /// Local leaf index of the calling identity.
     #[wasm_bindgen(getter, js_name = ownLeafIndex)]
     pub fn own_leaf_index(&self) -> Result<u32, JsValue> {
@@ -2148,6 +2181,7 @@ impl Group {
                      awaiting a verdict"
                 ),
                 reason: Some(MlsRefusalReason::SweepAlreadyStaged),
+                group_id: None,
             });
         }
         let Some(staged) = g
@@ -2166,6 +2200,11 @@ impl Group {
             welcome_bytes,
             swept_records: staged.swept.into_iter().map(Into::into).collect(),
         }))
+    }
+
+    /// Core of [`Self::delete_locally`].
+    fn delete_locally_core(&self, identity: &Identity) -> Result<(), MlsFailure> {
+        Ok(self.locked()?.delete(&identity.inner)?)
     }
 
     /// Core of [`Self::has_staged_sweep`].
@@ -5926,6 +5965,27 @@ mod tests {
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), total, "refusal codes must be unique");
+    }
+
+    /// `groupStillActive` is the one refusal that names something, and what it
+    /// names has to reach the failure the JS error is built from: the caller
+    /// reads the journal of exactly that group.
+    #[test]
+    fn a_group_still_active_refusal_carries_the_group_id() {
+        let alice = Identity::from_seed(&[0xE0u8; 64]).unwrap();
+        let group = Group::new(&alice, GroupKind::Group).unwrap();
+        let group_id = group.locked().unwrap().group_id();
+
+        let f = group.delete_locally_core(&alice).unwrap_err();
+        assert_eq!(f.reason, Some(lakko_mls::RefusalReason::GroupStillActive));
+        assert_eq!(f.group_id, Some(group_id));
+        assert_eq!(
+            f.reason.map(lakko_mls::RefusalReason::code),
+            Some("groupStillActive")
+        );
+
+        let f = MlsFailure::from(lakko_mls::Error::Codec("bad wire".into()));
+        assert_eq!(f.group_id, None, "only this refusal names a group");
     }
 
     /// A failure that is not a membership refusal carries **no** reason, so the

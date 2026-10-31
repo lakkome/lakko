@@ -52,9 +52,16 @@ pub enum CircleError {
     /// A card longer than a row carries.
     #[error("the card is too long")]
     CardTooLong,
+    /// A row takes a sealed card only: a plain one would be readable by every
+    /// contact of the owner.
+    #[error("the card is not sealed")]
+    CardNotSealed,
     /// A row index outside the directory.
     #[error("row out of range")]
     RowOutOfRange,
+    /// More search terms than a sealed card has slots for.
+    #[error("too many search terms")]
+    TooManyTerms,
 }
 
 impl CircleError {
@@ -76,7 +83,9 @@ impl CircleError {
             Self::Overflow => "overflow",
             Self::FilterTooLarge => "filterTooLarge",
             Self::CardTooLong => "cardTooLong",
+            Self::CardNotSealed => "cardNotSealed",
             Self::RowOutOfRange => "rowOutOfRange",
+            Self::TooManyTerms => "tooManyTerms",
         }
     }
 }

@@ -8,7 +8,9 @@
  * waiting for an answer. No Solid, no storage, no wasm; tested in
  * `contact-list-model.test.ts`.
  */
+import { base64Encode } from "../auth/account-id";
 import { badgeText } from "../feed/feed-marks";
+import { fingerprintLabel } from "../profile/resolver";
 
 
 /** The group every label that does not start with a letter falls into. */
@@ -129,6 +131,34 @@ export function waitingSentRequests(
         !(r.recipientKeyB64 !== undefined && acceptedKeysB64.has(r.recipientKeyB64)),
     )
     .sort((a, b) => b.sentAtMs - a.sentAtMs);
+}
+
+/** A new contact's name until their own profile arrives. */
+export interface FoundName {
+  readonly displayName: string | null;
+  /** Canonical, verified when the person was found. */
+  readonly username: string | null;
+}
+
+/**
+ * What the answered record says about the person who accepted: the name they
+ * were found under, so a new contact is never listed as a stand-in (UX 6.1).
+ *
+ * Only for the key they were found under: a found name and username say
+ * nothing about another key, and an ack states its own account id, so the
+ * record it matches proves nothing about who signed it. A person found by
+ * their username alone is named by it: that is a username, not a name. A
+ * found name that is only a key fingerprint names nobody.
+ */
+export function foundNameOf(
+  record: SentRequestRecord | undefined,
+  accepterPubkey: Uint8Array,
+): FoundName | null {
+  if (record === undefined || record.recipientKeyB64 !== base64Encode(accepterPubkey)) return null;
+  const name = record.recipientName?.trim() ?? "";
+  if (name.length === 0 || name === fingerprintLabel(accepterPubkey)) return null;
+  const username = record.recipientUsername.length > 0 ? record.recipientUsername : null;
+  return { displayName: username !== null && name === `@${username}` ? null : name, username };
 }
 
 /** What a Sent row shows: the name as found, and `@username` under it. A

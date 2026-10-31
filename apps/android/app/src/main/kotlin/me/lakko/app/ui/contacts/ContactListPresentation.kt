@@ -45,6 +45,19 @@ public fun sentRowText(name: String?, username: String): SentRowText {
     }
 }
 
+/**
+ * The people [sections] lists, as standard base64 account keys. The People part
+ * under the list leaves each of them out, whatever their reach, so one person
+ * stands once (`docs/ux/who-can-find-me.md` section 6.1). A contact's key comes
+ * from [contactKeyB64] by row key; a pending contact's row carries it in
+ * [ContactRowModel.personKey].
+ */
+public fun listedPersonKeys(
+    sections: List<ContactSection>,
+    contactKeyB64: (rowKey: String) -> String?,
+): Set<String> =
+    sections.flatMap { it.rows }.mapNotNullTo(HashSet()) { row -> contactKeyB64(row.key) ?: row.personKey }
+
 /** The header for rows whose name does not start with a letter. */
 public const val OTHER_SECTION: String = "#"
 

@@ -229,6 +229,7 @@ describe("membership refusal copy", () => {
     // a distinct sentence would be copy with no reader — and naming one would
     // leak an internal reason, which §6 row 7 forbids outright.
     expect([...COLLAPSED_TO_FALLBACK].sort()).toEqual([
+      "groupStillActive",
       "leafUpdateRefused",
       "noRoleTable",
       "notACommitter",

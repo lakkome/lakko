@@ -69,7 +69,29 @@ public data class PeerProfile(
     val usernameCertificateHex: String? = null,
     /** ADR-0084 — the person's profile photo references, or `null`. */
     val avatar: AvatarRefs? = null,
-)
+) {
+    /**
+     * Whether this is only what a search knew about the person
+     * ([ProfileDirectory.onFoundPersonAnswered]): stamp 0 and nothing a client
+     * composes for itself, which always states its account id. Read from the
+     * fields rather than kept as a flag, so it stays true of the claim a pairing
+     * state bundle carried to a new device.
+     */
+    public val isFoundName: Boolean
+        get() = updatedAtMs == 0uL && accountIdHex == null && usernameCertificateHex == null && avatar == null
+
+    /**
+     * What a pairing state bundle carries of this profile, `null` for nothing.
+     * A found username stands on this device's own verdict, which does not
+     * travel: with no certificate the new device could never verify it.
+     */
+    public val forStateBundle: PeerProfile?
+        get() = when {
+            !isFoundName || username == null -> this
+            displayName != null -> copy(username = null)
+            else -> null
+        }
+}
 
 /** The auth account id length, bytes. */
 public const val ACCOUNT_ID_BYTES: Int = 16

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   compareContactLabels,
+  foundNameOf,
   groupByLetter,
   letterOf,
   matchesContactQuery,
@@ -15,7 +16,9 @@ import {
   waitingSentRequests,
   contactsBadge,
 } from "./contact-list-model";
+import { base64Encode } from "../auth/account-id";
 import { badgeText } from "../feed/feed-marks";
+import { fingerprintLabel } from "../profile/resolver";
 
 describe("letterOf", () => {
   it("takes the first letter, upper-cased, ignoring a leading @", () => {
@@ -150,5 +153,58 @@ describe("the Contacts badge", () => {
     expect(contactsBadge(0)).toBeNull();
     expect(contactsBadge(5)).toBe(badgeText(5));
     expect(contactsBadge(100)).toBe(badgeText(100));
+  });
+});
+
+describe("foundNameOf", () => {
+  const key = new Uint8Array(32).fill(7);
+  const record = {
+    recipientUsername: "elin",
+    recipientName: "Elin Holm",
+    recipientAccountIdHex: "aa",
+    sentAtMs: 1,
+    recipientKeyB64: base64Encode(key),
+  };
+
+  it("is the name and the username the person was found under", () => {
+    expect(foundNameOf(record, key)).toEqual({ displayName: "Elin Holm", username: "elin" });
+  });
+
+  it("has no username when none was shown", () => {
+    expect(foundNameOf({ ...record, recipientUsername: "" }, key)).toEqual({
+      displayName: "Elin Holm",
+      username: null,
+    });
+  });
+
+  it("is nothing without a record, or with an empty name", () => {
+    expect(foundNameOf(undefined, key)).toBeNull();
+    expect(foundNameOf({ ...record, recipientName: " " }, key)).toBeNull();
+    const { recipientName: _name, ...nameless } = record;
+    expect(foundNameOf(nameless, key)).toBeNull();
+  });
+
+  it("says nothing about a key other than the one found", () => {
+    expect(foundNameOf(record, new Uint8Array(32).fill(8))).toBeNull();
+    const { recipientKeyB64: _key, ...keyless } = record;
+    expect(foundNameOf(keyless, key)).toBeNull();
+  });
+
+  it("a person found by their username alone is named by it, not given a name", () => {
+    expect(foundNameOf({ ...record, recipientName: "@elin" }, key)).toEqual({
+      displayName: null,
+      username: "elin",
+    });
+  });
+
+  it("a name that merely looks like a handle stays a name", () => {
+    expect(foundNameOf({ ...record, recipientUsername: "", recipientName: "@null" }, key)).toEqual({
+      displayName: "@null",
+      username: null,
+    });
+  });
+
+  it("a fingerprint names nobody", () => {
+    expect(foundNameOf({ ...record, recipientName: fingerprintLabel(key) }, key)).toBeNull();
   });
 });

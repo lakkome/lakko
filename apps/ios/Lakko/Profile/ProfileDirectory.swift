@@ -397,11 +397,45 @@ public final class ProfileDirectory: ObservableObject {
         return outcome
     }
 
+    /// `docs/ux/who-can-find-me.md` section 6.1 — file the name a person was
+    /// found under for the key that just became a contact, so the new row is
+    /// never a stand-in. Any profile of their own replaces it. Kept like a
+    /// received profile, and only while `receivedFor` is the active account.
+    ///
+    /// A username here was shown by the search, which verified it: its verdict
+    /// is written with it. The check a stored username otherwise gets reads
+    /// the certificate a profile carried, and this claim has none, so it would
+    /// refuse the pair for good.
+    @discardableResult
+    func fileFoundName(
+        _ claim: ProfileClaim, signatureKeyB64: String, accountIdB64 receivedFor: String?
+    ) -> ProfileAcceptance {
+        guard let receivedFor, receivedFor == accountIdB64 else { return .inactive }
+        let outcome = received.accept(claim, signatureKeyB64: signatureKeyB64)
+        guard outcome == .stored else { return outcome }
+        if let username = claim.username {
+            verifier.noteVerified(signatureKeyB64: signatureKeyB64, username: username)
+        }
+        bump()
+        return outcome
+    }
+
+    /// Whether the person still counts as unnamed for the profile request
+    /// (ADR-0048 section 2, trigger 4): the placeholder, or a name this device
+    /// found for them, which stands in for a profile it has not got. Counting
+    /// that one as a name would stop the asking that brings the real one.
+    func countsAsUnnamed(signatureKey: Data) -> Bool {
+        let resolved = resolve(signatureKey: signatureKey)
+        if resolved.isPlaceholder { return true }
+        return resolved.source != .localRename
+            && received.profile(signatureKeyB64: base64Encode(signatureKey))?.isFoundName == true
+    }
+
     /// ADR-0050 section 2.9, bundle v3 — the profiles a pairing state bundle
     /// carries to a new device of `accountIdB64`: every received profile kept
     /// for that account (the caller leaves out the account's own keys).
     func profilesForBundle(accountIdB64: String) -> [String: ProfileClaim] {
-        received.all(accountIdB64: accountIdB64)
+        received.all(accountIdB64: accountIdB64).compactMapValues(\.forStateBundle)
     }
 
     /// ADR-0050 section 2.9, bundle v3 — store the profiles a pairing state
