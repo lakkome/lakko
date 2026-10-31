@@ -3378,6 +3378,10 @@
       "text": "Criar",
       "status": "machine"
     },
+    "chats.create.open_link": {
+      "text": "Abrir um link",
+      "status": "machine"
+    },
     "chats.empty.action": {
       "text": "Começar",
       "status": "machine"
@@ -6508,6 +6512,34 @@
     },
     "notification.message.new": {
       "text": "Nova mensagem",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "Abrir no app",
+      "status": "machine"
+    },
+    "open_in_app.copied": {
+      "text": "Link copiado. Cole-o no app.",
+      "status": "machine"
+    },
+    "open_link.field": {
+      "text": "Link",
+      "status": "machine"
+    },
+    "open_link.hint": {
+      "text": "Cole um link de convite, chamada ou grupo do Lakko.",
+      "status": "machine"
+    },
+    "open_link.hint_copied": {
+      "text": "A página copiou este link. Cole-o aqui para abrir.",
+      "status": "machine"
+    },
+    "open_link.not_lakko": {
+      "text": "Este não é um link do Lakko. Verifique e tente novamente.",
+      "status": "machine"
+    },
+    "open_link.open": {
+      "text": "Abrir",
       "status": "machine"
     },
     "proof.add_device.help": {

@@ -20,7 +20,7 @@ export const HOST_TUNNEL_PATH = "/__host/tunnel";
 export const HOST_EVENT = "lakko:host";
 
 /** What the host can tell the page. */
-export type HostEventKind = "quit-requested" | "open-settings" | "open-target" | "still-running";
+export type HostEventKind = "quit-requested" | "open-settings" | "open-target" | "still-running" | "link-arrived";
 
 /** The system page for one device (`docs/ux/desktop.md` section 4.2). */
 export type PrivacyPage = "microphone" | "camera";
@@ -291,6 +291,43 @@ export async function hostCanOpenPrivacy(): Promise<boolean> {
     return v.privacySettings === true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Hand decrypted bytes to the system save dialog (`docs/ux/desktop.md` section
+ * 6). `false` when the person cancelled; throws when the file was not written.
+ * The body is bytes, never a Blob: the host reads a Blob empty.
+ */
+export async function saveFileOnHost(bytes: Uint8Array, name: string): Promise<boolean> {
+  const res = await fetch(`/__host/save-file?name=${encodeURIComponent(name)}`, {
+    method: "POST",
+    body: bytes.slice(),
+  });
+  if (res.status === 204) return false;
+  if (!res.ok) throw new HostRequestError(res.status, "save-file");
+  return true;
+}
+
+/** A `lakko://` link the OS handed over. `secret` is `null` where the OS
+ *  cannot carry it privately: the person pastes the link then. */
+export interface HostLink {
+  readonly kind: "i" | "c" | "g";
+  readonly id: string;
+  readonly secret: string | null;
+}
+
+/** The link waiting at the host, once. `null` when there is none. */
+export async function takeHostLink(): Promise<HostLink | null> {
+  if (!isDesktop()) return null;
+  try {
+    const res = await fetch(`${HOST_APP_PATH}/take-link`, { method: "POST" });
+    if (res.status !== 200) return null;
+    const v = (await res.json()) as { kind?: unknown; id?: unknown; secret?: unknown };
+    if ((v.kind !== "i" && v.kind !== "c" && v.kind !== "g") || typeof v.id !== "string") return null;
+    return { kind: v.kind, id: v.id, secret: typeof v.secret === "string" ? v.secret : null };
+  } catch {
+    return null;
   }
 }
 

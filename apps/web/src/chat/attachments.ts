@@ -56,6 +56,8 @@
  * cycles.
  */
 
+import { isDesktop } from "../platform";
+import { saveFileOnHost } from "../platform/host";
 import { loadWasm } from "../wasm";
 import { t } from "../l10n";
 import { StorageClient } from "../storage/client";
@@ -939,12 +941,19 @@ export function formatAttachmentSize(bytes: number): string {
  * `mime` defaults to `application/octet-stream` so a missing
  * type doesn't accidentally inline a binary into a browser
  * preview pane.
+ *
+ * The desktop webview has no download from its app scheme: there the
+ * host opens the system save dialog.
  */
-export function saveDecryptedBytes(
+export async function saveDecryptedBytes(
   bytes: Uint8Array,
   filename: string,
   mime: string | undefined,
-): void {
+): Promise<void> {
+  if (isDesktop()) {
+    await saveFileOnHost(bytes, filename);
+    return;
+  }
   const blob = new Blob([bytes.slice()], {
     type: mime ?? "application/octet-stream",
   });

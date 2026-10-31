@@ -815,6 +815,8 @@ mod tests {
         let origin_addr = origin.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = origin.accept().await.unwrap();
+            // The error type is the one tungstenite's callback requires.
+            #[allow(clippy::result_large_err)]
             let callback = |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
                             mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
                 assert_eq!(request.uri().path(), "/sfu/v1/connect");

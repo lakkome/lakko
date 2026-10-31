@@ -568,6 +568,10 @@ dev-desktop:
     <key>NSHighResolutionCapable</key><true/>
     <key>NSMicrophoneUsageDescription</key><string>Lakko uses the microphone for calls.</string>
     <key>NSCameraUsageDescription</key><string>Lakko uses the camera for video calls.</string>
+    <key>CFBundleURLTypes</key><array><dict>
+    <key>CFBundleURLName</key><string>$id</string>
+    <key>CFBundleURLSchemes</key><array><string>lakko</string></array>
+    </dict></array>
     </dict></plist>
     PLIST
     identity="${LAKKO_DESKTOP_SIGN_IDENTITY:-}"

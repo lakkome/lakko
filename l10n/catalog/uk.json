@@ -3378,6 +3378,10 @@
       "text": "Створити",
       "status": "machine"
     },
+    "chats.create.open_link": {
+      "text": "Відкрити посилання",
+      "status": "machine"
+    },
     "chats.empty.action": {
       "text": "Почати",
       "status": "machine"
@@ -6508,6 +6512,34 @@
     },
     "notification.message.new": {
       "text": "Нове повідомлення",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "Відкрити в застосунку",
+      "status": "machine"
+    },
+    "open_in_app.copied": {
+      "text": "Посилання скопійовано. Вставте його в застосунку.",
+      "status": "machine"
+    },
+    "open_link.field": {
+      "text": "Посилання",
+      "status": "machine"
+    },
+    "open_link.hint": {
+      "text": "Вставте посилання-запрошення, посилання на дзвінок або групу Lakko.",
+      "status": "machine"
+    },
+    "open_link.hint_copied": {
+      "text": "Сторінка скопіювала це посилання. Вставте його сюди, щоб відкрити.",
+      "status": "machine"
+    },
+    "open_link.not_lakko": {
+      "text": "Це не посилання Lakko. Перевірте його та спробуйте ще раз.",
+      "status": "machine"
+    },
+    "open_link.open": {
+      "text": "Відкрити",
       "status": "machine"
     },
     "proof.add_device.help": {

@@ -3378,6 +3378,10 @@
       "text": "إنشاء",
       "status": "machine"
     },
+    "chats.create.open_link": {
+      "text": "فتح رابط",
+      "status": "machine"
+    },
     "chats.empty.action": {
       "text": "ابدأ واحدة",
       "status": "machine"
@@ -6508,6 +6512,34 @@
     },
     "notification.message.new": {
       "text": "رسالة جديدة",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "فتح في التطبيق",
+      "status": "machine"
+    },
+    "open_in_app.copied": {
+      "text": "تم نسخ الرابط. الصقه في التطبيق.",
+      "status": "machine"
+    },
+    "open_link.field": {
+      "text": "الرابط",
+      "status": "machine"
+    },
+    "open_link.hint": {
+      "text": "الصق رابط دعوة أو مكالمة أو مجموعة من Lakko.",
+      "status": "machine"
+    },
+    "open_link.hint_copied": {
+      "text": "نسخت الصفحة هذا الرابط. الصقه هنا لفتحه.",
+      "status": "machine"
+    },
+    "open_link.not_lakko": {
+      "text": "هذا ليس رابط Lakko. تحقق منه وحاول مرة أخرى.",
+      "status": "machine"
+    },
+    "open_link.open": {
+      "text": "فتح",
       "status": "machine"
     },
     "proof.add_device.help": {

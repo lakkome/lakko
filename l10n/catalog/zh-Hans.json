@@ -3378,6 +3378,10 @@
       "text": "创建",
       "status": "machine"
     },
+    "chats.create.open_link": {
+      "text": "打开链接",
+      "status": "machine"
+    },
     "chats.empty.action": {
       "text": "开始聊天",
       "status": "machine"
@@ -6508,6 +6512,34 @@
     },
     "notification.message.new": {
       "text": "新消息",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "在应用中打开",
+      "status": "machine"
+    },
+    "open_in_app.copied": {
+      "text": "链接已复制。请在应用中粘贴。",
+      "status": "machine"
+    },
+    "open_link.field": {
+      "text": "链接",
+      "status": "machine"
+    },
+    "open_link.hint": {
+      "text": "粘贴 Lakko 邀请、通话或群组链接。",
+      "status": "machine"
+    },
+    "open_link.hint_copied": {
+      "text": "页面已复制此链接。请粘贴到此处打开。",
+      "status": "machine"
+    },
+    "open_link.not_lakko": {
+      "text": "这不是 Lakko 链接。请检查后重试。",
+      "status": "machine"
+    },
+    "open_link.open": {
+      "text": "打开",
       "status": "machine"
     },
     "proof.add_device.help": {

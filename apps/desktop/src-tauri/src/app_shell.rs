@@ -423,6 +423,13 @@ pub fn handle<R: Runtime>(
             set_tray_labels(app, label("open"), label("quit"));
             no_content()
         },
+        (&Method::POST, "/take-link") => match app
+            .try_state::<crate::link::Held>()
+            .and_then(|held| held.take())
+        {
+            Some(link) => json_response(&link),
+            None => no_content(),
+        },
         (&Method::GET, "/capabilities") => {
             json_response(&json!({ "privacySettings": privacy_link("microphone").is_some() }))
         },

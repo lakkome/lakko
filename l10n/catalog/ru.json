@@ -3494,6 +3494,10 @@
       "text": "Создать",
       "status": "machine"
     },
+    "chats.create.open_link": {
+      "text": "Открыть ссылку",
+      "status": "machine"
+    },
     "chats.empty.action": {
       "text": "Начать",
       "status": "machine"
@@ -6624,6 +6628,34 @@
     },
     "notification.message.new": {
       "text": "Новое сообщение",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "Открыть в приложении",
+      "status": "machine"
+    },
+    "open_in_app.copied": {
+      "text": "Ссылка скопирована. Вставьте её в приложении.",
+      "status": "machine"
+    },
+    "open_link.field": {
+      "text": "Ссылка",
+      "status": "machine"
+    },
+    "open_link.hint": {
+      "text": "Вставьте ссылку-приглашение, ссылку на звонок или группу Lakko.",
+      "status": "machine"
+    },
+    "open_link.hint_copied": {
+      "text": "Страница скопировала эту ссылку. Вставьте её сюда, чтобы открыть.",
+      "status": "machine"
+    },
+    "open_link.not_lakko": {
+      "text": "Это не ссылка Lakko. Проверьте её и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "open_link.open": {
+      "text": "Открыть",
       "status": "machine"
     },
     "profile.avatar.change": {

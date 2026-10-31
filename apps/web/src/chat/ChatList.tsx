@@ -29,6 +29,7 @@ import {
 } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
 import { isDesktop } from "../platform";
+import { setOpenLinkReason } from "../platform/open-link-state";
 import {
   clearListCommand,
   folderTabIndexFor,
@@ -149,6 +150,20 @@ function CreateMenu(props: { onClose: () => void }): JSX.Element {
           <Icon name="channels" size={16} />
           {t("chats.create.channel")}
         </button>
+        {/* docs/ux/desktop.md section 7 - the route that always works. */}
+        <Show when={isDesktop()}>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              props.onClose();
+              setOpenLinkReason("menu");
+            }}
+          >
+            <Icon name="link" size={16} />
+            {t("chats.create.open_link")}
+          </button>
+        </Show>
         {/* ADR-0065 section 3 — Saved, from the menu that holds New group. */}
         <div class="lk-menu-sep" />
         <button type="button" role="menuitem" onClick={() => go(paths.saved)}>

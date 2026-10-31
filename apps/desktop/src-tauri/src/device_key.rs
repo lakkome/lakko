@@ -120,6 +120,9 @@ impl Handles {
 }
 
 /// Answer a request under [`PATH`].
+// The error of an operation is the response to send, built once and handed
+// straight back, so its size costs nothing here.
+#[allow(clippy::result_large_err)]
 pub fn handle(handles: &Handles, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
     if request.method() != Method::POST {
         return plain(StatusCode::METHOD_NOT_ALLOWED, "method");
@@ -152,12 +155,15 @@ pub fn handle(handles: &Handles, request: &Request<Vec<u8>>) -> Response<Vec<u8>
                 return Ok(json(StatusCode::OK, &serde_json::json!({ "handle": h })));
             }
             match key_store::load(account).map_err(store_error)? {
-                None => Ok(json(StatusCode::NOT_FOUND, &serde_json::json!({ "error": "absent" }))),
+                None => Ok(json(
+                    StatusCode::NOT_FOUND,
+                    &serde_json::json!({ "error": "absent" }),
+                )),
                 Some(key) => {
                     let h = handles.insert(key).map_err(internal)?;
                     handles.remember_stored(account, &h);
                     Ok(json(StatusCode::OK, &serde_json::json!({ "handle": h })))
-                }
+                },
             }
         }),
         "/delete" => json_op(request, |v| {
@@ -178,11 +184,17 @@ fn cipher_op(handles: &Handles, request: &Request<Vec<u8>>, encrypt: bool) -> Re
         .and_then(|q| q.strip_prefix("handle="))
         .unwrap_or("");
     let Some(key) = handles.get(handle) else {
-        return json(StatusCode::BAD_REQUEST, &serde_json::json!({ "error": "handle" }));
+        return json(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": "handle" }),
+        );
     };
     let body = request.body();
     if body.len() < IV_LEN || body.len() > MAX_BODY {
-        return json(StatusCode::BAD_REQUEST, &serde_json::json!({ "error": "length" }));
+        return json(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": "length" }),
+        );
     }
     let (iv, data) = body.split_at(IV_LEN);
     let Ok(cipher) = Aes256Gcm::new_from_slice(key.as_ref()) else {
@@ -200,7 +212,10 @@ fn cipher_op(handles: &Handles, request: &Request<Vec<u8>>, encrypt: bool) -> Re
             .header(http::header::CONTENT_TYPE, "application/octet-stream")
             .body(out)
             .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "response")),
-        Err(_) => json(StatusCode::BAD_REQUEST, &serde_json::json!({ "error": "decrypt-failed" })),
+        Err(_) => json(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": "decrypt-failed" }),
+        ),
     }
 }
 
@@ -218,6 +233,9 @@ fn json_op(
     }
 }
 
+// The error of an operation is the response to send, built once and handed
+// straight back, so its size costs nothing here.
+#[allow(clippy::result_large_err)]
 fn str_field<'a>(v: &'a serde_json::Value, name: &str) -> Result<&'a str, Response<Vec<u8>>> {
     v.get(name)
         .and_then(serde_json::Value::as_str)
@@ -228,9 +246,10 @@ fn str_field<'a>(v: &'a serde_json::Value, name: &str) -> Result<&'a str, Respon
 fn store_error(e: KeyStoreError) -> Response<Vec<u8>> {
     warn!(error = %e, "device key store");
     match e {
-        KeyStoreError::Unavailable(reason) => {
-            json(StatusCode::SERVICE_UNAVAILABLE, &serde_json::json!({ "error": reason }))
-        }
+        KeyStoreError::Unavailable(reason) => json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &serde_json::json!({ "error": reason }),
+        ),
         KeyStoreError::Failed(_) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             &serde_json::json!({ "error": "key-store-failed" }),
@@ -239,11 +258,17 @@ fn store_error(e: KeyStoreError) -> Response<Vec<u8>> {
 }
 
 fn internal(code: &'static str) -> Response<Vec<u8>> {
-    json(StatusCode::INTERNAL_SERVER_ERROR, &serde_json::json!({ "error": code }))
+    json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &serde_json::json!({ "error": code }),
+    )
 }
 
 fn bad(field: &str) -> Response<Vec<u8>> {
-    json(StatusCode::BAD_REQUEST, &serde_json::json!({ "error": format!("bad-{field}") }))
+    json(
+        StatusCode::BAD_REQUEST,
+        &serde_json::json!({ "error": format!("bad-{field}") }),
+    )
 }
 
 fn no_content() -> Response<Vec<u8>> {
@@ -281,8 +306,10 @@ mod tests {
         assert!(derive("other", &ikm, account).is_none());
     }
 
-    const GOLDEN_EXPORT_KEY: &str = "580dd978cdf210bff5cbdf52be9c591fdb34fdff8f3a2a848bf261c0b82713ce";
-    const GOLDEN_IDENTITY_SEED: &str = "5589abd90eb4e362ba1ed2d2d50e156604d0929c3934c57d79af31483f8b8347";
+    const GOLDEN_EXPORT_KEY: &str =
+        "580dd978cdf210bff5cbdf52be9c591fdb34fdff8f3a2a848bf261c0b82713ce";
+    const GOLDEN_IDENTITY_SEED: &str =
+        "5589abd90eb4e362ba1ed2d2d50e156604d0929c3934c57d79af31483f8b8347";
 
     #[test]
     fn encrypt_then_decrypt_through_the_routes() {

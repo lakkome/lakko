@@ -18,12 +18,14 @@
 mod app_shell;
 mod device_key;
 mod key_store;
+mod link;
 mod notify;
 mod probe;
 mod proxy;
-mod tunnel;
+mod save_file;
 #[cfg(not(target_os = "macos"))]
 mod tray;
+mod tunnel;
 
 use std::sync::Arc;
 
@@ -66,7 +68,16 @@ fn main() {
 
     let handler_config = Arc::clone(&config);
     let setup_config = Arc::clone(&config);
-    let built = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // A second start hands its link to the running app and exits. macOS never
+    // starts a second copy: it sends the running one an event instead.
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _| {
+        link::from_args(app, &args);
+    }));
+    let built = builder
+        .manage(link::Held::default())
+        .plugin(tauri_plugin_dialog::init())
         .enable_macos_default_menu(false)
         .register_asynchronous_uri_scheme_protocol(APP_SCHEME, move |ctx, request, responder| {
             let app = ctx.app_handle().clone();
@@ -125,7 +136,7 @@ fn main() {
             // internal scheme (`apps/web/src/platform/index.ts`).
             let public_origin = serde_json::to_string(&setup_config.api_origin.origin().ascii_serialization())?;
             let mut builder = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::CustomProtocol(url))
-                .initialization_script(&format!(
+                .initialization_script(format!(
                     "Object.defineProperty(globalThis, '__LAKKO_PUBLIC_ORIGIN__', {{ value: {public_origin}, writable: false, configurable: false }});"
                 ));
             if cfg!(debug_assertions) {
@@ -137,6 +148,9 @@ fn main() {
             // screen-sharing pickers read it (`desktop.md` section 2).
             let window = builder
                 .title("Lakko")
+                // The page's own drop targets take a dragged file; the host's
+                // handler would swallow the event before them.
+                .disable_drag_drop_handler()
                 .inner_size(1100.0, 760.0)
                 .min_inner_size(820.0, 560.0)
                 .visible(false)
@@ -147,6 +161,8 @@ fn main() {
             if !start_hidden {
                 window.show()?;
             }
+            #[cfg(not(target_os = "macos"))]
+            link::from_args(app.handle(), &std::env::args().collect::<Vec<_>>());
             if probe_mode {
                 probe::schedule_hide(app.handle().clone(), window.label().to_owned());
             }
@@ -177,6 +193,12 @@ fn main() {
         },
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => app_shell::show_main(app),
+        #[cfg(target_os = "macos")]
+        RunEvent::Opened { urls } => {
+            for url in urls {
+                link::arrived(app, url.as_str(), link::Delivery::Private);
+            }
+        },
         RunEvent::Exit => info!("exit"),
         _ => {},
     });

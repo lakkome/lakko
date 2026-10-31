@@ -3378,6 +3378,10 @@
       "text": "ساختن",
       "status": "machine"
     },
+    "chats.create.open_link": {
+      "text": "باز کردن پیوند",
+      "status": "machine"
+    },
     "chats.empty.action": {
       "text": "یکی را شروع کنید",
       "status": "machine"
@@ -6508,6 +6512,34 @@
     },
     "notification.message.new": {
       "text": "پیام جدید",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "باز کردن در برنامه",
+      "status": "machine"
+    },
+    "open_in_app.copied": {
+      "text": "پیوند کپی شد. آن را در برنامه جای‌گذاری کنید.",
+      "status": "machine"
+    },
+    "open_link.field": {
+      "text": "پیوند",
+      "status": "machine"
+    },
+    "open_link.hint": {
+      "text": "پیوند دعوت، تماس یا گروه Lakko را جای‌گذاری کنید.",
+      "status": "machine"
+    },
+    "open_link.hint_copied": {
+      "text": "صفحه این پیوند را کپی کرد. برای باز کردن آن را اینجا جای‌گذاری کنید.",
+      "status": "machine"
+    },
+    "open_link.not_lakko": {
+      "text": "این پیوند Lakko نیست. آن را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "open_link.open": {
+      "text": "باز کردن",
       "status": "machine"
     },
     "proof.add_device.help": {

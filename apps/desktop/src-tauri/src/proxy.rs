@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use tauri::Manager;
 
+use crate::save_file;
 use crate::tunnel::{self, Route, Tunnel};
 use crate::{app_shell, device_key, probe};
 
@@ -84,10 +85,15 @@ impl ProxyConfig {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("http client: {e}"))?;
-        let host = api_origin.host_str().ok_or("origin has no host")?.to_owned();
-        let port = api_origin.port_or_known_default().ok_or("origin has no port")?;
-        let sfu = std::env::var("LAKKO_DESKTOP_SFU_URL")
-            .unwrap_or_else(|_| format!("wss://{host}/sfu"));
+        let host = api_origin
+            .host_str()
+            .ok_or("origin has no host")?
+            .to_owned();
+        let port = api_origin
+            .port_or_known_default()
+            .ok_or("origin has no port")?;
+        let sfu =
+            std::env::var("LAKKO_DESKTOP_SFU_URL").unwrap_or_else(|_| format!("wss://{host}/sfu"));
         let sfu = reqwest::Url::parse(&sfu).map_err(|e| format!("bad sfu url: {e}"))?;
         let tunnel = Tunnel::new(tunnel::Origin { host, port }, &sfu)?;
         Ok(Self {
@@ -115,6 +121,9 @@ pub async fn handle<R: Runtime>(
     }
     if path.starts_with(tunnel::PATH) {
         return tunnel::handle(&config.tunnel, request).await;
+    }
+    if path == save_file::PATH {
+        return save_file::handle(app, request).await;
     }
     if path.starts_with(app_shell::PATH) {
         return match app.try_state::<app_shell::Shell>() {
@@ -144,7 +153,7 @@ fn api_service(path: &str) -> Option<&'static str> {
 
 async fn forward(config: &ProxyConfig, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
     match config.tunnel.route() {
-        Route::Direct => {}
+        Route::Direct => {},
         Route::Refused => return tunnel::refused(),
         Route::Tunnel(dialer) => return forward_tunnelled(config, &dialer, request).await,
     }
@@ -173,7 +182,7 @@ async fn forward(config: &ProxyConfig, request: Request<Vec<u8>>) -> Response<Ve
         Err(e) => {
             warn!(error = %e, "forward failed");
             return plain(StatusCode::BAD_GATEWAY, "upstream unreachable");
-        }
+        },
     };
     let status = upstream.status();
     let mut response = Response::builder().status(status.as_u16());
@@ -187,7 +196,7 @@ async fn forward(config: &ProxyConfig, request: Request<Vec<u8>>) -> Response<Ve
         Err(e) => {
             warn!(error = %e, "upstream body failed");
             return plain(StatusCode::BAD_GATEWAY, "upstream body");
-        }
+        },
     };
     response
         .body(bytes)
@@ -223,7 +232,7 @@ async fn forward_tunnelled(
         Err(e) => {
             warn!(error = %e, "tunnelled request failed");
             return tunnel::refused();
-        }
+        },
     };
     let mut response = Response::builder().status(upstream.status);
     for (name, value) in &upstream.headers {
@@ -258,7 +267,7 @@ fn asset<R: Runtime>(app: &AppHandle<R>, path: &str) -> Response<Vec<u8>> {
             response
                 .body(a.bytes)
                 .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "asset"))
-        }
+        },
         None => plain(StatusCode::NOT_FOUND, "not found"),
     }
 }

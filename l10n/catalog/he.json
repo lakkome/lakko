@@ -3378,6 +3378,10 @@
       "text": "יצירה",
       "status": "machine"
     },
+    "chats.create.open_link": {
+      "text": "פתיחת קישור",
+      "status": "machine"
+    },
     "chats.empty.action": {
       "text": "התחילו צ׳אט",
       "status": "machine"
@@ -6508,6 +6512,34 @@
     },
     "notification.message.new": {
       "text": "הודעה חדשה",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "פתיחה באפליקציה",
+      "status": "machine"
+    },
+    "open_in_app.copied": {
+      "text": "הקישור הועתק. הדביקו אותו באפליקציה.",
+      "status": "machine"
+    },
+    "open_link.field": {
+      "text": "קישור",
+      "status": "machine"
+    },
+    "open_link.hint": {
+      "text": "הדביקו קישור הזמנה, שיחה או קבוצה של Lakko.",
+      "status": "machine"
+    },
+    "open_link.hint_copied": {
+      "text": "הדף העתיק את הקישור. הדביקו אותו כאן כדי לפתוח.",
+      "status": "machine"
+    },
+    "open_link.not_lakko": {
+      "text": "זה לא קישור של Lakko. בדקו ונסו שוב.",
+      "status": "machine"
+    },
+    "open_link.open": {
+      "text": "פתיחה",
       "status": "machine"
     },
     "proof.add_device.help": {

@@ -3551,6 +3551,10 @@
       "text": "Create",
       "comment": "Accessible name of the menu for starting a chat, a group or a channel."
     },
+    "chats.create.open_link": {
+      "text": "Open a link",
+      "comment": "Item of the create menu on the desktop app: opens a pasted Lakko link."
+    },
     "chats.empty.action": {
       "text": "Start one",
       "comment": "Button under the empty conversation list; opens the menu for starting a chat, a group or a channel."
@@ -6851,6 +6855,34 @@
     "notification.message.new": {
       "text": "New message",
       "comment": "Notification text when a new message arrived but its content could not be shown on this device."
+    },
+    "open_in_app.button": {
+      "text": "Open in the app",
+      "comment": "Button on the invite, call-link and group-invite web pages: opens the desktop app."
+    },
+    "open_in_app.copied": {
+      "text": "Link copied. Paste it in the app.",
+      "comment": "After Open in the app on Windows or Linux: the link was copied."
+    },
+    "open_link.field": {
+      "text": "Link",
+      "comment": "Label of the link field in the Open a link dialog."
+    },
+    "open_link.hint": {
+      "text": "Paste a Lakko invite, call or group link.",
+      "comment": "Under the title of the Open a link dialog."
+    },
+    "open_link.hint_copied": {
+      "text": "The page copied this link. Paste it here to open it.",
+      "comment": "Open a link dialog, after the app was opened from a web page that copied the link."
+    },
+    "open_link.not_lakko": {
+      "text": "This is not a Lakko link. Check it and try again.",
+      "comment": "Under the field of the Open a link dialog when the text is not a Lakko link."
+    },
+    "open_link.open": {
+      "text": "Open",
+      "comment": "Button of the Open a link dialog."
     },
     "profile.avatar.change": {
       "text": "Change photo",

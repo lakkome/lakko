@@ -211,9 +211,10 @@ app.
 
 - A file dragged from the desktop or a file manager onto an open conversation
   attaches it, as the attach button would. While dragging over a conversation
-  the pane shows "Drop to send to <name>"; over any other screen the drop is
+  the pane shows "Drop files to attach"; over any other screen the drop is
   refused (no drop target is shown).
-- Pasting an image from the clipboard into the composer attaches it.
+- Pasting an image from the clipboard into the composer attaches it. A copy
+  from a document, which holds text beside a picture of it, pastes as text.
 - "Save" on an attachment opens the system save dialog (allowed: it is the
   file picker); the default folder is the system Downloads folder.
 - Opening an attachment with another app (the system's "open with") is not in
@@ -223,13 +224,23 @@ app.
 
 - The invite, call-link and group-invite pages on `lakko.me` gain an **Open
   in the app** button beside what they show today. It opens the desktop app
-  (through its `lakko://` scheme) on the same screen the web would show. When
-  the app is not installed the button does nothing visible, and the web page
-  keeps working as today.
+  (through its `lakko://` scheme). On macOS the app opens on the same screen
+  the web would show. On Windows and Linux the page copies the link, says
+  "Link copied. Paste it in the app.", and the app opens the Open a link dialog
+  for it (ADR-0085 section 5). Phones and tablets are not offered the button.
+- On macOS in Chrome and Firefox the page also tries the app by itself, once
+  per link, when it opens, as a meeting link does: the browser asks whether to
+  open Lakko. Safari is left out, as is any browser not named here: with no app
+  installed it answers with its own "address is invalid" message, so there the
+  button is the only way. Windows and Linux stay on the button too, since
+  copying the link needs a press.
+- A page cannot tell whether the app opened. With no app installed the web page
+  keeps working as today; pressing the button in Safari shows that browser's
+  message and nothing else.
 - Inside the app, the create menu has **Open a link**: it takes a pasted
   Lakko link (`https://lakko.me/i/`, `/c/`, `/g/`) and shows its screen. This
-  is the route that always works, and the one to use until "Open in the app"
-  carries the whole link (ADR-0085 section 5).
+  is the route that always works. Anything else stays in the dialog with "This
+  is not a Lakko link. Check it and try again."
 - A link that is not a Lakko link is never opened inside Lakko; links in
   messages open in the system's default browser.
 

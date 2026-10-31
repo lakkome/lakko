@@ -514,6 +514,7 @@ import {
 } from "../chat/timeline-layout";
 import { conversationKindOf, type ConversationKind } from "../chat/conversation-kind";
 import { createDraftSeed } from "../chat/draft-seed";
+import { pastedImages } from "../chat/pasted-files";
 import {
   membershipNoticeAfterAttempt,
   membershipNoticeLanded,
@@ -5714,7 +5715,7 @@ function ChatView(props: {
     setError(null);
     try {
       const bytes = await downloadAndDecryptRef(ref);
-      saveDecryptedBytes(
+      await saveDecryptedBytes(
         bytes,
         ref.name ?? `attachment-${blobIdHex(ref.blobId).slice(0, 8)}`,
         ref.mime,
@@ -8062,6 +8063,12 @@ function ChatView(props: {
           onInput={(e) => {
             draftSeed.touched();
             setInput(e.currentTarget.value);
+          }}
+          onPaste={(e) => {
+            const images = pastedImages(e.clipboardData);
+            if (images.length === 0) return;
+            e.preventDefault();
+            void processFiles(images);
           }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {

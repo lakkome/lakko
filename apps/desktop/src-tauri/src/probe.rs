@@ -99,17 +99,17 @@ pub async fn handle(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
                 .min(30_000);
             tokio::time::sleep(Duration::from_millis(ms)).await;
             plain(StatusCode::OK, "ok")
-        }
+        },
         (&Method::POST, "/__probe/body") => {
             plain(StatusCode::OK, &request.body().len().to_string())
-        }
+        },
         (&Method::POST, "/__probe/report") => {
             let body = String::from_utf8_lossy(request.body());
             info!(t = format!("{:.1}", elapsed()), report = %body, "probe");
             let mut r = Response::new(Vec::new());
             *r.status_mut() = StatusCode::NO_CONTENT;
             r
-        }
+        },
         _ => plain(StatusCode::NOT_FOUND, "not found"),
     }
 }

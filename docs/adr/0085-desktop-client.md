@@ -11,7 +11,9 @@
   built on macOS (section 12, 2026-10-29), with system notifications not yet
   seen on screen; the Windows and Linux host compiles and has never been run
   (section 13, 2026-10-30); S4 is built and the tunnel runs on the test stack (section 14, 2026-10-30), with
-  no call placed through it; S5 is not started.
+  no call placed through it; S5 is built in part on macOS (2026-10-31): files and
+  `lakko://` links, not yet walked by hand; the TUF repository, install and
+  packaging are not started.
 - **Date:** 2026-10-16
 - **Amends:** [ADR-0002](0002-rust-core.md) (the desktop row of the
   per-platform UI table, and its open question "is Tauri 2.x mature enough").
@@ -206,14 +208,23 @@ never keeps MLS state.
   A link handed over by the OS at launch or while running is passed to the
   page, which shows the screen it shows on the web for the matching
   `https://lakko.me/i/`, `/c/` or `/g/` link. The web invite pages gain "Open
-  in the app", which navigates to the `lakko://` form. The in-app "Open a link"
-  (`desktop.md` 7) takes a pasted `https` link.
+  in the app", which follows the `lakko://` form. On macOS in Chrome and Firefox
+  the page also tries it by itself, once per link (maintainer, 2026-10-31),
+  because people follow the `https` link and should land in the app as they do
+  in a meeting link. Safari does not: measured 2026-10-31, with no handler for
+  the scheme it shows "Safari cannot open the page because the address is
+  invalid". Chrome and Firefox kept the page working through a scripted link
+  click with no handler. The in-app "Open a link" (`desktop.md` 7) takes a
+  pasted `https` link.
 - **The link secret never rides a command line.** On Windows and Linux the OS
   starts the app with the URL as an argument, readable by the user's other
-  processes. A `lakko://` link therefore carries only what is safe to expose
-  (the kind and the ledger id); how the secret after `#` reaches the app is
-  settled in S5, before the scheme ships. Until then the pasted link is the
-  only route that carries the secret.
+  processes. Settled in S5 (maintainer, 2026-10-31): macOS hands a link over as
+  an event, so there "Open in the app" sends the whole link and the screen opens
+  at once. On Windows and Linux the page copies the whole link and opens
+  `lakko://<kind>/<id>`; the host drops anything after `#` that arrives on a
+  command line, and the app asks the person to paste. The app never reads the
+  clipboard itself: the page cannot tell it the copy succeeded, and macOS warns
+  about a program reading the clipboard.
 
 ### 6. Calls
 

@@ -249,6 +249,7 @@ impl Notifier {
 #[cfg(target_os = "macos")]
 mod platform {
     use mac_notification_sys::{MainButton, Notification, NotificationResponse};
+    #[allow(deprecated)] // The same API `mac-notification-sys` delivers through.
     use objc2_foundation::{NSString, NSUserNotificationCenter};
     use tracing::warn;
 

@@ -42,9 +42,12 @@ import {
   requestHostQuit,
   setHostTrayLabels,
   showHostNotification,
+  takeHostLink,
   withdrawHostNotification,
 } from "./host";
 import { isDesktop } from "./index";
+import { appPathOf } from "./lakko-link";
+import { setOpenLinkReason } from "./open-link-state";
 import {
   conversationListMounted,
   isMacPlatform,
@@ -172,12 +175,37 @@ export function DesktopBridge(): JSX.Element {
     }
   }
 
+  // A file dropped outside a conversation would otherwise replace the page.
+  // The conversation's own handlers run first and claim the event.
+  onMount(() => {
+    const refuse = (e: DragEvent): void => {
+      if (e.defaultPrevented) return;
+      e.preventDefault();
+      if (e.dataTransfer !== null) e.dataTransfer.dropEffect = "none";
+    };
+    window.addEventListener("dragover", refuse);
+    window.addEventListener("drop", refuse);
+    onCleanup(() => {
+      window.removeEventListener("dragover", refuse);
+      window.removeEventListener("drop", refuse);
+    });
+  });
+
   onMount(() => {
     // App.tsx mounts this in the desktop build only; asked again so a stray
     // mount in the browser takes no key.
     if (!isDesktop()) return;
     const offQuit = onHostEvent("quit-requested", () => void onQuitRequested());
     const offSettings = onHostEvent("open-settings", () => navigate(paths.settings));
+    const openArrivedLink = async (): Promise<void> => {
+      const link = await takeHostLink();
+      if (link === null) return;
+      if (link.secret === null) setOpenLinkReason("copied");
+      else navigate(appPathOf({ kind: link.kind, id: link.id, secret: link.secret }));
+    };
+    const offLink = onHostEvent("link-arrived", () => void openArrivedLink());
+    // A link that started the app arrived before this page existed.
+    void openArrivedLink();
     const offTarget = onHostEvent("open-target", (target) => {
       if (target !== null) navigate(target);
     });
@@ -218,6 +246,7 @@ export function DesktopBridge(): JSX.Element {
     onCleanup(() => {
       offQuit();
       offSettings();
+      offLink();
       offTarget();
       offStillRunning();
       window.removeEventListener("focus", onFocus);

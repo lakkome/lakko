@@ -3378,6 +3378,10 @@
       "text": "बनाएँ",
       "status": "machine"
     },
+    "chats.create.open_link": {
+      "text": "लिंक खोलें",
+      "status": "machine"
+    },
     "chats.empty.action": {
       "text": "शुरू करें",
       "status": "machine"
@@ -6508,6 +6512,34 @@
     },
     "notification.message.new": {
       "text": "नया मैसेज",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "ऐप में खोलें",
+      "status": "machine"
+    },
+    "open_in_app.copied": {
+      "text": "लिंक कॉपी हो गया। इसे ऐप में पेस्ट करें।",
+      "status": "machine"
+    },
+    "open_link.field": {
+      "text": "लिंक",
+      "status": "machine"
+    },
+    "open_link.hint": {
+      "text": "Lakko का आमंत्रण, कॉल या समूह लिंक पेस्ट करें।",
+      "status": "machine"
+    },
+    "open_link.hint_copied": {
+      "text": "पेज ने यह लिंक कॉपी किया। खोलने के लिए इसे यहाँ पेस्ट करें।",
+      "status": "machine"
+    },
+    "open_link.not_lakko": {
+      "text": "यह Lakko लिंक नहीं है। जाँचकर फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "open_link.open": {
+      "text": "खोलें",
       "status": "machine"
     },
     "proof.add_device.help": {
