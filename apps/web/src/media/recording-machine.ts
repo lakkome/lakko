@@ -40,9 +40,10 @@
  *     take into preview (§2.7, §3.3).
  *   * The hold that triggered a permission PROMPT does not record (§6). When
  *     the browser cannot say whether it prompted, a grant that took longer
- *     than `PROMPT_INFERENCE_MS` after the pointer came up is treated as a
- *     prompt — the safe side is a take that did not start, never a take the
- *     user did not mean to make.
+ *     than `PROMPT_INFERENCE_MS` is treated as a prompt — the safe side is a
+ *     take that did not start, never a take the user did not mean to make.
+ *     Both rules apply only once the pointer has come up: a prompt cannot be
+ *     answered with the pointer held on the button.
  *   * Permission revoked mid-take discards the take and shows the denied
  *     card (§6).
  */
@@ -67,13 +68,16 @@ export type PermissionHint = "granted" | "prompt" | "denied" | "unknown";
  *     the take records: there was no prompt for a slow grant to have been.
  *   * `certain` — the browser reported `prompt`. §6: the gesture that raises
  *     the prompt does not record.
- *   * `possible` — the browser would not say (Firefox, Safari and the macOS
- *     desktop webview, for camera and microphone), so the signals left are how
- *     long the grant took (`PROMPT_INFERENCE_MS`) and whether the pointer is
- *     still down. A person cannot answer a prompt with the pointer held on the
- *     record button, so a slow grant under a held pointer is a slow device:
- *     without this, the first take after every launch was lost in silence,
- *     because opening the device took longer than the inference allows.
+ *   * `possible` — the browser would not say (Firefox and Safari, for camera
+ *     and microphone), so the signal left is how long the grant took
+ *     (`PROMPT_INFERENCE_MS`).
+ *
+ * Neither applies while the pointer is still down: nobody answers a prompt
+ * with the pointer held on the record button, so a grant under a held pointer
+ * raised none. `prompt` is not proof of a dialog. The macOS desktop webview
+ * reports it on every launch while the system grant stands, and the stream
+ * arrives in milliseconds: the first take after each launch was lost in
+ * silence until this rule.
  */
 export type PromptRisk = "none" | "certain" | "possible";
 
@@ -420,10 +424,9 @@ function fromRequesting(
         return step(IDLE, { type: "show-denied", kind: state.kind });
       }
       const prompted =
-        state.promptRisk === "certain" ||
-        (state.promptRisk === "possible" &&
-          !state.held &&
-          event.at - state.pressedAt > PROMPT_INFERENCE_MS);
+        !state.held &&
+        (state.promptRisk === "certain" ||
+          (state.promptRisk === "possible" && event.at - state.pressedAt > PROMPT_INFERENCE_MS));
       if (prompted) {
         // §6: the gesture that raised the prompt does not record.
         return step(IDLE, { type: "release-stream" });

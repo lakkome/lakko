@@ -4,6 +4,7 @@
 package me.lakko.app.reach
 
 import kotlinx.coroutines.test.runTest
+import me.lakko.app.discovery.DiscoveryHttpError
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -107,6 +108,42 @@ class IntroductionPublicationTest {
         publishIntroductions(state, inputs(), ops(second))
         assertTrue(second.oprf.isEmpty())
         assertTrue(second.sent.isEmpty())
+    }
+
+    @Test
+    fun `a failed build keeps the terms it paid for and resumes after them`() = runTest {
+        val first = Recorder()
+        var saved = IntroPublicationState()
+        val failing = ops(first).let { base ->
+            IntroPublicationOps(
+                nameSearchTerms = base.nameSearchTerms,
+                oprfNameTerm = { t -> if (first.oprf.size == 1) error("offline") else base.oprfNameTerm(t) },
+                oprfUsername = base.oprfUsername,
+                composeIntroduction = base.composeIntroduction,
+                composeOffer = base.composeOffer,
+                composeBundle = base.composeBundle,
+                maxBundleRecords = base.maxBundleRecords,
+                send = base.send,
+                save = { saved = it },
+            )
+        }
+        runCatching { publishIntroductions(IntroPublicationState(), inputs(), failing) }
+        assertEquals(1, saved.termOutputs.size)
+
+        val second = Recorder()
+        publishIntroductions(saved, inputs(), ops(second))
+        assertFalse("the paid term is not paid for again", second.oprf.any { it in saved.termOutputs })
+    }
+
+    @Test
+    fun `a rate limited term waits and is asked once more`() = runTest {
+        var calls = 0
+        val answer = waitingOutRateLimit {
+            if (++calls == 1) throw DiscoveryHttpError(429, "/discovery/oprf", "")
+            "output"
+        }
+        assertEquals("output", answer)
+        assertEquals(2, calls)
     }
 
     @Test

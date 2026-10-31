@@ -238,12 +238,9 @@ function waitForFrame(video: HTMLVideoElement, timeoutMs: number): Promise<boole
  *
  * One consequence, stated because it is not obvious: `requesting` is also what
  * `PROMPT_INFERENCE_MS` is measured against, and on a browser that will not
- * report a camera permission (Firefox, Safari) a grant slower than a second is
- * read as "a prompt was shown", which does not record. The camera's warm-up now
- * counts towards that second. It is additive to a `getUserMedia` that can
- * already exceed it on a cold camera, so this narrows an existing margin rather
- * than opening a new failure — and the alternative, recording a canvas with
- * nothing on it, is the defect.
+ * report a camera permission (Firefox, Safari) a grant slower than a second
+ * after the pointer came up is read as "a prompt was shown", which does not
+ * record. The camera's warm-up counts towards that second.
  */
 export async function acquireStream(
   kind: CaptureKind,

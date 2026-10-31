@@ -536,8 +536,22 @@ measurement. Separately, a media bubble's cleanup read a parent getter that thro
 during teardown, which stopped the route change: the chats would not switch until
 the app restarted. The cleanups now release the last key they saw.
 
-**Not done:** a message sent through the tunnel against the stack (only through a
-local proxy so far). Nothing here ran on Windows or Linux. WebTransport has no
+The first take after each launch was lost: the macOS webview answers `prompt`
+to the Permissions API on every launch while the system grant stands, so the
+recorder read a stream that arrived in 53 ms as a prompt and released it. A grant
+under a pointer still down now records. Confirmed on the app.
+
+The same run spent the `discovery-lookup` quota (300 a day) with nobody searching.
+The introduction and Everyone publication evaluates one OPRF term per word prefix,
+up to 64 and a token each, and web and Android kept the outputs only at the end.
+Discovery's address limit (burst 10) refused the eleventh, the outputs were lost,
+and the five-minute tick paid for the same terms again without ever finishing.
+All three clients now keep each output as it arrives and wait once on a `429`; on
+iOS and Android the Everyone step keeps them too. A finished publication spends
+nothing on later runs. Through the tunnel every client shares `127.0.0.1`, so one
+person's publication draws on the budget of all (the limit named above).
+
+**Not done:** nothing here ran on Windows or Linux. WebTransport has no
 listener configured; MASQUE stays unfit for this (ADR-0026).
 
 **Found running it:** through the tunnel every client reaches the server from
