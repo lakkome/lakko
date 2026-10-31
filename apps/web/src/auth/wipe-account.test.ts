@@ -254,6 +254,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.recovery-email.unsent.v1.${acct}`, "1");
   markFirstPasswordOwed(local, acct);
   put(`lakko.own-username.unsent.v1.${acct}`, "1");
+  put(`lakko.device-ack.unsent.v1.${acct}`, "1");
   put(`lakko.link-records.unsent.v1.${acct}`, "1");
   put(`lakko.link-claims.v1.${acct}`, JSON.stringify({ v: 1, seen: {}, own: {} }));
   put(`lakko.blob-deletes-owed.v1.${acct}`, JSON.stringify(["00".repeat(32)]));
@@ -623,6 +624,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.recovery-email.unsent.v1.": "account",
   "lakko:first-password-owed:": "account",
   "lakko.own-username.unsent.v1.": "account",
+  "lakko.device-ack.unsent.v1.": "account",
   "lakko.link-records.unsent.v1.": "account",
   "lakko.link-claims.v1.": "account",
   "lakko.blob-deletes-owed.v1.": "account",
@@ -684,6 +686,8 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   // call without audio/video alignment. Names no account.
   "lakko.call.av-align": "device",
   // not storage names
+  // The notification tag of identity-recovery 17.5 (`added-notice.ts`).
+  "lakko-device-added:": "not-storage",
   "lakko/state-bundle-row/v1": "not-storage",
   "lakko/state-bundle/v1": "not-storage",
   "lakko/feed-marks/v1": "not-storage",

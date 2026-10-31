@@ -48,9 +48,12 @@
 //!   verdict on a contact request's link answer, and their envelope.
 //! - [`own_username`] — the envelope the account's own username register
 //!   (ADR-0076) travels in between the account's devices.
+//! - [`device_ack`] — the device-acknowledgement register (identity-recovery
+//!   17.5: the added-device warning was seen) and its envelope.
 //! - [`state`] — the fold ([`SyncedState`]), its queries, its persistence
 //!   codec, and [`should_send_snapshot`].
 
+pub mod device_ack;
 pub mod entry;
 pub mod lineage;
 pub mod link_record;
@@ -58,6 +61,12 @@ pub mod own_username;
 pub mod recovery_email;
 pub mod state;
 
+pub use device_ack::{
+    compose_device_ack_envelope, decode_device_ack_envelope, is_device_ack_envelope,
+    DeviceAckEntry, DeviceAckEnvelopeError, DEVICE_ACK_ENVELOPE_DOMAIN_V1,
+    DEVICE_ACK_ENVELOPE_MAX_ENTRIES, DEVICE_ACK_ENVELOPE_MAX_LEN, DEVICE_ACK_ENVELOPE_MIN_LEN,
+    DEVICE_ACK_ENVELOPE_VERSION_V1, DEVICE_ACK_KEY_LEN,
+};
 pub use entry::{
     blob_id_from_slice, BlobId, SavedMessage, SavedSnapshot, SavedValue,
     SAVED_ATTACHMENT_KIND_MAX_BYTES, SAVED_AUTHOR_MAX_BYTES, SAVED_BLOB_IDS_MAX, SAVED_BLOB_ID_LEN,

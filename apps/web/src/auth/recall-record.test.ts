@@ -6,6 +6,7 @@
  * under the device key, and that it survives a reload (the store, over the
  * in-memory IndexedDB fake).
  */
+import { type DeviceCipher, WebDeviceCipher } from "./device-cipher";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { FakeIndexedDb } from "../test/fake-storage";
@@ -30,8 +31,8 @@ const record = (over: Partial<RecallRecord> = {}): RecallRecord => ({
   ...over,
 });
 
-async function deviceKey(): Promise<CryptoKey> {
-  return crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+async function deviceKey(): Promise<DeviceCipher> {
+  return new WebDeviceCipher(await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]));
 }
 
 let idb: FakeIndexedDb;

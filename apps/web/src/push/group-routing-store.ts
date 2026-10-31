@@ -157,6 +157,7 @@
  * - #7 — the secret is wrapped under the hardware-backed device root key.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import { getDeviceKey } from "../auth/key-store";
 
@@ -298,16 +299,12 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
 }
 
 async function encrypt(
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   plaintext: Uint8Array,
 ): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: iv.slice() },
-      deviceKey,
-      plaintext.slice(),
-    ),
+    await deviceKey.encrypt(iv, plaintext),
   );
   const out = new Uint8Array(IV_LEN + ct.length);
   out.set(iv, 0);
@@ -316,7 +313,7 @@ async function encrypt(
 }
 
 async function decrypt(
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   blob: Uint8Array,
 ): Promise<Uint8Array> {
   if (blob.length < IV_LEN + 16) {
@@ -325,7 +322,7 @@ async function decrypt(
   const iv = blob.slice(0, IV_LEN);
   const ct = blob.slice(IV_LEN);
   return new Uint8Array(
-    await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
+    await deviceKey.decrypt(iv, ct),
   );
 }
 
@@ -360,7 +357,7 @@ export async function putGroupRouting(
     distributed: boolean;
     mintEpoch: bigint;
   },
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<void> {
   const ciphertext = await encrypt(deviceKey, args.secret);
   const secretRow: SecretRow = {
@@ -415,7 +412,7 @@ export async function putGroupRouting(
 export async function getGroupRoutingRecord(
   accountId: string,
   groupIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<GroupRoutingRecord | null> {
   const row = await readSecretRow(accountId, groupIdB64);
   if (row === undefined) return null;
@@ -439,7 +436,7 @@ export async function getGroupRoutingRecord(
 export async function getGroupRoutingSecret(
   accountId: string,
   groupIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<Uint8Array | null> {
   return (await getGroupRoutingRecord(accountId, groupIdB64, deviceKey))
     ?.secret ?? null;

@@ -29,39 +29,26 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import java.text.DateFormat
-import java.util.Date
-import java.util.Locale
 import me.lakko.app.devices.NewDeviceNotices
-import me.lakko.app.devices.newDeviceBanner
 import me.lakko.app.l10n.LocalStrings
 import me.lakko.app.l10n.t
 
 /**
  * "A device was added to your account" (`docs/ux/identity-recovery.md`
- * section 17.5): one banner at the top of the Chats list and of Settings >
- * Devices, on every device of the account except the one that was added and
- * the one that let it in. Not a modal: it must not block someone who is
- * mid-conversation, and it stays until `Dismiss` or the device's removal.
+ * section 17.5, amended 2026-10-29): the explanation above the list of
+ * Settings > Devices while a row there carries `New`. No button: the screen
+ * it would open is this one, and opening it is the acknowledgement.
  *
- * Informational tone with a leading icon, as [me.lakko.app.ui.updates.UpdateAvailableBanner];
- * announced once when it appears (polite: it does not interrupt typing),
- * title and both lines as one announcement; `Open Devices` then `Dismiss` in
- * focus order; it never takes focus.
- *
- * [onOpenDevices] is `null` on Settings > Devices itself, where the button
- * would lead to the screen it is on.
+ * Read as the first element of the screen, title and both lines as one
+ * announcement; never a live region and never focused by itself.
  */
 @Composable
-public fun NewDeviceNoticeBanner(
-    onOpenDevices: (() -> Unit)?,
-    modifier: Modifier = Modifier,
-) {
-    val state by NewDeviceNotices.state.collectAsStateWithLifecycle()
-    val banner = newDeviceBanner(state) ?: return
+public fun NewDeviceExplanationBlock(modifier: Modifier = Modifier) {
+    val view by NewDeviceNotices.view.collectAsStateWithLifecycle()
+    val explanation = view.explanation ?: return
     val language = LocalStrings.current.language
-    val title = t(if (banner.count > 1) "devices.added_notice.title_many" else "devices.added_notice.title")
-    val whenLine = t("devices.added_notice.when", mapOf("date" to formatJoinTime(banner.latestAtMs, language)))
+    val title = t(if (explanation.count > 1) "devices.added_notice.title_many" else "devices.added_notice.title")
+    val whenLine = t("devices.added_notice.when", mapOf("date" to formatJoinTime(explanation.latestAtMs, language)))
     val notYou = t("devices.added_notice.not_you")
     val spoken = "$title. $whenLine $notYou"
     Surface(
@@ -72,44 +59,54 @@ public fun NewDeviceNoticeBanner(
         contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
         shape = RoundedCornerShape(8.dp),
     ) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.Top,
-                modifier = Modifier.semantics(mergeDescendants = true) {
-                    contentDescription = spoken
-                    liveRegion = LiveRegionMode.Polite
-                },
-            ) {
-                Icon(Icons.Filled.Devices, contentDescription = null, modifier = Modifier.size(24.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(title, style = MaterialTheme.typography.titleSmall)
-                    Text(whenLine, style = MaterialTheme.typography.bodySmall)
-                    Text(notYou, style = MaterialTheme.typography.bodySmall)
-                }
-            }
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                if (onOpenDevices != null) {
-                    Button(
-                        onClick = onOpenDevices,
-                        modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp),
-                    ) { Text(t("devices.added_notice.open_devices")) }
-                }
-                TextButton(
-                    onClick = { NewDeviceNotices.dismiss() },
-                    modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp),
-                ) { Text(t("common.dismiss")) }
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.Top,
+            modifier = Modifier
+                .padding(12.dp)
+                .semantics(mergeDescendants = true) { contentDescription = spoken },
+        ) {
+            Icon(Icons.Filled.Devices, contentDescription = null, modifier = Modifier.size(24.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                Text(whenLine, style = MaterialTheme.typography.bodySmall)
+                Text(notYou, style = MaterialTheme.typography.bodySmall)
             }
         }
     }
 }
 
 /**
- * The line that replaces the banner after a device carrying `New` was
- * removed here (UX 17.5): `Device removed. If you did not add it, change
+ * The exclamation-mark badge on the Settings destination and on the
+ * `Devices` row while a new device is pending (UX 17.5), in the danger
+ * colour. Never colour alone: the caller puts the accessible name
+ * (`nav.settings.attention_a11y` / `settings.devices.attention_a11y`) on the
+ * destination or the row it belongs to.
+ */
+@Composable
+public fun AttentionBadge(modifier: Modifier = Modifier) {
+    androidx.compose.material3.Badge(
+        modifier = modifier,
+        // The warning token, not the error one (maintainer, 2026-10-29): the
+        // badge asks the person to look, it does not report a failure.
+        containerColor = if (me.lakko.app.ui.theme.isLakkoDark()) {
+            me.lakko.app.ui.theme.LakkoDark.warning
+        } else {
+            me.lakko.app.ui.theme.LakkoLight.warning
+        },
+        contentColor = if (me.lakko.app.ui.theme.isLakkoDark()) {
+            me.lakko.app.ui.theme.LakkoDark.accentFg
+        } else {
+            me.lakko.app.ui.theme.LakkoLight.accentFg
+        },
+    ) {
+        Text("!", fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+    }
+}
+
+/**
+ * The line shown after a device carrying `New` was removed here (UX
+ * 17.5): `Device removed. If you did not add it, change
  * your password now.` with `Change password`.
  */
 @Composable
@@ -157,8 +154,7 @@ public fun RemovedNewDeviceLine(
 /** The join date and time, formatted by the platform in the interface
  *  language. */
 internal fun formatJoinTime(atMs: Long, language: String): String =
-    DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, Locale.forLanguageTag(language))
-        .format(Date(atMs))
+    me.lakko.app.l10n.DeviceFormats.mediumDateTime(atMs, language)
 
 /**
  * `docs/ux/identity-recovery.md` 18.3 - on a KEPT device after "remove and

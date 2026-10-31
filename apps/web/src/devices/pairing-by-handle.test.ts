@@ -18,6 +18,7 @@
  *   - the anonymous join binds the Welcome to the redeemed account, and a
  *     Welcome for another account is refused.
  */
+import { WebDeviceCipher } from "../auth/device-cipher";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -470,10 +471,10 @@ describe("the anonymous join applies the pairing state bundle", () => {
     expect(loadAccepted(ACCOUNT_B64)).toEqual([]);
     expect(loadKnownGroupIds(ACCOUNT_B64)).toEqual([]);
 
-    const deviceKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+    const deviceKey = new WebDeviceCipher(await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
       "encrypt",
       "decrypt",
-    ]);
+    ]));
     const info = console.info;
     console.info = (): void => {};
     try {
@@ -503,10 +504,10 @@ describe("the anonymous join applies the pairing state bundle", () => {
     const session = await prepareAnonymousJoinFlow({ loginHandle: alice() });
     await session.accept(confirmWithState(session.qrPayload), { welcomeCursor: 1 });
     session.dispose();
-    const deviceKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+    const deviceKey = new WebDeviceCipher(await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
       "encrypt",
       "decrypt",
-    ]);
+    ]));
     await expect(session.persistTo(deviceKey)).rejects.toThrow(/disposed/);
     expect(loadAccepted(ACCOUNT_B64)).toEqual([]);
   });
@@ -521,7 +522,7 @@ describe("the anonymous join applies the pairing state bundle", () => {
   it("the no-session restore screen hands persistTo to completeFromDeviceRestore", () => {
     const src = read("../auth/recover/DeviceRecover.tsx");
     expect(src).toMatch(/prepareAnonymousJoinFlow\(/);
-    expect(src).toMatch(/persistJoinState: \(deviceKey: CryptoKey\): Promise<void> => session\.persistTo\(deviceKey\)/);
+    expect(src).toMatch(/persistJoinState: \(deviceKey: DeviceCipher\): Promise<void> => session\.persistTo\(deviceKey\)/);
   });
 
   it("the parked sign-in with no device key hands persistTo to completeFromPairing", () => {

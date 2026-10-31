@@ -53,11 +53,12 @@ public struct DevicesScreen: View {
     }
 
     public var body: some View {
+        ScrollViewReader { proxy in
         List {
             if let session = DeviceSession.current(authRepository) {
-                // UX 17.5 — the same banner as on Chats (no `Open Devices`
-                // here), or the change-password line after a `New` device
-                // was removed.
+                // UX 17.5 — the explanation of the devices this visit
+                // highlights, or the change-password line after a `New`
+                // device was removed.
                 NewDeviceNoticeRow(onChangePassword: onChangePassword)
                 if authRepository.keysResetThisSession, !resetNoteDismissed {
                     // UX 15.3 — one dismissible note for the rest of this
@@ -89,7 +90,8 @@ public struct DevicesScreen: View {
                     accountIdBytes: session.accountIdBytes,
                     accountIdB64: session.accountIdB64,
                     sessionToken: session.sessionToken,
-                    onDeviceRemoved: onDeviceRemoved
+                    onDeviceRemoved: onDeviceRemoved,
+                    scrollProxy: proxy
                 )
                 if scanNotice.showsKeysNotSent(accountIdB64: session.accountIdB64) {
                     // UX section 2.1 — the scan link added the device but
@@ -122,24 +124,30 @@ public struct DevicesScreen: View {
         // A UIKit-backed List keeps the mirroring it was built with, so it
         // is rebuilt when the layout direction changes.
         .id(l10n.layoutDirection)
+        }
         .navigationTitle(l10n.t("settings.devices.title"))
         .navigationBarTitleDisplayMode(.inline)
+        // UX 17.5 — opening this screen while a device is pending is the
+        // acknowledgement, for every pending device and for the whole
+        // account; the highlight stays until the screen is left.
+        .onAppear { NewDeviceNoticeCenter.shared.beginVisit() }
+        .onDisappear { NewDeviceNoticeCenter.shared.endVisit() }
     }
 }
 
 /// The session values every device flow needs, or `nil` when the session is
 /// not ready.
-/// The new-device notice as a row of the Devices list: present only while
-/// there is something to say, so no empty section is left behind.
+/// The new-device explanation as a row of the Devices list, above it:
+/// present only while there is something to say, so no empty section is
+/// left behind.
 private struct NewDeviceNoticeRow: View {
     @ObservedObject private var center = NewDeviceNoticeCenter.shared
     let onChangePassword: () -> Void
 
     var body: some View {
-        if center.banner != nil || center.showsRemovedLine {
+        if center.explanation != nil || center.showsRemovedLine {
             Section {
-                NewDeviceNoticeBanner(
-                    center: center, onOpenDevices: nil, onChangePassword: onChangePassword)
+                NewDeviceNoticeExplanation(center: center, onChangePassword: onChangePassword)
                     .listRowInsets(EdgeInsets())
                     .listRowBackground(Color.clear)
             }
@@ -665,6 +673,10 @@ private struct DevicesListView: View {
     let sessionToken: String
     /// The device was signed out at the server.
     let onDeviceRemoved: (Data) -> Void
+    /// UX 17.5 — scrolls the first highlighted row into view.
+    let scrollProxy: ScrollViewProxy?
+    /// The first highlighted row was scrolled to (once per screen).
+    @State private var scrolledToNew = false
 
     @State private var state: ListState = .loading
     /// The device whose remove sheet is open.
@@ -672,7 +684,7 @@ private struct DevicesListView: View {
     /// The line under the list after a removal or a `Finish removing`.
     @State private var note: DeviceRemovalNote?
     @ObservedObject private var l10n = Localization.shared
-    /// UX 17.5 — which rows carry `New`.
+    /// UX 17.5 — which rows are highlighted and carry `New`.
     @ObservedObject private var notice = NewDeviceNoticeCenter.shared
     /// ADR-0080 — what each device said about itself.
     @ObservedObject private var cards = DeviceCardCenter.shared
@@ -793,6 +805,7 @@ private struct DevicesListView: View {
                 calendar: .current, locale: l10n.locale)
             let deviceIdB64 = device.signaturePublicKey.base64EncodedString()
             let run = rowRun[input.keyHex]
+            let highlighted = notice.isHighlighted(signaturePublicKey: device.signaturePublicKey)
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: Self.iconName(view.icon))
                     .foregroundStyle(Color.lakkoTextMuted)
@@ -802,7 +815,7 @@ private struct DevicesListView: View {
                         Text(view.title)
                             .font(.body)
                             .foregroundStyle(Color.lakkoText)
-                        if notice.isNew(signaturePublicKey: device.signaturePublicKey) {
+                        if highlighted {
                             // Text, not colour alone.
                             Text(l10n.t("settings.devices.new_badge"))
                                 .font(.caption.weight(.semibold))
@@ -871,7 +884,25 @@ private struct DevicesListView: View {
             }
             .padding(.vertical, 2)
             .accessibilityElement(children: .contain)
+            // UX 17.5 — a pending device's row is accent-tinted (and says
+            // `New` in text, so not colour alone).
+            .listRowBackground(highlighted ? Color.lakkoAccentSoft : nil)
+            .id(input.keyHex)
         }
+    }
+
+    /// UX 17.5 — scroll the first highlighted row into view, once.
+    private func scrollToFirstNew(_ devices: [DeviceRemoval.DeviceListItem]) {
+        guard !scrolledToNew, let scrollProxy else { return }
+        let ordered = DeviceCards.order(rows(devices))
+        guard let first = ordered.others.first(where: { input in
+            devices.contains {
+                hexEncode($0.signaturePublicKey) == input.keyHex
+                    && notice.isHighlighted(signaturePublicKey: $0.signaturePublicKey)
+            }
+        }) else { return }
+        scrolledToNew = true
+        withAnimation { scrollProxy.scrollTo(first.keyHex, anchor: .center) }
     }
 
     @ViewBuilder private var listFooter: some View {
@@ -946,6 +977,9 @@ private struct DevicesListView: View {
             }
         }
         .onAppear { refresh() }
+        .onChange(of: state) { _, next in
+            if case .ready(let devices) = next { scrollToFirstNew(devices) }
+        }
         // UX section 3 — the list follows the account: a device that joined or
         // left while this screen is open, on any route.
         .onReceive(DeviceRosterChanges.publisher(accountIdB64: accountIdB64)) { _ in

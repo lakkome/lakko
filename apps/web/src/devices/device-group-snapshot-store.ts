@@ -83,6 +83,7 @@
  * since both carry MLS private state. Deleting the snapshot deletes them.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { requireAccountStoresWritable } from "../auth/account-store-gate";
 
 const DB_NAME = "lakko-device-group-snapshots";
@@ -143,10 +144,10 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-async function seal(plaintext: Uint8Array, deviceKey: CryptoKey): Promise<Uint8Array> {
+async function seal(plaintext: Uint8Array, deviceKey: DeviceCipher): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv }, deviceKey, plaintext.slice()),
+    await deviceKey.encrypt(iv, plaintext.slice()),
   );
   const envelope = new Uint8Array(iv.length + ct.length);
   envelope.set(iv, 0);
@@ -154,13 +155,13 @@ async function seal(plaintext: Uint8Array, deviceKey: CryptoKey): Promise<Uint8A
   return envelope;
 }
 
-async function open(envelope: Uint8Array, deviceKey: CryptoKey, what: string): Promise<Uint8Array> {
+async function open(envelope: Uint8Array, deviceKey: DeviceCipher, what: string): Promise<Uint8Array> {
   if (envelope.length < 12 + 16) {
     throw new Error(`${what} envelope too short (${envelope.length} bytes)`);
   }
   const iv = envelope.slice(0, 12);
   const ct = envelope.slice(12);
-  return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct));
+  return new Uint8Array(await deviceKey.decrypt(iv, ct));
 }
 
 function pendingKey(kind: DeviceGroupPendingKind, accountIdB64: string): string {
@@ -182,7 +183,7 @@ function pendingKey(kind: DeviceGroupPendingKind, accountIdB64: string): string 
 export async function putDeviceGroupSnapshot(
   accountIdB64: string,
   snapshot: Uint8Array,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   journalCursor?: number,
   expectedGeneration?: number,
 ): Promise<number> {
@@ -249,7 +250,7 @@ async function readSnapshotRow(accountIdB64: string): Promise<SnapshotRecord | u
  *  decrypt failure (device key rotated, tampered, truncated). */
 export async function getDeviceGroupSnapshot(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<Uint8Array | null> {
   const state = await getDeviceGroupSnapshotState(accountIdB64, deviceKey);
   return state === null ? null : state.snapshot;
@@ -259,7 +260,7 @@ export async function getDeviceGroupSnapshot(
  *  it back as `expectedGeneration`). */
 export async function getDeviceGroupSnapshotState(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<{ readonly snapshot: Uint8Array; readonly generation: number } | null> {
   const row = await readSnapshotRow(accountIdB64);
   if (row === undefined) return null;
@@ -284,7 +285,7 @@ export async function putDeviceGroupPending(
   accountIdB64: string,
   kind: DeviceGroupPendingKind,
   plaintext: Uint8Array,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<void> {
   const envelope = await seal(plaintext, deviceKey);
   const db = await openDb();
@@ -311,7 +312,7 @@ export async function putDeviceGroupPending(
 export async function getDeviceGroupPending(
   accountIdB64: string,
   kind: DeviceGroupPendingKind,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<Uint8Array | null> {
   const db = await openDb();
   let row: PendingRecord | undefined;
@@ -358,7 +359,7 @@ export async function deleteDeviceGroupPending(
 export async function makeDeviceGroupSnapshotCurrent(
   accountIdB64: string,
   snapshot: Uint8Array,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<number> {
   return putDeviceGroupSnapshot(accountIdB64, snapshot, deviceKey);
 }

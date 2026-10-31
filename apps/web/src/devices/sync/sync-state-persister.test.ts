@@ -16,6 +16,7 @@
  * in-memory fake) under a real AES-GCM key. The component itself is not
  * mounted: it needs the auth context, the wasm core and the DS.
  */
+import { type DeviceCipher, WebDeviceCipher } from "../../auth/device-cipher";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { FakeIndexedDb, MemoryStorage } from "../../test/fake-storage";
@@ -37,17 +38,17 @@ const ACCOUNT = base64Encode(new Uint8Array(16).fill(0x21));
 
 const edit = (hlc: bigint): StampedEdit => ({ t: "removed", hlc, folderIdHex: "00".repeat(16) });
 
-let deviceKey: CryptoKey;
+let deviceKey: DeviceCipher;
 
 beforeEach(async () => {
   const g = globalThis as unknown as Record<string, unknown>;
   g["localStorage"] = new MemoryStorage();
   g["sessionStorage"] = new MemoryStorage();
   g["indexedDB"] = new FakeIndexedDb();
-  deviceKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+  deviceKey = new WebDeviceCipher(await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
     "encrypt",
     "decrypt",
-  ]);
+  ]));
 });
 
 afterEach(() => {

@@ -309,7 +309,7 @@ start.
 
 | Situation | UI |
 |---|---|
-| Not yet asked | The system prompt (native) / browser prompt (web). Recording starts only once granted; the hold that triggered the prompt does not record |
+| Not yet asked | The system prompt (native) / browser prompt (web). Recording starts only once granted; the hold that triggered the prompt does not record. A grant that arrives while the pointer is still down records whatever the browser reported: nobody answers a prompt while holding the button |
 | Denied | An inline card above the composer: `Lakko needs microphone access to record voice messages` (or camera) with **Open Settings** on iOS/Android; on web, `Allow microphone access in your browser's site settings` |
 | Revoked while recording | Recording stops, the take is discarded, the denied card shows |
 | In a call | Mic and camera buttons are disabled with `Unavailable during a call` — the call owns the audio session and the camera |

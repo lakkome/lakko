@@ -12,6 +12,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import * as wasm from "../../wasm/lakko_ffi_wasm";
 import init from "../../wasm/lakko_ffi_wasm";
+import { WebDeviceCipher, type DeviceCipher } from "../auth/device-cipher";
 import { appendToGroupSlot, summarizeGroupSlot } from "../chat/background-log";
 import {
   loadMessageLog,
@@ -45,8 +46,10 @@ afterEach(() => {
   delete g["indexedDB"];
 });
 
-function deviceKey(): Promise<CryptoKey> {
-  return crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+async function deviceKey(): Promise<DeviceCipher> {
+  return new WebDeviceCipher(
+    await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]),
+  );
 }
 
 const row = (id: number, direction: PersistedMessage["direction"], text: string): PersistedMessage => ({
@@ -140,10 +143,10 @@ describe("history is not news (docs/ux/second-device.md section 2)", () => {
     return sealed;
   }
 
-  const apply = (key: CryptoKey, sealedBytes: Uint8Array): Promise<number> =>
+  const apply = (key: DeviceCipher, sealedBytes: Uint8Array): Promise<number> =>
     applyHistoryBundleToLog({ accountIdB64: JOINER, deviceKey: key, secret: SECRET, sealedBytes });
 
-  async function slotOf(key: CryptoKey) {
+  async function slotOf(key: DeviceCipher) {
     return (await loadMessageLog(JOINER, key))?.groups[GROUP_HEX];
   }
 

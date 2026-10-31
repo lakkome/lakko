@@ -11,6 +11,7 @@
  * contract between the flush and the store, not the store itself.
  */
 
+import { type DeviceCipher } from "../auth/device-cipher";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const saveChannelLog = vi.fn<(...args: unknown[]) => Promise<void>>();
@@ -21,7 +22,7 @@ vi.mock("../channels/channel-log-store", () => ({
   deleteChannelLog: vi.fn(async () => undefined),
 }));
 
-const DEVICE_KEY = {} as unknown as CryptoKey;
+const DEVICE_KEY = {} as unknown as DeviceCipher;
 
 function fakeIdentity(): {
   signaturePublicKey: Uint8Array;

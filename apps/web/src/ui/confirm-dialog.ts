@@ -101,6 +101,9 @@ export interface ConfirmRequest {
    *  to decide has one primary button"): only `confirmLabel` is shown, and
    *  the answer carries no meaning. */
   readonly notice?: boolean;
+  /** A third button that does something and leaves the question open: "Open
+   *  settings" while the person is being asked to change one. */
+  readonly extra?: { readonly label: string; readonly onPress: () => void };
 }
 
 /** A question currently on screen, and the promise waiting on its answer. */

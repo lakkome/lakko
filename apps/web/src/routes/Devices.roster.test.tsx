@@ -74,10 +74,17 @@ vi.mock("../devices/pairing", () => ({ ownPairingHandle: vi.fn(), parsePairingQr
 vi.mock("../devices/pairing-copy", () => ({ pairingConfirmTitle: () => "" }));
 vi.mock("../devices/recovery-sender", () => ({ recoveryHalfFor: vi.fn() }));
 vi.mock("../devices/added-notice", () => ({
-  addedNotice: () => ({ newKeys: [], titleKey: "t" }),
+  addedNotice: () => ({ visible: false, newKeys: [], titleKey: "t" }),
+  devicesVisit: () => null,
+  enterDevicesVisit: () => [],
+  highlightedDeviceKeys: () => new Set<string>(),
+  leaveDevicesVisit: () => undefined,
   noteDeviceLetIn: () => undefined,
 }));
-vi.mock("../devices/DeviceAddedNotice", () => ({ DeviceAddedBanner: () => null }));
+vi.mock("../devices/DeviceAddedNotice", () => ({
+  DeviceAddedBanner: () => null,
+  DeviceAddedExplanation: () => null,
+}));
 vi.mock("../devices/device-card-runtime", () => ({
   currentOwnFields: () => ({}),
   deviceCards: () => ({}),
@@ -105,7 +112,11 @@ vi.mock("../chat/folders/folder-model", () => ({
 }));
 vi.mock("../devices/remove", () => ({ listDevices: h.listDevices }));
 vi.mock("../devices/sync/DeviceGroupSyncContext", () => ({
-  useDeviceGroupSync: () => ({ deviceRoster: () => h.roster?.() ?? null }),
+  useDeviceGroupSync: () => ({
+    ready: () => false,
+    acknowledgeDevices: async () => undefined,
+    deviceRoster: () => h.roster?.() ?? null,
+  }),
 }));
 vi.mock("qrcode", () => ({ default: {} }));
 vi.mock("jsqr", () => ({ default: () => null }));

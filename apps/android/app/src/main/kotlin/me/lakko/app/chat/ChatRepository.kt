@@ -5322,8 +5322,8 @@ public class ChatRepository(
                         ),
                         ops = me.lakko.app.reach.EveryoneOps(
                             nameSearchTerms = { uniffi.lakko_ffi_uniffi.nameSearchTerms(it) },
-                            oprfNameTerm = { client.oprfNameTerm(it) },
-                            oprfUsername = { client.oprfUsername(it) },
+                            oprfNameTerm = { t -> reach.keptOprf("n:$t") { client.oprfNameTerm(t) } },
+                            oprfUsername = { u -> reach.keptOprf("u:$u") { client.oprfUsername(u) } },
                             composePublicRecord = { payload, outputs, issuedAt ->
                                 uniffi.lakko_ffi_uniffi.composePublicRecord(payload, outputs, issuedAt)
                             },

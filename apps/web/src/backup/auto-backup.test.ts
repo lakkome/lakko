@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import { type DeviceCipher } from "../auth/device-cipher";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { startAutoBackup } from "./auto-backup-driver";
@@ -136,7 +137,7 @@ function readyDeps(overrides: Partial<AutoBackupDeps> = {}): {
     accountId: () => new Uint8Array(16),
     accountIdB64: () => ACCOUNT,
     ed25519Seed: () => new Uint8Array(32),
-    deviceKey: async () => ({}) as CryptoKey,
+    deviceKey: async () => ({}) as unknown as DeviceCipher,
     sessionToken: () => "token",
     upload: async () => {
       counter.uploads += 1;
@@ -331,7 +332,7 @@ describe("startAutoBackup (the driver's own wiring)", () => {
       knownGroupIds: () => ["ZzEtZ3JvdXAtaWQ="],
       accountIdB64: () => ACCOUNT,
       ed25519Seed: () => new Uint8Array(32),
-      deviceKey: async () => ({}) as CryptoKey,
+      deviceKey: async () => ({}) as unknown as DeviceCipher,
       sessionToken: () => "token",
       tickMs: 1000,
       onOutcome: (o) => outcomes.push(o),

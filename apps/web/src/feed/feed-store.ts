@@ -18,6 +18,7 @@
  * rule is the core's to say when the feed is opened.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
 
@@ -116,7 +117,7 @@ function done(tx: IDBTransaction): Promise<void> {
   });
 }
 
-export async function loadFeedState(accountIdB64: string, deviceKey: CryptoKey): Promise<FeedState> {
+export async function loadFeedState(accountIdB64: string, deviceKey: DeviceCipher): Promise<FeedState> {
   const db = await openDb();
   let row: { ciphertext: Uint8Array } | undefined;
   try {
@@ -132,11 +133,7 @@ export async function loadFeedState(accountIdB64: string, deviceKey: CryptoKey):
   }
   if (row === undefined || row.ciphertext.length < IV_LEN + 16) return { feeds: [] };
   try {
-    const plain = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: row.ciphertext.slice(0, IV_LEN) },
-      deviceKey,
-      row.ciphertext.slice(IV_LEN),
-    );
+    const plain = await deviceKey.decrypt(row.ciphertext.slice(0, IV_LEN), row.ciphertext.slice(IV_LEN));
     return decodeFeedState(JSON.parse(new TextDecoder().decode(plain)));
   } catch {
     return { feeds: [] };
@@ -145,13 +142,13 @@ export async function loadFeedState(accountIdB64: string, deviceKey: CryptoKey):
 
 export async function saveFeedState(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   state: FeedState,
 ): Promise<void> {
   const plain = new TextEncoder().encode(JSON.stringify(encodeFeedState(state)));
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv.slice() }, deviceKey, plain),
+    await deviceKey.encrypt(iv, plain),
   );
   const ciphertext = new Uint8Array(IV_LEN + ct.length);
   ciphertext.set(iv, 0);

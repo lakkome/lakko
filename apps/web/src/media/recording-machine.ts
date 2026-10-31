@@ -42,6 +42,8 @@
  *     the browser cannot say whether it prompted, a grant that took longer
  *     than `PROMPT_INFERENCE_MS` is treated as a prompt — the safe side is a
  *     take that did not start, never a take the user did not mean to make.
+ *     Both rules apply only once the pointer has come up: a prompt cannot be
+ *     answered with the pointer held on the button.
  *   * Permission revoked mid-take discards the take and shows the denied
  *     card (§6).
  */
@@ -67,8 +69,15 @@ export type PermissionHint = "granted" | "prompt" | "denied" | "unknown";
  *   * `certain` — the browser reported `prompt`. §6: the gesture that raises
  *     the prompt does not record.
  *   * `possible` — the browser would not say (Firefox and Safari, for camera
- *     and microphone), so the only signal left is how long the grant took
+ *     and microphone), so the signal left is how long the grant took
  *     (`PROMPT_INFERENCE_MS`).
+ *
+ * Neither applies while the pointer is still down: nobody answers a prompt
+ * with the pointer held on the record button, so a grant under a held pointer
+ * raised none. `prompt` is not proof of a dialog. The macOS desktop webview
+ * reports it on every launch while the system grant stands, and the stream
+ * arrives in milliseconds: the first take after each launch was lost in
+ * silence until this rule.
  */
 export type PromptRisk = "none" | "certain" | "possible";
 
@@ -110,7 +119,8 @@ export const TAP_SLOP_PX = 10;
 export const CANCEL_SLIDE_PX = 80;
 /** §2.5 — how far up a held pointer travels before the take locks. */
 export const LOCK_SLIDE_PX = 60;
-/** A permission grant slower than this is assumed to have shown a prompt. */
+/** A permission grant slower than this, with the pointer up, is assumed to
+ *  have shown a prompt. */
 export const PROMPT_INFERENCE_MS = 1000;
 
 export function capFor(kind: CaptureKind): number {
@@ -414,8 +424,9 @@ function fromRequesting(
         return step(IDLE, { type: "show-denied", kind: state.kind });
       }
       const prompted =
-        state.promptRisk === "certain" ||
-        (state.promptRisk === "possible" && event.at - state.pressedAt > PROMPT_INFERENCE_MS);
+        !state.held &&
+        (state.promptRisk === "certain" ||
+          (state.promptRisk === "possible" && event.at - state.pressedAt > PROMPT_INFERENCE_MS));
       if (prompted) {
         // §6: the gesture that raised the prompt does not record.
         return step(IDLE, { type: "release-stream" });

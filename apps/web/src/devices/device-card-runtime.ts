@@ -26,10 +26,12 @@
 import { createSignal } from "solid-js";
 import { loadWasm } from "../wasm";
 import { DEFAULT_BASE_URL } from "../discovery/client";
+import { isDesktop } from "../platform";
+import { getHostTunnel, tunnelRoutesThroughHost } from "../platform/host";
 import {
   adoptPairingCard,
-  browserFacts,
   cardGrowthDelayMs,
+  ownDeviceFacts,
   cardsStorageKey,
   cityStorageKey,
   showCityStorageKey,
@@ -49,8 +51,6 @@ import {
 /** The city is asked for again at most this often (chosen, not measured). */
 export const CITY_REFRESH_MS = 6 * 60 * 60 * 1000;
 
-/** What the web client puts in `app_version`: the row reads "Lakko web". */
-export const WEB_APP_VERSION = "web";
 
 /** docs/ux/second-device.md section 2.1 (2026-10-29): how long a pairing
  *  payload waits for the device's city, counted from the moment the screen
@@ -224,13 +224,10 @@ function visible(): boolean {
 
 /** The own card's fields as they are now. */
 export function currentOwnFields(): DeviceCardFields {
-  const facts = browserFacts(typeof navigator === "undefined" ? "" : navigator.userAgent);
+  const facts = ownDeviceFacts(isDesktop(), typeof navigator === "undefined" ? "" : navigator.userAgent);
   const place = showCity() && city !== null ? city : null;
   return {
-    platform: "web",
-    model: facts.model,
-    appVersion: WEB_APP_VERSION,
-    os: facts.os,
+    ...facts,
     city: place?.city ?? "",
     country: place?.country ?? "",
   };
@@ -272,6 +269,9 @@ async function refreshCity(bound: string, nowMs: number): Promise<void> {
   if (locating !== null) return locating;
   locating = (async () => {
     try {
+      // ADR-0080: not asked under anti-censorship. The answer would be the
+      // tunnel's exit, and the request itself is not worth making.
+      if (isDesktop() && tunnelRoutesThroughHost(await getHostTunnel())) return;
       const answer = await fetchLocate();
       // No city this time; the card goes out without one.
       if (answer === null || account !== bound) return;

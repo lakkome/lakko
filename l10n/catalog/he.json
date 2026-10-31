@@ -58,6 +58,14 @@
       "text": "אם שכחתם אותה, תוכלו לחזור לחשבון בעזרת מכשיר אחר שעדיין מחובר, מפתח גישה, ביטוי השחזור, שלוש מילים ממנו או אפליקציית אימות.",
       "status": "machine"
     },
+    "auth.key_store_unavailable.body": {
+      "text": "מחזיק המפתחות של המערכת אינו זמין. בטל את נעילתו או התקן אחד, ואז נסה שוב.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko לא יכול לשמור את המפתחות שלך בבטחה במחשב הזה.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "שינוי שפה",
       "status": "machine"
@@ -3382,6 +3390,10 @@
       "text": "יצירה",
       "status": "machine"
     },
+    "chats.create.open_link": {
+      "text": "פתיחת קישור",
+      "status": "machine"
+    },
     "chats.empty.action": {
       "text": "התחילו צ׳אט",
       "status": "machine"
@@ -4042,6 +4054,46 @@
       "text": "הקוד הזה אינו קישור של Lakko. נסו קוד אחר.",
       "status": "machine"
     },
+    "desktop.capture.body": {
+      "text": "אפשרו זאת בהגדרות הפרטיות של המערכת ונסו שוב.",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko לא יכול להשתמש במצלמה.",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko לא יכול להשתמש במיקרופון.",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "פתיחת ההגדרות",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "סיום שיחה ויציאה",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "לסיים את השיחה ולצאת?",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "תמשיכו לקבל הודעות ושיחות. כדי לעצור, צאו דרך הסמל במגש המערכת.",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko עדיין פועל.",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "פתיחת Lakko",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "יציאה מ-Lakko",
+      "status": "machine"
+    },
     "device_link.code.enter_six_digits": {
       "text": "הזינו את שש הספרות שמוצגות במכשיר השני שלכם.",
       "status": "machine"
@@ -4292,10 +4344,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "פתחו את Lakko כדי לראות את המכשירים שלכם.",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "פתיחת המכשירים",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -6366,6 +6414,10 @@
       "text": "הגדרות",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "הגדרות. מכשיר נוסף לחשבון שלך",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "קבוצות",
       "status": "machine"
@@ -6464,6 +6516,34 @@
     },
     "notification.message.new": {
       "text": "הודעה חדשה",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "פתיחה באפליקציה",
+      "status": "machine"
+    },
+    "open_in_app.copied": {
+      "text": "הקישור הועתק. הדביקו אותו באפליקציה.",
+      "status": "machine"
+    },
+    "open_link.field": {
+      "text": "קישור",
+      "status": "machine"
+    },
+    "open_link.hint": {
+      "text": "הדביקו קישור הזמנה, שיחה או קבוצה של Lakko.",
+      "status": "machine"
+    },
+    "open_link.hint_copied": {
+      "text": "הדף העתיק את הקישור. הדביקו אותו כאן כדי לפתוח.",
+      "status": "machine"
+    },
+    "open_link.not_lakko": {
+      "text": "זה לא קישור של Lakko. בדקו ונסו שוב.",
+      "status": "machine"
+    },
+    "open_link.open": {
+      "text": "פתיחה",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7422,6 +7502,54 @@
       "text": "איך Lakko מגנה עליכם",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "סגירת החלון",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "צ׳אטים, פיד, אנשי קשר, שיחות, הגדרות",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "עריכת ההודעה האחרונה שלי (בשדה הודעה ריק)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "סגירת תפריט, חלון דו-שיח או גיליון; יציאה מחיפוש",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "מעבר בין תיקיות צ'אט",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "צ'אט חדש",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "השיחה הקודמת או הבאה",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "יציאה מ-Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "חיפוש בשיחות ובאנשים",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "שליחה או שורה חדשה",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "הגדרות",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "קיצורי מקלדת",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "התרגומים עודכנו {date}",
       "status": "machine"
@@ -7610,12 +7738,40 @@
       "text": "הנתונים שלכם",
       "status": "machine"
     },
+    "settings.desktop.keep_running.sub": {
+      "text": "הודעות ושיחות ימשיכו להגיע כשהחלון סגור.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "להמשיך לפעול כשהחלון סגור",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "איך Lakko פועל במחשב הזה.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "לפתוח את Lakko כשאני נכנס למחשב הזה",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "לא ניתן היה לקרוא את ההגדרות. פתחו שוב את ההגדרות.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "לא ניתן היה לשנות את ההגדרה. נסו שוב.",
+      "status": "machine"
+    },
     "settings.devices.add.lede": {
       "text": "קודם התחברו ל-Lakko במכשיר החדש. אחר כך בחרו איזה משני המכשירים מציג קוד.",
       "status": "machine"
     },
     "settings.devices.add.no_camera": {
       "text": "אין מצלמה באף אחד מהמכשירים? התחברו במכשיר החדש ובחרו „{method}”: כאן תופיע בקשת „{prompt}” עם קוד להשוואה.",
+      "status": "machine"
+    },
+    "settings.devices.attention_a11y": {
+      "text": "מכשירים. מכשיר נוסף לחשבון שלך",
       "status": "machine"
     },
     "settings.devices.device_n": {
@@ -8148,6 +8304,10 @@
     },
     "settings.section.security": {
       "text": "אבטחה",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "אבטחה. מכשיר נוסף לחשבון שלך",
       "status": "machine"
     },
     "settings.security.devices.sub": {

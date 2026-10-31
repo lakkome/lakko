@@ -350,6 +350,12 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
       run: () => removeLocal(`lakko.own-username.unsent.v1.${accountIdB64}`),
     },
     { name: "username-change", run: () => clearRenameStores(storage, accountIdB64) },
+    // Identity-recovery 17.5: the "device acknowledgement is not confirmed
+    // sent" marker.
+    {
+      name: "device-ack-unsent",
+      run: () => removeLocal(`lakko.device-ack.unsent.v1.${accountIdB64}`),
+    },
     // ADR-0079: the "link-record register is not confirmed sent" marker,
     // the claims of link requests (seen from the account's other devices and
     // this device's own, reworked 2026-10-17), and the ledger-row deletions

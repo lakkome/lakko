@@ -53,6 +53,7 @@
  * session. The user can always send a fresh ContactRequest /
  * accept a fresh Welcome to recover an active group.
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { ensureGroupPushRouting } from "../push/group-routing";
@@ -104,7 +105,7 @@ export async function rehydrateMlsState(
     return;
   }
 
-  let deviceKey: CryptoKey | null;
+  let deviceKey: DeviceCipher | null;
   try {
     deviceKey = await getDeviceKey(accountIdB64);
   } catch (err) {

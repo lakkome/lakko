@@ -58,6 +58,14 @@
       "text": "Si la olvidas, puedes volver a entrar con otro dispositivo que siga con la sesión iniciada, una llave de acceso, tu frase de recuperación, tres palabras de ella o una app de autenticación.",
       "status": "machine"
     },
+    "auth.key_store_unavailable.body": {
+      "text": "El llavero del sistema no está disponible. Desbloquéalo o instala uno y vuelve a intentarlo.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko no puede guardar tus claves de forma segura en este ordenador.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "Cambiar idioma",
       "status": "machine"
@@ -3382,6 +3390,10 @@
       "text": "Crear",
       "status": "machine"
     },
+    "chats.create.open_link": {
+      "text": "Abrir un enlace",
+      "status": "machine"
+    },
     "chats.empty.action": {
       "text": "Empezar uno",
       "status": "machine"
@@ -4042,6 +4054,46 @@
       "text": "Este código no es un enlace de Lakko. Prueba con otro código.",
       "status": "machine"
     },
+    "desktop.capture.body": {
+      "text": "Permítelo en los ajustes de privacidad del sistema y vuelve a intentarlo.",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko no puede usar la cámara.",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko no puede usar el micrófono.",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "Abrir ajustes",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "Terminar llamada y salir",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "¿Terminar la llamada y salir?",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "Recibirás mensajes y llamadas. Para detenerlo, sal desde el icono de la bandeja.",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko sigue en ejecución.",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "Abrir Lakko",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "Salir de Lakko",
+      "status": "machine"
+    },
     "device_link.code.enter_six_digits": {
       "text": "Introduce los seis dígitos que muestra tu otro dispositivo.",
       "status": "machine"
@@ -4292,10 +4344,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "Abre Lakko para ver tus dispositivos.",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "Abrir Dispositivos",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -6366,6 +6414,10 @@
       "text": "Ajustes",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "Ajustes. Se añadió un dispositivo a tu cuenta",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "Grupos",
       "status": "machine"
@@ -6464,6 +6516,34 @@
     },
     "notification.message.new": {
       "text": "Mensaje nuevo",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "Abrir en la app",
+      "status": "machine"
+    },
+    "open_in_app.copied": {
+      "text": "Enlace copiado. Pégalo en la app.",
+      "status": "machine"
+    },
+    "open_link.field": {
+      "text": "Enlace",
+      "status": "machine"
+    },
+    "open_link.hint": {
+      "text": "Pega un enlace de invitación, llamada o grupo de Lakko.",
+      "status": "machine"
+    },
+    "open_link.hint_copied": {
+      "text": "La página ha copiado este enlace. Pégalo aquí para abrirlo.",
+      "status": "machine"
+    },
+    "open_link.not_lakko": {
+      "text": "No es un enlace de Lakko. Compruébalo e inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "open_link.open": {
+      "text": "Abrir",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7422,6 +7502,54 @@
       "text": "Cómo te protege Lakko",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "Cerrar la ventana",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "Chats, Feed, Contactos, Llamadas, Ajustes",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "Editar mi último mensaje (con el campo vacío)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "Cerrar un menú, diálogo u hoja; salir de una búsqueda",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "Cambiar de carpeta de chats",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "Nuevo chat",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "Conversación anterior o siguiente",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Salir de Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "Buscar conversaciones y personas",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "Enviar o empezar una línea nueva",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "Ajustes",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "Atajos de teclado",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Traducciones actualizadas {date}",
       "status": "machine"
@@ -7610,12 +7738,40 @@
       "text": "Tus datos",
       "status": "machine"
     },
+    "settings.desktop.keep_running.sub": {
+      "text": "Recibirás mensajes y llamadas con la ventana cerrada.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "Seguir abierto al cerrar la ventana",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "Cómo funciona Lakko en este ordenador.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "Abrir Lakko al iniciar sesión en este ordenador",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "No se pudieron leer estos ajustes. Vuelve a abrir Ajustes.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "No se pudo cambiar este ajuste. Inténtalo de nuevo.",
+      "status": "machine"
+    },
     "settings.devices.add.lede": {
       "text": "Primero inicia sesión en Lakko en el nuevo dispositivo. Luego elige cuál de los dos muestra un código.",
       "status": "machine"
     },
     "settings.devices.add.no_camera": {
       "text": "¿Ninguno de los dos dispositivos tiene cámara? Inicia sesión en el nuevo y elige «{method}»: aquí aparecerá un aviso «{prompt}» con un código para comparar.",
+      "status": "machine"
+    },
+    "settings.devices.attention_a11y": {
+      "text": "Dispositivos. Se añadió un dispositivo a tu cuenta",
       "status": "machine"
     },
     "settings.devices.device_n": {
@@ -8148,6 +8304,10 @@
     },
     "settings.section.security": {
       "text": "Seguridad",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "Seguridad. Se añadió un dispositivo a tu cuenta",
       "status": "machine"
     },
     "settings.security.devices.sub": {

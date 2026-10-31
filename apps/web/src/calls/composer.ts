@@ -52,6 +52,7 @@ import { DiscoveryClient } from "../discovery/client";
 import { CALL_ID_LEN, CALL_INVITE_LABEL_MAX_LEN, CALL_INVITE_URL_PREFIX } from "./invite";
 import { composeSealedInviteLink, inviteLinkWidths } from "../contacts/invite-link";
 import { reachSession } from "../reach/reach-service";
+import { publicOrigin } from "../platform";
 
 /** Options bag the UI hands to [`composeAndUploadCallInvite`]. */
 export interface ComposeCallInviteOptions {
@@ -306,5 +307,5 @@ export async function revokeCallInviteLink(opts: {
 }
 
 function defaultOrigin(): string {
-  return typeof location !== "undefined" ? location.origin : "https://lakko.me";
+  return publicOrigin();
 }

@@ -313,12 +313,26 @@ describe("caps", () => {
 
 describe("permissions", () => {
   it("a known prompt: the hold that raised it does not record", () => {
-    const r = run(hold({ permission: "prompt", acquireAt: HELD_AT + 100 }));
+    // Answering the prompt takes the pointer off the button.
+    const r = run([
+      press({ permission: "prompt" }),
+      { type: "tick", at: HELD_AT },
+      { type: "release", at: HELD_AT + 50 },
+      { type: "permission-result", granted: true, at: HELD_AT + 100 },
+    ]);
     expect(r.state.phase).toBe("idle");
     expect(r.effects).toEqual([
       { type: "request-permission", kind: "voice" },
       { type: "release-stream" },
     ]);
+  });
+
+  it("a grant under a held pointer records even when the browser said prompt", () => {
+    // The macOS desktop webview says `prompt` on every launch and hands the
+    // stream over at once: no dialog was shown, and the person is still holding.
+    const r = run(hold({ permission: "prompt", acquireAt: HELD_AT + 53 }));
+    expect(r.state).toMatchObject({ phase: "recording", startedAt: HELD_AT + 53 });
+    expect(r.effects).toContainEqual({ type: "start-capture", kind: "voice" });
   });
 
   it("an unknown permission granted fast while still held records", () => {
@@ -329,9 +343,24 @@ describe("permissions", () => {
     expect(r.effects).toContainEqual({ type: "start-capture", kind: "voice" });
   });
 
-  it("an unknown permission granted slowly is treated as a prompt", () => {
-    const r = run(hold({ permission: "unknown", acquireAt: HELD_AT + PROMPT_INFERENCE_MS + 1 }));
+  it("an unknown permission granted slowly under a held pointer records", () => {
+    // A person cannot answer a prompt while holding the button, so this is a
+    // device that took long to open: the first take after a launch.
+    const at = HELD_AT + PROMPT_INFERENCE_MS + 1;
+    const r = run(hold({ permission: "unknown", acquireAt: at }));
+    expect(r.state).toMatchObject({ phase: "recording", startedAt: at });
+    expect(r.effects).toContainEqual({ type: "start-capture", kind: "voice" });
+  });
+
+  it("an unknown permission granted slowly after the release is treated as a prompt", () => {
+    const r = run([
+      press({ permission: "unknown" }),
+      { type: "tick", at: HELD_AT },
+      { type: "release", at: HELD_AT + 50 },
+      { type: "permission-result", granted: true, at: HELD_AT + PROMPT_INFERENCE_MS + 1 },
+    ]);
     expect(r.state.phase).toBe("idle");
+    expect(r.effects).toContainEqual({ type: "release-stream" });
     expect(r.effects).not.toContainEqual({ type: "start-capture", kind: "voice" });
   });
 

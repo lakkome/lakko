@@ -144,6 +144,7 @@ import { KeyedError, RenderedError, keyedErrorText } from "../l10n/keyed-error";
 import { readFeedSelection, writeFeedSelection } from "../feed/feed-selection-store";
 import { screenAnchor } from "../ui/screen-anchor";
 import { durableSnapshotHook } from "../chat/persist-hooks";
+import { publicOrigin } from "../platform";
 
 /** Within this many pixels of the top, new items are shown at once;
  *  further down they wait behind the pill so the list does not move under
@@ -1026,7 +1027,7 @@ export default function Feed(): JSX.Element {
     if (c === null) return null;
     try {
       const bytes = exportDraft(c, v.draft);
-      return { link: shareLink(window.location.origin, bytes), bytes };
+      return { link: shareLink(publicOrigin(), bytes), bytes };
     } catch {
       return null;
     }

@@ -391,7 +391,12 @@ public class DeviceGroupSyncRepository(
         // this roster. A reopen after this device let a device in
         // acknowledges what is there: the device that let it in shows no
         // banner about it.
-        me.lakko.app.devices.NewDeviceNotices.bind(applicationContext, accountIdB64)
+        me.lakko.app.devices.NewDeviceNotices.bind(applicationContext, accountIdB64) { keys ->
+            scope.launch { acknowledgeDevices(keys) }
+        }
+        // UX 17.6 - the account's acknowledged devices first, so a device seen
+        // on another one is never announced here by the roster that follows.
+        reportAcknowledged(accountIdB64)
         // ADR-0080 - this account's device cards, sent through this
         // runtime's DeviceGroup `ServiceEnvelope`.
         me.lakko.app.devices.DeviceCardCenter.bind(applicationContext, accountIdB64) { envelope ->
@@ -481,7 +486,7 @@ public class DeviceGroupSyncRepository(
             if (localChange) {
                 me.lakko.app.devices.NewDeviceNotices.onLetIn(accountIdB64, roster)
             } else {
-                me.lakko.app.devices.NewDeviceNotices.onRoster(applicationContext, accountIdB64, roster, self)
+                me.lakko.app.devices.NewDeviceNotices.onRoster(accountIdB64, roster, self)
             }
             // ADR-0080 - a leaf that left takes its card with it.
             me.lakko.app.devices.DeviceCardCenter.prune(rows.map { hexOf(it.signaturePublicKey) })
@@ -590,6 +595,7 @@ public class DeviceGroupSyncRepository(
             try {
                 republishRecoveryEmail(state)
                 republishOwnUsername(state)
+                republishDeviceAcks(state)
                 republishLinkRecords(state)
                 republishLineage(state)
                 // ADR-0073 R.5 - every person-facing store is keyed by
@@ -1017,6 +1023,78 @@ public class DeviceGroupSyncRepository(
     }
 
     // ------------------------------------------------------------
+    // UX 17.5 / 17.6 - the account's acknowledged new devices
+    // ------------------------------------------------------------
+
+    /** Hand the account's acknowledged devices to the new-device notice.
+     *  Under [stateLock]. */
+    private fun republishDeviceAcks(state: SyncedState) {
+        val accountIdB64 = activeAccountIdB64.get() ?: return
+        val keys = runCatching { state.acknowledgedDevices() }.getOrNull() ?: return
+        me.lakko.app.devices.NewDeviceNotices.onAcknowledged(
+            accountIdB64,
+            keys.mapTo(HashSet()) { me.lakko.app.devices.newDeviceKey(it) },
+        )
+    }
+
+    /** [republishDeviceAcks] outside a republish (right after the notice is
+     *  bound). */
+    private fun reportAcknowledged(accountIdB64: String) {
+        synchronized(stateLock) {
+            val state = syncedState ?: return
+            if (activeAccountIdB64.get() != accountIdB64) return
+            republishDeviceAcks(state)
+        }
+    }
+
+    /**
+     * Settings > Devices was opened with [keysHex] pending: write the
+     * account's acknowledgement for them (write-once per device) and tell
+     * the other devices. A send that fails is owed: the pending flag makes
+     * the next flush re-send every acknowledgement ([publishSnapshot]).
+     */
+    private suspend fun acknowledgeDevices(keysHex: Set<String>) {
+        val keys = keysHex.mapNotNull { me.lakko.app.devices.newDeviceKeyBytes(it) }
+        if (keys.isEmpty()) return
+        val envelopes = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                state.acknowledgeDevices(Hlc.mint(), keys, System.currentTimeMillis().toULong())
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "device acknowledgement refused (${cause.javaClass.simpleName})")
+                emptyList()
+            }
+        }
+        if (envelopes.isEmpty()) return
+        republish()
+        for (envelope in envelopes) {
+            try {
+                sendServiceEnvelope(envelope)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "device acknowledgement not published (${cause.javaClass.simpleName})")
+                pendingFlag?.recordFailure()
+                return
+            }
+        }
+    }
+
+    /** A received device acknowledgement, folded write-once. */
+    private fun applyDeviceAck(envelope: ByteArray) {
+        val changed = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                state.applyDeviceAckEnvelope(envelope)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "device acknowledgement envelope refused (${cause.javaClass.simpleName})")
+                false
+            }
+        }
+        if (changed) republish()
+    }
+
+    // ------------------------------------------------------------
     // ADR-0079 - the account's own invite links
     // ------------------------------------------------------------
 
@@ -1380,6 +1458,8 @@ public class DeviceGroupSyncRepository(
         runCatching { restored.recoveryEmailEnvelope() }.getOrNull()?.let { applyRecoveryEmail(it) }
         // ADR-0076 - and the own-username register.
         runCatching { restored.ownUsernameEnvelope() }.getOrNull()?.let { applyOwnUsername(it) }
+        // UX 17.6 - and the device acknowledgements.
+        for (envelope in runCatching { restored.deviceAckEnvelopes() }.getOrNull().orEmpty()) applyDeviceAck(envelope)
         // ADR-0079 - and the link records.
         for (envelope in runCatching { restored.linkRecordEnvelopes() }.getOrNull().orEmpty()) applyLinkRecord(envelope)
     }
@@ -1641,6 +1721,12 @@ public class DeviceGroupSyncRepository(
             runCatching { syncedState?.ownUsernameEnvelope() }.getOrNull()
         }
         ownUsernameEnvelope?.let { sendServiceEnvelope(it) }
+        // UX 17.6 - nor are the device acknowledgements: this is also how an
+        // acknowledgement whose live send failed is re-sent.
+        val deviceAckEnvelopes = synchronized(stateLock) {
+            runCatching { syncedState?.deviceAckEnvelopes() }.getOrNull().orEmpty()
+        }
+        for (envelope in deviceAckEnvelopes) sendServiceEnvelope(envelope)
         // ADR-0079 - nor are the link records; each goes with its own stamp.
         val linkRecordEnvelopes = synchronized(stateLock) {
             runCatching { syncedState?.linkRecordEnvelopes() }.getOrNull().orEmpty()
@@ -1873,6 +1959,14 @@ public class DeviceGroupSyncRepository(
                             )
                             val body = parsed.body
                             if (body is DeviceGroupBody.ServiceEnvelope &&
+                                uniffi.lakko_ffi_uniffi.isDeviceAckEnvelope(body.envelope)
+                            ) {
+                                // UX 17.6 - another device of the account saw
+                                // a new device's warning; a `lakko-sync`
+                                // envelope, routed before the lakko-contacts
+                                // dispatcher.
+                                applyDeviceAck(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
                                 uniffi.lakko_ffi_uniffi.isLinkRecordEnvelope(body.envelope)
                             ) {
                                 // ADR-0079 - one of the account's invite links
@@ -2969,6 +3063,8 @@ internal object CoreSyncedStateBytes : SyncedStateBytes {
                 restored.recoveryEmailEnvelope()?.let { state.applyRecoveryEmailEnvelope(it) }
                 // ADR-0076 - and the own-username register.
                 restored.ownUsernameEnvelope()?.let { state.applyOwnUsernameEnvelope(it) }
+                // UX 17.6 - and the device acknowledgements.
+                for (envelope in restored.deviceAckEnvelopes()) state.applyDeviceAckEnvelope(envelope)
             }
             state.toBytes()
         }

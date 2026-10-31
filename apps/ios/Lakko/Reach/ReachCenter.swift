@@ -1734,10 +1734,15 @@ public final class ReachCenter: ObservableObject {
                 var recordTermOutputs: [Data] = []
                 let username = cert == nil ? nil : own.username
                 if let username {
-                    recordTermOutputs.append(try await client.usernameOprf(username).output)
+                    let oprf = try await keptOprf("u:\(username)", accountIdB64: accountIdB64) {
+                        try await client.usernameOprf(username)
+                    }
+                    recordTermOutputs.append(oprf.output)
                 }
                 for term in nameSearchTerms(displayName: name) {
-                    let oprf = try await client.nameTermOprf(term)
+                    let oprf = try await keptOprf("n:\(term)", accountIdB64: accountIdB64) {
+                        try await client.nameTermOprf(term)
+                    }
                     nameTermLookupKeys.append(oprf.lookupKey)
                     recordTermOutputs.append(oprf.output)
                 }
@@ -1777,6 +1782,36 @@ public final class ReachCenter: ObservableObject {
     // MARK: - Contacts of contacts: this account's own record (section 4)
 
     private static let termRateLimitWaitNs: UInt64 = 8_000_000_000
+
+    /// The OPRF round of the term `key`, from what this account already holds
+    /// when it can be: each round costs an anonymous token, and an Everyone
+    /// publication that fails part way otherwise pays for every term again.
+    /// The lookup key is kept beside the output under `k:<key>`.
+    private func keptOprf(
+        _ key: String,
+        accountIdB64: String,
+        round: () async throws -> OprfResult
+    ) async throws -> OprfResult {
+        let kept = record.introductionTermOutputsB64 ?? [:]
+        if let output = kept[key].flatMap({ Data(base64Encoded: $0) }),
+           let lookupKey = kept["k:\(key)"].flatMap({ Data(base64Encoded: $0) }) {
+            return OprfResult(output: output, lookupKey: lookupKey)
+        }
+        let result: OprfResult
+        do {
+            result = try await round()
+        } catch DiscoveryClientError.rateLimited {
+            try await Task.sleep(nanoseconds: Self.termRateLimitWaitNs)
+            result = try await round()
+        }
+        guard self.accountIdB64 == accountIdB64 else { return result }
+        var next = record.introductionTermOutputsB64 ?? [:]
+        next[key] = result.output.base64EncodedString()
+        next["k:\(key)"] = result.lookupKey.base64EncodedString()
+        record.introductionTermOutputsB64 = next
+        persist()
+        return result
+    }
 
     /// This account's introduction record at the current `fof` version and
     /// name, or `nil` while contacts of contacts may not find it. Cached: every

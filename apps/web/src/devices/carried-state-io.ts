@@ -33,6 +33,7 @@ import { avatarToWasm, type AvatarWasm } from "../profile/avatar-model";
 import { IdbProfileBackend } from "../profile/profile-idb";
 import { forStateBundle } from "../profile/profile-store";
 import { base64Decode, base64Encode } from "../auth/account-id";
+import type { DeviceCipher } from "../auth/device-cipher";
 import type { Wasm } from "../wasm";
 import {
   carriedGroupNamesOf,
@@ -86,7 +87,7 @@ function heldFor(contact: PendingContact, logHeld: readonly PersistedHeldSend[])
 export async function collectCarriedExtras(args: {
   readonly wasm: Wasm;
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   readonly knownGroupIdsB64: readonly string[];
   readonly ownKeysB64: readonly string[];
 }): Promise<CarriedExtras> {

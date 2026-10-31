@@ -15,6 +15,7 @@ import {
   CARD_REFRESH_MS,
   browserFacts,
   cardGrowthDelayMs,
+  ownDeviceFacts,
   deviceRowView,
   orderDeviceRows,
   pruneDeviceCards,
@@ -176,6 +177,34 @@ describe("browser facts", () => {
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0";
     expect(browserFacts(edge)).toEqual({ model: "Edge on Windows", os: "Windows" });
     expect(browserFacts("")).toEqual({ model: "Browser", os: "" });
+  });
+});
+
+describe("ownDeviceFacts", () => {
+  const webkitMac =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)";
+  const chromeMac =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+
+  it("names the desktop app a computer, never a browser", () => {
+    expect(ownDeviceFacts(true, webkitMac)).toEqual({
+      platform: "desktop",
+      model: "Lakko desktop on macOS",
+      appVersion: "desktop",
+      os: "macOS",
+    });
+    expect(ownDeviceFacts(true, chromeMac).model).toBe("Lakko desktop on macOS");
+    expect(ownDeviceFacts(true, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)").model).toBe("Lakko desktop on Windows");
+    expect(ownDeviceFacts(true, "").model).toBe("Lakko desktop");
+  });
+
+  it("keeps the browser's name on the web", () => {
+    expect(ownDeviceFacts(false, chromeMac)).toEqual({
+      platform: "web",
+      model: "Chrome on macOS",
+      appVersion: "web",
+      os: "macOS",
+    });
   });
 });
 

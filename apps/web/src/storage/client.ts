@@ -235,7 +235,9 @@ export class StorageClient {
         };
         xhr.onerror = () => reject(new StorageNetworkError(endpoint, "xhr error"));
         xhr.onabort = () => reject(new StorageNetworkError(endpoint, "xhr aborted"));
-        xhr.send(new Blob([ciphertext.slice()], { type: "application/octet-stream" }));
+        // The bytes, never a Blob: WebKit hands a Blob to a custom scheme as a
+        // stream the desktop host reads empty (ADR-0085 section 14).
+        xhr.send(ciphertext.slice());
       });
     });
   }

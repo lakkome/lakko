@@ -39,6 +39,7 @@ import uniffi.lakko_ffi_uniffi.FfiScopeKind
 import uniffi.lakko_ffi_uniffi.FfiVisibilityMode
 import uniffi.lakko_ffi_uniffi.FfiVisibilitySetting
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.OprfResult
 
 /** Whether the setting the person chose is in effect on the server
  *  (`docs/ux/who-can-find-me.md` sections 8 and 9). */
@@ -1224,6 +1225,28 @@ public class ReachManager internal constructor(
 
     /** Record what the Everyone publication now holds ([key] is `null` when
      *  not public). */
+    /**
+     * The OPRF round of the term [key], from what this account already holds
+     * when it can be: each round costs an anonymous token, and an Everyone
+     * publication that fails part way otherwise pays for every term again.
+     * The lookup key is kept beside the output under `k:<key>`.
+     */
+    internal suspend fun keptOprf(key: String, round: suspend () -> OprfResult): OprfResult {
+        val output = doc.termOutputs[key]?.let(::reachUnhex)
+        val lookupKey = doc.termOutputs["k:$key"]?.let(::reachUnhex)
+        if (output != null && lookupKey != null) return OprfResult(output, lookupKey)
+        val result = waitingOutRateLimit(round)
+        val b = binding.get() ?: return result
+        lock.withLock {
+            if (binding.get() === b) {
+                val kept = mapOf(key to reachHex(result.output), "k:$key" to reachHex(result.lookupKey))
+                doc = doc.copy(termOutputs = doc.termOutputs + kept)
+                store.save(b.accountIdB64, doc)
+            }
+        }
+        return result
+    }
+
     public fun notePublishedEveryone(public: Boolean, key: String?) {
         val b = binding.get() ?: return
         doc = doc.copy(publishedPublic = public, publishedKey = key)

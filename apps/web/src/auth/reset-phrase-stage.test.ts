@@ -6,6 +6,7 @@
  * BEFORE the server step (ADR-0077 decision 3 rule 1, G-47), against the real
  * stores over an in-memory IndexedDB.
  */
+import { type DeviceCipher, WebDeviceCipher } from "./device-cipher";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { FakeIndexedDb, MemoryStorage } from "../test/fake-storage";
@@ -43,11 +44,11 @@ afterEach(() => {
   resetAccountStoreGateForTests();
 });
 
-function aKey(): Promise<CryptoKey> {
-  return crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+async function aKey(): Promise<DeviceCipher> {
+  return new WebDeviceCipher(await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]));
 }
 
-async function storePhrase(phrase: string, key: CryptoKey): Promise<void> {
+async function storePhrase(phrase: string, key: DeviceCipher): Promise<void> {
   await putPhrase(A, new TextEncoder().encode(phrase), key);
 }
 

@@ -166,9 +166,9 @@ struct SettingsScreen: View {
                     row(l10n.t("settings.password.title"), systemImage: "lock") { onOpen(.password) }
                 }
                 row(l10n.t("settings.passkeys.title"), systemImage: "person.badge.key") { onOpen(.passkeys) }
-                row(l10n.t("settings.devices.title"), systemImage: "laptopcomputer.and.iphone") {
-                    onOpen(.devices)
-                }
+                // UX 17.5 — carries the exclamation-mark badge while a device
+                // added to the account is pending here.
+                DevicesSettingsRow { onOpen(.devices) }
                 row(l10n.t("settings.recovery.title"), systemImage: "lifepreserver") { onOpen(.recoveryFactors) }
                 // ADR-0059 section 6 — every group the "Share my channels"
                 // switch is on in (docs/ux/feed.md 6.3).
@@ -328,5 +328,33 @@ struct SettingsScreen: View {
             }
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// The `Devices` row of Settings (UX 17.5): the same row as its neighbours,
+/// with the exclamation-mark badge while a device added to the account is
+/// pending here. Its own view observes the warning, so Settings is not
+/// re-evaluated by it.
+private struct DevicesSettingsRow: View {
+    let action: () -> Void
+    @ObservedObject private var notice = NewDeviceNoticeCenter.shared
+    @ObservedObject private var l10n = Localization.shared
+
+    var body: some View {
+        let attention = notice.badgeVisible
+        Button(action: action) {
+            HStack {
+                Label(l10n.t("settings.devices.title"), systemImage: "laptopcomputer.and.iphone")
+                    .foregroundStyle(Color.lakkoText)
+                Spacer()
+                if attention { NewDeviceAttentionBadge() }
+                Image(systemName: "chevron.forward")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(
+            attention ? l10n.t("settings.devices.attention_a11y") : l10n.t("settings.devices.title"))
     }
 }

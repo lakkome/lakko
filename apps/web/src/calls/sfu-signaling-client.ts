@@ -32,6 +32,8 @@
  * differs from the UniFFI typed-enum on mobile).
  */
 
+import { isDesktop } from "../platform";
+import { openDesktopSfuSocket, type SfuSocket } from "../platform/host-socket";
 import { loadWasm } from "../wasm";
 import {
   claimsVideoGiven,
@@ -226,7 +228,7 @@ export function sfuSubprotocols(jwt: string): string[] {
  * the wired callbacks; send with the `send*` methods.
  */
 export class SfuSignalingClient {
-  private socket: WebSocket | null = null;
+  private socket: SfuSocket | null = null;
   private wasm: Awaited<ReturnType<typeof loadWasm>> | null = null;
   /** `close()` was called. Sticky: a closed client never opens a socket. */
   private closed = false;
@@ -274,7 +276,15 @@ export class SfuSignalingClient {
     // nobody holds any more.
     if (this.closed) throw new SfuSignalingClosedError();
     const url = `${this.baseUrl}/v1/connect`;
-    const socket = new WebSocket(url, sfuSubprotocols(this.jwt));
+    const protocols = sfuSubprotocols(this.jwt);
+    const socket = isDesktop()
+      ? await openDesktopSfuSocket(url, protocols)
+      : new WebSocket(url, protocols);
+    // The host was asked which way to go: the caller may have left meanwhile.
+    if (this.closed) {
+      socket.close();
+      throw new SfuSignalingClosedError();
+    }
     this.socket = socket;
 
     return new Promise<void>((resolve, reject) => {

@@ -69,6 +69,17 @@
 //! [`SyncedState::link_answer_verdict`] is the one rule every client asks
 //! when a contact request carries a link answer.
 //!
+//! ## The device-acknowledgement register (identity-recovery 17.5)
+//!
+//! One register per device signature key: the person has seen the
+//! "a device was added to your account" warning for that device on some
+//! device of the account, so no device warns about it any more. Write-once
+//! at the writer ([`SyncedState::acknowledge_device`]), folded by the rule
+//! above, carried by [`SyncedState::device_ack_envelopes`] /
+//! [`SyncedState::apply_device_ack_envelope`], persisted with the rest,
+//! never in [`StateSnapshot`]. Adding the register added a tag and changed
+//! no existing layout, so it did not change the persistence version.
+//!
 //! ## Saved messages (ADR-0065 section 4)
 //!
 //! A saved message is one more register, keyed `(conversation, message
@@ -112,6 +123,10 @@
 
 use std::collections::BTreeMap;
 
+use super::device_ack::{
+    compose_device_ack_envelope, decode_device_ack_envelope, DeviceAckEntry,
+    DeviceAckEnvelopeError, DEVICE_ACK_ENVELOPE_MAX_ENTRIES, DEVICE_ACK_KEY_LEN,
+};
 use super::entry::{
     take_bytes32, take_u32, take_u64, take_u8, BlobId, CodecError, ConversationEnd,
     ConversationEndState, ConversationEntry, ConversationOrderEntry, ConversationRef, DraftEntry,
@@ -366,7 +381,8 @@ impl SyncedState {
                 SyncEntry::Lineage(_)
                 | SyncEntry::RecoveryEmail(_)
                 | SyncEntry::OwnUsername(_)
-                | SyncEntry::LinkRecord(_) => {},
+                | SyncEntry::LinkRecord(_)
+                | SyncEntry::DeviceAck(_) => {},
                 other => {
                     let _ = snap.folders.push(h.hlc, other.clone());
                 },
@@ -685,6 +701,123 @@ impl SyncedState {
         Ok(matches!(
             self.apply(register.hlc, SyncEntry::OwnUsername(register.value))?,
             ApplyOutcome::Applied
+        ))
+    }
+
+    // -----------------------------------------------------------------
+    // Device acknowledgements (identity-recovery 17.5).
+    // -----------------------------------------------------------------
+
+    /// Record that the person has seen the added-device warning for each of
+    /// `device_keys`, stamped `hlc`, at wall-clock `now_ms`. **Write-once**: a
+    /// key already acknowledged is not re-stamped. Returns the envelopes to
+    /// send to the account's other devices, carrying exactly the registers
+    /// this call wrote (empty when nothing was new).
+    pub fn acknowledge_devices(
+        &mut self,
+        hlc: u64,
+        device_keys: &[[u8; DEVICE_ACK_KEY_LEN]],
+        now_ms: u64,
+    ) -> Vec<Vec<u8>> {
+        let mut written: Vec<Stamped<DeviceAckEntry>> = Vec::new();
+        for key in device_keys {
+            if self.acknowledge_device(hlc, *key, now_ms) {
+                written.push(Stamped {
+                    hlc,
+                    value: DeviceAckEntry {
+                        device_key: *key,
+                        acknowledged_at_ms: now_ms,
+                    },
+                });
+            }
+        }
+        written.sort_by_key(|e| e.value.device_key);
+        written.dedup_by_key(|e| e.value.device_key);
+        written
+            .chunks(DEVICE_ACK_ENVELOPE_MAX_ENTRIES)
+            .filter_map(|chunk| compose_device_ack_envelope(chunk).ok())
+            .collect()
+    }
+
+    /// One key of [`Self::acknowledge_devices`]: `true` when the register was
+    /// written now, `false` when it was already held.
+    pub fn acknowledge_device(
+        &mut self,
+        hlc: u64,
+        device_key: [u8; DEVICE_ACK_KEY_LEN],
+        now_ms: u64,
+    ) -> bool {
+        if self.is_device_acknowledged(&device_key) {
+            return false;
+        }
+        matches!(
+            self.apply(
+                hlc,
+                SyncEntry::DeviceAck(DeviceAckEntry {
+                    device_key,
+                    acknowledged_at_ms: now_ms,
+                }),
+            ),
+            Ok(ApplyOutcome::Applied)
+        )
+    }
+
+    /// Whether the warning for `device_key` was seen on some device.
+    #[must_use]
+    pub fn is_device_acknowledged(&self, device_key: &[u8; DEVICE_ACK_KEY_LEN]) -> bool {
+        self.registers
+            .contains_key(&RegisterKey::DeviceAck(*device_key))
+    }
+
+    /// Every acknowledged device key, ascending.
+    #[must_use]
+    pub fn acknowledged_devices(&self) -> Vec<[u8; DEVICE_ACK_KEY_LEN]> {
+        self.registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::DeviceAck(a) => Some(a.device_key),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every held acknowledgement with its original stamp, as envelopes of
+    /// at most [`DEVICE_ACK_ENVELOPE_MAX_ENTRIES`] entries: the re-send a
+    /// device owes when a live send did not go out.
+    #[must_use]
+    pub fn device_ack_envelopes(&self) -> Vec<Vec<u8>> {
+        let held: Vec<Stamped<DeviceAckEntry>> = self
+            .registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::DeviceAck(a) => Some(Stamped {
+                    hlc: h.hlc,
+                    value: a.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        held.chunks(DEVICE_ACK_ENVELOPE_MAX_ENTRIES)
+            .filter_map(|chunk| compose_device_ack_envelope(chunk).ok())
+            .collect()
+    }
+
+    /// Decode a device-acknowledgement envelope and fold every register in
+    /// with its original stamp. Fail closed. Returns whether anything
+    /// changed.
+    ///
+    /// # Errors
+    ///
+    /// [`DeviceAckEnvelopeError`].
+    pub fn apply_device_ack_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<bool, DeviceAckEnvelopeError> {
+        let entries = decode_device_ack_envelope(bytes)?;
+        Ok(self.apply_all(
+            entries
+                .into_iter()
+                .map(|s| (s.hlc, SyncEntry::DeviceAck(s.value))),
         ))
     }
 
@@ -2115,6 +2248,39 @@ mod tests {
     }
 
     #[test]
+    fn a_device_acknowledgement_is_write_once_carried_and_persisted() {
+        let mut a = SyncedState::new();
+        let k1 = [1u8; 32];
+        let k2 = [2u8; 32];
+        assert!(!a.is_device_acknowledged(&k1));
+        let sent = a.acknowledge_devices(10, &[k2, k1, k1], 1_000);
+        assert_eq!(sent.len(), 1);
+        assert!(a.is_device_acknowledged(&k1) && a.is_device_acknowledged(&k2));
+        // Write-once: a second acknowledgement writes and sends nothing.
+        assert!(a.acknowledge_devices(20, &[k1], 2_000).is_empty());
+        // Carried: another device folds it in, idempotently.
+        let mut b = SyncedState::new();
+        assert_eq!(b.apply_device_ack_envelope(&sent[0]), Ok(true));
+        assert_eq!(b.apply_device_ack_envelope(&sent[0]), Ok(false));
+        assert_eq!(b.acknowledged_devices(), vec![k1, k2]);
+        assert_eq!(b.device_ack_envelopes(), sent);
+        // Never in the snapshot, but persisted.
+        assert!(a.snapshot().folders.is_empty());
+        let back = SyncedState::from_bytes(&a.to_bytes()).unwrap_or_default();
+        assert_eq!(back.acknowledged_devices(), vec![k1, k2]);
+        // Two devices acknowledging concurrently converge.
+        let mut c = SyncedState::new();
+        let other = c.acknowledge_devices(10, &[k1], 5_000);
+        let mut ab = a.clone();
+        assert!(ab.apply_device_ack_envelope(&other[0]).is_ok());
+        assert!(c.apply_device_ack_envelope(&sent[0]).is_ok());
+        assert_eq!(ab.entries(), c.entries());
+        assert!(b
+            .apply_device_ack_envelope(b"lakko/sync/device-ack/v1\0\x02")
+            .is_err());
+    }
+
+    #[test]
     fn the_own_username_is_a_last_writer_wins_register() {
         use super::super::entry::BoundsError;
         let mut s = SyncedState::new();
@@ -2810,6 +2976,20 @@ mod tests {
     }
 
     /// The size [`CONVERSATION_ENDS_MAX_CLIENT`]'s documentation states.
+    /// Two registers landed from two branches with one tag number. They hold
+    /// their own tags now; a persisted state keeps both.
+    #[test]
+    fn a_conversation_end_and_a_device_ack_persist_side_by_side() {
+        let mut s = fold(&[(5, conversation_end(1, 3, true))]);
+        let device = [7u8; DEVICE_ACK_KEY_LEN];
+        assert!(s.acknowledge_device(6, device, 1_000));
+
+        let restored = SyncedState::from_bytes(&s.to_bytes()).unwrap();
+        assert_eq!(restored, s);
+        assert!(restored.is_conversation_ended(&cref(1)));
+        assert!(restored.is_device_acknowledged(&device));
+    }
+
     #[test]
     fn a_conversation_end_is_56_bytes_at_rest() {
         let empty = SyncedState::new().to_bytes().len();

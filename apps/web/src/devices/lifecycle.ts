@@ -45,6 +45,7 @@
  * Every DeviceGroup snapshot write here FAILS CLOSED (ADR-0081 decision 3):
  * a failed write throws and the operation in progress stops.
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import { loadWasm } from "../wasm";
 import { getAccountIdentitySeed } from "../auth/account-identity-seed-store";
 import { conversationSeed, getKeyRotationState } from "../auth/key-rotation-store";
@@ -112,7 +113,7 @@ export class DeviceGroupNotJoinedError extends Error {
  */
 export async function deviceGroupLineageSeed(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   explicit?: Uint8Array,
 ): Promise<Uint8Array | null> {
   try {
@@ -131,7 +132,7 @@ export async function deviceGroupLineageSeed(
  *  `null` when the device cannot derive it yet. */
 export async function deviceGroupIdOf(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   explicit?: Uint8Array,
 ): Promise<Uint8Array | null> {
   const seed = await deviceGroupLineageSeed(accountIdB64, deviceKey, explicit);
@@ -182,7 +183,7 @@ export async function ensureDeviceGroup(
   accountIdBytes: Uint8Array,
   accountIdB64: string,
   deviceIdentitySeed: Uint8Array,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   /** ADR-0057 — the account's phrase seed, so a founding can claim (or, on a
    *  re-found, reset) the journal with the account's root even before the
    *  session has installed its signer factory. Optional: without it the
@@ -223,7 +224,7 @@ async function ensureDeviceGroupWith(
   accountIdBytes: Uint8Array,
   accountIdB64: string,
   deviceIdentitySeed: Uint8Array,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   accountIdentitySeed: Uint8Array | undefined,
   afterKeyReset: boolean,
   mayFound: (() => Promise<boolean>) | undefined,
@@ -268,7 +269,7 @@ async function loadDurable(
   lineage: WasmIdentity,
   accountIdBytes: Uint8Array,
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<{ group: WasmDeviceGroup; generation: number } | null> {
   let state: Awaited<ReturnType<typeof getDeviceGroupSnapshotState>> = null;
   let unusable = false;
@@ -302,7 +303,7 @@ async function found(
   lineage: WasmIdentity,
   accountIdBytes: Uint8Array,
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   accountIdentitySeed: Uint8Array | undefined,
   afterKeyReset: boolean,
 ): Promise<{ group: WasmDeviceGroup; generation: number }> {
@@ -365,7 +366,7 @@ async function found(
 export async function persistDeviceGroupSnapshot(
   identity: WasmIdentity,
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<number> {
   const snapshot = identity.snapshotStorage();
   return putDeviceGroupSnapshot(accountIdB64, snapshot, deviceKey);
@@ -382,7 +383,7 @@ export async function persistDeviceGroupSnapshot(
 export async function persistDeviceGroupSnapshotWithCursor(
   identity: WasmIdentity,
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   journalCursor: number | undefined,
   expectedGeneration?: number,
 ): Promise<number> {

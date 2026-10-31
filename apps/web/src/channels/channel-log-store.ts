@@ -22,6 +22,7 @@
  * flush chain per page); this module is plain CRUD.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable, requireAccountStoresWritable } from "../auth/account-store-gate";
 import type { ChannelLogPayload } from "./channel-log-codec";
 
@@ -61,10 +62,10 @@ function awaitTx<T>(tx: IDBTransaction, value: T): Promise<T> {
   });
 }
 
-async function encryptBlob(deviceKey: CryptoKey, plaintext: Uint8Array): Promise<Uint8Array> {
+async function encryptBlob(deviceKey: DeviceCipher, plaintext: Uint8Array): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv.slice() }, deviceKey, plaintext.slice()),
+    await deviceKey.encrypt(iv, plaintext),
   );
   const out = new Uint8Array(IV_LEN + ct.length);
   out.set(iv, 0);
@@ -72,13 +73,13 @@ async function encryptBlob(deviceKey: CryptoKey, plaintext: Uint8Array): Promise
   return out;
 }
 
-async function decryptBlob(deviceKey: CryptoKey, blob: Uint8Array): Promise<Uint8Array> {
+async function decryptBlob(deviceKey: DeviceCipher, blob: Uint8Array): Promise<Uint8Array> {
   if (blob.length < IV_LEN + 16) {
     throw new Error("encrypted channel log is too short to be valid");
   }
   const iv = blob.slice(0, IV_LEN);
   const ct = blob.slice(IV_LEN);
-  return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct));
+  return new Uint8Array(await deviceKey.decrypt(iv, ct));
 }
 
 /** Persist (or replace) the channel log for an account. Rejects on an
@@ -91,7 +92,7 @@ async function decryptBlob(deviceKey: CryptoKey, blob: Uint8Array): Promise<Uint
  *  write landed (the co-publisher knock, `flushChannelLogDurable`). */
 export async function saveChannelLog(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   payload: ChannelLogPayload,
   options: { readonly durable?: boolean } = {},
 ): Promise<void> {
@@ -118,7 +119,7 @@ export async function saveChannelLog(
  */
 export async function loadChannelLog(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<ChannelLogPayload | null> {
   const db = await openDb();
   let row: PersistedRow | undefined;

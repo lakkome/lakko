@@ -4,6 +4,8 @@
 package me.lakko.app.reach
 
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.delay
+import me.lakko.app.discovery.isDiscoveryRateLimited
 import uniffi.lakko_ffi_uniffi.FfiContactsForm
 import uniffi.lakko_ffi_uniffi.FfiIntroductionPayload
 import uniffi.lakko_ffi_uniffi.FfiReachGrant
@@ -138,6 +140,25 @@ internal class IntroPublicationOps(
     val save: suspend (IntroPublicationState) -> Unit,
 )
 
+/**
+ * How long a term waits once after a rate limit: a long name has more terms
+ * than the server's burst, and the bucket refills about one per second.
+ * Chosen, not measured.
+ */
+internal const val TERM_RATE_LIMIT_WAIT_MS: Long = 8_000L
+
+/** [round], asked once more after the wait when the server rate limited it. */
+internal suspend fun <T> waitingOutRateLimit(round: suspend () -> T): T =
+    try {
+        round()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        if (!isDiscoveryRateLimited(e)) throw e
+        delay(TERM_RATE_LIMIT_WAIT_MS)
+        round()
+    }
+
 private class Term(val key: String, val evaluate: suspend () -> OprfResult)
 
 /**
@@ -170,14 +191,15 @@ internal suspend fun publishIntroductions(
         val identityPk = inputs.identityPk
         val accountId = inputs.accountId
         if (terms.isNotEmpty() && grant != null && identityPk != null && accountId != null) {
-            val missing = termsToEvaluate(state.termOutputs.keys, terms.map { it.key })
-            if (missing.isNotEmpty()) {
-                val added = LinkedHashMap<String, String>()
-                for (t in terms) {
-                    if (t.key !in missing || t.key in added) continue
-                    added[t.key] = reachHex(t.evaluate().output)
-                }
-                save(state.copy(termOutputs = state.termOutputs + added))
+            // Each evaluation costs an anonymous token, so an output is kept as
+            // soon as it is known: a failed build resumes where it stopped.
+            // Keeping them only at the end spent a token per term on every
+            // retry and ran through the account's daily quota.
+            val missing = termsToEvaluate(state.termOutputs.keys, terms.map { it.key }).toMutableSet()
+            for (t in terms) {
+                if (!missing.remove(t.key)) continue
+                val output = waitingOutRateLimit { t.evaluate() }.output
+                save(state.copy(termOutputs = state.termOutputs + (t.key to reachHex(output))))
             }
             val outputs = terms.map { reachUnhex(state.termOutputs[it.key] ?: "") ?: ByteArray(0) }
             val payload = FfiIntroductionPayload(

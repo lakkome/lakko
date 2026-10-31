@@ -167,6 +167,7 @@ public object AccountLocalWipe {
         // ---- backup ---------------------------------------------------------
         Step("new-device-notice") { ctx, acct ->
             me.lakko.app.devices.NewDeviceNoticeStore.onDevice(ctx).deleteAccount(acct)
+            me.lakko.app.devices.NewDeviceNotices.withdrawNotification(ctx, acct)
         },
         // ADR-0080: the cards of the account's devices, this device's own
         // card, its city answer and its "Show my city" switch.

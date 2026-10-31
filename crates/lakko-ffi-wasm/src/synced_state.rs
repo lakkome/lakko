@@ -1438,6 +1438,75 @@ impl SyncedState {
             .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
     }
 
+    /// Record that the person has seen the "a device was added to your
+    /// account" warning (identity-recovery 17.5) for each device whose
+    /// 32-byte signature key is in `device_keys` (flat-concatenated),
+    /// stamped `hlc`, at wall-clock `now_ms`. Write-once per key. Returns
+    /// the envelopes to send in DeviceGroup service envelopes, carrying
+    /// exactly what this call wrote (empty when nothing was new). Throws
+    /// `"bounds: ..."` when the length is not a multiple of 32.
+    #[wasm_bindgen(js_name = acknowledgeDevices)]
+    pub fn acknowledge_devices(
+        &self,
+        hlc: u64,
+        device_keys: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<js_sys::Uint8Array>, JsError> {
+        let n = core::DEVICE_ACK_KEY_LEN;
+        if device_keys.len() % n != 0 {
+            return Err(JsError::new("bounds: device keys must be 32 bytes each"));
+        }
+        let keys: Vec<[u8; 32]> = device_keys
+            .chunks_exact(n)
+            .filter_map(|c| <[u8; 32]>::try_from(c).ok())
+            .collect();
+        Ok(self
+            .with(|s| s.acknowledge_devices(hlc, &keys, now_ms))?
+            .iter()
+            .map(|e| js_sys::Uint8Array::from(e.as_slice()))
+            .collect())
+    }
+
+    /// Whether the added-device warning for `deviceKey` was seen on some
+    /// device of the account. A key of another length is never acknowledged.
+    #[wasm_bindgen(js_name = isDeviceAcknowledged)]
+    pub fn is_device_acknowledged(&self, device_key: &[u8]) -> Result<bool, JsError> {
+        let Ok(key) = <[u8; 32]>::try_from(device_key) else {
+            return Ok(false);
+        };
+        self.with(|s| s.is_device_acknowledged(&key))
+    }
+
+    /// Every acknowledged device key, ascending, flat-concatenated (32 bytes
+    /// each).
+    #[wasm_bindgen(js_name = acknowledgedDevices)]
+    pub fn acknowledged_devices(&self) -> Result<Vec<u8>, JsError> {
+        self.with(|s| s.acknowledged_devices().concat())
+    }
+
+    /// Every held acknowledgement as envelopes: the re-send a device owes
+    /// when a live send did not go out.
+    #[wasm_bindgen(js_name = deviceAckEnvelopes)]
+    pub fn device_ack_envelopes(&self) -> Result<Vec<js_sys::Uint8Array>, JsError> {
+        Ok(self
+            .with(|s| s.device_ack_envelopes())?
+            .iter()
+            .map(|e| js_sys::Uint8Array::from(e.as_slice()))
+            .collect())
+    }
+
+    /// Decode a device-acknowledgement envelope received in a DeviceGroup
+    /// service envelope (route on `isDeviceAckEnvelope`) and fold every
+    /// register in. Fail closed. Returns whether anything changed. Throws an
+    /// `Error` whose message is `"<code>: <reason>"` with code `wrongDomain`
+    /// / `unknownVersion` / `count` / `truncated` / `notCanonical` /
+    /// `trailing`.
+    #[wasm_bindgen(js_name = applyDeviceAckEnvelope)]
+    pub fn apply_device_ack_envelope(&self, envelope: &[u8]) -> Result<bool, JsError> {
+        self.with(|s| s.apply_device_ack_envelope(envelope))?
+            .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
+    }
+
     /// Write one of the account's invite links (ADR-0079 section 4) at
     /// `hlc`. `true` when written; then send `linkRecordEnvelopeFor(linkId)`
     /// in a DeviceGroup service envelope.
@@ -1767,6 +1836,16 @@ pub fn recovery_email_envelope_max_len() -> u32 {
     u32::try_from(core::RECOVERY_EMAIL_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
 }
 
+/// `true` when `bytes` open with the device-acknowledgement envelope domain
+/// (`lakko/sync/device-ack/v1`): the routing question for a DeviceGroup
+/// service envelope. Says nothing about validity;
+/// `SyncedState.applyDeviceAckEnvelope` decides that.
+#[wasm_bindgen(js_name = isDeviceAckEnvelope)]
+#[must_use]
+pub fn is_device_ack_envelope(bytes: &[u8]) -> bool {
+    core::is_device_ack_envelope(bytes)
+}
+
 /// `true` when `bytes` open with the own-username envelope domain
 /// (`lakko/sync/username/v1`): the routing question for a DeviceGroup
 /// service envelope, asked before the `lakko-contacts` dispatcher. Says
@@ -1975,6 +2054,23 @@ mod tests {
             recovery_email_envelope_max_len()
                 <= crate::mls::device_group_service_envelope_max_len()
         );
+    }
+
+    /// Envelopes arrays cannot be built off wasm32, so the envelope comes
+    /// from the core here.
+    #[test]
+    fn a_device_acknowledgement_is_folded_and_read() {
+        let mut core_state = core::SyncedState::new();
+        let sent = core_state.acknowledge_devices(2, &[[9u8; 32], [4u8; 32]], 7);
+        let a = SyncedState::new();
+        assert_eq!(a.is_device_acknowledged(&[9u8; 32]).ok(), Some(false));
+        assert!(is_device_ack_envelope(&sent[0]));
+        assert_eq!(a.apply_device_ack_envelope(&sent[0]).ok(), Some(true));
+        assert_eq!(a.is_device_acknowledged(&[9u8; 32]).ok(), Some(true));
+        assert_eq!(a.is_device_acknowledged(&[9u8; 3]).ok(), Some(false));
+        let mut both = vec![4u8; 32];
+        both.extend_from_slice(&[9u8; 32]);
+        assert_eq!(a.acknowledged_devices().ok(), Some(both));
     }
 
     /// Success paths, plus the refusal of the pure canonicalising helper (a

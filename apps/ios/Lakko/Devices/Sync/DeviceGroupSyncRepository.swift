@@ -310,6 +310,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         refreshDerived()
         ready = true
         onSyncedStateReady?()
+        // UX 17.5 — opening Settings > Devices acknowledges the pending
+        // devices for the account through this repository.
+        NewDeviceNoticeCenter.shared.setAcknowledger(accountIdB64: accountIdB64) { [weak self] keys in
+            self?.acknowledgeDevices(keys)
+        }
         // UX 17.5 — the roster as restored: the first reading on this device
         // seeds the acknowledged set; a later one may raise the notice for a
         // device added while the app was closed and already applied.
@@ -466,6 +471,12 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if links != linkRecords { linkRecords = links }
         let isPending = pending?.isPending ?? false
         if pendingSync != isPending { pendingSync = isPending }
+        // UX 17.5 / 17.6 — the synced acknowledged set ends the new-device
+        // warning on this device for every device in it.
+        if let account = activeAccountIdB64 {
+            NewDeviceNoticeCenter.shared.setAcknowledged(
+                accountIdB64: account, keys: (try? s.acknowledgedDevices()) ?? [])
+        }
     }
 
     /// Fold a restored backup state in, when it is this account's.
@@ -813,6 +824,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if isRecoveryEmailEnvelope(bytes: envelope) { return "recovery-email" }
         // ADR-0076 — likewise the own-username register.
         if isOwnUsernameEnvelope(bytes: envelope) { return "own-username" }
+        // UX 17.6 — every device acknowledgement is its own slot.
+        if isDeviceAckEnvelope(bytes: envelope) { return "device-ack:" + envelope.base64EncodedString() }
         // ADR-0079 — every link record is its own slot.
         if isLinkRecordEnvelope(bytes: envelope) { return "link-record:" + envelope.base64EncodedString() }
         guard let kind = try? dispatchIncomingEnvelope(plaintext: envelope).kind else {
@@ -1181,9 +1194,17 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         await flushUnsentOwnUsername()
         guard bound.isCurrent else { return }
         await flushUnsentLinkRecords()
+        guard bound.isCurrent else { return }
+        await flushUnsentDeviceAcks()
         while !Task.isCancelled, bound.isCurrent {
             if !pendingServiceEnvelopes.isEmpty {
                 await flushPendingServiceEnvelopes()
+                guard bound.isCurrent else { return }
+            }
+            // UX 17.6 — an acknowledgement whose send failed this session is
+            // retried on every turn of the loop until it goes through.
+            if deviceAcksUnsent {
+                await flushUnsentDeviceAcks()
                 guard bound.isCurrent else { return }
             }
             let result: FetchResult
@@ -1901,6 +1922,20 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 }
                 return
             }
+            // UX 17.6 — a device acknowledgement, the same way: the synced
+            // acknowledged set reaches the new-device warning through
+            // ``refreshDerived()``.
+            if isDeviceAckEnvelope(bytes: envelope) {
+                do {
+                    if try syncedState.applyDeviceAckEnvelope(envelope: envelope) {
+                        if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+                        stateChanged()
+                    }
+                } catch {
+                    NSLog("device-ack: envelope refused")
+                }
+                return
+            }
             // ADR-0076 — the own-username register, the same way.
             if isOwnUsernameEnvelope(bytes: envelope) {
                 do {
@@ -2057,6 +2092,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         for envelope in (try? syncedState.linkRecordEnvelopes()) ?? [] {
             await sendServiceEnvelope(envelope)
         }
+        // UX 17.6 — and every device acknowledgement, so the newcomer's
+        // synced state (and its backup) carries them.
+        for envelope in (try? syncedState.deviceAckEnvelopes()) ?? [] {
+            await sendServiceEnvelope(envelope)
+        }
     }
 
     // MARK: - ADR-0079: the link-record register
@@ -2171,6 +2211,72 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         guard ready else { return nil }
         return (try? syncedState.linkAnswerVerdict(
             linkId: linkId, linkSecret: linkSecret, requesterKey: requesterKey, pressedAtMs: pressedAtMs)) ?? .dead
+    }
+
+    // MARK: - UX 17.5 / 17.6: the device-acknowledgement register
+
+    /// `UserDefaults` marker: an acknowledgement written here has not been
+    /// confirmed sent (the own-username marker's pattern).
+    static func deviceAcksUnsentKey(accountIdB64: String) -> String {
+        "lakko.device-acks.unsent.v1.\(accountIdB64)"
+    }
+
+    private var deviceAcksUnsent: Bool {
+        guard let account = activeAccountIdB64 else { return false }
+        return UserDefaults.standard.object(forKey: Self.deviceAcksUnsentKey(accountIdB64: account)) != nil
+    }
+
+    /// Send every acknowledgement this device holds again when an earlier
+    /// send was not confirmed (registers are write-once, so a re-send is a
+    /// no-op on a device that has them).
+    func flushUnsentDeviceAcks() async {
+        guard let account = activeAccountIdB64 else { return }
+        let key = Self.deviceAcksUnsentKey(accountIdB64: account)
+        guard UserDefaults.standard.object(forKey: key) != nil else { return }
+        do {
+            try await sendLineageEnvelopes((try? syncedState.deviceAckEnvelopes()) ?? [])
+            UserDefaults.standard.removeObject(forKey: key)
+        } catch {
+            NSLog("device-ack: register send failed; retried")
+        }
+    }
+
+    /// Acknowledge `keys` (32-byte device signature keys) for the account:
+    /// write the registers (write-once), persist at once and send the new
+    /// envelopes to the account's other devices. A send that fails is owed
+    /// and retried by the poll loop.
+    func acknowledgeDevices(_ keys: [Data]) {
+        guard ready, !deviceRemoved, let account = activeAccountIdB64, !keys.isEmpty else { return }
+        let envelopes: [Data]
+        do {
+            envelopes = try syncedState.acknowledgeDevices(
+                hlc: Hlc.mint(), deviceKeys: keys,
+                nowMs: UInt64(max(0, Date().timeIntervalSince1970 * 1000)))
+        } catch {
+            NSLog("device-ack: register refused")
+            return
+        }
+        guard !envelopes.isEmpty else { return }
+        stateChanged()
+        persistSyncState()
+        UserDefaults.standard.set(true, forKey: Self.deviceAcksUnsentKey(accountIdB64: account))
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.sendLineageEnvelopes(envelopes)
+                if self.activeAccountIdB64 == account {
+                    UserDefaults.standard.removeObject(
+                        forKey: Self.deviceAcksUnsentKey(accountIdB64: account))
+                }
+            } catch {
+                // Set again: an earlier send that succeeded meanwhile may
+                // have cleared the marker this write set.
+                if self.activeAccountIdB64 == account {
+                    UserDefaults.standard.set(true, forKey: Self.deviceAcksUnsentKey(accountIdB64: account))
+                }
+                NSLog("device-ack: register send failed; retried")
+            }
+        }
     }
 
     // MARK: - ADR-0076: the own-username register

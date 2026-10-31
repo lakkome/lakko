@@ -10,6 +10,10 @@
  * session needs a password re-entry, because the whole point is to survive
  * long enough for a call the user pressed Accept on to reach the slot.
  *
+ * On the desktop there is no service worker: the host reports a press of the
+ * system notification's buttons (`platform/host.ts`), and that is a third
+ * input source of the same intent.
+ *
  * Every decision lives in the pure, unit-tested `call-notification-intent.ts`.
  * This file is only the two input sources, the reactive wait, and the two
  * calls into the call host — which is also why it is a `.tsx` with no logic:
@@ -37,6 +41,7 @@ import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type { JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
+import { onHostCallAction } from "../platform/host";
 import { currentInternalPath, entrySearch, replaceInternalPath } from "../routes/origin-history";
 import { useCallHost } from "./CallHostContext";
 import {
@@ -78,6 +83,13 @@ export function CallActionListener(): JSX.Element {
       // of `?wake=` on the very same entry.
       replaceInternalPath(cleaned);
     }
+
+    // The desktop host: a press on the system notification.
+    onCleanup(
+      onHostCallAction(({ action, callId, video }) => {
+        arm({ kind: action, callIdHex: callId, groupHex: "", video });
+      }),
+    );
 
     // (2) A window was already open: the worker posted the press to it.
     if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;

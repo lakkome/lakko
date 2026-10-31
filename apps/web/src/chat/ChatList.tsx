@@ -24,9 +24,20 @@ import {
   onCleanup,
   onMount,
   Show,
+  untrack,
   type JSX,
 } from "solid-js";
-import { A, useNavigate } from "@solidjs/router";
+import { A, useLocation, useNavigate } from "@solidjs/router";
+import { isDesktop } from "../platform";
+import { setOpenLinkReason } from "../platform/open-link-state";
+import {
+  clearListCommand,
+  folderTabIndexFor,
+  neighbourHref,
+  noteConversationListMounted,
+  pendingListCommand,
+  type ListCommand,
+} from "../platform/shortcuts";
 
 import { useCallHost } from "../calls/CallHostContext";
 import { quietCallKindLabel, quietCallOfferFor } from "../calls/quiet-call-offer";
@@ -49,9 +60,8 @@ import { paths } from "../routes/paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { createLongPress } from "../ui/long-press";
-import { currentLanguage, t } from "../l10n";
+import { t } from "../l10n";
 import { FolderBar, type FolderTab } from "./folders/FolderBar";
-import { DeviceAddedBanner } from "../devices/DeviceAddedNotice";
 import { MembershipEndBanners } from "./MembershipEndNotices";
 import { RecallDoneNotice } from "../devices/RecallDoneNotice";
 import { KeysRotatedNotice } from "../devices/KeysRotatedNotice";
@@ -84,6 +94,7 @@ import {
   shownPendingContacts,
   type PendingContact,
 } from "../contacts/pending-contacts";
+import { displayLocale } from "../l10n/display-locale";
 
 type Flag = "pinned" | "muted" | "archived";
 
@@ -140,6 +151,20 @@ function CreateMenu(props: { onClose: () => void }): JSX.Element {
           <Icon name="channels" size={16} />
           {t("chats.create.channel")}
         </button>
+        {/* docs/ux/desktop.md section 7 - the route that always works. */}
+        <Show when={isDesktop()}>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              props.onClose();
+              setOpenLinkReason("menu");
+            }}
+          >
+            <Icon name="link" size={16} />
+            {t("chats.create.open_link")}
+          </button>
+        </Show>
         {/* ADR-0065 section 3 — Saved, from the menu that holds New group. */}
         <div class="lk-menu-sep" />
         <button type="button" role="menuitem" onClick={() => go(paths.saved)}>
@@ -335,12 +360,13 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   }
 
   // Ctrl+1..9 (Cmd on macOS) select the first nine tabs, All chats being 1.
+  // Never with Shift: Mod+Shift+1..5 are the desktop destinations.
   onMount(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
-      if (e.key < "1" || e.key > "9") return;
+      const index = folderTabIndexFor(e);
+      if (index === null) return;
       if (folders().length === 0) return;
-      const t = tabs()[Number(e.key) - 1];
+      const t = tabs()[index];
       if (t === undefined) return;
       e.preventDefault();
       selectTab(accountId(), t.id);
@@ -465,6 +491,41 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     return kindOf(g) === "chat" ? paths.chat(slug) : paths.groupChat(slug);
   };
 
+  // docs/ux/desktop.md section 5 - the desktop shortcuts this list carries
+  // out (`platform/shortcuts.ts`): focus the search field, open the create
+  // menu, open the previous / next conversation in the list's own order.
+  let searchInput: HTMLInputElement | undefined;
+  const location = useLocation();
+  const rowHref = (row: ConversationRow): string | null => {
+    if (row.kind === "channel") return paths.channel(row.id);
+    const g = groupById().get(row.id);
+    return g === undefined ? null : hrefOf(g);
+  };
+  const runListCommand = (cmd: ListCommand): void => {
+    if (cmd === "search") {
+      searchInput?.focus();
+      searchInput?.select();
+    } else if (cmd === "create") {
+      setCreateOpen(true);
+    } else {
+      const hrefs = visibleRows()
+        .map(rowHref)
+        .filter((h): h is string => h !== null);
+      const to = neighbourHref(hrefs, location.pathname, cmd);
+      if (to !== null) navigate(to);
+    }
+  };
+  if (isDesktop()) {
+    onMount(() => onCleanup(noteConversationListMounted()));
+    createEffect(() => {
+      const cmd = pendingListCommand();
+      if (cmd === null) return;
+      clearListCommand();
+      // After mount: the search field's ref is set by then.
+      queueMicrotask(() => untrack(() => runListCommand(cmd)));
+    });
+  }
+
   return (
     <aside class="lk-pane" aria-label={copy().aria()}>
       <div class="lk-pane-head">
@@ -502,6 +563,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       <label class="lk-search lk-pane-search">
         <Icon name="search" size={16} />
         <input
+          ref={searchInput}
           type="search"
           placeholder={t("chats.search.placeholder")}
           aria-label={t("chats.search.label")}
@@ -509,8 +571,6 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           onInput={(e) => setQuery(e.currentTarget.value)}
         />
       </label>
-      {/* docs/ux/identity-recovery.md 17.5: a device joined the account. */}
-      <DeviceAddedBanner />
       <MembershipEndBanners activeSlug={props.activeGroupIdB64} />
       {/* docs/ux/identity-recovery.md 18.4: the account was taken back here. */}
       <RecallDoneNotice />
@@ -614,7 +674,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               const unread = (): number => (endedLine(g) === null ? summary().unread : 0);
               const label = (): string => chatLabel(g);
               const sub = (): string => subOf(g);
-              const time = (): string => formatListTime(summary().lastAt, clock(), currentLanguage());
+              const time = (): string => formatListTime(summary().lastAt, clock(), displayLocale());
               /**
                * A call from this conversation, arriving while it is muted
                * (`docs/ux/calls.md` section 2.1.1, second surface).
@@ -681,7 +741,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                             classList={{ muted: flags().muted }}
                             title={t("chats.row.unread", { count: unread() })}
                           >
-                            {unread() >= 100 ? t("chats.row.unread_overflow") : unread().toLocaleString(currentLanguage())}
+                            {unread() >= 100 ? t("chats.row.unread_overflow") : unread().toLocaleString(displayLocale())}
                           </span>
                         </Show>
                       </span>

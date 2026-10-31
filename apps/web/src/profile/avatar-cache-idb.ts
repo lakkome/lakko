@@ -18,6 +18,7 @@
 
 import { accountStoresWritable } from "../auth/account-store-gate";
 import type { AvatarCacheBackend } from "./avatar-cache";
+import type { DeviceCipher } from "../auth/device-cipher";
 
 const DB_NAME = "lakko-avatars";
 const DB_VERSION = 1;
@@ -56,7 +57,7 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
 export class IdbAvatarBackend implements AvatarCacheBackend {
   constructor(
     private readonly accountId: string,
-    private readonly deviceKey: () => Promise<CryptoKey | null>,
+    private readonly deviceKey: () => Promise<DeviceCipher | null>,
   ) {}
 
   private rowId(blobIdB64: string): string {
@@ -82,11 +83,7 @@ export class IdbAvatarBackend implements AvatarCacheBackend {
     if (row === undefined || row.ciphertext.length < IV_LEN + 16) return null;
     try {
       return new Uint8Array(
-        await crypto.subtle.decrypt(
-          { name: "AES-GCM", iv: row.ciphertext.slice(0, IV_LEN) },
-          key,
-          row.ciphertext.slice(IV_LEN),
-        ),
+        await key.decrypt(row.ciphertext.slice(0, IV_LEN), row.ciphertext.slice(IV_LEN)),
       );
     } catch {
       return null;
@@ -97,7 +94,7 @@ export class IdbAvatarBackend implements AvatarCacheBackend {
     const key = await this.deviceKey();
     if (key === null) return;
     const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv.slice() }, key, bytes.slice()));
+    const ct = new Uint8Array(await key.encrypt(iv.slice(), bytes.slice()));
     const ciphertext = new Uint8Array(IV_LEN + ct.length);
     ciphertext.set(iv, 0);
     ciphertext.set(ct, IV_LEN);

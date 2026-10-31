@@ -9,12 +9,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  dismissNotice,
+  applyAcknowledged,
+  badgeVisible,
+  beginDevicesVisit,
+  extendVisit,
   letIn,
+  noticeTag,
   noticeView,
+  notificationAction,
   observeRoster,
   parseNoticeState,
-  shouldNotify,
   type AddedNoticeState,
 } from "./added-notice";
 
@@ -100,25 +104,108 @@ describe("observeRoster", () => {
   });
 });
 
-describe("dismissNotice", () => {
-  it("acknowledges every pending device; the `New` label goes with the banner", () => {
+describe("the account's acknowledgement (17.5, amended 2026-10-29)", () => {
+  it("an acknowledged device is never pending, and moves to known", () => {
     const flagged = observeRoster(seeded(["me"]), roster(["me", "a", "b"]), 1_000).state;
     if (flagged === null) throw new Error("unreachable");
-    const dismissed = dismissNotice(flagged);
-    expect(noticeView(dismissed)).toMatchObject({ visible: false, newKeys: [] });
-    // It does not come back for the same devices.
-    expect(observeRoster(dismissed, roster(["me", "a", "b"]), 9_000).added).toEqual([]);
+    const acked = new Set(["a"]);
+    expect(noticeView(flagged, acked).newKeys).toEqual(["b"]);
+    const folded = applyAcknowledged(flagged, acked);
+    expect(folded.known).toContain("a");
+    expect(folded.pending.map((p) => p.key)).toEqual(["b"]);
+    // Nothing to fold: the same state object.
+    expect(applyAcknowledged(folded, acked)).toBe(folded);
+    // It does not come back for the same device.
+    expect(observeRoster(folded, roster(["me", "a", "b"]), 9_000).added).toEqual([]);
+  });
+
+  it("a device learned of only after it was acknowledged elsewhere shows nothing", () => {
+    const r = observeRoster(seeded(["me"]), roster(["me", "late"]), 5_000, new Set(["late"]));
+    expect(r.added).toEqual([]);
+    expect(r.state?.known).toContain("late");
+    expect(noticeView(r.state, new Set(["late"])).visible).toBe(false);
+  });
+
+  it("an acknowledgement drops a device already pending at the next fold too", () => {
+    const flagged = observeRoster(seeded(["me"]), roster(["me", "a"]), 1_000).state;
+    const r = observeRoster(flagged, roster(["me", "a"]), 2_000, new Set(["a"]));
+    expect(r.state?.pending).toEqual([]);
+    expect(r.added).toEqual([]);
+  });
+
+  it("the badge is up exactly while something is pending", () => {
+    const flagged = observeRoster(seeded(["me"]), roster(["me", "a"]), 1_000).state;
+    expect(badgeVisible(noticeView(flagged))).toBe(true);
+    expect(badgeVisible(noticeView(flagged, new Set(["a"])))).toBe(false);
+    expect(badgeVisible(noticeView(null))).toBe(false);
   });
 });
 
-describe("shouldNotify", () => {
-  it("only when something was added, the app is not in front, and notifications are allowed", () => {
-    expect(shouldNotify({ added: 1, hidden: true, permission: "granted" })).toBe(true);
-    expect(shouldNotify({ added: 0, hidden: true, permission: "granted" })).toBe(false);
-    expect(shouldNotify({ added: 1, hidden: false, permission: "granted" })).toBe(false);
+describe("opening Settings > Devices", () => {
+  it("with something pending: every pending key is acknowledged and the visit keeps the snapshot", () => {
+    const flagged = observeRoster(seeded(["me"]), roster(["me", "a", "b"]), 1_000).state;
+    const begun = beginDevicesVisit(noticeView(flagged));
+    expect(begun?.toAcknowledge).toEqual(["a", "b"]);
+    expect(begun?.visit).toMatchObject({
+      visible: true,
+      titleKey: "devices.added_notice.title_many",
+      newKeys: ["a", "b"],
+    });
+    // After the acknowledgement nothing is pending, the snapshot is kept.
+    expect(noticeView(flagged, new Set(begun?.toAcknowledge)).visible).toBe(false);
+  });
+
+  it("with nothing pending: nothing to acknowledge, no snapshot", () => {
+    expect(beginDevicesVisit(noticeView(seeded(["me"])))).toBeNull();
+  });
+
+  it("a device pending while the screen is open is added to the visit", () => {
+    const first = beginDevicesVisit(
+      noticeView(observeRoster(seeded(["me"]), roster(["me", "a"]), 1_000).state),
+    );
+    const later = noticeView(observeRoster(seeded(["me"]), roster(["me", "b"]), 4_000).state);
+    const merged = extendVisit(first?.visit ?? null, later);
+    expect(merged.newKeys).toEqual(["a", "b"]);
+    expect(merged.latestAtMs).toBe(4_000);
+    expect(merged.titleKey).toBe("devices.added_notice.title_many");
+  });
+});
+
+describe("notificationAction", () => {
+  it("posts when devices became pending and notifications are allowed, in front or not", () => {
+    expect(
+      notificationAction({ added: 1, pendingBefore: 0, pendingAfter: 1, permission: "granted" }),
+    ).toBe("post");
+    // A second device replaces the first (same tag, plural title).
+    expect(
+      notificationAction({ added: 1, pendingBefore: 1, pendingAfter: 2, permission: "granted" }),
+    ).toBe("post");
+  });
+
+  it("never posts without permission (and never asks)", () => {
     for (const permission of ["denied", "default", "unsupported"] as const) {
-      expect(shouldNotify({ added: 1, hidden: true, permission })).toBe(false);
+      expect(notificationAction({ added: 1, pendingBefore: 0, pendingAfter: 1, permission })).toBe("none");
     }
+  });
+
+  it("withdraws when the pending set becomes empty, whatever acknowledged it", () => {
+    for (const permission of ["granted", "denied"] as const) {
+      expect(notificationAction({ added: 0, pendingBefore: 2, pendingAfter: 0, permission })).toBe(
+        "withdraw",
+      );
+    }
+    expect(
+      notificationAction({ added: 0, pendingBefore: 0, pendingAfter: 0, permission: "granted" }),
+    ).toBe("none");
+    // A fold that adds nothing new posts nothing again.
+    expect(
+      notificationAction({ added: 0, pendingBefore: 1, pendingAfter: 1, permission: "granted" }),
+    ).toBe("none");
+  });
+
+  it("uses one identifier per account", () => {
+    expect(noticeTag("acc")).toBe(noticeTag("acc"));
+    expect(noticeTag("acc")).not.toBe(noticeTag("other"));
   });
 });
 
@@ -168,5 +255,44 @@ describe("recordRoster inside an effect", () => {
     dispose();
     expect(runs).toBeGreaterThanOrEqual(2);
     expect(runs).toBeLessThanOrEqual(3);
+  });
+});
+
+describe("the live state of the signed-in account", () => {
+  it("an acknowledgement from another device clears what is pending; a visit keeps its highlight", async () => {
+    const {
+      addedNotice,
+      bindAddedNotice,
+      devicesVisit,
+      enterDevicesVisit,
+      highlightedDeviceKeys,
+      leaveDevicesVisit,
+      recordAcknowledged,
+      recordRoster,
+    } = await import("./added-notice");
+    bindAddedNotice("acc-live");
+    recordRoster("acc-live", roster(["me"]), 1);
+    recordRoster("acc-live", roster(["me", "a", "b"]), 2);
+    expect(addedNotice().newKeys).toEqual(["a", "b"]);
+
+    // Received from elsewhere: "a" stops being pending here.
+    recordAcknowledged("acc-live", ["a"]);
+    expect(addedNotice().newKeys).toEqual(["b"]);
+    expect(highlightedDeviceKeys().has("a")).toBe(false);
+
+    // Opening Devices: "b" is to be acknowledged, and stays highlighted for
+    // the visit after the acknowledgement lands.
+    expect(enterDevicesVisit()).toEqual(["b"]);
+    recordAcknowledged("acc-live", ["a", "b"]);
+    expect(addedNotice().visible).toBe(false);
+    expect(devicesVisit()?.newKeys).toEqual(["b"]);
+    expect(highlightedDeviceKeys().has("b")).toBe(true);
+    // Opening again with nothing pending acknowledges nothing.
+    expect(enterDevicesVisit()).toEqual([]);
+
+    leaveDevicesVisit();
+    expect(devicesVisit()).toBeNull();
+    expect(highlightedDeviceKeys().size).toBe(0);
+    bindAddedNotice(null);
   });
 });

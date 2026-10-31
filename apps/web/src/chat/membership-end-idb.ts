@@ -19,6 +19,7 @@
  */
 
 import { requireAccountStoresWritable } from "../auth/account-store-gate";
+import type { DeviceCipher } from "../auth/device-cipher";
 import {
   decodeMembershipEndRow,
   encodeMembershipEndRow,
@@ -62,26 +63,18 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
   });
 }
 
-async function encryptBlob(deviceKey: CryptoKey, plaintext: Uint8Array): Promise<Uint8Array> {
+async function encryptBlob(deviceKey: DeviceCipher, plaintext: Uint8Array): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
-  const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv.slice() }, deviceKey, plaintext.slice()),
-  );
+  const ct = new Uint8Array(await deviceKey.encrypt(iv, plaintext));
   const out = new Uint8Array(IV_LEN + ct.length);
   out.set(iv, 0);
   out.set(ct, IV_LEN);
   return out;
 }
 
-async function decryptBlob(deviceKey: CryptoKey, blob: Uint8Array): Promise<Uint8Array> {
+async function decryptBlob(deviceKey: DeviceCipher, blob: Uint8Array): Promise<Uint8Array> {
   if (blob.length < IV_LEN + 16) throw new Error("encrypted membership-end row is too short");
-  return new Uint8Array(
-    await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: blob.slice(0, IV_LEN) },
-      deviceKey,
-      blob.slice(IV_LEN),
-    ),
-  );
+  return new Uint8Array(await deviceKey.decrypt(blob.slice(0, IV_LEN), blob.slice(IV_LEN)));
 }
 
 /**
@@ -91,7 +84,7 @@ async function decryptBlob(deviceKey: CryptoKey, blob: Uint8Array): Promise<Uint
  *                      device holds none; a save then throws
  */
 export class IdbMembershipEndBackend implements MembershipEndBackend {
-  constructor(private readonly deviceKeyFor: (accountId: string) => Promise<CryptoKey | null>) {}
+  constructor(private readonly deviceKeyFor: (accountId: string) => Promise<DeviceCipher | null>) {}
 
   async load(accountId: string): Promise<MembershipEndRow | null> {
     const deviceKey = await this.deviceKeyFor(accountId);

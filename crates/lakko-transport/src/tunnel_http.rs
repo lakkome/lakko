@@ -11,7 +11,7 @@
 //! for `Connection: close`), and parses the result.
 //!
 //! It is deliberately tiny — request/response only, `Connection: close`,
-//! `read-until-close` (no keep-alive, no chunked decoding). The inner HTTP is
+//! `read-until-close` (no keep-alive). The inner HTTP is
 //! plaintext because the obfs tunnel already encrypts + authenticates the
 //! channel and the application payloads are MLS-E2EE. A streaming /
 //! `AsyncRead`+`AsyncWrite` `ByteStreamConnection` (for WebSocket-over-tunnel)
@@ -135,11 +135,61 @@ fn parse_response(buf: &[u8]) -> Result<TunneledResponse, TunnelHttpError> {
         }
     }
 
+    let chunked = headers
+        .iter()
+        .any(|(n, v)| n == "transfer-encoding" && v.eq_ignore_ascii_case("chunked"));
+    let body = if chunked {
+        headers.retain(|(n, _)| n != "transfer-encoding");
+        decode_chunked(&body)?
+    } else {
+        // A tunnel that dies mid-response ends the read like a close does, so
+        // a short body is the only sign the answer was cut off.
+        let declared = headers
+            .iter()
+            .find(|(n, _)| n == "content-length")
+            .and_then(|(_, v)| v.parse::<usize>().ok());
+        if declared.is_some_and(|len| body.len() < len) {
+            return Err(TunnelHttpError::BadResponse(
+                "body shorter than Content-Length",
+            ));
+        }
+        body
+    };
+
     Ok(TunneledResponse {
         status,
         headers,
         body,
     })
+}
+
+/// Undo `Transfer-Encoding: chunked`, which an origin behind the relay uses for
+/// any body it does not know the length of. Trailers are ignored. A body that
+/// ends before the last chunk is refused: it was cut off.
+fn decode_chunked(mut rest: &[u8]) -> Result<Vec<u8>, TunnelHttpError> {
+    let mut out = Vec::with_capacity(rest.len());
+    loop {
+        let line_end = rest
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .ok_or(TunnelHttpError::BadResponse("chunk size line not ended"))?;
+        let line = std::str::from_utf8(&rest[..line_end])
+            .map_err(|_| TunnelHttpError::BadResponse("non-UTF-8 chunk size"))?;
+        let size = line.split(';').next().unwrap_or_default().trim();
+        let size = usize::from_str_radix(size, 16)
+            .map_err(|_| TunnelHttpError::BadResponse("chunk size not hexadecimal"))?;
+        rest = &rest[line_end + 2..];
+        if size == 0 {
+            return Ok(out);
+        }
+        if size > rest.len() {
+            return Err(TunnelHttpError::BadResponse("chunk longer than the body"));
+        }
+        out.extend_from_slice(&rest[..size]);
+        rest = rest[size..]
+            .strip_prefix(b"\r\n")
+            .ok_or(TunnelHttpError::BadResponse("chunk not terminated"))?;
+    }
 }
 
 /// Send `req` over an already-dialed tunnel `conn` and read the response.
@@ -157,7 +207,11 @@ pub async fn tunneled_request(
     mut conn: Box<dyn Connection>,
     req: &TunneledRequest,
 ) -> Result<TunneledResponse, TunnelHttpError> {
-    conn.send(bytes::Bytes::from(encode_request(req))).await?;
+    // The narrowest transport takes one AEAD chunk per frame, and the relay
+    // joins them back into one byte stream.
+    for frame in encode_request(req).chunks(crate::aead_stream::MAX_CHUNK) {
+        conn.send(bytes::Bytes::copy_from_slice(frame)).await?;
+    }
 
     let mut acc = BytesMut::new();
     // A clean close (or any transport end) terminates the response —
@@ -197,6 +251,17 @@ mod tests {
     use bytes::Bytes;
 
     #[test]
+    fn a_body_shorter_than_content_length_is_refused() {
+        let cut = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc";
+        assert!(matches!(
+            parse_response(cut),
+            Err(TunnelHttpError::BadResponse(_))
+        ));
+        let whole = b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc";
+        assert_eq!(parse_response(whole).unwrap().body, b"abc");
+    }
+
+    #[test]
     fn encode_request_sets_host_length_and_close() {
         let req = TunneledRequest {
             method: "POST".into(),
@@ -227,6 +292,65 @@ mod tests {
     #[test]
     fn parse_response_rejects_no_terminator() {
         assert!(parse_response(b"HTTP/1.1 200 OK\r\nfoo").is_err());
+    }
+
+    #[test]
+    fn parse_response_undoes_chunked_encoding() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;x=1\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let resp = parse_response(raw).unwrap();
+        assert_eq!(resp.body, b"hello world");
+        assert_eq!(resp.header("transfer-encoding"), None);
+    }
+
+    #[test]
+    fn a_cut_off_or_malformed_chunked_body_is_refused() {
+        for body in [
+            &b"5\r\nhel"[..],
+            b"5\r\nhello",
+            b"5\r\nhelloXX0\r\n\r\n",
+            b"zz\r\nhello\r\n0\r\n\r\n",
+            b"5\r\nhello\r\n",
+            b"ffffffffffffffff\r\nhello\r\n0\r\n\r\n",
+        ] {
+            assert!(decode_chunked(body).is_err(), "{body:?} must be refused");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_large_request_goes_out_in_frames_every_transport_takes() {
+        let (client, mut server) = in_memory::pair();
+        let body = vec![7u8; 3 * crate::aead_stream::MAX_CHUNK];
+        let expected = encode_request(&TunneledRequest {
+            method: "PUT".into(),
+            path: "/blob".into(),
+            host: "lakko.invalid".into(),
+            headers: vec![],
+            body: body.clone(),
+        });
+        let server_task = tokio::spawn(async move {
+            let mut got = Vec::new();
+            while got.len() < expected.len() {
+                let frame = server.recv().await.unwrap();
+                assert!(frame.len() <= crate::aead_stream::MAX_CHUNK);
+                got.extend_from_slice(&frame);
+            }
+            assert_eq!(got, expected);
+            server
+                .send(Bytes::from_static(b"HTTP/1.1 204 No Content\r\n\r\n"))
+                .await
+                .unwrap();
+            let _ = server.close().await;
+        });
+        let req = TunneledRequest {
+            method: "PUT".into(),
+            path: "/blob".into(),
+            host: "lakko.invalid".into(),
+            headers: vec![],
+            body,
+        };
+        let resp = tunneled_request(client, &req).await.unwrap();
+        assert_eq!(resp.status, 204);
+        server_task.await.unwrap();
     }
 
     #[tokio::test]

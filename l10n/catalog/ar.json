@@ -58,6 +58,14 @@
       "text": "إذا نسيتها، يمكنك العودة إلى حسابك بجهاز آخر لا يزال مسجّل الدخول، أو بمفتاح مرور، أو بعبارة الاسترداد، أو بثلاث كلمات منها، أو بتطبيق مصادقة.",
       "status": "machine"
     },
+    "auth.key_store_unavailable.body": {
+      "text": "حلقة مفاتيح النظام غير متاحة. افتح قفلها أو ثبّت واحدة، ثم حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "لا يستطيع Lakko حفظ مفاتيحك بأمان على هذا الكمبيوتر.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "تغيير اللغة",
       "status": "machine"
@@ -3382,6 +3390,10 @@
       "text": "إنشاء",
       "status": "machine"
     },
+    "chats.create.open_link": {
+      "text": "فتح رابط",
+      "status": "machine"
+    },
     "chats.empty.action": {
       "text": "ابدأ واحدة",
       "status": "machine"
@@ -4042,6 +4054,46 @@
       "text": "هذا الرمز ليس رابط Lakko. جرّب رمزًا آخر.",
       "status": "machine"
     },
+    "desktop.capture.body": {
+      "text": "اسمح به في إعدادات الخصوصية في نظامك، ثم حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "لا يستطيع Lakko استخدام الكاميرا.",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "لا يستطيع Lakko استخدام الميكروفون.",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "فتح الإعدادات",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "إنهاء المكالمة والخروج",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "هل تريد إنهاء المكالمة والخروج؟",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "ستصلك الرسائل والمكالمات. للإيقاف، أنهِ التطبيق من أيقونة شريط النظام.",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "لا يزال Lakko قيد التشغيل.",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "فتح Lakko",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "إنهاء Lakko",
+      "status": "machine"
+    },
     "device_link.code.enter_six_digits": {
       "text": "أدخل الأرقام الستة التي يعرضها جهازك الآخر.",
       "status": "machine"
@@ -4292,10 +4344,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "افتح Lakko لرؤية أجهزتك.",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "فتح الأجهزة",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -6366,6 +6414,10 @@
       "text": "الإعدادات",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "الإعدادات. تمت إضافة جهاز إلى حسابك",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "المجموعات",
       "status": "machine"
@@ -6464,6 +6516,34 @@
     },
     "notification.message.new": {
       "text": "رسالة جديدة",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "فتح في التطبيق",
+      "status": "machine"
+    },
+    "open_in_app.copied": {
+      "text": "تم نسخ الرابط. الصقه في التطبيق.",
+      "status": "machine"
+    },
+    "open_link.field": {
+      "text": "الرابط",
+      "status": "machine"
+    },
+    "open_link.hint": {
+      "text": "الصق رابط دعوة أو مكالمة أو مجموعة من Lakko.",
+      "status": "machine"
+    },
+    "open_link.hint_copied": {
+      "text": "نسخت الصفحة هذا الرابط. الصقه هنا لفتحه.",
+      "status": "machine"
+    },
+    "open_link.not_lakko": {
+      "text": "هذا ليس رابط Lakko. تحقق منه وحاول مرة أخرى.",
+      "status": "machine"
+    },
+    "open_link.open": {
+      "text": "فتح",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7422,6 +7502,54 @@
       "text": "كيف يحميك Lakko",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "إغلاق النافذة",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "الدردشات، الموجز، جهات الاتصال، المكالمات، الإعدادات",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "تعديل رسالتي الأخيرة (في حقل رسالة فارغ)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "إغلاق قائمة أو مربع حوار أو لوحة؛ الخروج من البحث",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "تبديل مجلد المحادثات",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "محادثة جديدة",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "المحادثة السابقة أو التالية",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "الخروج من Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "البحث في المحادثات والأشخاص",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "الإرسال أو بدء سطر جديد",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "الإعدادات",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "اختصارات لوحة المفاتيح",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "تم تحديث الترجمات {date}",
       "status": "machine"
@@ -7610,12 +7738,40 @@
       "text": "بياناتك",
       "status": "machine"
     },
+    "settings.desktop.keep_running.sub": {
+      "text": "ستصلك الرسائل والمكالمات والنافذة مغلقة.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "مواصلة العمل عند إغلاق النافذة",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "كيف يعمل Lakko على هذا الكمبيوتر.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "فتح Lakko عند تسجيل الدخول إلى هذا الكمبيوتر",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "تعذّرت قراءة هذه الإعدادات. افتح الإعدادات مرة أخرى.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "تعذّر تغيير هذا الإعداد. حاول مرة أخرى.",
+      "status": "machine"
+    },
     "settings.devices.add.lede": {
       "text": "سجّل الدخول إلى Lakko على الجهاز الجديد أولًا. ثم اختر أيّ الجهازين يعرض رمزًا.",
       "status": "machine"
     },
     "settings.devices.add.no_camera": {
       "text": "لا توجد كاميرا على أيّ من الجهازين؟ سجّل الدخول على الجهاز الجديد واختر «{method}»: ستظهر هنا رسالة «{prompt}» مع رمز للمقارنة.",
+      "status": "machine"
+    },
+    "settings.devices.attention_a11y": {
+      "text": "الأجهزة. تمت إضافة جهاز إلى حسابك",
       "status": "machine"
     },
     "settings.devices.device_n": {
@@ -8148,6 +8304,10 @@
     },
     "settings.section.security": {
       "text": "الأمان",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "الأمان. تمت إضافة جهاز إلى حسابك",
       "status": "machine"
     },
     "settings.security.devices.sub": {

@@ -28,6 +28,7 @@
  * before it (the staged wipe a recall begins from) does not, and a plain
  * sign-out never does.
  */
+import type { DeviceCipher } from "./device-cipher";
 import type { WipeMark } from "./account-store-gate";
 import { deriveDeviceRootKeyFromIdentitySeed } from "./device-key";
 import { deleteDeviceKey, getDeviceKey, putDeviceKey } from "./key-store";
@@ -43,7 +44,7 @@ export const PHRASE_NOT_STORED_KEY = "restore_identity.lost.error.phrase_not_sto
 export interface StagedResetPhrase {
   /** The device key the phrase is wrapped under; the reset's landing uses it
    *  so it does not mint another. */
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   /** The server step did not happen (it failed, or the route was overtaken
    *  before it): put the row, and a device key minted here, back. Never
    *  throws. */
@@ -67,7 +68,7 @@ export async function stageResetPhrase(args: {
    *  the account has none here). Not consumed. */
   readonly seed: Uint8Array;
   /** The account's device key when the route holds one. */
-  readonly deviceKey: CryptoKey | null;
+  readonly deviceKey: DeviceCipher | null;
   readonly wipes: WipeMark;
 }): Promise<StagedResetPhrase> {
   const refuse = (why: string): KeyedError => {
@@ -78,7 +79,7 @@ export async function stageResetPhrase(args: {
   let deviceKey = args.deviceKey;
   let mintedKey = false;
   if (deviceKey === null) {
-    let stored: CryptoKey | null;
+    let stored: DeviceCipher | null;
     try {
       stored = await getDeviceKey(args.accountIdB64);
     } catch {

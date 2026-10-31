@@ -294,6 +294,7 @@ impl Transport for WebTransportPt {
             session,
             send,
             recv,
+            inbound: Vec::new(),
             closed: false,
         }))
     }
@@ -475,6 +476,9 @@ struct WebTransportConnection {
     session: Session,
     send: SendStream,
     recv: RecvStream,
+    /// Bytes read and not yet a whole frame. They live here, not in `recv`'s
+    /// future, because a relay drops `recv` whenever something goes out first.
+    inbound: Vec<u8>,
     closed: bool,
 }
 
@@ -502,29 +506,33 @@ impl Connection for WebTransportConnection {
     }
 
     async fn recv(&mut self) -> Result<Bytes> {
-        let mut len_buf = [0u8; FRAME_LEN_PREFIX];
-        self.recv.read_exact(&mut len_buf).await.map_err(|e| {
-            // Distinguish clean close from an I/O error so
-            // the caller can branch.
-            if is_clean_close(&e) {
-                Error::PeerClosed
-            } else {
-                Error::Io(format!("read_len: {e}"))
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            if let Some(header) = self.inbound.get(..FRAME_LEN_PREFIX) {
+                let mut len_buf = [0u8; FRAME_LEN_PREFIX];
+                len_buf.copy_from_slice(header);
+                let len = u32::from_be_bytes(len_buf) as usize;
+                if len > MAX_FRAME_BYTES {
+                    return Err(Error::FrameTooLarge {
+                        actual: len,
+                        limit: MAX_FRAME_BYTES,
+                    });
+                }
+                let end = FRAME_LEN_PREFIX + len;
+                if self.inbound.len() >= end {
+                    let frame = Bytes::copy_from_slice(&self.inbound[FRAME_LEN_PREFIX..end]);
+                    self.inbound.drain(..end);
+                    return Ok(frame);
+                }
             }
-        })?;
-        let len = u32::from_be_bytes(len_buf) as usize;
-        if len > MAX_FRAME_BYTES {
-            return Err(Error::FrameTooLarge {
-                actual: len,
-                limit: MAX_FRAME_BYTES,
-            });
+            // `read` is cancel-safe: dropped before it completes, it took nothing.
+            match self.recv.read(&mut chunk).await {
+                Ok(Some(n)) => self.inbound.extend_from_slice(&chunk[..n]),
+                Ok(None) if self.inbound.is_empty() => return Err(Error::PeerClosed),
+                Ok(None) => return Err(Error::Io("stream ended inside a frame".into())),
+                Err(e) => return Err(Error::Io(format!("read: {e}"))),
+            }
         }
-        let mut buf = vec![0u8; len];
-        self.recv
-            .read_exact(&mut buf)
-            .await
-            .map_err(|e| Error::Io(format!("read_payload: {e}")))?;
-        Ok(Bytes::from(buf))
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -607,24 +615,10 @@ impl WebTransportListener {
             session,
             send,
             recv,
+            inbound: Vec::new(),
             closed: false,
         }))
     }
-}
-
-/// Distinguish a clean WebTransport close from a
-/// transport-layer I/O error so `recv()` can map to the
-/// right Lakko variant.
-///
-/// `FinishedEarly` means the peer FIN'd the send half
-/// before the requested byte count was filled — that is
-/// the canonical "clean close" signal on a quinn /
-/// WebTransport stream. Every other variant of
-/// `ReadExactError` indicates a real I/O / session
-/// failure.
-fn is_clean_close(err: &web_transport_quinn::ReadExactError) -> bool {
-    use web_transport_quinn::ReadExactError;
-    matches!(err, ReadExactError::FinishedEarly(_))
 }
 
 /// Wraps an arc-cloneable handle for the rare case a

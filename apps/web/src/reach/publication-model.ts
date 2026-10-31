@@ -289,6 +289,51 @@ export function termsToEvaluate(state: PublicationState, terms: readonly string[
   return [...new Set(terms)].filter((t) => !(t in state.termOutputs));
 }
 
+/** One term to evaluate: its cache key and the OPRF round (base64 output). */
+export interface TermRound {
+  readonly key: string;
+  readonly evaluate: () => Promise<string>;
+}
+
+/** How long a term waits once after a rate limit: a long name has more terms
+ *  than the server's burst, and the bucket refills about one per second.
+ *  Chosen, not measured. */
+export const TERM_RATE_LIMIT_WAIT_MS = 8000;
+
+/**
+ * Evaluate the terms not yet kept, keeping each output as soon as it is known.
+ *
+ * Each evaluation costs an anonymous token, so a failure must not lose the
+ * ones already paid for: a build that failed part way resumes where it stopped.
+ * Keeping them only at the end spent a token per term on every retry, and the
+ * retries ran through the account's daily quota without ever finishing.
+ */
+export async function evaluateMissingTerms(
+  state: PublicationState,
+  terms: readonly TermRound[],
+  deps: {
+    readonly keep: (termOutputs: Readonly<Record<string, string>>) => Promise<void>;
+    readonly isRateLimited: (err: unknown) => boolean;
+    readonly wait: (ms: number) => Promise<void>;
+  },
+): Promise<void> {
+  const missing = new Set(termsToEvaluate(state, terms.map((t) => t.key)));
+  let kept = state.termOutputs;
+  for (const term of terms) {
+    if (!missing.delete(term.key)) continue;
+    let output: string;
+    try {
+      output = await term.evaluate();
+    } catch (err) {
+      if (!deps.isRateLimited(err)) throw err;
+      await deps.wait(TERM_RATE_LIMIT_WAIT_MS);
+      output = await term.evaluate();
+    }
+    kept = { ...kept, [term.key]: output };
+    await deps.keep(kept);
+  }
+}
+
 /** Version of the persisted row. 2: `termOutputs` and the Everyone `key`
  *  (ADR-0060 section 5: discovery holds lookup keys, never OPRF outputs). A
  *  row of any other version reads as empty, so a device that published under

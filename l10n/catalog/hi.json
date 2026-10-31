@@ -58,6 +58,14 @@
       "text": "अगर आप इसे भूल जाएँ, तो कोई दूसरा डिवाइस जिस पर अभी भी लॉग इन है, कोई पासकी, आपकी रिकवरी फ़्रेज़, उसके तीन शब्द, या कोई ऑथेंटिकेटर ऐप आपको वापस अकाउंट में ले आता है।",
       "status": "machine"
     },
+    "auth.key_store_unavailable.body": {
+      "text": "आपके सिस्टम का कीरिंग उपलब्ध नहीं है। उसे अनलॉक करें या कोई इंस्टॉल करें, फिर दोबारा कोशिश करें।",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko इस कंप्यूटर पर आपकी कुंजियाँ सुरक्षित रूप से नहीं रख सकता।",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "भाषा बदलें",
       "status": "machine"
@@ -3382,6 +3390,10 @@
       "text": "बनाएँ",
       "status": "machine"
     },
+    "chats.create.open_link": {
+      "text": "लिंक खोलें",
+      "status": "machine"
+    },
     "chats.empty.action": {
       "text": "शुरू करें",
       "status": "machine"
@@ -4042,6 +4054,46 @@
       "text": "यह कोड Lakko लिंक नहीं है। कोई दूसरा कोड आज़माएँ।",
       "status": "machine"
     },
+    "desktop.capture.body": {
+      "text": "अपने सिस्टम की निजता सेटिंग में इसकी अनुमति दें, फिर दोबारा कोशिश करें।",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko आपके कैमरे का उपयोग नहीं कर सकता।",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko आपके माइक्रोफ़ोन का उपयोग नहीं कर सकता।",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "सेटिंग खोलें",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "कॉल खत्म करें और बाहर निकलें",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "कॉल खत्म करके बाहर निकलें?",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "आपको संदेश और कॉल मिलते रहेंगे। बंद करने के लिए ट्रे आइकन से बाहर निकलें।",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko अभी भी चल रहा है।",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "Lakko खोलें",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "Lakko बंद करें",
+      "status": "machine"
+    },
     "device_link.code.enter_six_digits": {
       "text": "आपके दूसरे डिवाइस पर दिख रहे छह अंक डालें।",
       "status": "machine"
@@ -4292,10 +4344,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "अपने डिवाइस देखने के लिए Lakko खोलें।",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "डिवाइस खोलें",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -6366,6 +6414,10 @@
       "text": "सेटिंग्स",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "सेटिंग्स. आपके खाते में एक डिवाइस जोड़ा गया",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "ग्रुप",
       "status": "machine"
@@ -6464,6 +6516,34 @@
     },
     "notification.message.new": {
       "text": "नया मैसेज",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "ऐप में खोलें",
+      "status": "machine"
+    },
+    "open_in_app.copied": {
+      "text": "लिंक कॉपी हो गया। इसे ऐप में पेस्ट करें।",
+      "status": "machine"
+    },
+    "open_link.field": {
+      "text": "लिंक",
+      "status": "machine"
+    },
+    "open_link.hint": {
+      "text": "Lakko का आमंत्रण, कॉल या समूह लिंक पेस्ट करें।",
+      "status": "machine"
+    },
+    "open_link.hint_copied": {
+      "text": "पेज ने यह लिंक कॉपी किया। खोलने के लिए इसे यहाँ पेस्ट करें।",
+      "status": "machine"
+    },
+    "open_link.not_lakko": {
+      "text": "यह Lakko लिंक नहीं है। जाँचकर फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "open_link.open": {
+      "text": "खोलें",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7422,6 +7502,54 @@
       "text": "Lakko आपकी सुरक्षा कैसे करता है",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "विंडो बंद करें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "चैट, फ़ीड, संपर्क, कॉल, सेटिंग्स",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "मेरा आखिरी संदेश संपादित करें (खाली संदेश फ़ील्ड में)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "मेनू, डायलॉग या शीट बंद करें; खोज से बाहर निकलें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "चैट फ़ोल्डर बदलें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "नई चैट",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "पिछली या अगली बातचीत",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Lakko से बाहर निकलें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "बातचीत और लोग खोजें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "भेजें या नई पंक्ति शुरू करें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "सेटिंग",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "कीबोर्ड शॉर्टकट",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "अनुवाद अपडेट किए गए {date}",
       "status": "machine"
@@ -7610,12 +7738,40 @@
       "text": "आपका डेटा",
       "status": "machine"
     },
+    "settings.desktop.keep_running.sub": {
+      "text": "विंडो बंद होने पर भी आपको संदेश और कॉल मिलेंगे।",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "विंडो बंद होने पर भी चलता रहे",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "इस कंप्यूटर पर Lakko कैसे चलता है।",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "इस कंप्यूटर में साइन इन करने पर Lakko खोलें",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "ये सेटिंग पढ़ी नहीं जा सकीं। सेटिंग फिर से खोलें।",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "यह सेटिंग बदली नहीं जा सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
     "settings.devices.add.lede": {
       "text": "पहले नए डिवाइस पर Lakko में साइन इन करें। फिर चुनें कि दोनों में से कौन-सा कोड दिखा रहा है।",
       "status": "machine"
     },
     "settings.devices.add.no_camera": {
       "text": "किसी भी डिवाइस में कैमरा नहीं है? नए डिवाइस पर साइन इन करें और \"{method}\" चुनें: यहाँ मिलान के लिए एक कोड के साथ \"{prompt}\" संदेश दिखेगा।",
+      "status": "machine"
+    },
+    "settings.devices.attention_a11y": {
+      "text": "डिवाइस. आपके खाते में एक डिवाइस जोड़ा गया",
       "status": "machine"
     },
     "settings.devices.device_n": {
@@ -8148,6 +8304,10 @@
     },
     "settings.section.security": {
       "text": "सुरक्षा",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "सुरक्षा. आपके खाते में एक डिवाइस जोड़ा गया",
       "status": "machine"
     },
     "settings.security.devices.sub": {

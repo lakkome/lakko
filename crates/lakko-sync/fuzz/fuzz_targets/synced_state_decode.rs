@@ -3,7 +3,7 @@
 
 //! Fuzz target — the byte decoders of the synced state (`lakko-sync`).
 //!
-//! Five decoders run on bytes this device did not write:
+//! Six decoders run on bytes this device did not write:
 //!
 //! * `decode_lineage_envelope` (ADR-0073 R.5): a conversation-lineage
 //!   envelope another device of the same account sent over the DeviceGroup's
@@ -24,6 +24,10 @@
 //!   every length checked against its bound before any copy, strictly
 //!   ascending link ids, no trailing bytes; a revoked record it carries must
 //!   be held revoked after the fold.
+//! * `decode_device_ack_envelope` (identity-recovery 17.5): the devices
+//!   whose added-device warning was seen, sent the same way. Domain,
+//!   version, a bounded count, fixed-size entries, strictly ascending keys,
+//!   no trailing bytes; an accepted envelope folds to exactly its keys.
 //! * `SyncedState::from_bytes` (ADR-0058): the persisted fold, which is also
 //!   what the backup payload carries, so a hostile storage tier chooses it.
 //!   Version 7 since the conversation-end register (ADR-0087 section 9),

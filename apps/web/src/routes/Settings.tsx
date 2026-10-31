@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `/settings/:section?` — Profile · Privacy · Security · Chat folders · Appearance ·
+ * `/settings/:section?` — Profile · Privacy · Security · Notifications (desktop
+ * only, docs/ux/desktop.md 3.1) · Chat folders · Appearance ·
  * Language · Media · About · Account (docs/ux/client-redesign.md section 5.5; Privacy is
  * docs/ux/who-can-find-me.md). A section list on the
  * left, the section on the right; a narrow screen shows one of the two.
@@ -38,11 +39,21 @@ import Profile from "./Profile";
 import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { ChatFoldersSection } from "../chat/folders/ChatFoldersSection";
 import { paths } from "./paths";
+import { isDesktop } from "../platform";
+import {
+  AntiCensorshipCard,
+  DesktopNotificationsSection,
+  KeyboardShortcutsCard,
+} from "../settings/DesktopSettings";
+import { sectionsForBuild, showsShortcutList } from "../settings/desktop-only";
+import { addedNotice, badgeVisible } from "../devices/added-notice";
+import { DevicesAttention, devicesNeedAttention } from "../devices/DeviceAddedNotice";
 
 type Section =
   | "profile"
   | "privacy"
   | "security"
+  | "notifications"
   | "folders"
   | "appearance"
   | "language"
@@ -52,12 +63,14 @@ type Section =
 type Page = Section | "recovery" | "privacy-groups" | "privacy-contacts";
 
 // Language sits after Appearance (`docs/ux/localization.md` section 1).
-const SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconName }> = [
+const ALL_SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconName }> = [
   { id: "profile", labelKey: "settings.section.profile", icon: "user" },
   { id: "privacy", labelKey: "settings.section.privacy", icon: "eye" },
   { id: "security", labelKey: "settings.section.security", icon: "shield" },
-  // docs/ux/chat-folders.md section 4 - between Notifications (which the web
-  // does not have) and Appearance.
+  // docs/ux/desktop.md section 3.1 - desktop only; the web has no
+  // Notifications section.
+  { id: "notifications", labelKey: "settings.section.notifications", icon: "bell" },
+  // docs/ux/chat-folders.md section 4 - between Notifications and Appearance.
   { id: "folders", labelKey: "settings.section.folders", icon: "folder" },
   { id: "appearance", labelKey: "settings.section.appearance", icon: "palette" },
   { id: "language", labelKey: "settings.language.title", icon: "globe" },
@@ -65,6 +78,9 @@ const SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconName }>
   { id: "about", labelKey: "settings.section.about", icon: "info" },
   { id: "account", labelKey: "settings.section.account", icon: "logout" },
 ];
+
+/** The sections this build has: Notifications only in the desktop app. */
+const SECTIONS = sectionsForBuild(ALL_SECTIONS, isDesktop());
 
 /** The interface language in its own name: the Language row's trailing text. */
 function currentLanguageOwnName(): string {
@@ -135,9 +151,19 @@ export default function Settings(): JSX.Element {
             classList={{ active: highlighted() === s.id && page() !== null }}
             activeClass=""
             inactiveClass=""
+            // The Devices row lives in Security: on a wide screen Settings
+            // opens on Profile, so the section entry carries the badge too.
+            aria-label={
+              s.id === "security" && devicesNeedAttention()
+                ? t("settings.security.attention_a11y")
+                : undefined
+            }
           >
             <Icon name={s.icon} size={20} />
             <span>{t(s.labelKey)}</span>
+            <Show when={s.id === "security"}>
+              <DevicesAttention />
+            </Show>
             <Show when={s.id === "language"}>
               <span class="lk-settings-nav-trail">
                 <bdi lang={currentLanguage()}>{currentLanguageOwnName()}</bdi>
@@ -170,6 +196,9 @@ export default function Settings(): JSX.Element {
           </Show>
           <Show when={shown() === "recovery"}>
             <RecoveryPage />
+          </Show>
+          <Show when={shown() === "notifications"}>
+            <DesktopNotificationsSection />
           </Show>
           <Show when={shown() === "folders"}>
             <ChatFoldersSection />
@@ -264,6 +293,9 @@ function SecuritySection(): JSX.Element {
       <PasswordCard />
       <PasskeysSection />
       <ChannelsIShareCard />
+      <Show when={isDesktop()}>
+        <AntiCensorshipCard />
+      </Show>
       <section class="lk-card">
         <h2>{t("settings.security.devices_and_recovery")}</h2>
         <div class="lk-card-row">
@@ -271,10 +303,17 @@ function SecuritySection(): JSX.Element {
             <Icon name="devices" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">{t("settings.devices.title")}</span>
+            <span class="lk-card-row-title">
+              {t("settings.devices.title")}
+              <DevicesAttention />
+            </span>
             <span class="lk-card-row-sub">{t("settings.security.devices.sub")}</span>
           </div>
-          <A href={paths.devices} class="lk-card-row-action">
+          <A
+            href={paths.devices}
+            class="lk-card-row-action"
+            aria-label={badgeVisible(addedNotice()) ? t("settings.devices.attention_a11y") : undefined}
+          >
             {t("common.manage")}
           </A>
         </div>
@@ -395,6 +434,9 @@ function AboutSection(): JSX.Element {
           </div>
         </div>
       </section>
+      <Show when={showsShortcutList(isDesktop())}>
+        <KeyboardShortcutsCard />
+      </Show>
     </>
   );
 }

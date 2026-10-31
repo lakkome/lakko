@@ -62,6 +62,14 @@
       "text": "If you forget it, you can get back in with another device that is still logged in, a passkey, your recovery phrase, three words from it, or an authenticator app.",
       "comment": "Third paragraph of the password explanation: the ways back into an account (another device, a passkey, the recovery phrase, three words of it, an authenticator app)."
     },
+    "auth.key_store_unavailable.body": {
+      "text": "Your system keyring isn't available. Unlock it or install one, then try again.",
+      "comment": "Body of the desktop key-store refusal screen; the button under it (common.try_again) repeats the step that failed."
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko can't store your keys safely on this computer.",
+      "comment": "Title of the desktop screen shown when the operating system's key store (Keychain, Windows key store, Linux keyring) is missing or refused. Sign-in stops here."
+    },
     "auth.language.button": {
       "text": "Change language",
       "comment": "Accessibility label of the globe button on the sign-in and sign-up screens."
@@ -3555,6 +3563,10 @@
       "text": "Create",
       "comment": "Accessible name of the menu for starting a chat, a group or a channel."
     },
+    "chats.create.open_link": {
+      "text": "Open a link",
+      "comment": "Item of the create menu on the desktop app: opens a pasted Lakko link."
+    },
     "chats.empty.action": {
       "text": "Start one",
       "comment": "Button under the empty conversation list; opens the menu for starting a chat, a group or a channel."
@@ -4228,6 +4240,46 @@
       "text": "This code is not a Lakko link. Try another code.",
       "comment": "Shown on the scanner when the scanned QR code is not a Lakko invite, group or call link."
     },
+    "desktop.capture.body": {
+      "text": "Allow it in your system's privacy settings, then try again.",
+      "comment": "Second line of the desktop screen shown when the operating system refused Lakko the microphone or camera."
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko can't use your camera.",
+      "comment": "Title of the desktop screen shown when the operating system refused Lakko the camera."
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko can't use your microphone.",
+      "comment": "Title of the desktop screen shown when the operating system refused Lakko the microphone."
+    },
+    "desktop.capture.open_settings": {
+      "text": "Open settings",
+      "comment": "Button that opens the operating system's privacy settings for the microphone or camera."
+    },
+    "desktop.quit_call.confirm": {
+      "text": "End call and quit",
+      "comment": "Desktop app: confirm button of the quit-during-a-call question."
+    },
+    "desktop.quit_call.title": {
+      "text": "End the call and quit?",
+      "comment": "Desktop app: question shown when the person quits Lakko during a call."
+    },
+    "desktop.still_running.body": {
+      "text": "You'll get messages and calls. Quit from the tray icon to stop.",
+      "comment": "Body of the one notification shown the first time the window closes while Lakko keeps running, on Windows and Linux."
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko is still running.",
+      "comment": "Title of the one notification shown the first time the window closes while Lakko keeps running, on Windows and Linux."
+    },
+    "desktop.tray.open": {
+      "text": "Open Lakko",
+      "comment": "Tray icon menu item that opens the window, on Windows and Linux."
+    },
+    "desktop.tray.quit": {
+      "text": "Quit Lakko",
+      "comment": "Tray icon menu item that stops the app, on Windows and Linux."
+    },
     "device_link.code.enter_six_digits": {
       "text": "Enter the six digits your other device shows.",
       "comment": "Error under the code field when what was typed is not six digits."
@@ -4497,30 +4549,26 @@
     },
     "devices.added_notice.not_you": {
       "text": "If this was not you, remove the device, then change your password.",
-      "comment": "Second line of the notice shown on a person's other devices after a new device joined their own account. Tells them what to do if they did not add it.",
+      "comment": "Second line of the explanation shown in Settings > Devices after a new device joined the person's own account. Tells them what to do if they did not add it.",
       "security_critical": true
     },
     "devices.added_notice.notification_body": {
       "text": "Open Lakko to see your devices.",
-      "comment": "Body of the system notification shown when a new device joined the person's own account while Lakko was running but not in front. The notification title is 'A device was added to your account'."
-    },
-    "devices.added_notice.open_devices": {
-      "text": "Open Devices",
-      "comment": "Button on the 'A device was added to your account' notice. Opens Settings > Devices, where the device can be removed. 'Devices' is the name of that settings screen."
+      "comment": "Body of the system notification posted on the person's other devices when a new device joined their own account. Tapping it opens Settings > Devices. The notification title is 'A device was added to your account'."
     },
     "devices.added_notice.title": {
       "text": "A device was added to your account",
-      "comment": "Title of the notice shown on a person's other devices after one new device joined their own account. Also the title of the matching system notification.",
+      "comment": "Title of the explanation above the list in Settings > Devices, and of the system notification, after one new device joined the person's own account.",
       "security_critical": true
     },
     "devices.added_notice.title_many": {
       "text": "Devices were added to your account",
-      "comment": "Title of the same notice when two or more new devices joined the person's own account since the notice was last dismissed.",
+      "comment": "The same title when two or more new devices joined the person's own account and the person has not looked at them yet.",
       "security_critical": true
     },
     "devices.added_notice.when": {
       "text": "Added {date}.",
-      "comment": "First line of the 'A device was added to your account' notice. {date} is the date and time the device joined, formatted by the device (for example '6 Oct 2026, 14:05'). With several devices it is the most recent one."
+      "comment": "First line of the 'A device was added to your account' explanation in Settings > Devices. {date} is the date and time the device joined, formatted by the device (for example '6 Oct 2026, 14:05'). With several devices it is the most recent one."
     },
     "devices.pairing.qr_description": {
       "text": "Pairing QR code",
@@ -6696,6 +6744,11 @@
       "text": "Settings",
       "comment": "Primary navigation: settings."
     },
+    "nav.settings.attention_a11y": {
+      "text": "Settings. A device was added to your account",
+      "comment": "Accessible name of the Settings navigation destination while it carries the exclamation-mark badge: a new device joined the person's own account and the person has not looked at it yet in Settings > Devices.",
+      "security_critical": true
+    },
     "new_group.back": {
       "text": "Groups",
       "comment": "Web: back button to the groups list on a narrow screen."
@@ -6806,6 +6859,34 @@
     "notification.message.new": {
       "text": "New message",
       "comment": "Notification text when a new message arrived but its content could not be shown on this device."
+    },
+    "open_in_app.button": {
+      "text": "Open in the app",
+      "comment": "Button on the invite, call-link and group-invite web pages: opens the desktop app."
+    },
+    "open_in_app.copied": {
+      "text": "Link copied. Paste it in the app.",
+      "comment": "After Open in the app on Windows or Linux: the link was copied."
+    },
+    "open_link.field": {
+      "text": "Link",
+      "comment": "Label of the link field in the Open a link dialog."
+    },
+    "open_link.hint": {
+      "text": "Paste a Lakko invite, call or group link.",
+      "comment": "Under the title of the Open a link dialog."
+    },
+    "open_link.hint_copied": {
+      "text": "The page copied this link. Paste it here to open it.",
+      "comment": "Open a link dialog, after the app was opened from a web page that copied the link."
+    },
+    "open_link.not_lakko": {
+      "text": "This is not a Lakko link. Check it and try again.",
+      "comment": "Under the field of the Open a link dialog when the text is not a Lakko link."
+    },
+    "open_link.open": {
+      "text": "Open",
+      "comment": "Button of the Open a link dialog."
     },
     "profile.avatar.change": {
       "text": "Change photo",
@@ -8035,6 +8116,54 @@
       "comment": "Row title in About.",
       "security_critical": true
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "Close the window",
+      "comment": "Keyboard shortcut list entry."
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "Chats, Feed, Contacts, Calls, Settings",
+      "comment": "Keyboard shortcut list entry for Mod+Shift+1 to Mod+Shift+5, which open these five destinations in this order."
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "Edit my last message (in an empty message field)",
+      "comment": "Keyboard shortcut list entry for the Up arrow."
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "Close a menu, dialog or sheet; leave a search",
+      "comment": "Keyboard shortcut list entry for Esc."
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "Switch chat folder",
+      "comment": "Keyboard shortcut list entry: selects a chat folder tab."
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "New chat",
+      "comment": "Keyboard shortcut list entry: opens the create menu."
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "Previous or next conversation",
+      "comment": "Keyboard shortcut list entry."
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Quit Lakko",
+      "comment": "Keyboard shortcut list entry (macOS)."
+    },
+    "settings.about.shortcuts.search": {
+      "text": "Search conversations and people",
+      "comment": "Keyboard shortcut list entry."
+    },
+    "settings.about.shortcuts.send": {
+      "text": "Send or start a new line",
+      "comment": "Keyboard shortcut list entry for Enter / Shift+Enter in the composer."
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "Settings",
+      "comment": "Keyboard shortcut list entry."
+    },
+    "settings.about.shortcuts.title": {
+      "text": "Keyboard shortcuts",
+      "comment": "Card title in Settings > About, desktop app."
+    },
     "settings.about.translations_updated": {
       "text": "Translations updated {date}",
       "comment": "Settings > About, shown when a signed translation update is active. {date} is a date formatted for the locale."
@@ -8239,6 +8368,30 @@
       "text": "Your data",
       "comment": "Card heading in Settings > Account: the data export."
     },
+    "settings.desktop.keep_running.sub": {
+      "text": "You'll get messages and calls while the window is closed.",
+      "comment": "Subtitle of the keep-running switch."
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "Keep running when the window is closed",
+      "comment": "Switch row in Settings > Notifications, desktop app. Off: closing the window quits."
+    },
+    "settings.desktop.lede": {
+      "text": "How Lakko runs on this computer.",
+      "comment": "Line under the Notifications title in Settings, desktop app."
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "Open Lakko when I sign in to this computer",
+      "comment": "Switch row in Settings > Notifications, desktop app. On: Lakko starts hidden at login."
+    },
+    "settings.desktop.read_failed": {
+      "text": "These settings could not be read. Open Settings again to retry.",
+      "comment": "Shown in Settings > Notifications, desktop app, when the current values could not be read."
+    },
+    "settings.desktop.save_failed": {
+      "text": "This setting could not be changed. Try again.",
+      "comment": "Shown under a desktop switch when the change was not saved; the switch keeps its old state."
+    },
     "settings.devices.add.lede": {
       "text": "Sign in to Lakko on the new device first. Then pick which of the two is showing a code.",
       "comment": "Text of the Add a device panel before choosing a side."
@@ -8246,6 +8399,11 @@
     "settings.devices.add.no_camera": {
       "text": "No camera on either device? Sign in on the new one and choose \"{method}\": an \"{prompt}\" prompt with a code to compare appears here.",
       "comment": "{method} is the recovery method name \"Another device\"; {prompt} is the prompt title \"Is this you?\". Both are passed already translated.",
+      "security_critical": true
+    },
+    "settings.devices.attention_a11y": {
+      "text": "Devices. A device was added to your account",
+      "comment": "Accessible name of the Devices row inside Settings while it carries the exclamation-mark badge: a new device joined the person's own account and the person has not looked at it yet.",
       "security_critical": true
     },
     "settings.devices.device_n": {
@@ -8851,6 +9009,11 @@
     "settings.section.security": {
       "text": "Security",
       "comment": "Settings section: passkeys, devices, recovery."
+    },
+    "settings.security.attention_a11y": {
+      "text": "Security. A device was added to your account",
+      "comment": "Accessible name of the Security entry in the Settings section list while it carries the exclamation-mark badge: a new device joined the person's own account and the person has not looked at it yet in Settings > Devices (which is inside Security).",
+      "security_critical": true
     },
     "settings.security.devices.sub": {
       "text": "See, add and remove the devices on this account.",

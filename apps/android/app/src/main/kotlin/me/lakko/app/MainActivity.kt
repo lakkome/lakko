@@ -55,6 +55,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -1959,24 +1961,40 @@ private fun SessionRoot(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
             if (showTabs) {
+                // docs/ux/identity-recovery.md 17.5 - while a new device of
+                // the account is pending, the Settings destination carries
+                // the attention badge.
+                val deviceNotice by me.lakko.app.devices.NewDeviceNotices.view.collectAsStateWithLifecycle()
                 NavigationBar {
                     for (tab in Tabs) {
                         val selected = currentRoute == tab.route
+                        val attention = tab.route == Routes.SETTINGS && deviceNotice.attention
                         NavigationBarItem(
                             selected = selected,
                             onClick = { navController.navigateToTab(tab.route) },
                             icon = {
+                                val label = me.lakko.app.l10n.t(tab.labelKey)
                                 val waiting = if (tab.route == Routes.CONTACTS) requestsWaiting else 0
+                                val name = if (attention) {
+                                    "$label, ${me.lakko.app.l10n.t("nav.settings.attention_a11y")}"
+                                } else {
+                                    label
+                                }
                                 androidx.compose.material3.BadgedBox(
                                     badge = {
-                                        if (waiting > 0) {
+                                        if (attention) {
+                                            me.lakko.app.ui.devices.AttentionBadge()
+                                        } else if (waiting > 0) {
                                             me.lakko.app.ui.chat.UnreadBadge(count = waiting, muted = false)
                                         }
+                                    },
+                                    modifier = Modifier.semantics(mergeDescendants = true) {
+                                        contentDescription = name
                                     },
                                 ) {
                                     Icon(
                                         imageVector = if (selected) tab.selectedIcon else tab.icon,
-                                        contentDescription = me.lakko.app.l10n.t(tab.labelKey),
+                                        contentDescription = null,
                                     )
                                 }
                             },
@@ -2018,10 +2036,10 @@ private fun SessionRoot(
                 // `crates/lakko-ui-rules`. A tap is routed by the ROW's kind,
                 // which is the only thing that kind is carried for.
                 composable(Routes.CHATS) {
-                    // docs/ux/identity-recovery.md 17.5 - "A device was added
-                    // to your account", above the list and its folder bar, on
-                    // every device but the added one and the one that let it
-                    // in. Not a modal; it stays until dismissed.
+                    // docs/ux/identity-recovery.md 17.5 (amended 2026-10-29) -
+                    // "A device was added to your account" is no longer a card
+                    // here: it is a notification, the badge on Settings and
+                    // the highlighted rows in Settings > Devices.
                     androidx.compose.foundation.layout.Column(modifier = Modifier.fillMaxSize()) {
                     // UX 18.4 - the session that took the account back.
                     me.lakko.app.ui.devices.RecallDoneLine(repository = authRepository)
@@ -2031,9 +2049,6 @@ private fun SessionRoot(
                     me.lakko.app.ui.devices.KeysRotatedNotice(
                         repository = authRepository,
                         onShowPhrase = { navController.navigate(Routes.RECOVERY) { launchSingleTop = true } },
-                    )
-                    me.lakko.app.ui.devices.NewDeviceNoticeBanner(
-                        onOpenDevices = { navController.navigate(Routes.DEVICES) { launchSingleTop = true } },
                     )
                     val invitedAll by contactsRepository.invited.collectAsStateWithLifecycle()
                     val contactsNow by contactsRepository.state.collectAsStateWithLifecycle()

@@ -45,6 +45,7 @@
  * to a future value gains nothing: the server-side HMAC binds the real
  * one). Flag day: a row of the single-token shape reads as absent.
  */
+import type { DeviceCipher } from "./device-cipher";
 import type { SessionPair } from "./session-pair";
 
 import { accountSessionWritable } from "./account-store-gate";
@@ -97,7 +98,7 @@ function openDb(): Promise<IDBDatabase> {
 export async function putSessionPair(
   accountIdB64: string,
   pair: SessionPair,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<void> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const plain: Plain = {
@@ -109,7 +110,7 @@ export async function putSessionPair(
   };
   const plaintext = new TextEncoder().encode(JSON.stringify(plain));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv }, deviceKey, plaintext),
+    await deviceKey.encrypt(iv, plaintext),
   );
   const envelope = new Uint8Array(iv.length + ct.length);
   envelope.set(iv, 0);
@@ -147,7 +148,7 @@ export async function putSessionPair(
  */
 export async function getSessionPair(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<SessionPair | null> {
   const db = await openDb();
   try {
@@ -171,7 +172,7 @@ export async function getSessionPair(
     const iv = row.ciphertext.slice(0, 12);
     const ct = row.ciphertext.slice(12);
     const plaintext = new Uint8Array(
-      await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
+      await deviceKey.decrypt(iv, ct),
     );
     const decoded = JSON.parse(new TextDecoder().decode(plaintext)) as Partial<Plain>;
     if (

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { subscribeAcceptedChanged } from "../contacts/local-store";
 import { BackupClient } from "./client";
 import { isBackupRestoreOwed } from "./restore-owed";
@@ -50,7 +51,7 @@ export interface AutoBackupDriverInputs {
   readonly knownGroupIds: () => readonly string[] | null;
   readonly accountIdB64: () => string | null;
   readonly ed25519Seed: () => Uint8Array | null;
-  readonly deviceKey: () => Promise<CryptoKey | null>;
+  readonly deviceKey: () => Promise<DeviceCipher | null>;
   readonly sessionToken: () => string | null;
   /** Injected by tests; production reads `restore-owed.ts`. */
   readonly restoreOwed?: (accountIdB64: string) => boolean;

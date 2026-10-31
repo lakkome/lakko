@@ -37,6 +37,7 @@ import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
+import { publicOrigin } from "../platform";
 
 /** Poll cadence for the PublisherGroup DS journal — same 5 s trade-off as
  *  the subscriber fan-out. */
@@ -90,7 +91,7 @@ export function CoPublishersPanel(props: {
         await createCoPublisherLink(
           props.identity,
           props.publisherGroup,
-          window.location.origin,
+          publicOrigin(),
           discovery,
           secrets === null ? null : base64Encode(secrets.accountId),
         ),

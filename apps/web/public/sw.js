@@ -1025,6 +1025,31 @@ self.addEventListener("notificationclick", (event) => {
     return;
   }
 
+  // "A device was added to your account" (identity-recovery UX 17.5): shown
+  // from here only where the page cannot show it itself. Tapping it opens
+  // Settings > Devices: an open tab is told to go there, else a new one
+  // opens on it.
+  if (event.notification.data?.lakkoDevicesNotice === true) {
+    event.waitUntil(
+      (async () => {
+        const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+        for (const c of clients) {
+          if (c.url.startsWith(self.location.origin)) {
+            try {
+              c.postMessage({ type: "LAKKO_OPEN_DEVICES" });
+            } catch {
+              // The client went away between `matchAll` and here.
+            }
+            await c.focus();
+            return;
+          }
+        }
+        await self.clients.openWindow("/devices");
+      })(),
+    );
+    return;
+  }
+
   const wake = event.notification.data?.wake;
   // ADR-0042 — `wake.groupHex` is the OPAQUE `push_gid`, which no SPA
   // surface can match against a group. `handlePush` already resolved it

@@ -58,6 +58,14 @@
       "text": "如果忘记密码，你可以通过另一台仍在登录的设备、通行密钥、恢复短语、恢复短语中的三个词或身份验证器应用重新登录。",
       "status": "machine"
     },
+    "auth.key_store_unavailable.body": {
+      "text": "你的系统密钥环不可用。请解锁或安装一个，然后重试。",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko 无法在这台电脑上安全地保存你的密钥。",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "更改语言",
       "status": "machine"
@@ -3382,6 +3390,10 @@
       "text": "创建",
       "status": "machine"
     },
+    "chats.create.open_link": {
+      "text": "打开链接",
+      "status": "machine"
+    },
     "chats.empty.action": {
       "text": "开始聊天",
       "status": "machine"
@@ -4042,6 +4054,46 @@
       "text": "这不是 Lakko 链接。请换一个二维码。",
       "status": "machine"
     },
+    "desktop.capture.body": {
+      "text": "请在系统隐私设置中允许，然后重试。",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko 无法使用你的摄像头。",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko 无法使用你的麦克风。",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "打开设置",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "结束通话并退出",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "结束通话并退出？",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "你仍会收到消息和通话。要停止，请从托盘图标退出。",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko 仍在运行。",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "打开 Lakko",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "退出 Lakko",
+      "status": "machine"
+    },
     "device_link.code.enter_six_digits": {
       "text": "请输入你另一台设备上显示的六位数字。",
       "status": "machine"
@@ -4292,10 +4344,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "打开 Lakko 查看你的设备。",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "打开“设备”",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -6366,6 +6414,10 @@
       "text": "设置",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "设置。有设备添加到了你的账号",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "群组",
       "status": "machine"
@@ -6464,6 +6516,34 @@
     },
     "notification.message.new": {
       "text": "新消息",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "在应用中打开",
+      "status": "machine"
+    },
+    "open_in_app.copied": {
+      "text": "链接已复制。请在应用中粘贴。",
+      "status": "machine"
+    },
+    "open_link.field": {
+      "text": "链接",
+      "status": "machine"
+    },
+    "open_link.hint": {
+      "text": "粘贴 Lakko 邀请、通话或群组链接。",
+      "status": "machine"
+    },
+    "open_link.hint_copied": {
+      "text": "页面已复制此链接。请粘贴到此处打开。",
+      "status": "machine"
+    },
+    "open_link.not_lakko": {
+      "text": "这不是 Lakko 链接。请检查后重试。",
+      "status": "machine"
+    },
+    "open_link.open": {
+      "text": "打开",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7422,6 +7502,54 @@
       "text": "Lakko 如何保护你",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "关闭窗口",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "聊天、动态、联系人、通话、设置",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "编辑我的最后一条消息（在空的消息框中）",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "关闭菜单、对话框或面板；退出搜索",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "切换聊天文件夹",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "新聊天",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "上一个或下一个对话",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "退出 Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "搜索对话和联系人",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "发送或换行",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "设置",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "键盘快捷键",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "翻译已更新 {date}",
       "status": "machine"
@@ -7610,12 +7738,40 @@
       "text": "你的数据",
       "status": "machine"
     },
+    "settings.desktop.keep_running.sub": {
+      "text": "窗口关闭时仍会收到消息和通话。",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "关闭窗口后继续运行",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "Lakko 在这台电脑上的运行方式。",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "登录这台电脑时打开 Lakko",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "无法读取这些设置。请重新打开设置。",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "无法更改此设置。请重试。",
+      "status": "machine"
+    },
     "settings.devices.add.lede": {
       "text": "先在新设备上登录 Lakko。然后选择两台设备中哪一台正在显示代码。",
       "status": "machine"
     },
     "settings.devices.add.no_camera": {
       "text": "两台设备都没有摄像头？在新设备上登录并选择“{method}”：这里会出现带有核对代码的“{prompt}”提示。",
+      "status": "machine"
+    },
+    "settings.devices.attention_a11y": {
+      "text": "设备。有设备添加到了你的账号",
       "status": "machine"
     },
     "settings.devices.device_n": {
@@ -8148,6 +8304,10 @@
     },
     "settings.section.security": {
       "text": "安全",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "安全。有设备添加到了你的账号",
       "status": "machine"
     },
     "settings.security.devices.sub": {

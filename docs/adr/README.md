@@ -84,3 +84,4 @@ detail, and `Implemented` is used where the decision is fully landed.
 | [0077](0077-account-binding-and-store-gate.md) | Accepted | Work started for one account never acts for another; a wiped account's stores take no late write; a refused persist publishes nothing |
 | [0078](0078-servers-cannot-link-accounts.md) | Proposed | Lakko's servers cannot link accounts: sealed senders, anonymous admission, unlinkable ids |
 | [0083](0083-screen-share.md) | Accepted | Screen sharing: one share per call, ordered the same on every device |
+| [0085](0085-desktop-client.md) | Proposed | The desktop client is a Tauri host that keeps the keys and talks to the network; the web client's code runs inside it |

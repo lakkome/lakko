@@ -104,6 +104,7 @@ pub use shadowsocks::{
     ReplayWindow as ShadowsocksReplayWindow, ShadowsocksConfig, ShadowsocksConnection,
     ShadowsocksHeaderError, ShadowsocksListener, ShadowsocksTransport,
 };
+pub use tokio_tungstenite::tungstenite;
 pub use transport::{Connection, Listener, Transport, MAX_FRAME_BYTES};
 pub use tunnel_http::{
     tunneled_request, tunneled_request_via_dialer, TunnelHttpError, TunneledRequest,

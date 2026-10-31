@@ -66,6 +66,7 @@
  *
  *   * Multi-account on a single device.
  */
+import { type DeviceCipher, KeyStoreUnavailableError } from "./device-cipher";
 import {
   createContext,
   createEffect,
@@ -750,6 +751,15 @@ export interface AuthApi {
    *  (`SignedOutState`). While non-null both route guards render the
    *  signed-out screen instead of any route, whatever `state()` says. */
   readonly signedOut: Accessor<SignedOutState | null>;
+  /** ADR-0085 (desktop, `docs/ux/desktop.md` 1.1): a sign-in or session
+   *  landing stopped because the operating system's key store is missing or
+   *  refused. While true both route guards render the refusal screen. Never
+   *  true on the web, where nothing throws `KeyStoreUnavailableError`. */
+  readonly keyStoreUnavailable: Accessor<boolean>;
+  /** The refusal screen's "Try again": re-runs the step that stopped (the
+   *  page-load restore, or the same sign-in call with the same arguments).
+   *  Shows the screen again when the key store still refuses. */
+  retryKeyStore(): Promise<void>;
   /** The signed-out screen's button: on `identity-mismatch` (blocked) runs
    *  the wipe; once `removed`, clears the screen so the sign-in page can
    *  show. */
@@ -1105,7 +1115,7 @@ export interface AuthApi {
      *  an anonymous join, and the state bundle (ADR-0074: the account's
      *  earlier keys must be stored before the conversation identity is
      *  minted). Best effort. */
-    persistJoinState?: (deviceKey: CryptoKey) => Promise<void>,
+    persistJoinState?: (deviceKey: DeviceCipher) => Promise<void>,
   ): Promise<void>;
   /** ADR-0018 factor (a), path (b) — the NO-PASSWORD entry of the
    *  recovery cascade. The fresh device ran the pairing
@@ -1130,7 +1140,7 @@ export interface AuthApi {
     /** Persist the pairing's in-memory DeviceIdentity seed +
      *  DeviceGroup snapshot under the freshly-bootstrapped device
      *  key (`AnonymousJoinSession.persistTo`). Best-effort. */
-    readonly persistJoinState?: (deviceKey: CryptoKey) => Promise<void>;
+    readonly persistJoinState?: (deviceKey: DeviceCipher) => Promise<void>;
     /** The restore was reached through "Forgot password?": offer the
      *  new-password step once the session lands (UX spec section 7). */
     readonly forgotPassword?: boolean;
@@ -1254,7 +1264,7 @@ interface PendingRecovery {
    *  from the VERIFIED identity seed, exactly like
    *  `completeFromDeviceRestore`, and only AFTER the fail-closed
    *  verification succeeds. */
-  readonly deviceKey: CryptoKey | null;
+  readonly deviceKey: DeviceCipher | null;
   readonly session: SessionPair;
   readonly username: string;
 }
@@ -1280,7 +1290,7 @@ interface PendingFreshPhrase {
    *  UI by the `save-fresh-phrase` render so the user can save it. */
   readonly phrase: string;
   /** The device key the new seed and phrase are stored under. */
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
 }
 
 /** `localStorage`, or `undefined` where there is none (tests, a blocked
@@ -1411,12 +1421,44 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // superseded session, or a landing that found other keys published). The
   // guards render the signed-out screen while this is set.
   const [signedOut, setSignedOut] = createSignal<SignedOutState | null>(null);
+  // ADR-0085: the OS key store refused (desktop only). `keyStoreRetry` is the
+  // step Try again repeats; only the page-load restore sets one, because it
+  // carries no secret. A sign-in or recovery step is not kept: its arguments
+  // are a password, a phrase or an export key, and holding them until the
+  // person returns would keep a credential in memory for no bound. Try again
+  // then only clears the screen and the person repeats the step.
+  const [keyStoreUnavailable, setKeyStoreUnavailable] = createSignal(false);
+  let keyStoreRetry: (() => Promise<unknown>) | null = null;
+  /** Put up the refusal screen when `err` is the key-store refusal. */
+  function noteKeyStoreUnavailable(err: unknown, retry: (() => Promise<unknown>) | null): boolean {
+    if (!(err instanceof KeyStoreUnavailableError)) return false;
+    // eslint-disable-next-line no-console
+    console.warn("device key store unavailable; sign-in stopped", err.reason);
+    keyStoreRetry = retry;
+    setKeyStoreUnavailable(true);
+    return true;
+  }
+  /** Wrap a sign-in / landing call so a key-store refusal shows the screen.
+   *  Its arguments are not kept (see `keyStoreRetry`); the error still
+   *  reaches the caller. */
+  function guardKeyStore<A extends unknown[], R>(
+    f: (...args: A) => Promise<R>,
+  ): (...args: A) => Promise<R> {
+    return async (...args: A): Promise<R> => {
+      try {
+        return await f(...args);
+      } catch (err) {
+        noteKeyStoreUnavailable(err, null);
+        throw err;
+      }
+    };
+  }
   // UX 15.3: the keys were reset on this device in this page session.
   const [keyResetNote, setKeyResetNote] = createSignal(false);
   // ADR-0074 part 1: the recall record this page holds open (the "Was it
   // you?" screen), with the device key that seals it; and whether the
   // account was taken back in this page session.
-  let recallHeld: { readonly record: RecallRecord; readonly deviceKey: CryptoKey } | null = null;
+  let recallHeld: { readonly record: RecallRecord; readonly deviceKey: DeviceCipher } | null = null;
   const [recallDone, setRecallDone] = createSignal(false);
   // ADR-0073 section 4.2, last paragraph: an attestation older than the
   // client-side bound is applied only after an explicit sign-in in this page
@@ -2415,7 +2457,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     accountIdB64: string,
     accountIdBytes: Uint8Array,
     accountIdentitySeed: Uint8Array,
-    deviceKey: CryptoKey,
+    deviceKey: DeviceCipher,
   ): Promise<void> {
     const record = readKeyResetOwed(plainStorage(), accountIdB64);
     if (record === null || remainingKeyResetSteps(record.done).length === 0) return;
@@ -2457,7 +2499,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     readonly accountIdBytes: Uint8Array;
     readonly accountIdB64: string;
     readonly seed: Uint8Array;
-    readonly deviceKey: CryptoKey;
+    readonly deviceKey: DeviceCipher;
     readonly record: KeyResetOwed;
   }): Promise<void> {
     // One run at a time per page: the background settle on a landing and a
@@ -2474,7 +2516,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     readonly accountIdBytes: Uint8Array;
     readonly accountIdB64: string;
     readonly seed: Uint8Array;
-    readonly deviceKey: CryptoKey;
+    readonly deviceKey: DeviceCipher;
     readonly record: KeyResetOwed;
   }): Promise<void> {
     let record = ctx.record;
@@ -2561,7 +2603,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     readonly accountIdBytes: Uint8Array;
     readonly accountIdB64: string;
     readonly seed: Uint8Array;
-    readonly deviceKey: CryptoKey;
+    readonly deviceKey: DeviceCipher;
   }): Promise<void> {
     try {
       await deleteDeviceGroupSnapshot(ctx.accountIdB64);
@@ -2705,11 +2747,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   async function prepareRecallRecord(
     accountIdB64: string,
     username: string,
-  ): Promise<{ readonly record: RecallRecord; readonly deviceKey: CryptoKey } | null> {
-    let deviceKey: CryptoKey | null = null;
+  ): Promise<{ readonly record: RecallRecord; readonly deviceKey: DeviceCipher } | null> {
+    let deviceKey: DeviceCipher | null = null;
     try {
       deviceKey = await getDeviceKey(accountIdB64);
-    } catch {
+    } catch (err) {
+      // ADR-0085: an unusable OS key store is not "no key".
+      if (err instanceof KeyStoreUnavailableError) throw err;
       deviceKey = null;
     }
     if (deviceKey === null) return null;
@@ -3026,7 +3070,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     /** The OLD account identity's 32-byte Ed25519 seed. */
     readonly oldSeed: Uint8Array;
     /** The account's device key on this device, when it has one. */
-    readonly deviceKey: CryptoKey | null;
+    readonly deviceKey: DeviceCipher | null;
     readonly check: () => Promise<RecallCheck>;
     /** Whether the target is still the one to act on. */
     readonly isCurrent: () => boolean;
@@ -3121,7 +3165,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       let phrase: string;
       let newPubkey: Uint8Array;
       let phraseArm: boolean;
-      let landedKey: CryptoKey;
+      let landedKey: DeviceCipher;
       // The earlier finish was answered with a refusal the server chose:
       // that attempt did not land.
       let earlierRefused = false;
@@ -3374,10 +3418,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // A device key this browser already holds for the account is reused
     // (minting another would orphan what it wraps); else one is derived
     // from the new seed.
-    let deviceKey: CryptoKey | null = null;
+    let deviceKey: DeviceCipher | null = null;
     try {
       deviceKey = await getDeviceKey(accountIdB64);
-    } catch {
+    } catch (err) {
+      // ADR-0085: an unusable OS key store is not "no key".
+      if (err instanceof KeyStoreUnavailableError) throw err;
       deviceKey = null;
     }
     try {
@@ -3675,7 +3721,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     accountIdBytes: Uint8Array;
     accountIdB64: string;
     accountIdentitySeed: Uint8Array;
-    deviceKey: CryptoKey;
+    deviceKey: DeviceCipher;
     sessionToken: string;
     phrase: string;
     context: string;
@@ -3771,10 +3817,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // root key from — the ONLY same-device shortcut is an
     // already-stored device key that decrypts a cached
     // AccountIdentity seed.
-    let deviceKey: CryptoKey | null = null;
+    let deviceKey: DeviceCipher | null = null;
     try {
       deviceKey = await getDeviceKey(accountIdB64);
     } catch (err) {
+      // ADR-0085: an unusable OS key store is not "no key".
+      if (err instanceof KeyStoreUnavailableError) throw err;
       // IDB unreachable — treat as "no key" and fall into the
       // fail-safe below.
       // eslint-disable-next-line no-console
@@ -3964,10 +4012,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   } | null> {
     const cached = loadPersisted();
     if (cached === null) return null;
-    let deviceKey: CryptoKey | null = null;
+    let deviceKey: DeviceCipher | null = null;
     try {
       deviceKey = await getDeviceKey(cached.accountIdB64);
-    } catch {
+    } catch (err) {
+      // ADR-0085: an unusable OS key store is not "no key".
+      if (err instanceof KeyStoreUnavailableError) throw err;
       deviceKey = null;
     }
     const phrase =
@@ -4149,12 +4199,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       return false;
     }
     for (const accountIdB64 of accounts) {
-      let deviceKey: CryptoKey | null = null;
+      let deviceKey: DeviceCipher | null = null;
       let record: RecallRecord | null = null;
       try {
         deviceKey = await getDeviceKey(accountIdB64);
         record = deviceKey === null ? null : await getRecallRecord(accountIdB64, deviceKey);
-      } catch {
+      } catch (err) {
+        // ADR-0085: an unusable OS key store is not "no key".
+        if (err instanceof KeyStoreUnavailableError) throw err;
         record = null;
       }
       if (deviceKey === null || record === null) {
@@ -4186,10 +4238,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
    *  phrase store, else the account's row (a keep that was interrupted after
    *  the phrase moved). `null` when this device cannot read it. */
   async function readGuestPhrase(accountIdB64: string): Promise<string | null> {
-    let deviceKey: CryptoKey | null = null;
+    let deviceKey: DeviceCipher | null = null;
     try {
       deviceKey = await getDeviceKey(accountIdB64);
-    } catch {
+    } catch (err) {
+      // ADR-0085: an unusable OS key store is not "no key".
+      if (err instanceof KeyStoreUnavailableError) throw err;
       deviceKey = null;
     }
     if (deviceKey === null) return null;
@@ -4216,10 +4270,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     phrase: string;
   }): Promise<void> {
     const { accountIdB64 } = args;
-    let deviceKey: CryptoKey | null = null;
+    let deviceKey: DeviceCipher | null = null;
     try {
       deviceKey = await getDeviceKey(accountIdB64);
-    } catch {
+    } catch (err) {
+      // ADR-0085: an unusable OS key store is not "no key".
+      if (err instanceof KeyStoreUnavailableError) throw err;
       deviceKey = null;
     }
     let moved = false;
@@ -4309,7 +4365,21 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }
   }
 
+  /** Page-load restore; a key-store refusal (desktop) puts up the refusal
+   *  screen, whose Try again runs the restore again. */
   async function restoreSessionOnLoad(): Promise<void> {
+    try {
+      await restoreSessionOnLoadInner();
+    } catch (err) {
+      const retry = async (): Promise<void> => {
+        setState({ kind: "loading" });
+        await restoreSessionOnLoad();
+      };
+      if (!noteKeyStoreUnavailable(err, retry)) throw err;
+    }
+  }
+
+  async function restoreSessionOnLoadInner(): Promise<void> {
     if (await restoreOwedRecall()) return;
     const probe = await probeStoredSecrets();
     // ADR-0074 section 2.3: a logout that could not reach the server left a
@@ -4437,6 +4507,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       setIdentitySecrets(null);
       dropSession();
       seed.fill(0);
+      // ADR-0085: undone, but not signed out: the refusal screen retries.
+      if (err instanceof KeyStoreUnavailableError) throw err;
       setState({ kind: "anon", cachedUsername: decision.username });
     }
   }
@@ -4467,7 +4539,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     readonly username: string;
     /** The account's device key when this device has one; `null` mints one
      *  from the new seed. */
-    readonly deviceKey: CryptoKey | null;
+    readonly deviceKey: DeviceCipher | null;
     /** The 64-byte seed of the NEW phrase. Owned by the parked phrase from
      *  here on. */
     readonly seed: Uint8Array;
@@ -4519,6 +4591,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       try {
         await putDeviceKey(ctx.accountIdB64, deviceKey, ctx.wipes);
       } catch (err) {
+        // ADR-0085: a key held only in host memory must not wrap stores.
+        if (err instanceof KeyStoreUnavailableError) throw err;
         // eslint-disable-next-line no-console
         console.warn("device-key persist (reset) failed", err);
       }
@@ -4683,7 +4757,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
    */
   async function adoptRotatedKeys(ctx: {
     readonly accountIdB64: string;
-    readonly deviceKey: CryptoKey;
+    readonly deviceKey: DeviceCipher;
     /** The 64-byte seed held before the rotation. */
     readonly oldSeed: Uint8Array;
     readonly newEntropy: Uint8Array;
@@ -4860,10 +4934,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
    * reset.
    */
   async function adoptRotation(accountIdB64: string): Promise<AdoptionOutcome> {
-    let deviceKey: CryptoKey | null = null;
+    let deviceKey: DeviceCipher | null = null;
     try {
       deviceKey = await getDeviceKey(accountIdB64);
-    } catch {
+    } catch (err) {
+      // ADR-0085: an unusable OS key store is not "no key".
+      if (err instanceof KeyStoreUnavailableError) throw err;
       deviceKey = null;
     }
     // A device that never held the keys has nothing to adopt with.
@@ -5085,7 +5161,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     return { accountIdB64: s.account.accountId, accountIdBytes: secrets.accountId, secrets };
   }
 
-  async function rotationDeviceKey(accountIdB64: string): Promise<CryptoKey> {
+  async function rotationDeviceKey(accountIdB64: string): Promise<DeviceCipher> {
     const deviceKey = await getDeviceKey(accountIdB64);
     if (deviceKey === null) throw new KeyedError("common.error.session_not_ready");
     return deviceKey;
@@ -5512,6 +5588,23 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       return landingDevice({ username });
     },
     signedOut,
+    keyStoreUnavailable,
+    async retryKeyStore() {
+      const retry = keyStoreRetry;
+      keyStoreRetry = null;
+      setKeyStoreUnavailable(false);
+      if (retry === null) return;
+      try {
+        await retry();
+      } catch (err) {
+        // A refusal again has put the screen back up; any other failure is
+        // the step's own and is shown where that step shows it.
+        if (!(err instanceof KeyStoreUnavailableError)) {
+          // eslint-disable-next-line no-console
+          console.warn("retry after key-store refusal failed", err);
+        }
+      }
+    },
     async confirmSignedOut() {
       const current = signedOut();
       if (current === null) return;
@@ -7722,6 +7815,23 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     },
   };
 
+  // ADR-0085: every sign-in and session landing stops on a key-store
+  // refusal and shows the refusal screen (`docs/ux/desktop.md` 1.1).
+  api.signup = guardKeyStore(api.signup.bind(api));
+  api.signupGuest = guardKeyStore(api.signupGuest.bind(api));
+  api.login = guardKeyStore(api.login.bind(api));
+  api.loginWithPasskey = guardKeyStore(api.loginWithPasskey.bind(api));
+  api.restoreKeysWithPasskey = guardKeyStore(api.restoreKeysWithPasskey.bind(api));
+  api.provideRecoveryPhrase = guardKeyStore(api.provideRecoveryPhrase.bind(api));
+  api.completeFromPairing = guardKeyStore(api.completeFromPairing.bind(api));
+  api.completeFromDeviceRestore = guardKeyStore(api.completeFromDeviceRestore.bind(api));
+  api.recover = guardKeyStore(api.recover.bind(api));
+  api.recoverWithTotp = guardKeyStore(api.recoverWithTotp.bind(api));
+  api.recoverWithThreeWords = guardKeyStore(api.recoverWithThreeWords.bind(api));
+  api.landEmailPasswordRecovery = guardKeyStore(api.landEmailPasswordRecovery.bind(api));
+  api.mintFreshIdentity = guardKeyStore(api.mintFreshIdentity.bind(api));
+  api.confirmFreshPhraseSaved = guardKeyStore(api.confirmFreshPhraseSaved.bind(api));
+
   return (
     <AuthContext.Provider value={api}>{props.children}</AuthContext.Provider>
   );
@@ -7742,7 +7852,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
  */
 async function probeStoredSecrets(): Promise<{
   cachedAccount: { accountIdB64: string; username: string } | null;
-  deviceKey: CryptoKey | null;
+  deviceKey: DeviceCipher | null;
   sessionPair: SessionPair | null;
   identitySeed: Uint8Array | null;
 }> {
@@ -7754,10 +7864,12 @@ async function probeStoredSecrets(): Promise<{
     accountIdB64: cached.accountIdB64,
     username: cached.username,
   };
-  let deviceKey: CryptoKey | null = null;
+  let deviceKey: DeviceCipher | null = null;
   try {
     deviceKey = await getDeviceKey(cached.accountIdB64);
-  } catch {
+  } catch (err) {
+    // ADR-0085: an unusable OS key store is not "no key".
+    if (err instanceof KeyStoreUnavailableError) throw err;
     deviceKey = null;
   }
   if (deviceKey === null) {

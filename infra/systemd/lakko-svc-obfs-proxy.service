@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# ADR-0026 - the obfuscation-terminating proxy. Takes REALITY and
+# Shadowsocks-2022 tunnels on public TCP ports and relays each to one fixed
+# internal HTTP address, LAKKO_OBFS_PROXY_TARGET. It reads nothing inside a
+# tunnel and holds no account state. Stateless: no database, no writable
+# directory. Its binds and secrets come from lakko.env; with no listener
+# configured it serves its health routes only.
+
+[Unit]
+Description=Lakko obfuscation-terminating proxy
+Documentation=https://github.com/lakkome/lakko
+PartOf=lakko.target
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lakkome
+Group=lakkome
+
+EnvironmentFile=/etc/lakko/lakko.env
+Environment=RUST_LOG=info
+
+ExecStart=/usr/local/bin/lakko-svc-obfs-proxy
+Restart=on-failure
+RestartSec=5s
+
+# --- Security hardening ----------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=lakko.target

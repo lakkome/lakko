@@ -2606,6 +2606,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-bootstrap-config-tool"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "lakko-crypto",
+ "lakko-transport",
+ "serde_json",
+]
+
+[[package]]
 name = "lakko-call-jwt"
 version = "0.0.0"
 dependencies = [

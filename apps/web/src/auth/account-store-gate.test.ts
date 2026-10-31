@@ -7,6 +7,7 @@
  * data back, in this tab or another; the durable MLS writes throw instead of
  * skipping; a plain sign-out closes the session-token row only.
  */
+import { type DeviceCipher, WebDeviceCipher } from "./device-cipher";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,11 +75,11 @@ afterEach(() => {
   resetAccountStoreGateForTests();
 });
 
-function deviceKey(): Promise<CryptoKey> {
-  return crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+async function deviceKey(): Promise<DeviceCipher> {
+  return new WebDeviceCipher(await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
     "encrypt",
     "decrypt",
-  ]);
+  ]));
 }
 
 /** A second tab: its own memory, the same `localStorage`. */

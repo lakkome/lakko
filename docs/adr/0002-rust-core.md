@@ -107,6 +107,7 @@ Best UX, but duplicating the crypto / protocol logic in 3+ languages is an unacc
 
 - How to version the FFI surface — semver, or a meaningful contract test? (Phase 1 will decide)
 - Desktop: is Tauri 2.x mature enough? If we hit a wall, fallback to native Win32 / Cocoa / GTK + Rust business logic. Decide by the end of Phase 2
+  - **Proposed answer, 2026-10-16: [ADR-0085](0085-desktop-client.md).** Tauri 2 on all three desktop OSes, but not "native Rust integration" of the messaging logic: the host keeps the device key, carries the network and owns the window and notifications, while the web client's TypeScript and wasm run inside the window. The web client's logic is TypeScript calling wasm, not a UI over a Rust core, so the row of the table above does not describe what can be built without a fourth client.
 
 ## References
 

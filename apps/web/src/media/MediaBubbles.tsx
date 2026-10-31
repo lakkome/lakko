@@ -15,7 +15,7 @@
 import { t } from "../l10n";
 import { AttachmentFailureNote } from "./AttachmentFailureNote";
 import { openFailureOf, type AttachmentFailure } from "../chat/attachment-failure";
-import { createEffect, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 
 import type { AttachmentRefBytes } from "../chat/attachments";
 import { autoplayVideoNotes } from "./media-prefs";
@@ -91,6 +91,10 @@ export function NotSent(props: { onRetry: () => void }): JSX.Element {
 // ----- voice ---------------------------------------------------------------
 
 export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
+  // What a cleanup releases. Reading `props.mediaKey` there would run the
+  // parent's getter while the parent is being torn down, where it can throw
+  // and stop the route change that disposed this bubble.
+  const settledKey = createMemo(() => props.mediaKey);
   const [status, setStatus] = createSignal<"idle" | "loading" | "error">("idle");
   const [playing, setPlaying] = createSignal(false);
   const [position, setPosition] = createSignal(0);
@@ -329,7 +333,7 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
   onCleanup(() => {
     if (audio !== null) {
       audio.pause();
-      props.hub.release(props.mediaKey);
+      props.hub.release(settledKey());
       audio.removeAttribute("src");
       audio = null;
       sourced = false;
@@ -500,6 +504,10 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
 const VIDEO_NOTE_READY_TIMEOUT_MS = 4000;
 
 export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
+  // What a cleanup releases. Reading `props.mediaKey` there would run the
+  // parent's getter while the parent is being torn down, where it can throw
+  // and stop the route change that disposed this bubble.
+  const settledKey = createMemo(() => props.mediaKey);
   const [posterUrl, setPosterUrl] = createSignal<string | null>(null);
   const [status, setStatus] = createSignal<"idle" | "loading" | "error">("idle");
   const [mode, setMode] = createSignal<"poster" | "muted" | "sound">("poster");
@@ -698,7 +706,7 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
   onCleanup(() => {
     playToken++;
     video?.pause();
-    props.hub.release(props.mediaKey);
+    props.hub.release(settledKey());
   });
 
   const label = (): string => {

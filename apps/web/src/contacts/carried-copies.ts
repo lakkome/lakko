@@ -43,6 +43,7 @@ import { createSignal, type Accessor } from "solid-js";
 
 import { registerAccountMemory } from "../auth/account-memory";
 import { accountStoresWritable } from "../auth/account-store-gate";
+import type { DeviceCipher } from "../auth/device-cipher";
 import { getDeviceKey } from "../auth/key-store";
 
 /** A copy unmatched this long after it was held is dropped. */
@@ -200,7 +201,7 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
   });
 }
 
-async function deviceKeyOf(accountIdB64: string): Promise<CryptoKey | null> {
+async function deviceKeyOf(accountIdB64: string): Promise<DeviceCipher | null> {
   try {
     return await getDeviceKey(accountIdB64);
   } catch {
@@ -208,7 +209,7 @@ async function deviceKeyOf(accountIdB64: string): Promise<CryptoKey | null> {
   }
 }
 
-async function read(accountIdB64: string, key: CryptoKey): Promise<Record<string, CarriedSlot>> {
+async function read(accountIdB64: string, key: DeviceCipher): Promise<Record<string, CarriedSlot>> {
   const db = await openDb();
   let row: PersistedRow | undefined;
   try {
@@ -223,18 +224,14 @@ async function read(accountIdB64: string, key: CryptoKey): Promise<Record<string
   }
   if (row === undefined || row.ciphertext.length < IV_LEN + 16) return {};
   const plaintext = new Uint8Array(
-    await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: row.ciphertext.slice(0, IV_LEN) },
-      key,
-      row.ciphertext.slice(IV_LEN),
-    ),
+    await key.decrypt(row.ciphertext.slice(0, IV_LEN), row.ciphertext.slice(IV_LEN)),
   );
   return decodeCarriedCopies(new TextDecoder().decode(plaintext));
 }
 
 async function write(
   accountIdB64: string,
-  key: CryptoKey,
+  key: DeviceCipher,
   slots: Readonly<Record<string, CarriedSlot>>,
 ): Promise<void> {
   const db = await openDb();
@@ -248,7 +245,7 @@ async function write(
     }
     const plaintext = new TextEncoder().encode(encodeCarriedCopies(slots));
     const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext));
+    const ct = new Uint8Array(await key.encrypt(iv, plaintext));
     const blob = new Uint8Array(IV_LEN + ct.length);
     blob.set(iv, 0);
     blob.set(ct, IV_LEN);

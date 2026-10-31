@@ -281,8 +281,9 @@ Stated plainly, because each of these would otherwise be a reasonable inference.
 - **Nothing is deployed.** There are no users and no production data. Only
   `auth`, `ds`, `storage`, `discovery`, `push-gw`, `channels` and `sfu` have a
   deployment path at all
-  ([`infra/scripts/deploy.sh`](../../infra/scripts/deploy.sh)). **`transparency`,
-  `witness` and `obfs-proxy` have no systemd unit and are in no deploy target** —
+  ([`infra/scripts/deploy.sh`](../../infra/scripts/deploy.sh)). **`transparency`
+  and `witness` have no systemd unit and are in no deploy target, and `obfs-proxy`
+  runs only on the test stack (a unit since 2026-10-30)** —
   the key-transparency log that invariant #6 rests on runs only in a docker compose
   stack for end-to-end tests.
 - **CI does not gate pull requests.** Of eleven workflows, **ten are

@@ -35,6 +35,7 @@ vi.mock("./device-group-snapshot-store", () => ({
 }));
 
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
+import type { DeviceCipher } from "../auth/device-cipher";
 import { DeviceGroupNotJoinedError, ensureDeviceGroup, persistDeviceGroupSnapshot } from "./lifecycle";
 
 beforeAll(async () => {
@@ -69,7 +70,7 @@ function stubClaim(): { calls: string[] } {
 describe("ADR-0081 decision 4 - re-founding is a single-device account's", () => {
   it("another own device listed: not founded, not claimed - the device rejoins", async () => {
     const claim = stubClaim();
-    const err = await ensureDeviceGroup(ACCOUNT_ID, "acc", DEVICE_SEED, {} as CryptoKey, ACCOUNT_SEED, {
+    const err = await ensureDeviceGroup(ACCOUNT_ID, "acc", DEVICE_SEED, {} as unknown as DeviceCipher, ACCOUNT_SEED, {
       mayFound: async () => false,
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(DeviceGroupNotJoinedError);
@@ -80,7 +81,7 @@ describe("ADR-0081 decision 4 - re-founding is a single-device account's", () =>
 
   it("no founding policy (a one-shot path): never founds", async () => {
     const claim = stubClaim();
-    const err = await ensureDeviceGroup(ACCOUNT_ID, "acc", DEVICE_SEED, {} as CryptoKey, ACCOUNT_SEED).catch(
+    const err = await ensureDeviceGroup(ACCOUNT_ID, "acc", DEVICE_SEED, {} as unknown as DeviceCipher, ACCOUNT_SEED).catch(
       (e: unknown) => e,
     );
     expect((err as DeviceGroupNotJoinedError).reason).toBe("no-state");
@@ -90,7 +91,7 @@ describe("ADR-0081 decision 4 - re-founding is a single-device account's", () =>
   it("a directory that cannot be read founds nothing", async () => {
     const claim = stubClaim();
     await expect(
-      ensureDeviceGroup(ACCOUNT_ID, "acc", DEVICE_SEED, {} as CryptoKey, ACCOUNT_SEED, {
+      ensureDeviceGroup(ACCOUNT_ID, "acc", DEVICE_SEED, {} as unknown as DeviceCipher, ACCOUNT_SEED, {
         mayFound: async () => {
           throw new Error("discovery unreachable");
         },
@@ -101,7 +102,7 @@ describe("ADR-0081 decision 4 - re-founding is a single-device account's", () =>
 
   it("a single-device account founds: the claim, then the snapshot", async () => {
     const claim = stubClaim();
-    const ensured = await ensureDeviceGroup(ACCOUNT_ID, "acc", DEVICE_SEED, {} as CryptoKey, ACCOUNT_SEED, {
+    const ensured = await ensureDeviceGroup(ACCOUNT_ID, "acc", DEVICE_SEED, {} as unknown as DeviceCipher, ACCOUNT_SEED, {
       mayFound: async () => true,
     });
     expect(ensured.bootstrapped).toBe(true);
@@ -114,7 +115,7 @@ describe("ADR-0081 decision 4 - re-founding is a single-device account's", () =>
   it("an unreadable snapshot is dropped before the decision (decision 4, step 1)", async () => {
     stubClaim();
     store.state = "unreadable";
-    const err = await ensureDeviceGroup(ACCOUNT_ID, "acc", DEVICE_SEED, {} as CryptoKey, ACCOUNT_SEED, {
+    const err = await ensureDeviceGroup(ACCOUNT_ID, "acc", DEVICE_SEED, {} as unknown as DeviceCipher, ACCOUNT_SEED, {
       mayFound: async () => false,
     }).catch((e: unknown) => e);
     expect(store.deleted).toBe(1);
@@ -127,7 +128,7 @@ describe("ADR-0081 decision 3 - a DeviceGroup snapshot write fails closed", () =
     stubClaim();
     store.putFails = true;
     await expect(
-      ensureDeviceGroup(ACCOUNT_ID, "acc", DEVICE_SEED, {} as CryptoKey, ACCOUNT_SEED, { mayFound: async () => true }),
+      ensureDeviceGroup(ACCOUNT_ID, "acc", DEVICE_SEED, {} as unknown as DeviceCipher, ACCOUNT_SEED, { mayFound: async () => true }),
     ).rejects.toThrow(/Quota/);
   });
 
@@ -135,7 +136,7 @@ describe("ADR-0081 decision 3 - a DeviceGroup snapshot write fails closed", () =
     store.putFails = true;
     const identity = wasm.Identity.fromSeed(DEVICE_SEED);
     try {
-      await expect(persistDeviceGroupSnapshot(identity, "acc", {} as CryptoKey)).rejects.toThrow(/Quota/);
+      await expect(persistDeviceGroupSnapshot(identity, "acc", {} as unknown as DeviceCipher)).rejects.toThrow(/Quota/);
     } finally {
       identity.free();
     }

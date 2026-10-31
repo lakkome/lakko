@@ -20,6 +20,7 @@
  * server hiccup must not block auth from flipping into the
  * Session state.
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import { base64Encode } from "../auth/account-id";
 import { BackupClient } from "./client";
 import { putPhrase } from "./phrase-store";
@@ -37,7 +38,7 @@ export interface BackupBootstrapInputs {
   /** Non-extractable AES-GCM `CryptoKey` from
    *  `deriveDeviceRootKey`. Used to wrap the phrase for the
    *  IDB cache. */
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   /** Bearer token to authorise the `/backup` PUT. The session
    *  token already bound by the auth flow. */
   readonly sessionToken: string;

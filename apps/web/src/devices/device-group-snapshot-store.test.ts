@@ -15,6 +15,7 @@ import {
   sealAccountStoresForWipe,
 } from "../auth/account-store-gate";
 import { accountStoreIds } from "../auth/wipe-account";
+import { WebDeviceCipher, type DeviceCipher } from "../auth/device-cipher";
 import {
   DeviceGroupSnapshotChangedError,
   deleteDeviceGroupSnapshot,
@@ -42,8 +43,10 @@ afterEach(() => {
   resetAccountStoreGateForTests();
 });
 
-function deviceKey(): Promise<CryptoKey> {
-  return crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+async function deviceKey(): Promise<DeviceCipher> {
+  return new WebDeviceCipher(
+    await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]),
+  );
 }
 
 const bytes = (s: string): Uint8Array => new TextEncoder().encode(s);

@@ -1348,6 +1348,81 @@ impl SyncedState {
             .map_err(own_username_refusal)
     }
 
+    /// Record that the person has seen the "a device was added to your
+    /// account" warning (identity-recovery 17.5) for each of `device_keys`
+    /// (32-byte device signature keys), stamped `hlc`, at wall-clock
+    /// `now_ms`. Write-once per key. Returns the envelopes to send to the
+    /// account's other devices in DeviceGroup service envelopes, carrying
+    /// exactly what this call wrote (empty when nothing was new).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"bounds: ..."` when a key is not 32 bytes;
+    /// [`FfiError::LockPoisoned`].
+    pub fn acknowledge_devices(
+        &self,
+        hlc: u64,
+        device_keys: Vec<Vec<u8>>,
+        now_ms: u64,
+    ) -> Result<Vec<Vec<u8>>, FfiError> {
+        let keys = device_keys
+            .iter()
+            .map(|k| fixed::<{ core::DEVICE_ACK_KEY_LEN }>(k, "device key"))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.with(|s| s.acknowledge_devices(hlc, &keys, now_ms))
+    }
+
+    /// Whether the added-device warning for `device_key` was seen on some
+    /// device of the account. A key of another length is never acknowledged.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn is_device_acknowledged(&self, device_key: Vec<u8>) -> Result<bool, FfiError> {
+        let Ok(key) = <[u8; core::DEVICE_ACK_KEY_LEN]>::try_from(device_key.as_slice()) else {
+            return Ok(false);
+        };
+        self.with(|s| s.is_device_acknowledged(&key))
+    }
+
+    /// Every acknowledged device key, ascending.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn acknowledged_devices(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        self.with(|s| {
+            s.acknowledged_devices()
+                .iter()
+                .map(|k| k.to_vec())
+                .collect()
+        })
+    }
+
+    /// Every held acknowledgement as envelopes: the re-send a device owes
+    /// when a live send did not go out.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn device_ack_envelopes(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        self.with(|s| s.device_ack_envelopes())
+    }
+
+    /// Decode a device-acknowledgement envelope received in a DeviceGroup
+    /// service envelope (route on [`is_device_ack_envelope`]) and fold every
+    /// register in. Fail closed. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"` with code
+    /// `wrongDomain` / `unknownVersion` / `count` / `truncated` /
+    /// `notCanonical` / `trailing`.
+    pub fn apply_device_ack_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_device_ack_envelope(&envelope))?
+            .map_err(|e| FfiError::SyncedState(format!("{}: {e}", e.code())))
+    }
+
     /// Write one of the account's invite links (ADR-0079 section 4), stamped
     /// `hlc`: at mint, and for any change. `true` when written; then send
     /// [`Self::link_record_envelope_for`] in a DeviceGroup service envelope.
@@ -1716,6 +1791,17 @@ pub fn is_recovery_email_envelope(bytes: Vec<u8>) -> bool {
 #[must_use]
 pub fn recovery_email_envelope_max_len() -> u32 {
     u32::try_from(core::RECOVERY_EMAIL_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
+}
+
+/// `true` when `bytes` open with the device-acknowledgement envelope domain
+/// (`lakko/sync/device-ack/v1`): the routing question for a DeviceGroup
+/// service envelope, asked before the `lakko-contacts` dispatcher. Says
+/// nothing about validity; [`SyncedState::apply_device_ack_envelope`]
+/// decides that.
+#[uniffi::export]
+#[must_use]
+pub fn is_device_ack_envelope(bytes: Vec<u8>) -> bool {
+    core::is_device_ack_envelope(&bytes)
 }
 
 /// `true` when `bytes` open with the own-username envelope domain
@@ -2208,6 +2294,28 @@ mod tests {
             assert!(rule::normalize_recovery_email(bad).is_err() || bad.ends_with('\n'));
             assert!(core::check_recovery_email_address(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn device_acknowledgements_are_written_once_and_carried() {
+        let a = SyncedState::new();
+        let k = vec![7u8; 32];
+        assert!(!a.is_device_acknowledged(k.clone()).unwrap());
+        assert!(a.acknowledge_devices(1, vec![vec![1u8; 31]], 5).is_err());
+        let sent = a.acknowledge_devices(3, vec![k.clone()], 5).unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(is_device_ack_envelope(sent[0].clone()));
+        assert!(a
+            .acknowledge_devices(4, vec![k.clone()], 6)
+            .unwrap()
+            .is_empty());
+        let b = SyncedState::new();
+        assert!(b.apply_device_ack_envelope(sent[0].clone()).unwrap());
+        assert!(b.is_device_acknowledged(k.clone()).unwrap());
+        assert!(!b.is_device_acknowledged(vec![7u8; 3]).unwrap());
+        assert_eq!(b.acknowledged_devices().unwrap(), vec![k]);
+        assert_eq!(b.device_ack_envelopes().unwrap(), sent);
+        assert!(b.apply_device_ack_envelope(vec![1, 2, 3]).is_err());
     }
 
     #[test]

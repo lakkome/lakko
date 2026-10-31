@@ -48,6 +48,7 @@
  * configure VAPID right away.
  */
 
+import { isDesktop } from "../platform";
 import { clearDevicePushToken, setDevicePushToken } from "./device-token";
 import { resubscribeAllForAccount, unsubscribeAllForAccount } from "./group-routing";
 import { getWakeBinding } from "./group-routing-store";
@@ -115,6 +116,8 @@ export async function subscribeToPush(
     // No build-time VAPID key — dev fallback.
     return null;
   }
+  // The desktop app receives through its host, not Web Push (ADR-0085).
+  if (isDesktop()) return null;
   if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
     return null;
   }

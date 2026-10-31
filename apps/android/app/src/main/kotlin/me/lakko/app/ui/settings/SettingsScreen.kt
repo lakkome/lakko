@@ -51,6 +51,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -202,11 +204,15 @@ public fun SettingsScreen(
                 )
             }
             SettingsRow(t("settings.passkeys.title"), Icons.Filled.Key, onOpenPasskeys)
+            // docs/ux/identity-recovery.md 17.5 - the attention badge while a
+            // new device of the account is pending.
+            val deviceNotice by me.lakko.app.devices.NewDeviceNotices.view.collectAsStateWithLifecycle()
             SettingsRow(
                 t("settings.devices.title"),
                 Icons.Filled.Devices,
                 onOpenDevices,
                 supporting = t("settings.security.devices.sub"),
+                attention = if (deviceNotice.attention) t("settings.devices.attention_a11y") else null,
             )
             SettingsRow(
                 t("settings.recovery.title"),
@@ -375,8 +381,8 @@ private fun TranslationsUpdatedRow() {
     val millis = signedAt ?: return
     val language = me.lakko.app.l10n.LocalStrings.current.language
     val date = remember(millis, language) {
-        java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM, java.util.Locale.forLanguageTag(language))
-            .format(java.util.Date(millis))
+        // Words from the language, order from the device (localization.md 5).
+        me.lakko.app.l10n.DeviceFormats.mediumDate(millis, language)
     }
     ListItem(
         headlineContent = { Text(t("settings.about.translations_updated", mapOf("date" to date))) },
@@ -424,9 +430,18 @@ private fun SettingsRow(
     onClick: () -> Unit,
     danger: Boolean = false,
     supporting: String? = null,
+    /** The accessible name of the attention badge (UX 17.5); `null`: no badge. */
+    attention: String? = null,
 ) {
     val tint = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
     ListItem(
+        trailingContent = attention?.let {
+            {
+                me.lakko.app.ui.devices.AttentionBadge(
+                    modifier = Modifier.semantics { contentDescription = it },
+                )
+            }
+        },
         headlineContent = {
             Text(title, color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
         },

@@ -57,6 +57,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as B64_STANDARD;
 use base64::Engine as _;
+use std::future::Future;
+use std::pin::Pin;
+
 use bytes::Bytes;
 use lakko_crypto::aead::{self, AeadKey, Algorithm, Nonce, KEY_LEN, NONCE_LEN, TAG_LEN};
 use lakko_crypto::hash::blake3_derive_key_from_material;
@@ -715,7 +718,23 @@ pub struct ShadowsocksConnection {
     /// uncontended in normal use — one task per direction.
     tx: Mutex<Option<AeadStreamWriter<OwnedWriteHalf>>>,
     rx: Mutex<Option<AeadStreamReader<OwnedReadHalf>>>,
+    /// The read in flight. It outlives one `recv` call: a relay `select!`s
+    /// `recv` against outbound data, and a dropped `recv` must lose neither
+    /// the reader nor the bytes of a half-read chunk.
+    reading: Option<ChunkRead>,
 }
+
+/// A read of one chunk, handing the reader back with its result.
+type ChunkRead = Pin<
+    Box<
+        dyn Future<
+                Output = (
+                    AeadStreamReader<OwnedReadHalf>,
+                    std::result::Result<Option<Vec<u8>>, AeadStreamError>,
+                ),
+            > + Send,
+    >,
+>;
 
 impl ShadowsocksConnection {
     /// Construct from already-handshaked halves. The
@@ -751,6 +770,7 @@ impl ShadowsocksConnection {
                 rx_subkey,
                 SS_PRELUDE_NONCE_COUNT,
             ))),
+            reading: None,
         }
     }
 }
@@ -796,13 +816,23 @@ impl Connection for ShadowsocksConnection {
     }
 
     async fn recv(&mut self) -> Result<Bytes> {
-        let mut reader = self
-            .rx
-            .lock()
-            .map_err(|_| Error::Io("rx lock poisoned".into()))?
-            .take()
-            .ok_or(Error::PeerClosed)?;
-        let result = reader.read_chunk().await;
+        if self.reading.is_none() {
+            let mut reader = self
+                .rx
+                .lock()
+                .map_err(|_| Error::Io("rx lock poisoned".into()))?
+                .take()
+                .ok_or(Error::PeerClosed)?;
+            self.reading = Some(Box::pin(async move {
+                let result = reader.read_chunk().await;
+                (reader, result)
+            }));
+        }
+        let Some(reading) = self.reading.as_mut() else {
+            return Err(Error::PeerClosed);
+        };
+        let (reader, result) = reading.await;
+        self.reading = None;
         match result {
             Ok(Some(plaintext)) => {
                 self.rx
@@ -828,6 +858,7 @@ impl Connection for ShadowsocksConnection {
         if let Some(mut writer) = writer_opt {
             let _ = writer.shutdown().await;
         }
+        self.reading = None;
         let _ = self
             .rx
             .lock()
@@ -1820,6 +1851,41 @@ mod tests {
             conn.close().await.unwrap();
         }
         server.await.unwrap();
+    }
+
+    /// A relay `select!`s `recv` against outbound data, so a `recv` is dropped
+    /// whenever something goes out first. The connection has to go on reading.
+    #[tokio::test]
+    async fn a_dropped_recv_loses_neither_the_reader_nor_a_chunk() {
+        let psk = [0x66u8; KEY_LEN];
+        let cfg = ShadowsocksConfig {
+            remote: "127.0.0.1:0".into(),
+            method: "2022-blake3-chacha20-poly1305".into(),
+            psk_b64: B64_STANDARD.encode(psk),
+        };
+        let transport = ShadowsocksTransport::new(cfg).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bound = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let mut window = ReplayWindow::new();
+            let mut conn = accept_inbound(sock, &psk, &mut window).await.unwrap();
+            let got = conn.recv().await.unwrap();
+            conn.send(got).await.unwrap();
+            conn
+        });
+
+        let mut conn = transport.connect(&Endpoint::Direct(bound)).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(20), conn.recv())
+            .await
+            .is_err());
+        conn.send(Bytes::from_static(b"ping")).await.unwrap();
+        let echoed = tokio::time::timeout(Duration::from_secs(2), conn.recv())
+            .await
+            .expect("the echo arrives")
+            .unwrap();
+        assert_eq!(&echoed[..], b"ping");
+        drop(server.await.unwrap());
     }
 
     #[tokio::test]

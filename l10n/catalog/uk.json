@@ -58,6 +58,14 @@
       "text": "Якщо ви його забудете, повернутися допоможуть інший пристрій, на якому ви ще в системі, ключ доступу, фраза відновлення, три слова з неї або застосунок-автентифікатор.",
       "status": "machine"
     },
+    "auth.key_store_unavailable.body": {
+      "text": "Системна в'язка ключів недоступна. Розблокуйте її або встановіть, потім спробуйте ще раз.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko не може надійно зберігати ваші ключі на цьому комп'ютері.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "Змінити мову",
       "status": "machine"
@@ -3382,6 +3390,10 @@
       "text": "Створити",
       "status": "machine"
     },
+    "chats.create.open_link": {
+      "text": "Відкрити посилання",
+      "status": "machine"
+    },
     "chats.empty.action": {
       "text": "Почати",
       "status": "machine"
@@ -4042,6 +4054,46 @@
       "text": "Це не посилання Lakko. Спробуйте інший код.",
       "status": "machine"
     },
+    "desktop.capture.body": {
+      "text": "Дозвольте доступ у налаштуваннях конфіденційності системи й спробуйте ще раз.",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko не може використовувати камеру.",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko не може використовувати мікрофон.",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "Відкрити налаштування",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "Завершити дзвінок і вийти",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "Завершити дзвінок і вийти?",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "Повідомлення і дзвінки надходитимуть. Щоб зупинити, вийдіть через значок у треї.",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko продовжує працювати.",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "Відкрити Lakko",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "Вийти з Lakko",
+      "status": "machine"
+    },
     "device_link.code.enter_six_digits": {
       "text": "Введіть шість цифр, які показує інший пристрій.",
       "status": "machine"
@@ -4292,10 +4344,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "Відкрийте Lakko, щоб переглянути свої пристрої.",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "Відкрити «Пристрої»",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -6366,6 +6414,10 @@
       "text": "Налаштування",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "Налаштування. До вашого облікового запису додано пристрій",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "Групи",
       "status": "machine"
@@ -6464,6 +6516,34 @@
     },
     "notification.message.new": {
       "text": "Нове повідомлення",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "Відкрити в застосунку",
+      "status": "machine"
+    },
+    "open_in_app.copied": {
+      "text": "Посилання скопійовано. Вставте його в застосунку.",
+      "status": "machine"
+    },
+    "open_link.field": {
+      "text": "Посилання",
+      "status": "machine"
+    },
+    "open_link.hint": {
+      "text": "Вставте посилання-запрошення, посилання на дзвінок або групу Lakko.",
+      "status": "machine"
+    },
+    "open_link.hint_copied": {
+      "text": "Сторінка скопіювала це посилання. Вставте його сюди, щоб відкрити.",
+      "status": "machine"
+    },
+    "open_link.not_lakko": {
+      "text": "Це не посилання Lakko. Перевірте його та спробуйте ще раз.",
+      "status": "machine"
+    },
+    "open_link.open": {
+      "text": "Відкрити",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7422,6 +7502,54 @@
       "text": "Як Lakko вас захищає",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "Закрити вікно",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "Чати, Стрічка, Контакти, Дзвінки, Налаштування",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "Змінити останнє повідомлення (у порожньому полі)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "Закрити меню, діалог або панель; вийти з пошуку",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "Перемкнути папку чатів",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "Новий чат",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "Попередня або наступна розмова",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Вийти з Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "Пошук розмов і людей",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "Надіслати або почати новий рядок",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "Налаштування",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "Комбінації клавіш",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Переклади оновлено {date}",
       "status": "machine"
@@ -7610,12 +7738,40 @@
       "text": "Ваші дані",
       "status": "machine"
     },
+    "settings.desktop.keep_running.sub": {
+      "text": "Повідомлення і дзвінки надходитимуть, поки вікно закрите.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "Працювати, коли вікно закрите",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "Як Lakko працює на цьому комп'ютері.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "Відкривати Lakko під час входу на цей комп'ютер",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "Не вдалося прочитати налаштування. Відкрийте Налаштування знову.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "Не вдалося змінити налаштування. Спробуйте ще раз.",
+      "status": "machine"
+    },
     "settings.devices.add.lede": {
       "text": "Спершу увійдіть у Lakko на новому пристрої. Потім виберіть, на якому з двох показано код.",
       "status": "machine"
     },
     "settings.devices.add.no_camera": {
       "text": "Немає камери на жодному з пристроїв? Увійдіть на новому й виберіть «{method}»: тут з’явиться запит «{prompt}» з кодом для звірки.",
+      "status": "machine"
+    },
+    "settings.devices.attention_a11y": {
+      "text": "Пристрої. До вашого облікового запису додано пристрій",
       "status": "machine"
     },
     "settings.devices.device_n": {
@@ -8148,6 +8304,10 @@
     },
     "settings.section.security": {
       "text": "Безпека",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "Безпека. До вашого облікового запису додано пристрій",
       "status": "machine"
     },
     "settings.security.devices.sub": {

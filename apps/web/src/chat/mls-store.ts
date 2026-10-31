@@ -57,6 +57,7 @@
  * little code.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { requireAccountStoresWritable } from "../auth/account-store-gate";
 import type { PendingCommitEntry } from "./commit-outbox";
 
@@ -145,7 +146,7 @@ export function awaitTx<T>(tx: IDBTransaction, value: T): Promise<T> {
 // ---------------------------------------------------------------
 
 async function encryptSnapshot(
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   plaintext: Uint8Array,
 ): Promise<Uint8Array> {
   // 12 bytes is the AES-GCM-recommended IV length and matches
@@ -155,11 +156,7 @@ async function encryptSnapshot(
   // `.slice()` to guarantee an `ArrayBuffer` backing for
   // strict-mode TS (matches the pattern in device-key.ts).
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: iv.slice() },
-      deviceKey,
-      plaintext.slice(),
-    ),
+    await deviceKey.encrypt(iv, plaintext),
   );
   // Concat: [12-byte IV | ciphertext+tag].
   const out = new Uint8Array(IV_LEN + ct.length);
@@ -169,7 +166,7 @@ async function encryptSnapshot(
 }
 
 async function decryptSnapshot(
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   blob: Uint8Array,
 ): Promise<Uint8Array> {
   if (blob.length < IV_LEN + 16) {
@@ -180,7 +177,7 @@ async function decryptSnapshot(
   const iv = blob.slice(0, IV_LEN);
   const ct = blob.slice(IV_LEN);
   const pt = new Uint8Array(
-    await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
+    await deviceKey.decrypt(iv, ct),
   );
   return pt;
 }
@@ -206,7 +203,7 @@ async function decryptSnapshot(
  */
 export async function saveMlsSnapshot(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   snapshotBytes: Uint8Array,
   knownGroupIds: readonly string[],
   leafKeyB64?: string,
@@ -253,7 +250,7 @@ export async function saveMlsSnapshot(
  */
 export async function saveSnapshotWithCommitEntry(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   snapshotBytes: Uint8Array,
   knownGroupIds: readonly string[],
   entry: PendingCommitEntry,
@@ -289,7 +286,7 @@ export async function saveSnapshotWithCommitEntry(
  */
 export async function loadMlsSnapshot(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<MlsSnapshotRecord | null> {
   const db = await openMlsDb();
   let row: PersistedRow | undefined;

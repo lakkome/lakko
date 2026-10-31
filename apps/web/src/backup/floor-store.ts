@@ -27,6 +27,7 @@
  * - `updatedAtMs` (number) — plaintext write time for cheap diagnostics.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import { base64Decode, base64Encode } from "../auth/account-id";
 
@@ -101,7 +102,7 @@ function openDb(): Promise<IDBDatabase> {
 export async function putFloor(
   accountIdB64: string,
   floor: BackupFloor,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<void> {
   // Never lower an existing (readable) floor. A corrupt / absent existing floor
   // is overwritten by this fresh, valid one — the write heals the anchor.
@@ -117,7 +118,7 @@ export async function putFloor(
   const plaintext = new TextEncoder().encode(JSON.stringify(json));
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv }, deviceKey, plaintext),
+    await deviceKey.encrypt(iv, plaintext),
   );
   const envelope = new Uint8Array(iv.length + ct.length);
   envelope.set(iv, 0);
@@ -159,7 +160,7 @@ export async function putFloor(
  */
 export async function getFloor(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<FloorRead> {
   const db = await openDb();
   try {
@@ -177,7 +178,7 @@ export async function getFloor(
       const iv = row.ciphertext.slice(0, 12);
       const ct = row.ciphertext.slice(12);
       const plaintext = new Uint8Array(
-        await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
+        await deviceKey.decrypt(iv, ct),
       );
       const json = JSON.parse(new TextDecoder().decode(plaintext)) as FloorJson;
       if (typeof json.v !== "string" || typeof json.h !== "string") {

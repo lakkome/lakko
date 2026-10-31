@@ -19,6 +19,7 @@
  * `AuthContext.tsx` needs a Solid runtime this suite does not have, so that
  * both phrase routes reach this function is pinned on its source.
  */
+import { type DeviceCipher } from "../auth/device-cipher";
 import { beforeEach, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -46,7 +47,7 @@ import {
 
 const ACCOUNT_BYTES = new Uint8Array(16).fill(0x42);
 const ACCOUNT = "QkJCQkJCQkJCQkJCQkJCQg==";
-const DEVICE_KEY = { fake: "device-key" } as unknown as CryptoKey;
+const DEVICE_KEY = { fake: "device-key" } as unknown as DeviceCipher;
 const PHRASE = "abandon ability able about above absent absorb abstract";
 const G1 = "ZzEtZ3JvdXAtaWQ=";
 const G2 = "ZzItZ3JvdXAtaWQ=";

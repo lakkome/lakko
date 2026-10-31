@@ -38,6 +38,7 @@ import {
   bundleTargets,
   decodePublication,
   encodePublication,
+  evaluateMissingTerms,
   everyoneAction,
   everyoneKey,
   forgetSentRecords,
@@ -47,13 +48,13 @@ import {
   offerTargets,
   oneToOnePeerHex,
   recordsDigest,
-  termsToEvaluate,
   type PublicationState,
 } from "./publication-model";
 import { heldClassesForPerson } from "./received-grants";
 import { reachSession, reachSessionSignal, reachVersionsTick } from "./reach-service";
 import { loadReachRow, saveReachRow } from "./reach-store";
 import { ScopedDiscoveryClient } from "./scoped-discovery";
+import { DiscoveryHttpError } from "../discovery/client";
 import type { OprfPair } from "../discovery/oprf-pair";
 import { introductionOffersTick, loadIntroductions, takeIntroductionAsks } from "./scoped-intake";
 import { visibilitySetting } from "./visibility-store";
@@ -172,15 +173,15 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
     /** The OPRF OUTPUTS of the terms (cached; each new one costs a token).
      *  Outputs never leave the device; see `lookupKeysOf`. */
     const outputsOf = async (terms: readonly Term[]): Promise<Uint8Array[]> => {
-      const missing = termsToEvaluate(state, terms.map((t) => t.key));
-      if (missing.length > 0) {
-        const added: Record<string, string> = {};
-        for (const t of terms) {
-          if (!missing.includes(t.key)) continue;
-          added[t.key] = base64Encode((await t.evaluate()).output);
-        }
-        await save({ ...state, termOutputs: { ...state.termOutputs, ...added } });
-      }
+      await evaluateMissingTerms(
+        state,
+        terms.map((t) => ({ key: t.key, evaluate: async () => base64Encode((await t.evaluate()).output) })),
+        {
+          keep: (termOutputs) => save({ ...state, termOutputs }),
+          isRateLimited: (err) => err instanceof DiscoveryHttpError && err.status === 429,
+          wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        },
+      );
       return terms.map((t) => base64Decode(state.termOutputs[t.key] ?? ""));
     };
     /** The lookup keys discovery gets for these outputs (ADR-0060 §5). */

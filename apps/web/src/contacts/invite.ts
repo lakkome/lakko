@@ -25,6 +25,7 @@ import {
   type ClassifiedInviteSlug,
   type InviteLinkWidths,
 } from "./invite-link";
+import { publicOrigin } from "../platform";
 
 /** Path prefix every invite URL starts with — kept in lock-step
  *  with `routes/paths.ts::inviteRoutePattern`. */
@@ -43,7 +44,7 @@ export const INVITE_LABEL_MAX_LEN = 64;
 export function composePointerInviteUrl(
   blobId: Uint8Array,
   widths: InviteLinkWidths,
-  origin: string = typeof location !== "undefined" ? location.origin : "https://lakko.me",
+  origin: string = publicOrigin(),
 ): string {
   requireBlobId(blobId, widths);
   return `${origin}${INVITE_URL_PREFIX}${base64UrlEncodeNoPad(blobId)}`;

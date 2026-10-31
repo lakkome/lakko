@@ -47,6 +47,7 @@
  * server, run the ADR-0037 head gate, decrypt with the phrase, return the
  * structured fields for that function to apply.
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import { loadWasm } from "../wasm";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { groupIdHex } from "../devices/sync/state";
@@ -142,7 +143,7 @@ export interface RestoreGateContext {
   /** Base64 account id — the floor-store key. */
   readonly accountIdB64: string;
   /** Non-extractable device root key for the version-floor store. */
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   /** Auth base for the attest-key fetch (default the shared `/api/auth`). */
   readonly authBaseUrl?: string;
   /** Injectable clock in ms (default `Date.now()`). */
@@ -235,7 +236,7 @@ export class BackupClient {
      *  encrypted store on a successful mint. Omitted → no floor persisted
      *  (the mint + framing still happen; a future restore falls back to the
      *  freshness window). */
-    deviceKey?: CryptoKey,
+    deviceKey?: DeviceCipher,
     /** The conversation ids the backup lists, base64: the groups this
      *  device holds plus the restored ones it has not joined yet
      *  (`backupKnownGroupIds`). */
@@ -310,7 +311,7 @@ export class BackupClient {
   async uploadFromCache(
     accountId: Uint8Array,
     ed25519Seed: Uint8Array,
-    deviceKey: CryptoKey,
+    deviceKey: DeviceCipher,
     /** As in [`uploadNow`]. */
     knownGroupIds: readonly string[] = [],
   ): Promise<UploadResult> {

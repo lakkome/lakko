@@ -58,6 +58,14 @@
       "text": "Şifrenizi unutursanız hâlâ oturumu açık olan başka bir cihaz, bir geçiş anahtarı, kurtarma ifadeniz, ifadenizden üç kelime ya da bir kimlik doğrulayıcı uygulaması ile hesabınıza geri dönebilirsiniz.",
       "status": "machine"
     },
+    "auth.key_store_unavailable.body": {
+      "text": "Sistem anahtarlığınız kullanılamıyor. Kilidini açın veya bir tane yükleyin, sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko anahtarlarınızı bu bilgisayarda güvenle saklayamıyor.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "Dili değiştir",
       "status": "machine"
@@ -3382,6 +3390,10 @@
       "text": "Oluştur",
       "status": "machine"
     },
+    "chats.create.open_link": {
+      "text": "Bağlantı aç",
+      "status": "machine"
+    },
     "chats.empty.action": {
       "text": "Başlat",
       "status": "machine"
@@ -4042,6 +4054,46 @@
       "text": "Bu kod bir Lakko bağlantısı değil. Başka bir kod deneyin.",
       "status": "machine"
     },
+    "desktop.capture.body": {
+      "text": "Sistemin gizlilik ayarlarından izin verin, sonra yeniden deneyin.",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko kameranızı kullanamıyor.",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko mikrofonunuzu kullanamıyor.",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "Ayarları aç",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "Aramayı sonlandır ve çık",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "Arama sonlandırılıp çıkılsın mı?",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "Mesajlar ve aramalar gelmeye devam edecek. Durdurmak için tepsi simgesinden çıkın.",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko çalışmaya devam ediyor.",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "Lakko'yu aç",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "Lakko'dan çık",
+      "status": "machine"
+    },
     "device_link.code.enter_six_digits": {
       "text": "Diğer cihazınızın gösterdiği altı haneyi girin.",
       "status": "machine"
@@ -4292,10 +4344,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "Cihazlarınızı görmek için Lakko'yu açın.",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "Cihazlar'ı aç",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -6366,6 +6414,10 @@
       "text": "Ayarlar",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "Ayarlar. Hesabınıza bir cihaz eklendi",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "Gruplar",
       "status": "machine"
@@ -6464,6 +6516,34 @@
     },
     "notification.message.new": {
       "text": "Yeni mesaj",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "Uygulamada aç",
+      "status": "machine"
+    },
+    "open_in_app.copied": {
+      "text": "Bağlantı kopyalandı. Uygulamaya yapıştırın.",
+      "status": "machine"
+    },
+    "open_link.field": {
+      "text": "Bağlantı",
+      "status": "machine"
+    },
+    "open_link.hint": {
+      "text": "Bir Lakko davet, arama veya grup bağlantısı yapıştırın.",
+      "status": "machine"
+    },
+    "open_link.hint_copied": {
+      "text": "Sayfa bu bağlantıyı kopyaladı. Açmak için buraya yapıştırın.",
+      "status": "machine"
+    },
+    "open_link.not_lakko": {
+      "text": "Bu bir Lakko bağlantısı değil. Kontrol edip yeniden deneyin.",
+      "status": "machine"
+    },
+    "open_link.open": {
+      "text": "Aç",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -7422,6 +7502,54 @@
       "text": "Lakko sizi nasıl korur",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "Pencereyi kapat",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "Sohbetler, Akış, Kişiler, Aramalar, Ayarlar",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "Son mesajımı düzenle (boş mesaj alanında)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "Menüyü, iletişim kutusunu veya paneli kapat; aramadan çık",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "Sohbet klasörünü değiştir",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "Yeni sohbet",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "Önceki veya sonraki sohbet",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Lakko'dan çık",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "Sohbetlerde ve kişilerde ara",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "Gönder veya yeni satıra geç",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "Ayarlar",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "Klavye kısayolları",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Çeviriler güncellendi: {date}",
       "status": "machine"
@@ -7610,12 +7738,40 @@
       "text": "Verileriniz",
       "status": "machine"
     },
+    "settings.desktop.keep_running.sub": {
+      "text": "Pencere kapalıyken mesaj ve aramalar gelmeye devam eder.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "Pencere kapatıldığında çalışmaya devam et",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "Lakko'nun bu bilgisayarda nasıl çalıştığı.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "Bu bilgisayarda oturum açtığımda Lakko'yu aç",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "Bu ayarlar okunamadı. Ayarlar'ı yeniden açın.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "Bu ayar değiştirilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
     "settings.devices.add.lede": {
       "text": "Önce yeni cihazda Lakko'ya giriş yapın. Ardından ikisinden hangisinin kod gösterdiğini seçin.",
       "status": "machine"
     },
     "settings.devices.add.no_camera": {
       "text": "İki cihazda da kamera yok mu? Yenisinde giriş yapın ve \"{method}\" seçeneğini seçin: burada karşılaştırılacak bir kodla \"{prompt}\" istemi görünür.",
+      "status": "machine"
+    },
+    "settings.devices.attention_a11y": {
+      "text": "Cihazlar. Hesabınıza bir cihaz eklendi",
       "status": "machine"
     },
     "settings.devices.device_n": {
@@ -8148,6 +8304,10 @@
     },
     "settings.section.security": {
       "text": "Güvenlik",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "Güvenlik. Hesabınıza bir cihaz eklendi",
       "status": "machine"
     },
     "settings.security.devices.sub": {

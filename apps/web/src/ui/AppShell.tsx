@@ -21,7 +21,8 @@ import { useAuth } from "../auth/AuthContext";
 import { contactsBadge } from "../contacts/contact-list-model";
 import { useMailbox } from "../contacts/MailboxContext";
 import { DeviceRequestPrompt } from "../devices/DeviceRequestPrompt";
-import { DeviceAddedWatcher } from "../devices/DeviceAddedNotice";
+import { AttentionBadge, DeviceAddedWatcher } from "../devices/DeviceAddedNotice";
+import { addedNotice, badgeVisible } from "../devices/added-notice";
 import { RemovedDeviceScreen } from "../devices/RemovedDeviceScreen";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { Avatar } from "./Avatar";
@@ -87,6 +88,11 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
     return p === item.href || p.startsWith(`${item.href}/`) || item.prefix.some((x) => p.startsWith(x));
   };
 
+  // docs/ux/identity-recovery.md 17.5: a device joined the account and no
+  // device of it has looked at Settings > Devices since.
+  const attention = (item: (typeof ITEMS)[number]): boolean =>
+    item.href === paths.settings && badgeVisible(addedNotice());
+
   // docs/ux/second-device.md section 3.1: another device removed this one.
   // The removed screen replaces the whole app, rail and prompts included.
   return (
@@ -102,8 +108,14 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
             inactiveClass=""
             activeClass=""
             aria-current={isActive(item) ? "page" : undefined}
+            aria-label={attention(item) ? t("nav.settings.attention_a11y") : undefined}
           >
-            <Icon name={item.icon} size={22} />
+            <span class="lk-rail-icon">
+              <Icon name={item.icon} size={22} />
+              <Show when={attention(item)}>
+                <AttentionBadge />
+              </Show>
+            </span>
             <span>{t(item.labelKey)}</span>
             <Show when={item.href === paths.contacts ? requestsBadge() : null}>
               {(text) => <span class="lk-badge lk-rail-badge">{text()}</span>}

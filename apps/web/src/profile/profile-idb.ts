@@ -27,6 +27,7 @@
  * would lose to the profile name in exactly one place.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import { avatarFromJson } from "./avatar-model";
 import {
@@ -187,10 +188,10 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
   });
 }
 
-async function encryptBlob(deviceKey: CryptoKey, plaintext: Uint8Array): Promise<Uint8Array> {
+async function encryptBlob(deviceKey: DeviceCipher, plaintext: Uint8Array): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv.slice() }, deviceKey, plaintext.slice()),
+    await deviceKey.encrypt(iv, plaintext),
   );
   const out = new Uint8Array(IV_LEN + ct.length);
   out.set(iv, 0);
@@ -198,14 +199,10 @@ async function encryptBlob(deviceKey: CryptoKey, plaintext: Uint8Array): Promise
   return out;
 }
 
-async function decryptBlob(deviceKey: CryptoKey, blob: Uint8Array): Promise<Uint8Array> {
+async function decryptBlob(deviceKey: DeviceCipher, blob: Uint8Array): Promise<Uint8Array> {
   if (blob.length < IV_LEN + 16) throw new Error("encrypted profile row is too short");
   return new Uint8Array(
-    await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: blob.slice(0, IV_LEN) },
-      deviceKey,
-      blob.slice(IV_LEN),
-    ),
+    await deviceKey.decrypt(blob.slice(0, IV_LEN), blob.slice(IV_LEN)),
   );
 }
 
@@ -218,7 +215,7 @@ async function decryptBlob(deviceKey: CryptoKey, blob: Uint8Array): Promise<Uint
  */
 export class IdbProfileBackend implements ProfileBackend {
   constructor(
-    private readonly deviceKeyFor: (accountId: string) => Promise<CryptoKey | null>,
+    private readonly deviceKeyFor: (accountId: string) => Promise<DeviceCipher | null>,
     private readonly renamesFor: () => ReadonlyMap<string, string>,
   ) {}
 
