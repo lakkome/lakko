@@ -62,6 +62,40 @@ describe("sendFoundRequest", () => {
     expect(d.sendByUsername).not.toHaveBeenCalled();
   });
 
+  it("a refused row grant is not the end: the first other held grant that passes carries the send", async () => {
+    const reachCheck = vi.fn(async (_key: Uint8Array, wire: string) => wire === "SECOND");
+    const d = deps({ reachCheck, heldGrantWires: () => ["GRANT", "FIRST", "SECOND", "THIRD"] });
+    expect(await sendFoundRequest(found(), d)).toEqual({ kind: "sent" });
+    expect(reachCheck.mock.calls.map(([, w]) => w)).toEqual(["GRANT", "FIRST", "SECOND"]);
+    expect(d.sendToBundle).toHaveBeenCalledWith(ACC, KEY, X25519, NO_INTRO, "SECOND", null);
+  });
+
+  it("is refused only when no grant held passes, and each is asked once", async () => {
+    const reachCheck = vi.fn(async () => false);
+    const d = deps({ reachCheck, heldGrantWires: () => ["GRANT", "OTHER"] });
+    expect(await sendFoundRequest(found(), d)).toEqual({ kind: "refused", byReachCheck: true });
+    expect(reachCheck).toHaveBeenCalledTimes(2);
+    expect(d.sendToBundle).not.toHaveBeenCalled();
+  });
+
+  it("reads the held grants at the send: one that arrived since the row is tried", async () => {
+    let held: string[] = [];
+    const d = deps({ reachCheck: vi.fn(async (_k, w) => w === "NEW"), heldGrantWires: () => held });
+    held = ["NEW"];
+    expect(await sendFoundRequest(found(), d)).toEqual({ kind: "sent" });
+    expect(d.sendToBundle).toHaveBeenCalledWith(ACC, KEY, X25519, NO_INTRO, "NEW", null);
+  });
+
+  it("a connection failure on a later grant is a failure, not a refusal", async () => {
+    const reachCheck = vi.fn(async (_key: Uint8Array, wire: string) => {
+      if (wire === "OTHER") throw new Error("offline");
+      return false;
+    });
+    const d = deps({ reachCheck, heldGrantWires: () => ["OTHER"] });
+    expect((await sendFoundRequest(found(), d)).kind).toBe("failed");
+    expect(d.sendToBundle).not.toHaveBeenCalled();
+  });
+
   it("sends nothing when the identity bundle publishes another key for the account", async () => {
     const d = deps({ identityFetch: vi.fn(async () => ({ signaturePub: new Uint8Array(32), x25519Pub: X25519 })) });
     expect(await sendFoundRequest(found(), d)).toEqual({ kind: "refused" });

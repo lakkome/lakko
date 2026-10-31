@@ -10,6 +10,15 @@ import Foundation
 /// search match. Kept out of the view so a test can pin them.
 enum ContactListPresentation {
 
+    /// What a row under Sent says: the name the person was found under with
+    /// `@username` beneath it; a request sent by username alone has that for
+    /// its name and nothing beneath. `nil` for a row that knows neither.
+    static func sentRow(_ request: SentContactRequest) -> (name: String?, username: String?) {
+        let username = request.recipientUsername.isEmpty ? nil : "@\(request.recipientUsername)"
+        guard let name = request.recipientName, !name.isEmpty else { return (username, nil) }
+        return (name, name == username ? nil : username)
+    }
+
     /// One contact as the grouping sees it.
     struct Item<ID: Hashable>: Equatable {
         let id: ID

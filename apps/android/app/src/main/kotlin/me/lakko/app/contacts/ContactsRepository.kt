@@ -1183,6 +1183,7 @@ public class ContactsRepository(
         // Rule 5 - the rotating device's owed step, and the round a kept
         // device runs over its own links and requests after adopting.
         chatRepo?.spendPreRotationGrants = { spendPreRotationGrants() }
+        chatRepo?.contactAccountId = { peerKey -> contactAccountId(peerKey) }
         // ADR-0074 (a device paired after a rotation) - a pairing state
         // bundle that moved the conversation key rebuilds a chat layer that
         // was already loaded under the current key.
@@ -1395,6 +1396,8 @@ public class ContactsRepository(
         introMessage: ByteArray,
         grantWire: ByteArray?,
         mailboxBinding: ByteArray? = null,
+        /** The name the row showed; the Sent list keeps it. */
+        shownName: String? = null,
     ): SendResult {
         val secrets = authRepo.identitySecrets.value
             ?: throw ContactsError.wrap(IllegalStateException("no identity secrets — please re-enter your password"))
@@ -1421,7 +1424,7 @@ public class ContactsRepository(
                         ?: listOfNotNull(found?.let { held -> { held } })
                 },
             )
-            if (bound.isCurrent) recordSent(result.recipientUsername, result, introMessage)
+            if (bound.isCurrent) recordSent(result.recipientUsername, shownName, result, introMessage)
             result
         }
     }
@@ -1441,6 +1444,8 @@ public class ContactsRepository(
         shownUsername: String?,
         /** ADR-0078 - the mailbox binding a public record carried. */
         mailboxBinding: ByteArray? = null,
+        /** The name the row showed; the Sent list keeps it. */
+        shownName: String? = null,
     ): SendResult {
         val secrets = authRepo.identitySecrets.value
             ?: throw ContactsError.wrap(IllegalStateException("no identity secrets — please re-enter your password"))
@@ -1471,18 +1476,20 @@ public class ContactsRepository(
                     first = explicit,
                 ) ?: listOfNotNull(explicit?.let { held -> { held } }),
             )
-            // The Sent list shows `@username`; a person found by name alone
-            // has none to show there.
-            if (bound.isCurrent) shownUsername?.let { recordSent(it, result, introMessage) }
+            // A person found by name alone has no username: the Sent row
+            // shows the name, and it is what makes a search row read
+            // Request sent.
+            if (bound.isCurrent) recordSent(shownUsername.orEmpty(), shownName, result, introMessage)
             result
         }
     }
 
-    private fun recordSent(username: String, result: SendResult, introMessage: ByteArray) {
+    private fun recordSent(username: String, name: String?, result: SendResult, introMessage: ByteArray) {
         mutableState.update { state ->
             state.copy(
                 sent = state.sent + SentContactRequest(
                     recipientUsername = username,
+                    recipientName = name,
                     recipientAccountIdB64 = base64Encode(result.recipientAccountId),
                     messageId = result.messageId,
                     createdAt = result.createdAt,
@@ -1665,7 +1672,7 @@ public class ContactsRepository(
                     // `joinGroupFromWelcome` republishes this device's
                     // KeyPackage after every attempt, success or failure.
                     var joinFailure: InboxError? = null
-                    val answeredBy = HashSet<String>()
+                    val answeredBy = HashMap<String, String>()
                     for (welcome in welcomes) {
                         if (!bound.isCurrent) return@useClientWith
                         if (chatRepo != null) {
@@ -1676,7 +1683,7 @@ public class ContactsRepository(
                                 // that person.
                                 chatRepo.oneToOnePeerKey(joinedHex)?.let { peer ->
                                     reach()?.retireRepliesTo(peer)
-                                    answeredBy += base64Encode(peer)
+                                    answeredBy[base64Encode(peer)] = joinedHex
                                 }
                                 // ADR-0079 section 5 — a one-to-one with a
                                 // person added through their link: what was
@@ -1734,22 +1741,30 @@ public class ContactsRepository(
                         // Someone accepted one of this device's requests: they are
                         // a contact here too, with their account id.
                         val applied = applyContactAcks(state.accepted, state.sent, acks)
-                        acceptedChanged = applied.acceptedChanged
+                        // A Welcome from the person asked answers the
+                        // request; the ack may never come. They become a
+                        // contact in the step that retires the Sent entry.
+                        val answered = applyAnsweringWelcomes(
+                            accepted = applied.accepted,
+                            sent = applied.sent,
+                            answered = answeredBy,
+                            nowMs = System.currentTimeMillis().toULong(),
+                            createdAt = java.time.Instant.now().toString(),
+                        )
+                        acceptedChanged = applied.acceptedChanged || answered.acceptedChanged
                         // Dedupe: a row already pending (same DS messageId) or a
                         // sender already accepted is not a new request.
                         val merged = mergeFetchedRequests(
                             pending = state.pending,
-                            accepted = applied.accepted,
+                            accepted = answered.accepted,
                             fetched = newIncoming,
                             supersedes = supersedes,
                         )
                         dropped = merged.dropped
                         state.copy(
-                            accepted = applied.accepted,
-                            // A Welcome from the person asked answers the
-                            // request; the ack may never come.
-                            sent = withoutSentAnsweredBy(applied.sent, answeredBy),
-                            pending = withoutAcceptedSenders(merged.pending, applied.accepted),
+                            accepted = answered.accepted,
+                            sent = answered.sent,
+                            pending = withoutAcceptedSenders(merged.pending, answered.accepted),
                             // Never backwards: a stale batch cannot re-arm a
                             // re-fetch of rows this device already handled.
                             // A later mailbox's cursor is kept apart.
@@ -2080,11 +2095,13 @@ public class ContactsRepository(
         bindAccountIfSignedIn()
         var changed = false
         var removedKey: ByteArray? = null
+        var removedAccountId: ByteArray? = null
         mutableState.update { state ->
             val remaining = state.accepted.filterNot { it.request.messageId == messageId }
             changed = remaining.size != state.accepted.size
             val removed = state.accepted.firstOrNull { it.request.messageId == messageId }
             removedKey = removed?.request?.fromPubkey
+            removedAccountId = removed?.request?.fromAccountId
             if (changed) state.copy(accepted = remaining) else state
         }
         if (changed) {
@@ -2106,6 +2123,8 @@ public class ContactsRepository(
         reachScope.launchBound(sessionBinding) {
             try {
                 removedKey?.let { manager.forgetHeld(it) }
+                // UX who-can-find-me 4.1: adding them back brings them in off.
+                removedAccountId?.let { manager.forgetChosenContact(it) }
                 manager.rotate(me.lakko.app.reach.ReachKind.CONTACT)
                 manager.rotate(me.lakko.app.reach.ReachKind.FOF)
                 chatRepo?.publishOwnProfileToAllGroups()
@@ -2135,6 +2154,13 @@ public class ContactsRepository(
         // already past the row, and the row is no longer in the saved list.
         persistInboxPending()
     }
+
+    /** The account id of the contact holding [peerKey], when one is known. */
+    private fun contactAccountId(peerKey: ByteArray): ByteArray? =
+        mutableState.value.accepted
+            .firstOrNull { it.request.fromPubkey.contentEquals(peerKey) }
+            ?.request?.fromAccountId
+            ?.takeIf { it.size == CONTACT_ACCOUNT_ID_LEN }
 
     /**
      * Contacts > Sent, **Dismiss**: the person leaves this device's outgoing
@@ -3841,6 +3867,8 @@ public data class SentContactRequest(
     /** ADR-0084 — the recipient's signature key (standard base64), so the
      *  Sent row shows their photo when this device holds one. */
     val recipientKeyB64: String? = null,
+    /** The name the person was found under. Not part of the entry's identity. */
+    val recipientName: String? = null,
 ) {
     override fun equals(other: Any?): Boolean =
         other is SentContactRequest &&

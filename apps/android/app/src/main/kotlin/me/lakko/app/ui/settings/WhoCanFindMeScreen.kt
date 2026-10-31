@@ -55,6 +55,9 @@ import me.lakko.app.l10n.text
 import me.lakko.app.reach.ReachApplyStatus
 import me.lakko.app.reach.ReachManager
 import me.lakko.app.reach.reachUnhex
+import me.lakko.app.ui.components.LakkoAvatar
+import me.lakko.app.ui.components.personKeyBytes
+import uniffi.lakko_ffi_uniffi.FfiContactsForm
 import uniffi.lakko_ffi_uniffi.FfiGroupsForm
 import uniffi.lakko_ffi_uniffi.FfiScopeId
 import uniffi.lakko_ffi_uniffi.FfiScopeKind
@@ -77,6 +80,8 @@ import uniffi.lakko_ffi_uniffi.FfiVisibilitySetting
 public fun WhoCanFindMeScreen(
     reach: ReachManager,
     scopes: List<FindMeScope>,
+    /** The contacts that can be chosen (UX section 4.1). */
+    contacts: List<FindMeContact>,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -84,6 +89,7 @@ public fun WhoCanFindMeScreen(
     val status by reach.applyStatus.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
     var showList by rememberSaveable { mutableStateOf(false) }
+    var showContactList by rememberSaveable { mutableStateOf(false) }
     val setting = settingOrNull ?: reach.currentVisibility() ?: return
 
     fun apply(transform: (FfiVisibilitySetting) -> FfiVisibilitySetting) {
@@ -96,7 +102,22 @@ public fun WhoCanFindMeScreen(
     }
 
     val model = setting.toModel()
-    val rows = findMeRows(model, scopes)
+    val rows = findMeRows(model, scopes, contacts)
+
+    if (showContactList) {
+        BackHandler { showContactList = false }
+        ChosenContactsList(
+            contacts = sortedFindMeContacts(contacts),
+            chosen = model.chosenContacts,
+            onToggle = { contact, on ->
+                val id = reachUnhex(contact.accountIdHex) ?: ByteArray(0)
+                apply { uniffi.lakko_ffi_uniffi.setContactChosen(it, id, on) }
+            },
+            onBack = { showContactList = false },
+            modifier = modifier,
+        )
+        return
+    }
 
     if (showList) {
         BackHandler { showList = false }
@@ -188,11 +209,39 @@ public fun WhoCanFindMeScreen(
                 item {
                     SwitchRow(
                         title = t("who_can_find_me.contacts_of_contacts"),
-                        helper = FIND_ME_FOF_HELPER.text(),
+                        helper = rows.contactsHelper.text(),
                         checked = model.contactsOfContacts,
                         indent = 1,
                         onToggle = { on -> apply { uniffi.lakko_ffi_uniffi.setContactsOfContacts(it, on) } },
                     )
+                }
+            }
+            if (rows.showContactsForm) {
+                item {
+                    RadioRow(
+                        title = t("who_can_find_me.contacts.all"),
+                        helper = null,
+                        selected = model.contactsForm == FindMeForm.ALL,
+                        indent = 2,
+                        onSelect = { apply { uniffi.lakko_ffi_uniffi.setContactsForm(it, FfiContactsForm.ALL) } },
+                    )
+                    RadioRow(
+                        title = t("who_can_find_me.contacts.chosen"),
+                        helper = null,
+                        selected = model.contactsForm == FindMeForm.CHOSEN,
+                        indent = 2,
+                        trailingDisclosure = true,
+                        onSelect = {
+                            val firstTime = model.contactsForm != FindMeForm.CHOSEN && model.chosenContacts.isEmpty()
+                            apply { uniffi.lakko_ffi_uniffi.setContactsForm(it, FfiContactsForm.CHOSEN) }
+                            // As under the second part (UX section 3).
+                            if (firstTime || model.contactsForm == FindMeForm.CHOSEN) showContactList = true
+                        },
+                    )
+                }
+            }
+            if (rows.showParts) {
+                item {
                     SwitchRow(
                         title = t("who_can_find_me.groups"),
                         helper = rows.membersHelper.text(),
@@ -339,6 +388,94 @@ private fun ChosenScopesList(
     }
 }
 
+/** UX section 4.1 — one row per contact, each with a switch; a search field on
+ *  top when there are many. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChosenContactsList(
+    contacts: List<FindMeContact>,
+    chosen: Set<String>,
+    onToggle: (FindMeContact, Boolean) -> Unit,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var query by rememberSaveable { mutableStateOf("") }
+    val shown = remember(contacts, query) {
+        val q = query.trim().lowercase()
+        if (q.isEmpty()) contacts else contacts.filter { it.name.lowercase().contains(q) }
+    }
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            TopAppBar(
+                title = { Text(t("who_can_find_me.contacts.chosen")) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+        ) {
+            if (contacts.isEmpty()) {
+                item { ListLine(t("who_can_find_me.list.contacts_empty")) }
+                return@LazyColumn
+            }
+            if (contacts.size > SEARCH_THRESHOLD) {
+                item {
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        placeholder = { Text(t("who_can_find_me.list.contacts_search")) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                    )
+                }
+            }
+            if (shown.isEmpty()) {
+                item { ListLine(t("contacts.list.no_match")) }
+            }
+            items(shown, key = { it.accountIdHex }) { contact ->
+                val checked = contact.accountIdHex.lowercase() in chosen
+                ListItem(
+                    headlineContent = { Text(contact.name) },
+                    leadingContent = {
+                        LakkoAvatar(
+                            name = contact.name,
+                            seed = contact.keyB64,
+                            size = 40.dp,
+                            personKey = personKeyBytes(contact.keyB64),
+                        )
+                    },
+                    trailingContent = { Switch(checked = checked, onCheckedChange = null) },
+                    colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
+                    modifier = Modifier.toggleable(value = checked, role = Role.Switch) { on ->
+                        onToggle(contact, on)
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ListLine(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(16.dp),
+    )
+}
+
 @Composable
 private fun SectionHeader(text: String) {
     Text(
@@ -410,6 +547,8 @@ internal fun FfiVisibilitySetting.toModel(): FindMeModel = FindMeModel(
         val kind = if (scope.kind == FfiScopeKind.GROUP) FindMeScopeKind.GROUP else FindMeScopeKind.CHANNEL
         FindMeScope(kind, me.lakko.app.reach.reachHex(scope.id), "").chosenKey()
     }.toSet(),
+    contactsForm = if (contactsForm == FfiContactsForm.CHOSEN) FindMeForm.CHOSEN else FindMeForm.ALL,
+    chosenContacts = chosenContacts.mapTo(HashSet()) { me.lakko.app.reach.reachHex(it) },
 )
 
 /** A list row as the FFI's scope id. */
@@ -479,6 +618,63 @@ public fun MembersCanFindMeRow(
         }
     }
 }
+
+/**
+ * `docs/ux/who-can-find-me.md` section 5.1 — `Their contacts can find me` on a
+ * contact's screen. Under "Only the ones I choose" it is this contact's switch
+ * from the list. Under "All" it shows on, and turning it off switches the part
+ * to chosen with every other contact on and this one off, saying so once.
+ * Shown only when the shared info rule lists it; [accountId] is the contact's.
+ */
+@Composable
+public fun TheirContactsCanFindMeRow(
+    reach: ReachManager,
+    accountId: ByteArray,
+    allContactIds: List<ByteArray>,
+    modifier: Modifier = Modifier,
+) {
+    val settingOrNull by reach.visibility.collectAsStateWithLifecycle()
+    val setting = settingOrNull ?: return
+    val model = setting.toModel()
+    val idHex = me.lakko.app.reach.reachHex(accountId)
+    val coroutineScope = rememberCoroutineScope()
+    var notice by rememberSaveable(idHex) { mutableStateOf(false) }
+    val on = contactSwitchOn(model, idHex)
+    androidx.compose.foundation.layout.Column(modifier = modifier) {
+        ListItem(
+            headlineContent = { Text(t("who_can_find_me.their_contacts_can_find_me")) },
+            trailingContent = { Switch(checked = on, onCheckedChange = null) },
+            colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
+            modifier = Modifier.toggleable(value = on, role = Role.Switch) { wanted ->
+                val next = try {
+                    if (model.contactsForm == FindMeForm.ALL && !wanted) {
+                        notice = true
+                        uniffi.lakko_ffi_uniffi.excludeContactUnderAll(setting, allContactIds, accountId)
+                    } else {
+                        uniffi.lakko_ffi_uniffi.setContactChosen(setting, accountId, wanted)
+                    }
+                } catch (_: Throwable) {
+                    return@toggleable
+                }
+                coroutineScope.launch { reach.updateVisibility(next) }
+            },
+        )
+        if (notice) {
+            Text(
+                THEIR_CONTACTS_NOTICE.text(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+        }
+    }
+}
+
+/** UX section 5.1 — said once, in place, after a contact is excluded under All. */
+public val THEIR_CONTACTS_NOTICE: UiText = UiText(
+    "who_can_find_me.contacts_excluded_notice",
+    parts = mapOf("privacy" to UiText("settings.section.privacy")),
+)
 
 /** UX section 5 — said once, in place, after a group is excluded under All. */
 public val MEMBERS_CAN_FIND_ME_NOTICE: UiText = UiText(

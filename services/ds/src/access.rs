@@ -327,7 +327,7 @@ where
 
 /// Parse the proof header, verify it under `key_for_epoch`, and consume the
 /// nonce. Every failure is [`refused`].
-async fn check_proof(
+pub(crate) async fn check_proof(
     pool: &MySqlPool,
     pseudonym: &[u8; PSEUDONYM_LEN],
     headers: &HeaderMap,

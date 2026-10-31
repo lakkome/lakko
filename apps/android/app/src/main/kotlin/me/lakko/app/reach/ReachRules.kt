@@ -13,6 +13,21 @@ package me.lakko.app.reach
  * the FFI and the Delivery Service.
  */
 
+/** Who part 2.1 of the setting lets the record go to, as the narrowing rule
+ *  reads it. [chosenHex] is kept whatever the form. */
+public data class ContactsReach(val onlyChosen: Boolean, val chosenHex: Set<String>)
+
+/**
+ * Whether a change of the setting takes the record away from a contact: moving
+ * from all to chosen, or a contact switched off under chosen. Widening is not
+ * narrowing: the next run offers the record to the new contact.
+ */
+public fun contactsNarrowed(previous: ContactsReach?, next: ContactsReach): Boolean = when {
+    previous == null || !next.onlyChosen -> false
+    !previous.onlyChosen -> true
+    else -> !next.chosenHex.containsAll(previous.chosenHex)
+}
+
 /** Who a reach key is handed to (ADR-0060 §1). Mirror of `FfiReachClass`. */
 public enum class ReachKind {
     /** Every contact (sent in the 1:1 conversation). Empty scope. */
@@ -570,3 +585,13 @@ public fun rekeyDecision(boundKeyHex: String, registeredForKeyHex: String?, prev
         previousKeyHex != null && previousKeyHex != boundKeyHex -> ReachRekey.MOVE
         else -> ReachRekey.STAMP
     }
+
+/**
+ * The classes a change of the setting made on this device rotates. `group` and
+ * `channel` always (ADR-0078 section 9); `fof` when it narrowed who the record
+ * goes to, so the old key comes off the mailbox at once and a new record goes to
+ * the contacts still allowed (the rotation a removed contact causes).
+ */
+public fun settingChangeRotation(previous: ContactsReach?, next: ContactsReach): List<ReachKind> =
+    listOf(ReachKind.GROUP, ReachKind.CHANNEL) +
+        (if (contactsNarrowed(previous, next)) listOf(ReachKind.FOF) else emptyList())

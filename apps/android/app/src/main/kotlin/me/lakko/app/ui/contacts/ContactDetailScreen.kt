@@ -64,6 +64,8 @@ import me.lakko.app.l10n.text
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.components.LakkoAvatar
 import uniffi.lakko_ffi_uniffi.InfoSection
+import me.lakko.app.contacts.CONTACT_ACCOUNT_ID_LEN
+import me.lakko.app.ui.settings.toModel
 import uniffi.lakko_ffi_uniffi.PersonInfoCapabilities
 import uniffi.lakko_ffi_uniffi.personInfoSections
 import me.lakko.app.ui.components.LakkoDialog
@@ -170,9 +172,16 @@ public fun ContactDetailScreen(
     // renders whichever blocks it is handed.
     // Remembered because asking now crosses the FFI: the rule is a native
     // call, and its answer changes only when one of its inputs does.
-    val sections = remember(membershipEnded, isContact) {
+    val reach = remember(contactsRepository) { me.lakko.app.reach.ReachManager.get(appContext) }
+    val visibility by reach.visibility.collectAsStateWithLifecycle()
+    val contactsOfContactsOn = visibility?.toModel()?.contactsPartOn == true
+    val sections = remember(membershipEnded, isContact, contactsOfContactsOn) {
         personInfoSections(
-            PersonInfoCapabilities(membershipEnded = membershipEnded, isContact = isContact),
+            PersonInfoCapabilities(
+                membershipEnded = membershipEnded,
+                isContact = isContact,
+                contactsOfContactsOn = contactsOfContactsOn,
+            ),
         )
     }
     // Read through `nameVersion` so a profile or a username arriving later
@@ -200,6 +209,18 @@ public fun ContactDetailScreen(
                     if (chat != null) viewModel.onAddContactBack(c.request.fromPubkey, chat)
                 },
                 onDeleteChat = { confirmingDelete = true },
+                theirContactsRow = {
+                    // A contact with no known account id cannot be chosen.
+                    c.request.fromAccountId?.takeIf { it.size == CONTACT_ACCOUNT_ID_LEN }?.let { id ->
+                        me.lakko.app.ui.settings.TheirContactsCanFindMeRow(
+                            reach = reach,
+                            accountId = id,
+                            allContactIds = contactsState.accepted
+                                .mapNotNull { it.request.fromAccountId }
+                                .filter { it.size == CONTACT_ACCOUNT_ID_LEN },
+                        )
+                    }
+                },
                 modifier = bodyModifier,
             )
         }
@@ -277,6 +298,7 @@ private fun ContactDetailBody(
     onRemove: () -> Unit,
     onAddContact: () -> Unit,
     onDeleteChat: () -> Unit,
+    theirContactsRow: @Composable () -> Unit,
     modifier: Modifier = Modifier,
 ) {
         Column(
@@ -406,6 +428,8 @@ private fun ContactDetailBody(
                     modifier = Modifier.clickable(onClick = onAddContact),
                 )
             }
+            // Section 2.1 — who-can-find-me 5.1.
+            if (InfoSection.THEIR_CONTACTS_CAN_FIND_ME in sections) theirContactsRow()
             if (InfoSection.REMOVE_CONTACT in sections) {
                 HorizontalDivider()
                 DetailRow(

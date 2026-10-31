@@ -222,6 +222,24 @@ describe("the vocabulary that crosses the boundary", () => {
   });
 });
 
+describe("Their contacts can find me (who-can-find-me 5.1)", () => {
+  it("is on a contact's card only while Contacts of my contacts is on", () => {
+    const on = { membershipEnded: false, isContact: true, contactsOfContactsOn: true };
+    expect(personInfoSections(rules, on)).toContain("their-contacts-can-find-me");
+    expect(personInfoSections(rules, { ...on, contactsOfContactsOn: false })).not.toContain(
+      "their-contacts-can-find-me",
+    );
+    expect(personInfoSections(rules, { membershipEnded: false, isContact: true })).not.toContain(
+      "their-contacts-can-find-me",
+    );
+  });
+
+  it("is not on the card of a person the viewer removed", () => {
+    const removed = { membershipEnded: false, isContact: false, contactsOfContactsOn: true };
+    expect(personInfoSections(rules, removed)).not.toContain("their-contacts-can-find-me");
+  });
+});
+
 describe("personInfoSections", () => {
   it("renders nothing until the shared rules have loaded", () => {
     expect(personInfoSections(null, { membershipEnded: false, isContact: true })).toEqual([]);

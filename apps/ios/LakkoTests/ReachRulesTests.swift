@@ -30,6 +30,66 @@ final class ReachRulesTests: XCTestCase {
             updatedAtMs: 1)
     }
 
+    private func contactsSetting(
+        mode: FfiVisibilityMode = .some, form: FfiContactsForm = .all, chosen: [Data] = []
+    ) -> FfiVisibilitySetting {
+        var s = setting(mode: mode, fof: true)
+        s.contactsForm = form
+        s.chosenContacts = chosen
+        return s
+    }
+
+    private func narrows(_ old: FfiVisibilitySetting, _ new: FfiVisibilitySetting) -> Bool {
+        ReachRules.narrowsContacts(from: old, to: new, allowsFof: { allowsContactsOfContacts(setting: $0) })
+    }
+
+    func testMovingToOnlyTheOnesIChooseNarrows() {
+        let a = Data(repeating: 1, count: 16)
+        XCTAssertTrue(narrows(contactsSetting(), contactsSetting(form: .chosen, chosen: [a])))
+    }
+
+    func testSwitchingAContactOffNarrowsAndSwitchingOneOnDoesNot() {
+        let a = Data(repeating: 1, count: 16)
+        let b = Data(repeating: 2, count: 16)
+        let both = contactsSetting(form: .chosen, chosen: [a, b])
+        let one = contactsSetting(form: .chosen, chosen: [a])
+        XCTAssertTrue(narrows(both, one))
+        XCTAssertFalse(narrows(one, both), "widening needs no bump")
+        XCTAssertFalse(narrows(one, one))
+    }
+
+    func testExcludingAContactUnderAllNarrows() throws {
+        let a = Data(repeating: 1, count: 16)
+        let b = Data(repeating: 2, count: 16)
+        let next = try excludeContactUnderAll(
+            setting: contactsSetting(), allContactIds: [a, b], excluded: b)
+        XCTAssertEqual(next.contactsForm, .chosen)
+        XCTAssertEqual(next.chosenContacts, [a])
+        XCTAssertTrue(narrows(contactsSetting(), next))
+    }
+
+    func testChoosingAllAndTurningThePartOffDoNotMoveTheKey() {
+        let a = Data(repeating: 1, count: 16)
+        XCTAssertFalse(narrows(contactsSetting(form: .chosen, chosen: [a]), contactsSetting()))
+        XCTAssertFalse(narrows(contactsSetting(), setting(mode: .some, fof: false)))
+    }
+
+    func testTheOfferGoesOnlyToAllowedContacts() {
+        let a = Data(repeating: 1, count: 16)
+        let b = Data(repeating: 2, count: 16)
+        func offers(_ id: Data?, _ s: FfiVisibilitySetting) -> Bool {
+            ReachRules.offersRecord(to: id, setting: s, allows: { allowsContact(setting: $0, accountId: $1) })
+        }
+        let chosen = contactsSetting(form: .chosen, chosen: [a])
+        XCTAssertTrue(offers(a, chosen))
+        XCTAssertFalse(offers(b, chosen))
+        XCTAssertFalse(offers(nil, chosen), "no known account id gets none under Chosen")
+        XCTAssertTrue(offers(b, contactsSetting()))
+        XCTAssertTrue(offers(nil, contactsSetting()), "under All every contact does")
+        XCTAssertFalse(offers(nil, setting(mode: .nobody)))
+        XCTAssertFalse(offers(a, setting(mode: .some, fof: false)))
+    }
+
     private func desired(_ setting: FfiVisibilitySetting, links: [LinkReach] = [],
                          replies: [ReplyReach] = [], now: UInt64 = 1_000) -> [ReachKeySpec] {
         ReachRules.desiredKeys(

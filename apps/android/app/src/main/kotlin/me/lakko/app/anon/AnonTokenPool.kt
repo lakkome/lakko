@@ -71,6 +71,7 @@ public enum class AnonTokenContext(public val wire: String) {
     BLOB_READ("blob-read"),
     MAILBOX_WRITE("mailbox-write"),
     CALL_JOIN("call-join"),
+    CIRCLE_CLAIM("circle-claim"),
 }
 
 /**
@@ -91,6 +92,7 @@ public fun anonPoolTargetFor(context: AnonTokenContext): Int = when (context) {
     AnonTokenContext.BLOB_UPLOAD -> 4
     AnonTokenContext.BLOB_READ -> 4
     AnonTokenContext.MAILBOX_WRITE -> 4
+    AnonTokenContext.CIRCLE_CLAIM -> 2
     // ADR-0078 section 2: a join, a reconnect, the TURN credential of a
     // one-to-one call. Chosen, not measured.
     AnonTokenContext.CALL_JOIN -> 4

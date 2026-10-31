@@ -87,6 +87,10 @@ public final class ReachCenter: ObservableObject {
     /// the app shell): what "All groups and channels" means when one of them is
     /// switched off from its info (UX section 5).
     public var allScopesProvider: () -> [FfiScopeId] = { [] }
+    /// This account's contacts with a known account id, as (account key,
+    /// account id): the list "Only the ones I choose" is made of. Set by the
+    /// app.
+    public var contactsProvider: () -> [(accountKey: Data, accountId: Data)] = { [] }
     /// The session token discovery writes need (set by the app shell).
     public var sessionTokenProvider: () -> String? = { nil }
     /// This account's display name and canonical username (set by the app
@@ -579,19 +583,27 @@ public final class ReachCenter: ObservableObject {
     /// stops holding a working key (one key serves every group and channel).
     /// A setting adopted from another device arrives with that device's
     /// bumped counters and is not rotated again.
-    public func updateSetting(_ next: FfiVisibilitySetting) {
-        guard isActive else { return }
+    ///
+    /// Returns whether the `fof` key moved: a change that narrows who is
+    /// reached through the person's contacts bumps it at once
+    /// (``ReachRules/narrowsContacts(from:to:allowsFof:)``).
+    @discardableResult
+    public func updateSetting(_ next: FfiVisibilitySetting) -> Bool {
+        guard isActive else { return false }
         var stamped = next
         stamped.updatedAtMs = max(Self.nowMs(), setting.updatedAtMs &+ 1)
         guard let envelope = try? composeVisibilityEnvelope(setting: stamped) else {
             NSLog("ADR-0060: a setting the core refuses was not applied")
-            return
+            return false
         }
+        let narrowed = ReachRules.narrowsContacts(
+            from: setting, to: stamped, allowsFof: { allowsContactsOfContacts(setting: $0) })
         setting = stamped
         record.settingEnvelopeB64 = envelope.base64EncodedString()
         persist()
         onDeviceEnvelope?(envelope)
-        rotateClasses([.group, .channel], sync: true)
+        rotateClasses(narrowed ? [.group, .channel, .fof] : [.group, .channel], sync: true)
+        return narrowed
     }
 
     /// Accept a setting another of this account's devices sent, when strictly
@@ -749,6 +761,47 @@ public final class ReachCenter: ObservableObject {
         }
         updateSetting(next)
         return false
+    }
+
+    /// `Their contacts can find me` on a contact's screen (UX spec section
+    /// 5.1). Returns whether the switch moved the setting to "Only the ones I
+    /// choose", which is said once in place.
+    @discardableResult
+    public func setContactCanFindMe(accountId: Data, on: Bool) -> Bool {
+        guard isActive, setting.contactsOfContacts else { return false }
+        if setting.contactsForm == .all {
+            guard !on,
+                  let next = try? excludeContactUnderAll(
+                      setting: setting, allContactIds: contactsProvider().map(\.accountId),
+                      excluded: accountId)
+            else { return false }
+            updateSetting(next)
+            return true
+        }
+        guard let next = try? setContactChosen(setting: setting, accountId: accountId, on: on) else {
+            return false
+        }
+        updateSetting(next)
+        return false
+    }
+
+    /// Removed contacts leave the chosen list (UX spec section 4.1). Returns
+    /// whether that moved the `fof` key.
+    public func dropChosenContacts(_ accountIds: [Data]) -> Bool {
+        guard isActive else { return false }
+        var next = setting
+        for id in accountIds where next.chosenContacts.contains(id) {
+            if let without = try? setContactChosen(setting: next, accountId: id, on: false) {
+                next = without
+            }
+        }
+        guard next.chosenContacts != setting.chosenContacts else { return false }
+        return updateSetting(next)
+    }
+
+    /// The account id of the contact holding `accountKey`, when known.
+    public func contactAccountId(ofKey accountKey: Data) -> Data? {
+        contactsProvider().first { $0.accountKey == accountKey }?.accountId
     }
 
     // MARK: - Rotation

@@ -75,6 +75,7 @@ pub mod auth;
 pub mod backup;
 pub mod call_relay;
 pub mod channels;
+pub mod circle;
 pub mod contacts;
 pub mod device_card;
 pub mod device_link;

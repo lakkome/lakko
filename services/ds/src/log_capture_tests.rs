@@ -9,7 +9,7 @@
 //!
 //! Gated on `LAKKO_DS_TEST_DATABASE_URL` like the other route tests.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
 use axum::http::StatusCode;
 use lakko_anon_token::TokenContext;
@@ -30,6 +30,49 @@ async fn no_identifier_reaches_the_log_on_journal_and_mailbox_routes() {
         return;
     };
     let (capture, _guard) = Capture::install();
+
+    // A circle directory: the claim, a read under the current key, and the
+    // refusal of a read under no key.
+    let mut directory = lakko_circle::DirectoryWriter::create(&fresh_name(0x65)).unwrap();
+    let owner = lakko_ds_proof::SigningKey::from_seed(directory.owner_signing_seed().as_bytes());
+    directory.put_row(0, b"card".to_vec()).unwrap();
+    directory.set_filter(vec![], 1).unwrap();
+    let first_write = directory.take_write().unwrap().unwrap();
+    let claim_uri = first_write.path();
+    let claim_token = token_at(TokenContext::CircleClaim, 0);
+    let (status, _) = send_with(
+        &app,
+        Req {
+            method: first_write.method(),
+            uri: &claim_uri,
+            body: first_write.body_json().into_bytes(),
+            proof: Some((&owner, lakko_circle::OWNER_PROOF_EPOCH)),
+        },
+        &[(lakko_anon_token::TOKEN_HEADER, claim_token.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let read = lakko_ds_proof::SigningKey::from_seed(directory.epoch_key().read_seed().as_bytes());
+    let row_uri = format!(
+        "{}/rows/0",
+        lakko_circle::directory_path(directory.directory_id())
+    );
+    for (proof, expected) in [
+        (Some((&read, 1)), StatusCode::OK),
+        (None, StatusCode::UNAUTHORIZED),
+    ] {
+        let (status, _) = send(
+            &app,
+            Req {
+                method: "GET",
+                uri: &row_uri,
+                body: vec![],
+                proof,
+            },
+        )
+        .await;
+        assert_eq!(status, expected);
+    }
 
     // A claimed group: publish under the epoch key, read back, and the two
     // refusals (no proof, another key).

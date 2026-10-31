@@ -17,11 +17,16 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
+import { accountIdsHexOf, concatAccountIds, contactsNarrowed, NO_ACCOUNT_ID } from "./contact-visibility";
 import {
   channelIdBytes,
   chosenCount,
   chosenKeysOf,
+  contactEntries,
+  contactList,
   contactsOfContactsHelper,
+  CONTACTS_FORM_ALL,
+  CONTACTS_FORM_CHOSEN,
   COPY,
   FORM_ALL,
   FORM_CHOSEN,
@@ -37,6 +42,7 @@ import {
   scopeList,
   showsListSearch,
   showsMembersSwitch,
+  showsTheirContactsSwitch,
   statusLine,
   viewOf,
   visibleRows,
@@ -50,54 +56,131 @@ function entry(kind: "group" | "channel", byte: number, name: string): ScopeEntr
 
 describe("rows on screen", () => {
   it("shows the parts only under Some people", () => {
-    expect(visibleRows({ mode: "nobody", contactsOfContacts: false, groups: null }).parts).toBe(false);
-    expect(visibleRows({ mode: "everyone", contactsOfContacts: false, groups: null }).parts).toBe(false);
-    expect(visibleRows({ mode: "some", contactsOfContacts: true, groups: null })).toEqual({
+    expect(visibleRows({ mode: "nobody", contactsOfContacts: false, groups: null, contactsForm: "all" }).parts).toBe(false);
+    expect(visibleRows({ mode: "everyone", contactsOfContacts: false, groups: null, contactsForm: "all" }).parts).toBe(false);
+    expect(visibleRows({ mode: "some", contactsOfContacts: true, groups: null, contactsForm: "all" })).toEqual({
       parts: true,
       groupsForm: false,
       listDisclosure: false,
+      contactsForm: true,
+      contactsDisclosure: false,
     });
   });
 
   it("shows the form only while the groups part is on, and the disclosure only under chosen", () => {
-    expect(visibleRows({ mode: "some", contactsOfContacts: false, groups: "all" })).toEqual({
+    expect(visibleRows({ mode: "some", contactsOfContacts: false, groups: "all", contactsForm: "all" })).toEqual({
       parts: true,
       groupsForm: true,
       listDisclosure: false,
+      contactsForm: false,
+      contactsDisclosure: false,
     });
-    expect(visibleRows({ mode: "some", contactsOfContacts: false, groups: "chosen" })).toEqual({
+    expect(visibleRows({ mode: "some", contactsOfContacts: false, groups: "chosen", contactsForm: "all" })).toEqual({
       parts: true,
       groupsForm: true,
       listDisclosure: true,
+      contactsForm: false,
+      contactsDisclosure: false,
     });
   });
 
   it("offers the Members can find me switch only while groups are part of the setting", () => {
-    expect(showsMembersSwitch({ mode: "some", contactsOfContacts: true, groups: "all" })).toBe(true);
-    expect(showsMembersSwitch({ mode: "some", contactsOfContacts: false, groups: "chosen" })).toBe(true);
-    expect(showsMembersSwitch({ mode: "some", contactsOfContacts: true, groups: null })).toBe(false);
-    expect(showsMembersSwitch({ mode: "nobody", contactsOfContacts: false, groups: null })).toBe(false);
+    expect(showsMembersSwitch({ mode: "some", contactsOfContacts: true, groups: "all", contactsForm: "all" })).toBe(true);
+    expect(showsMembersSwitch({ mode: "some", contactsOfContacts: false, groups: "chosen", contactsForm: "all" })).toBe(true);
+    expect(showsMembersSwitch({ mode: "some", contactsOfContacts: true, groups: null, contactsForm: "all" })).toBe(false);
+    expect(showsMembersSwitch({ mode: "nobody", contactsOfContacts: false, groups: null, contactsForm: "all" })).toBe(false);
     // Everyone includes every group, but there is nothing to switch.
-    expect(showsMembersSwitch({ mode: "everyone", contactsOfContacts: false, groups: null })).toBe(false);
+    expect(showsMembersSwitch({ mode: "everyone", contactsOfContacts: false, groups: null, contactsForm: "all" })).toBe(false);
+  });
+});
+
+describe("the rows of Contacts of my contacts (UX section 3)", () => {
+  const some = { mode: "some", contactsOfContacts: true, groups: null } as const;
+
+  it("shows the form while the part is on, and the disclosure only under chosen", () => {
+    expect(visibleRows({ ...some, contactsForm: "all" })).toMatchObject({
+      contactsForm: true,
+      contactsDisclosure: false,
+    });
+    expect(visibleRows({ ...some, contactsForm: "chosen" })).toMatchObject({
+      contactsForm: true,
+      contactsDisclosure: true,
+    });
+    expect(visibleRows({ ...some, contactsOfContacts: false, contactsForm: "chosen" })).toMatchObject({
+      contactsForm: false,
+      contactsDisclosure: false,
+    });
+  });
+
+  it("offers Their contacts can find me only while the part is on, under either form", () => {
+    expect(showsTheirContactsSwitch({ ...some, contactsForm: "all" })).toBe(true);
+    expect(showsTheirContactsSwitch({ ...some, contactsForm: "chosen" })).toBe(true);
+    expect(showsTheirContactsSwitch({ ...some, contactsOfContacts: false, contactsForm: "all" })).toBe(false);
+    expect(showsTheirContactsSwitch({ ...some, mode: "everyone", contactsForm: "all" })).toBe(false);
+  });
+});
+
+describe("the list of contacts (UX section 4.1)", () => {
+  const person = (name: string, byte: string, accountIdHex?: string) => ({
+    signaturePubkeyB64: byte,
+    name,
+    ...(accountIdHex === undefined ? {} : { accountIdHex }),
+  });
+  const id = (b: string): string => b.repeat(16);
+
+  it("leaves out a contact with no known account id, who cannot be chosen, so M does not count them", () => {
+    const entries = contactEntries(
+      [person("Anna", "a", id("0a")), person("No Id", "b"), person("Bad", "c", "zz")],
+      (c) => c.name,
+    );
+    expect(entries.map((e) => e.name)).toEqual(["Anna"]);
+  });
+
+  it("sorts as the Contacts screen does and lower-cases the id", () => {
+    const entries = contactEntries(
+      [person("bob", "b", id("0B")), person("Ánna", "a", id("0a")), person("7", "c", id("0c"))],
+      (c) => c.name,
+    );
+    expect(entries.map((e) => e.name)).toEqual(["Ánna", "bob", "7"]);
+    expect(entries[1]?.accountIdHex).toBe(id("0b"));
+  });
+
+  it("filters by any part of the name, case and accents aside", () => {
+    const entries = contactEntries([person("Ánna Weber", "a", id("0a")), person("Bob", "b", id("0b"))], (c) => c.name);
+    expect(contactList(entries, "webe").map((e) => e.name)).toEqual(["Ánna Weber"]);
+    expect(contactList(entries, "anna")).toHaveLength(1);
+    expect(contactList(entries, "")).toHaveLength(2);
   });
 });
 
 describe("copy", () => {
   it("counts N of M under chosen and describes all otherwise", () => {
-    expect(groupsHelper({ mode: "some", contactsOfContacts: false, groups: "chosen" }, 2, 5)).toBe(
+    expect(groupsHelper({ groups: "chosen" }, 2, 5)).toBe(
       "Only the ones you choose (2 of 5).",
     );
-    expect(groupsHelper({ mode: "some", contactsOfContacts: false, groups: "all" }, 2, 5)).toBe(
+    expect(groupsHelper({ groups: "all" }, 2, 5)).toBe(
       "Everyone in the groups and channels you're in.",
     );
   });
 
   it("says contacts of contacts is spreading only while it is on and was just turned on", () => {
-    expect(contactsOfContactsHelper(true, true)).toBe(
+    const on = { contactsOfContacts: true, contactsForm: "all" } as const;
+    const off = { contactsOfContacts: false, contactsForm: "all" } as const;
+    expect(contactsOfContactsHelper(on, 0, 0, true)).toBe(
       "Contacts of your contacts can find you once your contacts next open Lakko.",
     );
-    expect(contactsOfContactsHelper(true, false)).toBe("People your contacts have added.");
-    expect(contactsOfContactsHelper(false, true)).toBe("People your contacts have added.");
+    expect(contactsOfContactsHelper(on, 0, 0, false)).toBe("People your contacts have added.");
+    expect(contactsOfContactsHelper(off, 0, 0, true)).toBe("People your contacts have added.");
+  });
+
+  it("counts N of M under Only the ones I choose, 0 of M included", () => {
+    const chosen = { contactsOfContacts: true, contactsForm: "chosen" } as const;
+    expect(contactsOfContactsHelper(chosen, 2, 5, false)).toBe(
+      "Only the contacts of the people you choose (2 of 5).",
+    );
+    expect(contactsOfContactsHelper(chosen, 0, 5, false)).toBe(
+      "Only the contacts of the people you choose (0 of 5).",
+    );
   });
 
   it("maps every apply state to what the screen says", () => {
@@ -185,13 +268,15 @@ describe("against the real rules", () => {
     expect(MODE_EVERYONE).toBe(wasm.VisibilityMode.Everyone);
     expect(FORM_ALL).toBe(wasm.GroupsForm.All);
     expect(FORM_CHOSEN).toBe(wasm.GroupsForm.Chosen);
+    expect(CONTACTS_FORM_ALL).toBe(wasm.ContactsForm.All);
+    expect(CONTACTS_FORM_CHOSEN).toBe(wasm.ContactsForm.Chosen);
     expect(SCOPE_GROUP).toBe(wasm.ScopeKind.Group);
     expect(SCOPE_CHANNEL).toBe(wasm.ScopeKind.Channel);
   });
 
   it("reads the default for a new account as Some people with both parts, all groups", () => {
     const s = wasm.defaultVisibilitySetting();
-    expect(viewOf(s)).toEqual({ mode: "some", contactsOfContacts: true, groups: "all" });
+    expect(viewOf(s)).toEqual({ mode: "some", contactsOfContacts: true, contactsForm: "all", groups: "all" });
     s.free();
   });
 
@@ -226,5 +311,66 @@ describe("against the real rules", () => {
     excluded.free();
     s0.free();
     s1.free();
+  });
+
+  it("reads the contacts form and the chosen contacts the rules keep", () => {
+    const a = new Uint8Array(16).fill(1);
+    const b = new Uint8Array(16).fill(2);
+    const s0 = wasm.defaultVisibilitySetting();
+    expect(viewOf(s0).contactsForm).toBe("all");
+    const s1 = wasm.excludeContactUnderAll(s0, concatAccountIds(["01".repeat(16), "02".repeat(16)]), b);
+    expect(viewOf(s1).contactsForm).toBe("chosen");
+    expect(accountIdsHexOf(s1.chosenContacts)).toEqual(["01".repeat(16)]);
+    expect(wasm.allowsContact(s1, a)).toBe(true);
+    expect(wasm.allowsContact(s1, b)).toBe(false);
+    s0.free();
+    s1.free();
+  });
+
+  describe("narrowing moves the fof key (ADR-0060 section 4)", () => {
+    const a = new Uint8Array(16).fill(1);
+    const b = new Uint8Array(16).fill(2);
+    const ids = concatAccountIds(["01".repeat(16), "02".repeat(16)]);
+
+    it("switching a contact off narrows, switching one on does not", () => {
+      const s0 = wasm.defaultVisibilitySetting();
+      const both = wasm.setContactChosen(wasm.setContactChosen(wasm.setContactsForm(s0, wasm.ContactsForm.Chosen), a, true), b, true);
+      const one = wasm.setContactChosen(both, b, false);
+      expect(contactsNarrowed(wasm, both, one)).toBe(true);
+      expect(contactsNarrowed(wasm, one, both)).toBe(false);
+    });
+
+    it("moving from All to Only the ones I choose narrows, and back does not", () => {
+      const all = wasm.defaultVisibilitySetting();
+      const chosen = wasm.setContactsForm(all, wasm.ContactsForm.Chosen);
+      expect(contactsNarrowed(wasm, all, chosen)).toBe(true);
+      expect(contactsNarrowed(wasm, chosen, all)).toBe(false);
+    });
+
+    it("excluding one under All narrows", () => {
+      const all = wasm.defaultVisibilitySetting();
+      expect(contactsNarrowed(wasm, all, wasm.excludeContactUnderAll(all, ids, b))).toBe(true);
+    });
+
+    it("leaving Everyone for a chosen list narrows", () => {
+      const chosen = wasm.setContactsForm(wasm.defaultVisibilitySetting(), wasm.ContactsForm.Chosen);
+      const everyone = wasm.chooseVisibilityMode(chosen, wasm.VisibilityMode.Everyone);
+      expect(contactsNarrowed(wasm, everyone, chosen)).toBe(true);
+    });
+
+    it("with the part off there is no key to move", () => {
+      const all = wasm.defaultVisibilitySetting();
+      expect(contactsNarrowed(wasm, all, wasm.setContactsOfContacts(all, false))).toBe(false);
+    });
+
+    it("a contact with no known account id is allowed under All and not under a chosen list", () => {
+      const all = wasm.defaultVisibilitySetting();
+      expect(wasm.allowsContact(all, NO_ACCOUNT_ID)).toBe(true);
+      expect(wasm.allowsContact(wasm.setContactsForm(all, wasm.ContactsForm.Chosen), NO_ACCOUNT_ID)).toBe(false);
+    });
+
+    it("a stored setting of the old format reads as nothing: the store falls back to the default", () => {
+      expect(() => wasm.decodeVisibilityEnvelope(new Uint8Array(8))).toThrow();
+    });
   });
 });

@@ -5,8 +5,8 @@ import LakkoCore
 import SwiftUI
 
 /// `docs/ux/who-can-find-me.md` section 6.1 — what one search field shows
-/// beside its own list: the people this device knows, then, under the heading
-/// **People**, what the network found. Nothing to press: the field asks the
+/// beside its own list: under the heading **People**, the people this device
+/// knows, then what the network found. Nothing to press: the field asks the
 /// network by itself (``PeopleSearchModel``). A row is an avatar, the name,
 /// the `@username` when verified and **Add contact**, which sends the request
 /// at once. A row never says why the person was found.
@@ -23,6 +23,8 @@ struct PeopleSearchSection: View {
     /// ask the network, whose People part answers by itself (Chats: "No
     /// results" when no conversation matched either); `nil` shows nothing.
     let emptyText: String?
+    /// The people whose one-to-one is among the matching conversations above.
+    let chatPeers: Set<Data>
     let onOpenPerson: (FoundPerson) -> Void
     let onOpenChannel: (_ channelIdHex: String, _ handle: String) -> Void
     @ObservedObject private var l10n = Localization.shared
@@ -32,6 +34,7 @@ struct PeopleSearchSection: View {
         includesChannels: Bool,
         showsLocalContacts: Bool,
         emptyText: String? = nil,
+        chatPeers: Set<Data> = [],
         onOpenPerson: @escaping (FoundPerson) -> Void,
         onOpenChannel: @escaping (String, String) -> Void = { _, _ in }
     ) {
@@ -40,25 +43,27 @@ struct PeopleSearchSection: View {
         self.includesChannels = includesChannels
         self.showsLocalContacts = showsLocalContacts
         self.emptyText = emptyText
+        self.chatPeers = chatPeers
         self.onOpenPerson = onOpenPerson
         self.onOpenChannel = onOpenChannel
     }
 
     var body: some View {
-        let rows = model.rows(showsLocalContacts: showsLocalContacts)
+        let rows = model.rows(showsLocalContacts: showsLocalContacts, chatPeers: chatPeers)
         let channel = includesChannels ? model.answer?.channel : nil
         let message = model.peopleMessage(
-            includesChannels: includesChannels, showsLocalContacts: showsLocalContacts)
-        let showsHeading = model.searching || !rows.network.isEmpty || channel != nil || message != nil
+            includesChannels: includesChannels, showsLocalContacts: showsLocalContacts,
+            chatPeers: chatPeers)
+        // No heading without something under it. Below 3 characters nothing
+        // was asked, so a person row is all that can stand here.
+        let showsHeading = model.searching || !rows.local.isEmpty || !rows.network.isEmpty
+            || channel != nil || message != nil
         VStack(alignment: .leading, spacing: 10) {
             if let emptyText, !model.asksNetwork,
                !model.showsAnything(includesChannels: includesChannels, showsLocalContacts: showsLocalContacts) {
                 Text(emptyText)
                     .foregroundStyle(Color.lakkoTextMuted)
                     .frame(maxWidth: .infinity)
-            }
-            ForEach(rows.local) { person in
-                personRow(person)
             }
             if showsHeading {
                 HStack(spacing: 8) {
@@ -72,7 +77,9 @@ struct PeopleSearchSection: View {
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityAddTraits(.isHeader)
-                .padding(.top, rows.local.isEmpty ? 0 : 6)
+                ForEach(rows.local) { person in
+                    personRow(person)
+                }
                 if let channel {
                     Button { onOpenChannel(channel.idHex, channel.handle) } label: {
                         HStack(spacing: 12) {
@@ -152,6 +159,11 @@ private struct FoundPersonRow: View {
         if person.reach == .contact {
             Button(l10n.t("common.open"), action: onOpen)
                 .buttonStyle(.borderless)
+        } else if state == .sent {
+            // From the outgoing list, whatever the check says of them.
+            Text(l10n.t("search.people.request_sent"))
+                .font(.subheadline)
+                .foregroundStyle(Color.lakkoTextMuted)
         } else if person.canAddContact {
             switch state {
             case .idle, .failed:
@@ -159,11 +171,7 @@ private struct FoundPersonRow: View {
                     .buttonStyle(.borderless)
             case .sending:
                 ProgressView().controlSize(.small)
-            case .sent:
-                Text(l10n.t("search.people.request_sent"))
-                    .font(.subheadline)
-                    .foregroundStyle(Color.lakkoTextMuted)
-            case .refused:
+            case .sent, .refused:
                 EmptyView()
             }
         }

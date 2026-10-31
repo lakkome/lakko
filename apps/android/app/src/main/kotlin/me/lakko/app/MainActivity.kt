@@ -2445,9 +2445,30 @@ private fun SessionRoot(
                         }
                         groups + chans
                     }
+                    // Section 4.1 — a contact with no known account id cannot
+                    // be chosen.
+                    val contactsState by contactsRepository.state.collectAsStateWithLifecycle()
+                    val names = remember(ctx) { me.lakko.app.profile.ProfileDirectory.get(ctx) }
+                    val nameVersion by names.version.collectAsStateWithLifecycle()
+                    val findMeContacts = remember(contactsState.accepted, nameVersion) {
+                        contactsState.accepted.mapNotNull { contact ->
+                            val id = contact.request.fromAccountId
+                                ?.takeIf { it.size == me.lakko.app.contacts.CONTACT_ACCOUNT_ID_LEN }
+                                ?: return@mapNotNull null
+                            val resolved = names.resolve(contact.request.fromPubkey)
+                            me.lakko.app.ui.settings.FindMeContact(
+                                accountIdHex = me.lakko.app.reach.reachHex(id),
+                                keyB64 = java.util.Base64.getEncoder().encodeToString(contact.request.fromPubkey),
+                                name = resolved.primary,
+                                username = resolved.verifiedUsername,
+                                placeholder = resolved.isPlaceholder,
+                            )
+                        }
+                    }
                     me.lakko.app.ui.settings.WhoCanFindMeScreen(
                         reach = me.lakko.app.reach.ReachManager.get(ctx),
                         scopes = scopes,
+                        contacts = findMeContacts,
                         onBack = { navController.popBackStack() },
                     )
                 }

@@ -37,6 +37,14 @@ pub struct DsProofSigner {
     inner: Inner,
 }
 
+impl DsProofSigner {
+    /// Wrap a core signer, for a sibling module that derives its own key
+    /// (`circle.rs`).
+    pub(crate) const fn from_inner(inner: Inner) -> Self {
+        Self { inner }
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 fn now_ms() -> u64 {
     // `Date.now()` is integral milliseconds carried in an f64; a negative or

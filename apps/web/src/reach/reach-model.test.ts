@@ -17,6 +17,7 @@ import {
   dropRepliesTo,
   encodeReachBook,
   fofRotationDue,
+  rotateClasses,
   isEmptyDiff,
   departuresOf,
   pruneExpired,
@@ -90,6 +91,13 @@ describe("the wanted reach keys", () => {
     const empty = departuresOf(book, { groupIdsHex: [], channels: [] });
     expect(empty).toMatchObject({ leftGroup: false, leftChannel: false });
     expect(empty.memberOf).toEqual(first.memberOf);
+  });
+
+  it("a narrowed Contacts of my contacts moves fof: the old key is no longer wanted", () => {
+    const moved = rotateClasses(EMPTY_REACH_BOOK, ["fof"]);
+    const wanted = classes(moved, { allowsContactsOfContacts: true });
+    expect(wanted).toContain("fof::1");
+    expect(wanted).not.toContain("fof::0");
   });
 
   it("wants the fof key only while contacts of contacts may find the owner", () => {

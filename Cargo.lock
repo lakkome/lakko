@@ -2654,6 +2654,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-circle"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.2.17",
+ "lakko-crypto",
+ "proptest",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "lakko-contacts"
 version = "0.0.0"
 dependencies = [
@@ -2764,6 +2775,7 @@ dependencies = [
  "lakko-call-jwt",
  "lakko-calls",
  "lakko-channels",
+ "lakko-circle",
  "lakko-contacts",
  "lakko-crypto",
  "lakko-device-link",
@@ -2804,6 +2816,7 @@ dependencies = [
  "lakko-call-jwt",
  "lakko-calls",
  "lakko-channels",
+ "lakko-circle",
  "lakko-contacts",
  "lakko-crypto",
  "lakko-device-link",
@@ -3104,6 +3117,7 @@ dependencies = [
  "http-body-util",
  "lakko-anon-token",
  "lakko-anon-token-server",
+ "lakko-circle",
  "lakko-contacts",
  "lakko-ds-proof",
  "lakko-log-hygiene",

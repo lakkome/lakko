@@ -46,6 +46,9 @@ import { personInfoSections } from "../chat/conversation-info";
 import { uiRules } from "../chat/ui-rules";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
+import { visibilitySetting } from "../reach/visibility-store";
+import { TheirContactsCanFindMeRow } from "../settings/TheirContactsCanFindMeRow";
+import { showsTheirContactsSwitch, viewOf } from "../settings/who-can-find-me";
 import { Avatar } from "../ui/Avatar";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon, type IconName } from "../ui/icons";
@@ -101,6 +104,9 @@ export interface ContactDetailViewProps {
    * `Add to contacts` in place of Rename and Remove (amended 2026-10-24).
    */
   readonly isContact: boolean;
+  /** The person's account id, the name "Who can find me" has for them, or
+   *  `null`: such a contact cannot be chosen, and has no switch there. */
+  readonly accountIdHex: string | null;
   /** Put the person back on the contact list. Local; sends nothing. */
   readonly onAddContact: () => void;
   /**
@@ -113,12 +119,17 @@ export interface ContactDetailViewProps {
 
 export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   const profiles = useProfiles();
+  const contactsOfContactsOn = (): boolean => {
+    const s = visibilitySetting();
+    return s !== null && props.accountIdHex !== null && showsTheirContactsSwitch(viewOf(s));
+  };
   // Which blocks this screen holds - the shared rule
   // (`chat/conversation-info.ts` -> `crates/lakko-ui-rules`), not this file.
   const sections = createMemo(() =>
     personInfoSections(uiRules(), {
       membershipEnded: props.membershipEnded,
       isContact: props.isContact,
+      contactsOfContactsOn: contactsOfContactsOn(),
     }),
   );
   const resolved = (): ReturnType<typeof profiles.resolve> =>
@@ -379,6 +390,10 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
             </Show>
           </Show>
         </section>
+        </Show>
+
+        <Show when={sections().includes("their-contacts-can-find-me") ? props.accountIdHex : null}>
+          {(hex) => <TheirContactsCanFindMeRow accountIdHex={hex()} />}
         </Show>
 
         <Show when={sections().includes("rename-contact")}>

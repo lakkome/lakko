@@ -31,7 +31,8 @@ import { base64UrlEncodeNoPad, base64Decode } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
 import { contactBackState, type ContactBackState } from "../chat/info-navigation";
 import { ContactsClient } from "../contacts/client";
-import { recordSentRequest } from "../contacts/sent-requests";
+import { loadAccepted, subscribeAcceptedChanged } from "../contacts/local-store";
+import { loadSentRequests, recordSentRequest, sentRequestsVersion } from "../contacts/sent-requests";
 import { t } from "../l10n";
 import { useProfiles } from "../profile/ProfileContext";
 import { reachSession } from "../reach/reach-service";
@@ -40,10 +41,27 @@ import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { loadWasm, type Wasm } from "../wasm";
 import { AutoSearch, networkQueryOf, SearchMemory, type NetworkQuery, type NetworkView } from "./auto-search";
-import { canAddContact, localPeople, mergePeople, type LocalCandidate, type PersonResult } from "./people";
+import {
+  asContacts,
+  canAddContact,
+  localPeople,
+  mergePeople,
+  peopleRows,
+  type ContactSet,
+  type LocalCandidate,
+  type PersonResult,
+} from "./people";
 import { searchPeople } from "./people-search";
 import { candidatesMatching, ReachVerdicts } from "./reach-verdicts";
-import { rowStateAfter, rowView, type RowSendState } from "./row-send";
+import {
+  heldStateAfter,
+  outgoingOf,
+  rowSendState,
+  rowView,
+  withoutRowLines,
+  type OutgoingRequests,
+  type RowSendState,
+} from "./row-send";
 import { peopleLineOf, REQUEST_FAILED, REQUEST_SENT } from "./search-state";
 import { sendFoundRequest, type SendOutcome } from "./send-request";
 import {
@@ -64,8 +82,9 @@ export type PeopleSearchScope = "chats" | "contacts";
 const sessionMemory = new SearchMemory();
 
 /** Each found person's row state for this session, by account and person
- *  key, so "Request sent" survives the list being redrawn as the person
- *  types, and moving between Chats and Contacts. */
+ *  key, so a send under way survives the list being redrawn as the person
+ *  types, and moving between Chats and Contacts. "Request sent" is not here:
+ *  it comes from the Sent list. */
 const [rowStates, setRowStates] = createSignal<ReadonlyMap<string, RowSendState>>(new Map());
 const rowKeyOf = (keyHex: string): string => `${reachSession()?.accountIdB64 ?? ""}\u0000${keyHex}`;
 const rowStateOf = (keyHex: string): RowSendState => rowStates().get(rowKeyOf(keyHex)) ?? "idle";
@@ -83,8 +102,11 @@ export function PeopleSearch(props: {
   readonly groupPeopleKeys: () => readonly string[];
   /** Open a channel's subscribe page (Chats only). */
   readonly onOpenChannel?: (channelIdHex: string, handle: string) => void;
-  /** A request went out (Contacts refreshes its Sent list). */
-  readonly onSent?: () => void;
+  /** The people whose one-to-one is among the matching conversations (Chats):
+   *  a contact among them stands there already. */
+  readonly chatPeersB64?: () => ReadonlySet<string>;
+  /** The route of the one-to-one with a person, or `null` (Chats). */
+  readonly chatHrefOf?: (personKeyB64: string) => string | null;
 }): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
@@ -104,10 +126,24 @@ export function PeopleSearch(props: {
   const ownKeyHex = (): string | null => reachSession()?.accountKeyHex ?? null;
   const inContacts = props.scope === "contacts";
 
+  // The contact list as it stands now: a person accepted while the text is in
+  // the field is a contact at once, before their request leaves the Sent list.
+  const [contactsChanged, setContactsChanged] = createSignal(0);
+  onCleanup(subscribeAcceptedChanged(() => setContactsChanged((n) => n + 1)));
+  const contactSet = createMemo((): ContactSet => {
+    contactsChanged();
+    const contacts = loadAccepted();
+    return {
+      keysB64: new Set(contacts.map((c) => c.signaturePubkeyB64)),
+      accountIdsHex: new Set(contacts.flatMap((c) => (c.accountIdHex === undefined ? [] : [c.accountIdHex]))),
+    };
+  });
+
   /** The people this device knows, as they stand now. */
   const candidates = createMemo((): LocalCandidate[] => {
     if (wasm() === null || props.query().trim().length === 0) return [];
     profiles.version();
+    contactsChanged();
     return localCandidates(profiles, props.groupPeopleKeys());
   });
 
@@ -117,13 +153,30 @@ export function PeopleSearch(props: {
     reachCheck: (keyB64, wireB64) => reachCheckWith(base64Decode(keyB64), wireB64),
     onChange: () => setVerdictsChanged((n) => n + 1),
   });
-  // Runs on the text and the candidates, never on a verdict: an unanswered
-  // check is asked again when the text changes, not in a loop.
+  // Runs on the text and the candidates, never on a verdict: a check answers
+  // for one text, so every change of it asks again, and never in a loop.
   createEffect(() => {
     const w = wasm();
     const held = candidates();
+    const text = props.query();
     if (w === null) return;
-    verdicts.ask(candidatesMatching(held, props.query(), normalizerOf(w), ownKeyHex()));
+    if (text.trim().length === 0) {
+      verdicts.clear();
+      return;
+    }
+    verdicts.ask(candidatesMatching(held, text, normalizerOf(w), ownKeyHex()), text);
+  });
+
+  // A row's refused or failed line lasts until the text changes. Leaving the
+  // field is a change of it: the field is unmounted when it is emptied.
+  createEffect(on(() => props.query(), () => setRowStates(withoutRowLines), { defer: true }));
+  onCleanup(() => setRowStates(withoutRowLines));
+
+  /** The Sent list, which a row's "Request sent" reads. */
+  const outgoing = createMemo((): OutgoingRequests => {
+    sentRequestsVersion();
+    const account = reachSession()?.accountIdB64;
+    return outgoingOf(account === undefined ? [] : loadSentRequests(account));
   });
 
   /** The local half, as the person types. */
@@ -172,11 +225,16 @@ export function PeopleSearch(props: {
   };
   createEffect(on(target, (next) => auto.input(next)));
 
+  /** Everyone found, a person who became a contact since read as one. */
+  const merged = (): PersonResult[] =>
+    asContacts(mergePeople([local(), network().outcome?.people ?? []], ownKeyHex()), contactSet());
   const people = (): PersonResult[] => {
-    const found = network().outcome?.people ?? [];
-    const merged = mergePeople([local(), found], ownKeyHex());
-    // The contacts list above already shows the contacts.
-    return inContacts ? merged.filter((p) => p.reach !== "contact") : merged;
+    const all = merged();
+    // The contacts list above already shows the contacts; in Chats, a contact
+    // whose conversation matched stands there.
+    return inContacts
+      ? all.filter((p) => p.reach !== "contact")
+      : peopleRows(all, props.chatPeersB64?.() ?? new Set());
   };
 
   const channel = () => (inContacts ? null : (network().outcome?.channel ?? null));
@@ -185,7 +243,9 @@ export function PeopleSearch(props: {
   const message = (): string | null => {
     if (searching()) return null;
     const outcome = network().outcome;
-    return outcome === null ? null : peopleLineOf(outcome.state, people().length);
+    // Counted before a contact leaves for the list above: "not found" would
+    // contradict the person standing there.
+    return outcome === null ? null : peopleLineOf(outcome.state, merged().length);
   };
   const showsPeople = (): boolean =>
     people().length > 0 || channel() !== null || searching() || message() !== null;
@@ -211,8 +271,9 @@ export function PeopleSearch(props: {
               person={p}
               wasm={wasm}
               chats={chats}
-              onSent={props.onSent}
+              outgoing={outgoing}
               onReachRefused={(keyHex) => verdicts.refused(keyHex)}
+              chatHref={props.chatHrefOf?.(p.keyB64) ?? null}
               openState={contactOpenState}
             />
           )}
@@ -245,9 +306,12 @@ function PersonRow(props: {
   readonly person: PersonResult;
   readonly wasm: () => Wasm | null;
   readonly chats: ReturnType<typeof useChats>;
-  readonly onSent?: (() => void) | undefined;
+  /** Who the Sent list holds. */
+  readonly outgoing: () => OutgoingRequests;
   /** A send was refused by the reach check. */
   readonly onReachRefused: (keyHex: string) => void;
+  /** Their conversation, which Open opens (UX 6.1); `null` with none yet. */
+  readonly chatHref: string | null;
   /** The history state the contact screen is opened with (its way back). */
   readonly openState: () => ContactBackState | undefined;
 }): JSX.Element {
@@ -256,8 +320,19 @@ function PersonRow(props: {
 
   // A contact has nothing to send: whatever this row said before they became
   // one is over.
-  const view = () =>
-    rowView(props.person.reach === "contact" ? "idle" : rowStateOf(props.person.keyHex), canAddContact(props.person));
+  const state = (): RowSendState =>
+    props.person.reach === "contact"
+      ? "idle"
+      : rowSendState(props.person, rowStateOf(props.person.keyHex), props.outgoing());
+  const view = () => rowView(state(), canAddContact(props.person));
+  /** A refusal takes the grant away, and with it what the row may show; the
+   *  row keeps the username its card still has while it says so. The next
+   *  text asks again, and a person who cannot be reached is a name alone. */
+  const username = (): string | null =>
+    props.person.username ??
+    (state() === "refused"
+      ? (profiles.resolve(props.person.keyB64).username?.replace(/^@+/, "") ?? null)
+      : null);
   const contactHref = (): string => paths.contact(base64UrlEncodeNoPad(base64Decode(props.person.keyB64)));
 
   /** Add contact: the request goes out at once - no dialog, no text. */
@@ -289,20 +364,18 @@ function PersonRow(props: {
     }
     if (outcome.kind === "sent") {
       const account = reachSession()?.accountIdB64 ?? null;
-      // The Sent list shows `@username`; a person found by name alone has
-      // none to show there, so only the row says it went.
-      if (account !== null && person.username !== null && person.accountIdHex !== null) {
+      if (account !== null && person.accountIdHex !== null) {
         recordSentRequest(account, {
-          recipientUsername: person.username,
+          recipientUsername: person.username ?? "",
+          recipientName: person.name,
           recipientAccountIdHex: person.accountIdHex,
           sentAtMs: Date.now(),
           recipientKeyB64: person.keyB64,
         });
       }
-      props.onSent?.();
     }
     if (outcome.kind === "refused" && outcome.byReachCheck === true) props.onReachRefused(person.keyHex);
-    setRowState(person.keyHex, rowStateAfter(outcome));
+    setRowState(person.keyHex, heldStateAfter(outcome));
   }
 
   return (
@@ -315,7 +388,7 @@ function PersonRow(props: {
               <span class="lk-ellipsis">{props.person.name}</span>
             </span>
           </div>
-          <Show when={props.person.username}>
+          <Show when={username()}>
             {(u) => (
               <div class="lk-row-line">
                 <span class="lk-row-sub">@{u()}</span>
@@ -324,9 +397,21 @@ function PersonRow(props: {
           </Show>
         </div>
         <Show when={props.person.reach === "contact"}>
-          <A href={contactHref()} state={props.openState()} class="lk-pane-lookup" style={{ width: "auto" }}>
-            {t("common.open")}
-          </A>
+          <Show
+            when={props.chatHref}
+            fallback={
+              // No conversation yet: its Message creates one.
+              <A href={contactHref()} state={props.openState()} class="lk-pane-lookup" style={{ width: "auto" }}>
+                {t("common.open")}
+              </A>
+            }
+          >
+            {(href) => (
+              <A href={href()} class="lk-pane-lookup" style={{ width: "auto" }}>
+                {t("common.open")}
+              </A>
+            )}
+          </Show>
         </Show>
         <Show when={view().add !== "hidden"}>
           <button

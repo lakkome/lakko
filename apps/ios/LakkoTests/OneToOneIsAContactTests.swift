@@ -173,9 +173,14 @@ final class ContactAcceptTests: XCTestCase {
         XCTAssertEqual(ContactAccept.reason(of: URLError(.timedOut)), "failed")
     }
 
-    func testTheWelcomeIsOwedOnlyWhenTheGroupStands() {
-        XCTAssertFalse(FoundingRollback.owesAnswerWelcome(welcomesDelivered: 0))
-        XCTAssertTrue(FoundingRollback.owesAnswerWelcome(welcomesDelivered: 1))
+    func testARequestWithAFoundingOnRecordFoundsNoSecondGroup() {
+        var row = owedRow("one", messageId: 7)
+        row.groupId = base64Encode(Data([0xAB, 0xCD]))
+        XCTAssertEqual(
+            OwedAnswers.foundedGroupHex(requestMessageId: 7, rows: [row]),
+            DsClient.pseudonymHex(Data([0xAB, 0xCD])))
+        XCTAssertNil(OwedAnswers.foundedGroupHex(requestMessageId: 8, rows: [row]))
+        XCTAssertNil(OwedAnswers.foundedGroupHex(requestMessageId: 7, rows: []))
     }
 
     // MARK: - The owed Welcome

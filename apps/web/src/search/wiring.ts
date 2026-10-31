@@ -42,6 +42,22 @@ function contactKeySet(): Set<string> {
   return new Set(loadAccepted().map((c) => c.signaturePubkeyB64));
 }
 
+/**
+ * Every grant kept for a person, in the order they are tried. ADR-0074
+ * section 3.5a rule 2 - the grants of the PERSON, under any key a proven
+ * rotation left behind. All of them: a person may have rotated one away and
+ * still answer to another.
+ */
+function keptGrantWiresOf(keyHex: string): readonly string[] {
+  const session = reachSession();
+  if (session === null) return [];
+  try {
+    return grantsInOrderForPerson(session.receivedGrants(), personKeysHex(keyHex)).map((g) => g.wireB64);
+  } catch {
+    return [];
+  }
+}
+
 /** What this device knows about one person (by account key, base64). */
 export function knownPerson(
   profiles: ProfileApi,
@@ -51,20 +67,11 @@ export function knownPerson(
   const isContact = contactKeys.has(keyB64);
   const resolved = profiles.resolve(keyB64);
   const named = resolved.source === "rename" || resolved.source === "profile";
-  const session = reachSession();
   let keptGrantWires: readonly string[] = [];
-  if (session !== null) {
-    try {
-      // ADR-0074 section 3.5a rule 2 - the grants of the PERSON, under any
-      // key a proven rotation left behind. All of them: a person may have
-      // rotated one away and still answer to another.
-      keptGrantWires = grantsInOrderForPerson(
-        session.receivedGrants(),
-        personKeysHex(toHex(base64Decode(keyB64))),
-      ).map((g) => g.wireB64);
-    } catch {
-      keptGrantWires = [];
-    }
+  try {
+    keptGrantWires = keptGrantWiresOf(toHex(base64Decode(keyB64)));
+  } catch {
+    keptGrantWires = [];
   }
   return {
     // Only a name this device holds counts as a name. A contact nothing
@@ -152,6 +159,8 @@ export function openPublicRecordWith(
       identityPk: payload.identityPk,
       accountId: payload.accountId,
       displayName: payload.displayName ?? null,
+      username: payload.username ?? null,
+      usernameCertificate: payload.usernameCertificate ?? null,
       // ADR-0078 - where an unsigned request to this person goes.
       mailboxBinding: payload.mailboxBinding,
     };
@@ -199,6 +208,12 @@ async function provenPredecessorOf(
   }
 }
 
+/** The lookup keys of usernames a record stated, by username. A key depends
+ *  on the name alone, so a person found again costs no token. Memory only;
+ *  the oldest goes first. Chosen, not measured. */
+const MAX_KEPT_USERNAME_LOOKUP_KEYS = 64;
+const usernameLookupKeys = new Map<string, Uint8Array>();
+
 /** One line per finished network search: counts only. */
 function logSearchCounts(c: SearchCounts): void {
   // eslint-disable-next-line no-console
@@ -228,6 +243,17 @@ export function peopleSearchDeps(args: {
       return found.channel === null ? null : bytesToHex(found.channel);
     },
     usernameOprf: (username) => scoped.usernameOprf(username),
+    usernameLookupKey: async (username) => {
+      const held = usernameLookupKeys.get(username);
+      if (held !== undefined) return held;
+      const { lookupKey } = await scoped.usernameOprf(username);
+      usernameLookupKeys.set(username, lookupKey);
+      const oldest = usernameLookupKeys.keys().next().value;
+      if (usernameLookupKeys.size > MAX_KEPT_USERNAME_LOOKUP_KEYS && oldest !== undefined) {
+        usernameLookupKeys.delete(oldest);
+      }
+      return lookupKey;
+    },
     accountOfUsernameLookupKey: async (lookupKey) => {
       const res = await discovery.lookupRaw({ oprf_hash: base64Encode(lookupKey) });
       if (res === null) return null;
@@ -299,6 +325,7 @@ export function sendDeps(args: {
   };
   return {
     reachCheck: reachCheckWith,
+    heldGrantWires: (identityPk) => keptGrantWiresOf(toHex(identityPk)),
     identityFetch: async (accountId) => {
       const bundle = await discovery.identityFetch(accountId);
       if (bundle === null) return null;

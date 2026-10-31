@@ -201,6 +201,11 @@ conversion, so the channel still sees one key per subscriber.
 
 ### 4. Contacts of contacts: relayed, sealed under the searched terms
 
+**To be superseded by [ADR-0086](0086-circle-directories.md) (proposed 2026-10-30):**
+the card and bundle relay below costs 390 MB to 8 GB a week per person and does not
+meet the scale requirement. ADR-0086 also replaces the rotation rules of section 3
+for groups and channels. This section describes what is built today.
+
 When 2.1 is on, the owner (Alice) builds one **introduction record**:
 
 - the **search terms**: the username, and every prefix of 3 to 16 letters of

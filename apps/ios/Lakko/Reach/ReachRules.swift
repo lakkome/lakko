@@ -641,6 +641,40 @@ public enum ReachRules {
         return ordered.filter { seen.insert($0.seedB64).inserted }
     }
 
+    /// `docs/ux/who-can-find-me.md` section 8 — whether going from `old` to
+    /// `new` narrowed who is reached through the person's contacts: all
+    /// contacts became the chosen ones, or someone left the chosen list. The
+    /// `fof` key then moves at once, so the old key is unregistered and a new
+    /// record is offered to the contacts still allowed. Widening moves
+    /// nothing: the next offer pass reaches the new contact.
+    public static func narrowsContacts(
+        from old: FfiVisibilitySetting, to new: FfiVisibilitySetting,
+        allowsFof: (FfiVisibilitySetting) -> Bool
+    ) -> Bool {
+        guard allowsFof(old), allowsFof(new), new.mode == .some, new.contactsForm == .chosen else {
+            return false
+        }
+        if old.mode != .some || old.contactsForm == .all { return true }
+        return !Set(old.chosenContacts).isSubset(of: Set(new.chosenContacts))
+    }
+
+    /// ADR-0060 section 4, "Only the contacts I choose" — whether this
+    /// account's own introduction record goes to the person of a one-to-one.
+    /// `allows` is the core's `allowsContact`. With no account id known a
+    /// person cannot be matched against the chosen list, so under Only the
+    /// ones I choose they get none.
+    public static func offersRecord(
+        to accountId: Data?, setting: FfiVisibilitySetting,
+        allows: (FfiVisibilitySetting, Data) -> Bool
+    ) -> Bool {
+        if let accountId { return allows(setting, accountId) }
+        switch setting.mode {
+        case .nobody: return false
+        case .everyone: return true
+        case .some: return setting.contactsOfContacts && setting.contactsForm == .all
+        }
+    }
+
     /// `docs/ux/who-can-find-me.md` section 6.1 — the grants a search may
     /// offer a person under, in the order they are tried: `contact`, each
     /// `group`, each `channel`, the `fof` one found through an introduction,

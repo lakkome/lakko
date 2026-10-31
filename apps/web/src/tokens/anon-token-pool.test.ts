@@ -18,6 +18,7 @@ import {
   REFILL_INTERVAL_MAX_MS,
   REFILL_INTERVAL_MIN_MS,
   anonTokenQuotaExhausted,
+  anonTokenRefillOnDemandInThisBuild,
   anonymousFetchInit,
   isAnonTokenNetworkFailure,
 } from "./anon-token-pool";
@@ -36,6 +37,39 @@ function issuances(issuer: ReturnType<typeof fakeTokenPool>["issuer"], context?:
       (context === undefined || (r.body as { context?: string }).context === context),
   );
 }
+
+describe("a take on an empty bucket: the release rule and a test build", () => {
+  async function emptied(refillOnDemand?: boolean) {
+    const made = fakeTokenPool(refillOnDemand === undefined ? {} : { refillOnDemand });
+    await made.pool.take("ds-knock");
+    await settle();
+    while (made.pool.size("ds-knock") > 0) await made.pool.take("ds-knock");
+    return made;
+  }
+
+  it("release: a take never starts an issuance", async () => {
+    const { pool, issuer } = await emptied();
+    await expect(pool.take("ds-knock")).rejects.toBeInstanceOf(AnonTokenUnavailableError);
+    expect(issuances(issuer, "ds-knock")).toHaveLength(1);
+  });
+
+  it("test build: the take starts the issuance and waits for it", async () => {
+    const { pool, issuer } = await emptied(true);
+    const token = await pool.take("ds-knock");
+    expect(token.context).toBe("ds-knock");
+    expect(issuances(issuer, "ds-knock")).toHaveLength(2);
+  });
+
+  it("test build: takes at once share one issuance", async () => {
+    const { pool, issuer } = await emptied(true);
+    await Promise.all([pool.take("ds-knock"), pool.take("ds-knock")]);
+    expect(issuances(issuer, "ds-knock")).toHaveLength(2);
+  });
+
+  it("the build rule reads the on-demand flag, and this test build is not on-demand", () => {
+    expect(anonTokenRefillOnDemandInThisBuild()).toBe(false);
+  });
+});
 
 describe("refill on a schedule, take without drawing (ADR-0078 section 8)", () => {
   it("the session's first refill draws a day of use WITH the session; a take waits for it", async () => {

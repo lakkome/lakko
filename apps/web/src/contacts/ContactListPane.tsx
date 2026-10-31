@@ -28,6 +28,7 @@ import type { IncomingContactRequest } from "./client";
 import {
   groupByLetter,
   matchesContactQuery,
+  sentRowLines,
   sortIncomingRequests,
   type SentRequestRecord,
 } from "./contact-list-model";
@@ -240,12 +241,15 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                 {(record) => (
                   <div class="lk-row">
                     <Avatar
-                      label={record.recipientUsername}
+                      label={sentRowLines(record).title}
                       id={record.recipientAccountIdHex}
                       personKey={record.recipientKeyB64}
                     />
                     <div class="lk-row-body">
-                      <span class="lk-row-title">@{record.recipientUsername}</span>
+                      <span class="lk-row-title">{sentRowLines(record).title}</span>
+                      <Show when={sentRowLines(record).username}>
+                        {(u) => <span class="lk-row-sub">{u()}</span>}
+                      </Show>
                       <span class="lk-row-sub">{t("contacts.list.sent_waiting")}</span>
                     </div>
                     <button

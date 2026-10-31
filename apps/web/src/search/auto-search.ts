@@ -10,9 +10,12 @@
  *   network by username and by name at once;
  * - a leading `@` is ignored, and a text that cannot be a username and has
  *   no searchable name term asks nothing;
- * - a text asked once in this session is not asked again: its answer is
- *   shown from memory. Only an ANSWER is remembered (found, not found); a
- *   network failure or "out of searches" is not, so typing again retries;
+ * - a text asked in the last {@link SEARCH_ANSWER_KEPT_MS} is not asked again:
+ *   its answer is shown from memory. Only an ANSWER is remembered (found, not
+ *   found), and it ages: a person may have widened who can find them. Its age
+ *   is read when a text is asked; no timer re-asks an unchanged text. A
+ *   network failure or "out of searches" is not remembered, so typing again
+ *   retries;
  * - a result already shown stays while the person keeps typing, until the
  *   new answer arrives.
  *
@@ -31,6 +34,9 @@ export const NETWORK_SEARCH_DEBOUNCE_MS = 500;
 /** At most this many answers are remembered per session; the oldest goes
  *  first. Chosen, not measured. */
 export const MAX_REMEMBERED_SEARCHES = 200;
+/** How long an answer is reused for its text, a not-found included. Chosen, not
+ *  measured (UX section 6.1). */
+export const SEARCH_ANSWER_KEPT_MS = 60_000;
 
 /** What decides whether a text may be asked. */
 export interface NetworkQueryRules {
@@ -66,12 +72,24 @@ export function isRememberedAnswer(outcome: PeopleSearchOutcome): boolean {
 
 /** The answers of this session, by search key. Bounded; insertion-ordered. */
 export class SearchMemory {
-  private readonly answers = new Map<string, PeopleSearchOutcome>();
+  private readonly answers = new Map<
+    string,
+    { readonly outcome: PeopleSearchOutcome; readonly atMs: number }
+  >();
 
-  constructor(private readonly max: number = MAX_REMEMBERED_SEARCHES) {}
+  constructor(
+    private readonly max: number = MAX_REMEMBERED_SEARCHES,
+    /** A clock that never runs backwards, in milliseconds. */
+    private readonly now: () => number = () => performance.now(),
+  ) {}
 
+  /** The answer for `key`, while it is young enough to reuse. */
   get(key: string): PeopleSearchOutcome | undefined {
-    return this.answers.get(key);
+    const kept = this.answers.get(key);
+    if (kept === undefined) return undefined;
+    if (this.now() - kept.atMs < SEARCH_ANSWER_KEPT_MS) return kept.outcome;
+    this.answers.delete(key);
+    return undefined;
   }
 
   /** Remember `outcome` when it is an answer; anything else is forgotten. */
@@ -81,7 +99,7 @@ export class SearchMemory {
       return;
     }
     this.answers.delete(key);
-    this.answers.set(key, outcome);
+    this.answers.set(key, { outcome, atMs: this.now() });
     while (this.answers.size > this.max) {
       const oldest = this.answers.keys().next().value;
       if (oldest === undefined) break;

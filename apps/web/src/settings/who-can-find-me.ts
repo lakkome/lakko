@@ -19,6 +19,7 @@
  * through a structural type the wasm `VisibilitySetting` satisfies.
  */
 
+import { compareContactLabels } from "../contacts/contact-list-model";
 import { t } from "../l10n";
 
 /** The numeric wire values of `VisibilityMode` (frozen). */
@@ -28,6 +29,9 @@ export const MODE_EVERYONE = 2;
 /** The numeric wire values of `GroupsForm` (frozen); `undefined` is off. */
 export const FORM_ALL = 1;
 export const FORM_CHOSEN = 2;
+/** The numeric wire values of `ContactsForm` (frozen). */
+export const CONTACTS_FORM_ALL = 1;
+export const CONTACTS_FORM_CHOSEN = 2;
 /** The numeric wire values of `ScopeKind` (frozen). */
 export const SCOPE_GROUP = 1;
 export const SCOPE_CHANNEL = 2;
@@ -36,6 +40,7 @@ export const SCOPE_CHANNEL = 2;
 export interface SettingFields {
   readonly mode: number;
   readonly contactsOfContacts: boolean;
+  readonly contactsForm: number;
   readonly groups: number | undefined;
 }
 
@@ -46,6 +51,8 @@ export type FormName = "all" | "chosen";
 export interface VisibilityView {
   readonly mode: ModeName;
   readonly contactsOfContacts: boolean;
+  /** Part 2.1's form; meaningful only while part 2.1 is on. */
+  readonly contactsForm: FormName;
   /** Part 2.2 and its form; `null` when off. */
   readonly groups: FormName | null;
 }
@@ -55,7 +62,8 @@ export function viewOf(s: SettingFields): VisibilityView {
     s.mode === MODE_SOME ? "some" : s.mode === MODE_EVERYONE ? "everyone" : "nobody";
   const groups: FormName | null =
     s.groups === FORM_ALL ? "all" : s.groups === FORM_CHOSEN ? "chosen" : null;
-  return { mode, contactsOfContacts: s.contactsOfContacts, groups };
+  const contactsForm: FormName = s.contactsForm === CONTACTS_FORM_CHOSEN ? "chosen" : "all";
+  return { mode, contactsOfContacts: s.contactsOfContacts, contactsForm, groups };
 }
 
 /** Which rows are on screen (UX section 3). */
@@ -66,12 +74,23 @@ export interface VisibleRows {
   readonly groupsForm: boolean;
   /** The disclosure into the list, beside Only the ones I choose. */
   readonly listDisclosure: boolean;
+  /** All / Only the ones I choose, under Contacts of my contacts. */
+  readonly contactsForm: boolean;
+  /** The disclosure into the list of contacts. */
+  readonly contactsDisclosure: boolean;
 }
 
 export function visibleRows(v: VisibilityView): VisibleRows {
   const parts = v.mode === "some";
   const groupsForm = parts && v.groups !== null;
-  return { parts, groupsForm, listDisclosure: groupsForm && v.groups === "chosen" };
+  const contactsForm = parts && v.contactsOfContacts;
+  return {
+    parts,
+    groupsForm,
+    listDisclosure: groupsForm && v.groups === "chosen",
+    contactsForm,
+    contactsDisclosure: contactsForm && v.contactsForm === "chosen",
+  };
 }
 
 /**
@@ -82,6 +101,15 @@ export function visibleRows(v: VisibilityView): VisibleRows {
  */
 export function showsMembersSwitch(v: VisibilityView): boolean {
   return v.mode === "some" && v.groups !== null;
+}
+
+/**
+ * UX section 5.1: `Their contacts can find me` on a contact's screen exists
+ * only while Contacts of my contacts is on. The row is absent rather than dead
+ * otherwise.
+ */
+export function showsTheirContactsSwitch(v: VisibilityView): boolean {
+  return v.mode === "some" && v.contactsOfContacts;
 }
 
 // ------------------------------------------------------------------ copy
@@ -97,6 +125,9 @@ export const COPY = {
   contactsOfContacts: (): string => t("who_can_find_me.contacts_of_contacts"),
   contactsOfContactsHelper: (): string => t("who_can_find_me.contacts_of_contacts_helper"),
   contactsOfContactsSpreading: (): string => t("who_can_find_me.contacts_of_contacts_spreading"),
+  contactsAll: (): string => t("who_can_find_me.contacts.all"),
+  contactsChosen: (): string => t("who_can_find_me.contacts.chosen"),
+  theirContactsCanFindMe: (): string => t("who_can_find_me.their_contacts_can_find_me"),
   groups: (): string => t("who_can_find_me.groups"),
   groupsAllHelper: (): string => t("who_can_find_me.groups_all_helper"),
   all: (): string => t("who_can_find_me.groups.all"),
@@ -111,6 +142,8 @@ export const COPY = {
   listChannels: (): string => t("who_can_find_me.list.channels"),
   listSearch: (): string => t("who_can_find_me.list.search"),
   listNoMatch: (): string => t("who_can_find_me.list.no_match"),
+  contactsListEmpty: (): string => t("who_can_find_me.list.contacts_empty"),
+  contactsListSearch: (): string => t("who_can_find_me.list.contacts_search"),
   membersCanFindMe: (): string => t("who_can_find_me.members_can_find_me"),
   /** The notice as plain text; the screen renders it with `privacy` as a link. */
   excludedNotice: (): string =>
@@ -120,7 +153,7 @@ export const COPY = {
 } as const;
 
 /** The helper under Members of my groups and channels (UX section 3). */
-export function groupsHelper(v: VisibilityView, chosen: number, total: number): string {
+export function groupsHelper(v: Pick<VisibilityView, "groups">, chosen: number, total: number): string {
   if (v.groups === "chosen") return t("who_can_find_me.groups_chosen_helper", { chosen, total });
   return COPY.groupsAllHelper();
 }
@@ -130,8 +163,17 @@ export function groupsHelper(v: VisibilityView, chosen: number, total: number): 
  * turned on the widening travels through the contacts' devices, so the
  * screen says so rather than claiming it is already in effect.
  */
-export function contactsOfContactsHelper(on: boolean, spreading: boolean): string {
-  return on && spreading ? COPY.contactsOfContactsSpreading() : COPY.contactsOfContactsHelper();
+export function contactsOfContactsHelper(
+  v: Pick<VisibilityView, "contactsOfContacts" | "contactsForm">,
+  chosen: number,
+  total: number,
+  spreading: boolean,
+): string {
+  if (v.contactsOfContacts && spreading) return COPY.contactsOfContactsSpreading();
+  if (v.contactsOfContacts && v.contactsForm === "chosen") {
+    return t("who_can_find_me.contacts_chosen_helper", { chosen, total });
+  }
+  return COPY.contactsOfContactsHelper();
 }
 
 /** The apply states of the reach session (`reachApplyStatus`). */
@@ -248,6 +290,40 @@ export function chosenCount(
  */
 export function opensListOnChoose(chosenBefore: number): boolean {
   return chosenBefore === 0;
+}
+
+// ------------------------------------------------------- the contact list
+
+/** One contact of the list of section 4.1. */
+export interface ContactEntry {
+  /** The 16-byte account id, lower-case hex: what the setting names, so the
+   *  choice survives a key rotation. */
+  readonly accountIdHex: string;
+  readonly keyB64: string;
+  readonly name: string;
+}
+
+/**
+ * The contacts the list shows, sorted as the Contacts screen sorts them. A
+ * contact with no known account id cannot be chosen, so it has no row.
+ */
+export function contactEntries<C extends { readonly signaturePubkeyB64: string; readonly accountIdHex?: string }>(
+  contacts: readonly C[],
+  nameOf: (contact: C) => string,
+): ContactEntry[] {
+  const out: ContactEntry[] = [];
+  for (const c of contacts) {
+    const hex = c.accountIdHex?.toLowerCase();
+    if (hex === undefined || !/^[0-9a-f]{32}$/.test(hex)) continue;
+    out.push({ accountIdHex: hex, keyB64: c.signaturePubkeyB64, name: nameOf(c) });
+  }
+  return out.sort((a, b) => compareContactLabels(a.name, b.name) || a.keyB64.localeCompare(b.keyB64));
+}
+
+/** The list filtered by the search text (any part of the name). */
+export function contactList(entries: readonly ContactEntry[], query: string): readonly ContactEntry[] {
+  const q = foldForSearch(query);
+  return q.length === 0 ? entries : entries.filter((e) => foldForSearch(e.name).includes(q));
 }
 
 /** The keys of the setting's chosen list (a `ScopeId[]` read off the wasm

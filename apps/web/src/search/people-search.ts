@@ -35,7 +35,9 @@
  * does not open or fails either check is ignored. A name this device already
  * holds (a contact, a profile from a shared group or channel) wins over the
  * record's. A name hit nothing names is dropped; a username match without a
- * usable record is shown under its username.
+ * usable record is shown under its username. The record also states the
+ * person's username and its certificate: a name hit shows the username once
+ * the certificate proves it, as an introduction's does, and never before.
  *
  * Every dependency is an argument, so the whole decision is testable.
  */
@@ -80,6 +82,10 @@ export interface OpenedPublicRecord {
   readonly identityPk: Uint8Array;
   readonly accountId: Uint8Array;
   readonly displayName: string | null;
+  /** The username the record states, and the discovery certificate for it. A
+   *  claim until {@link PeopleSearchDeps.verifyUsername} says otherwise. */
+  readonly username?: string | null;
+  readonly usernameCertificate?: Uint8Array | null;
   /** ADR-0078 - the person's 97-byte mailbox binding, the core verified
    *  against `identityPk`. Absent from a fake that does not model it. */
   readonly mailboxBinding?: Uint8Array | null;
@@ -97,6 +103,9 @@ export interface PeopleSearchDeps {
   lookupChannel?(handle: string): Promise<string | null>;
   /** One OPRF round over a username (one anonymous token). */
   usernameOprf(username: string): Promise<OprfPair>;
+  /** The lookup key of a username a record states, kept once it is known so a
+   *  person found again costs no token. Absent: one {@link usernameOprf}. */
+  usernameLookupKey?(username: string): Promise<Uint8Array>;
   /** `/discovery/lookup` by the username's LOOKUP KEY: the account id and
    *  its public record, or `null`. */
   accountOfUsernameLookupKey(lookupKey: Uint8Array): Promise<LookupHit | null>;
@@ -154,9 +163,10 @@ export interface PeopleSearchOutcome {
   readonly state: PeopleSearchState;
 }
 
-/** At most this many usernames of introduction results are verified per
- *  search beyond the typed one: each verification costs an OPRF evaluation,
- *  i.e. one anonymous token. The rest show their name without a username. */
+/** At most this many usernames that a public record or an introduction states
+ *  are verified per search beyond the typed one: each verification costs an
+ *  OPRF evaluation, i.e. one anonymous token. The rest show their name without
+ *  a username. */
 export const MAX_EXTRA_USERNAME_CHECKS = 3;
 
 /**
@@ -172,6 +182,18 @@ export function acceptPublicRecord(
   oprfOutput: Uint8Array,
   bundleKey: Uint8Array,
 ): string | null {
+  const name = acceptedRecord(deps, hit, oprfOutput, bundleKey)?.displayName?.trim() ?? "";
+  return name.length === 0 ? null : name;
+}
+
+/** The record of a lookup hit, under the checks of {@link acceptPublicRecord},
+ *  or `null`. Never throws. */
+function acceptedRecord(
+  deps: Pick<PeopleSearchDeps, "openPublicRecord">,
+  hit: LookupHit,
+  oprfOutput: Uint8Array,
+  bundleKey: Uint8Array,
+): OpenedPublicRecord | null {
   if (hit.publicRecord === null) return null;
   let opened: OpenedPublicRecord | null;
   try {
@@ -182,8 +204,28 @@ export function acceptPublicRecord(
   if (opened === null) return null;
   if (toHex(opened.accountId) !== toHex(hit.accountId)) return null;
   if (toHex(opened.identityPk) !== toHex(bundleKey)) return null;
-  const name = opened.displayName?.trim() ?? "";
-  return name.length === 0 ? null : name;
+  return opened;
+}
+
+/** A username a record states, to be proven before it is shown. */
+interface UsernameClaim {
+  readonly username: string;
+  readonly certificate: Uint8Array;
+  readonly accountId: Uint8Array;
+}
+
+/** The username claim of a lookup hit's record, or `null`. Never throws. */
+function publicRecordClaim(
+  deps: Pick<PeopleSearchDeps, "openPublicRecord">,
+  hit: LookupHit,
+  oprfOutput: Uint8Array,
+  bundleKey: Uint8Array,
+): UsernameClaim | null {
+  const opened = acceptedRecord(deps, hit, oprfOutput, bundleKey);
+  const username = opened?.username ?? null;
+  const certificate = opened?.usernameCertificate ?? null;
+  if (username === null || certificate === null) return null;
+  return { username, certificate, accountId: hit.accountId };
 }
 
 /**
@@ -198,17 +240,7 @@ export function publicRecordBinding(
   oprfOutput: Uint8Array,
   bundleKey: Uint8Array,
 ): string | null {
-  if (hit.publicRecord === null) return null;
-  let opened: OpenedPublicRecord | null;
-  try {
-    opened = deps.openPublicRecord(hit.publicRecord, oprfOutput);
-  } catch {
-    return null;
-  }
-  if (opened === null) return null;
-  if (toHex(opened.accountId) !== toHex(hit.accountId)) return null;
-  if (toHex(opened.identityPk) !== toHex(bundleKey)) return null;
-  const binding = opened.mailboxBinding ?? null;
+  const binding = acceptedRecord(deps, hit, oprfOutput, bundleKey)?.mailboxBinding ?? null;
   return binding === null ? null : deps.encodeGrant(binding);
 }
 
@@ -250,6 +282,8 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
   const username = deps.canonicalUsername(query);
   const term = deps.queryTerm(query);
   const probes: IntroductionProbe[] = [];
+  /** What the people found by name state about their username, by key. */
+  const nameClaims = new Map<string, UsernameClaim>();
 
   // ---- the channel namespace ------------------------------------------
   const channelLeg = (async (): Promise<{ idHex: string; handle: string } | null> => {
@@ -335,7 +369,11 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
           null,
           publicRecordBinding(deps, hit, round.output, key.bytes),
         );
-        if (r !== null) out.push(r);
+        if (r !== null) {
+          out.push(r);
+          const claim = publicRecordClaim(deps, hit, round.output, key.bytes);
+          if (r.username === null && claim !== null) nameClaims.set(r.keyHex, claim);
+        }
       }
       legs.push("answered");
       return out;
@@ -345,7 +383,34 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
     }
   })();
 
-  const [channel, byUsername, byName] = await Promise.all([channelLeg, usernameLeg, nameLeg]);
+  const [channel, byUsername, byNameOnly] = await Promise.all([channelLeg, usernameLeg, nameLeg]);
+
+  // ---- usernames a record states ------------------------------------
+  let extraChecks = 0;
+  const lookupKeyOf =
+    deps.usernameLookupKey ?? (async (u: string) => (await deps.usernameOprf(u)).lookupKey);
+  /** `claim.username` once its certificate proves it, else `null`. */
+  const provenUsername = async (claim: UsernameClaim): Promise<string | null> => {
+    let lookupKey: Uint8Array | null = null;
+    if (claim.username === username && rounds.username !== null) {
+      lookupKey = rounds.username.lookupKey;
+    } else if (extraChecks < MAX_EXTRA_USERNAME_CHECKS) {
+      extraChecks += 1;
+      try {
+        lookupKey = await lookupKeyOf(claim.username);
+      } catch {
+        lookupKey = null;
+      }
+    }
+    if (lookupKey === null) return null;
+    return (await deps.verifyUsername(claim.certificate, lookupKey, claim.accountId)) ? claim.username : null;
+  };
+  const byName: PersonResult[] = [];
+  for (const p of byNameOnly) {
+    const claim = nameClaims.get(p.keyHex);
+    const proven = claim === undefined ? null : await provenUsername(claim);
+    byName.push(proven === null ? p : { ...p, username: shownUsername(proven, p.reach) });
+  }
 
   // ---- contacts of contacts ------------------------------------------
   const byIntroduction: PersonResult[] = [];
@@ -360,7 +425,6 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
       opened = [];
     }
     recordsOpened = opened.length;
-    let extraChecks = 0;
     for (const intro of opened) {
       const matches =
         intro.via === "username"
@@ -381,26 +445,14 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
         continue;
       }
       if (!bound) continue;
-      let verified: string | null = null;
-      if (intro.username !== null && intro.usernameCertificate !== null) {
-        let lookupKey: Uint8Array | null = null;
-        if (intro.username === username && rounds.username !== null) {
-          lookupKey = rounds.username.lookupKey;
-        } else if (extraChecks < MAX_EXTRA_USERNAME_CHECKS) {
-          extraChecks += 1;
-          try {
-            lookupKey = (await deps.usernameOprf(intro.username)).lookupKey;
-          } catch {
-            lookupKey = null;
-          }
-        }
-        if (
-          lookupKey !== null &&
-          (await deps.verifyUsername(intro.usernameCertificate, lookupKey, intro.accountId))
-        ) {
-          verified = intro.username;
-        }
-      }
+      const verified =
+        intro.username !== null && intro.usernameCertificate !== null
+          ? await provenUsername({
+              username: intro.username,
+              certificate: intro.usernameCertificate,
+              accountId: intro.accountId,
+            })
+          : null;
       const keyB64 = keyB64Of(intro.identityPk);
       const name = intro.displayName ?? (verified !== null ? `@${verified}` : fingerprintLabel(intro.identityPk));
       const r = resultFor(

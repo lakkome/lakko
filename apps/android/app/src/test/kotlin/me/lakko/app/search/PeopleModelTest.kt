@@ -210,4 +210,41 @@ class PeopleModelTest {
         assertEquals(SEARCH_OUT_OF_SEARCHES, searchStateMessage(PeopleSearchState.ALLOWANCE_USED))
         assertEquals("search.people.out_of_searches", SEARCH_OUT_OF_SEARCHES.key)
     }
+
+    private fun row(key: String, reach: PersonReach) = PersonResult(key, key, null, "Kaj", null, reach, null)
+
+    @Test
+    fun `a contact listed above leaves People, and a person who is no contact stays`() {
+        val listed = row("k", PersonReach.CONTACT)
+        val chat = row("c", PersonReach.CONTACT)
+        val noChat = row("n", PersonReach.CONTACT)
+        val removed = row("r", PersonReach.GRANT)
+        assertEquals(
+            listOf(noChat, removed),
+            peopleRows(listOf(listed, chat, noChat, removed), setOf("k"), setOf("c", "r")),
+        )
+    }
+
+    @Test
+    fun `the heading never stands alone`() {
+        assertFalse(showsPeopleHeading(rows = 0, channel = false, searching = false, line = false))
+        assertTrue(showsPeopleHeading(rows = 1, channel = false, searching = false, line = false))
+        assertTrue(showsPeopleHeading(rows = 0, channel = true, searching = false, line = false))
+        assertTrue(showsPeopleHeading(rows = 0, channel = false, searching = true, line = false))
+        assertTrue(showsPeopleHeading(rows = 0, channel = false, searching = false, line = true))
+    }
+
+    @Test
+    fun `a held answer never offers a second request to a person who accepted`() {
+        val held = PersonResult("k", "k", "aa", "Eivor", null, PersonReach.OPEN, null)
+        val row = withCurrentContacts(listOf(held), setOf("k")).single()
+        assertEquals(PersonReach.CONTACT, row.reach)
+        assertFalse(canAddContact(row))
+    }
+
+    @Test
+    fun `a person who is no contact keeps their row and their grant`() {
+        val held = PersonResult("k", "k", "aa", "Eivor", null, PersonReach.GRANT, "G", grantChecked = true)
+        assertEquals(listOf(held), withCurrentContacts(listOf(held), setOf("other")))
+    }
 }

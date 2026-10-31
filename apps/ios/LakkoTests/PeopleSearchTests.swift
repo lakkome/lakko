@@ -513,7 +513,7 @@ final class PeopleSearchTests: XCTestCase {
             [waiting.accountKey], "a waiting one still matches, as its name alone")
     }
 
-    func testOnlyAMatchingCandidateWithGrantsAndNoVerdictIsChecked() {
+    func testOnlyAMatchingCandidateWithGrantsIsCheckedWhateverVerdictIsHeld() {
         let grant = kept(Data(repeating: 1, count: 32))
         let own = Data(repeating: 9, count: 32)
         let ask = candidate(1, KnownPerson(
@@ -525,14 +525,11 @@ final class PeopleSearchTests: XCTestCase {
         let noGrant = candidate(4, KnownPerson(name: "Anna", verifiedUsername: nil, isContact: false))
         let contact = candidate(5, KnownPerson(
             name: "Anna", verifiedUsername: nil, isContact: true, keptGrants: [grant]))
-        let answered = candidate(6, KnownPerson(
-            name: "Anna", verifiedUsername: nil, isContact: false, keptGrants: [grant]))
         let me = LocalCandidate(accountKey: own, accountId: nil, known: KnownPerson(
             name: "Anna", verifiedUsername: nil, isContact: false, keptGrants: [grant]))
         let needed = PeopleSearch.needingReachCheck(
             query: "ann",
-            candidates: [ask, byUsername, other, noGrant, contact, answered, me],
-            verdicts: [answered.accountKey: .live(grant)],
+            candidates: [ask, byUsername, other, noGrant, contact, me],
             ownAccountKey: own)
         XCTAssertEqual(needed.map(\.accountKey), [ask.accountKey, byUsername.accountKey])
     }
@@ -582,6 +579,140 @@ final class PeopleSearchTests: XCTestCase {
         var terms = nameSearchTerms(displayName: name).map { fakeOutput("name", $0) }
         terms.append(fakeOutput("user", username))
         return try composeIntroduction(payload: payload, termOprfs: terms, issuedAtMs: 1)
+    }
+
+    // MARK: - A username on a name match (UX section 6.1)
+
+    /// A public record stating a username, for the person of `identity`.
+    private func publicRecord(
+        of identity: Identity, accountId: Data, name: String, username: String
+    ) throws -> PublicAccountHit {
+        let payload = FfiIntroductionPayload(
+            identityPk: identity.signaturePublicKey(), accountId: accountId,
+            displayName: name, username: username, usernameCertificate: Data(repeating: 1, count: 153),
+            mailboxBinding: signMailboxBinding(accountIdentity: identity), fof: nil)
+        let terms = nameSearchTerms(displayName: name).map { fakeOutput("name", $0) }
+        return PublicAccountHit(
+            accountId: accountId,
+            publicRecord: try composePublicRecord(payload: payload, termOprfs: terms, issuedAtMs: 1))
+    }
+
+    func testANameHitShowsAUsernameOnlyOnceItsCertificateIsProved() async throws {
+        let hit = try publicRecord(of: annaKey, accountId: annaAccount, name: "Anna Weber", username: "anna_w")
+        var proved: [(Data, Data)] = []
+        let found = await PeopleSearch.networkLegs(
+            query: "anna web", records: [],
+            ports: ports(nameLookup: { _ in [hit] }, verifyCertificate: { _, key, account in
+                proved.append((key, account))
+                return true
+            }))
+        XCTAssertEqual(found.people.map(\.username), ["anna_w"])
+        XCTAssertEqual(proved.first?.0, fakeOprf("user", "anna_w").lookupKey)
+        XCTAssertEqual(proved.first?.1, annaAccount)
+
+        let unproved = await PeopleSearch.networkLegs(
+            query: "anna web", records: [], ports: ports(nameLookup: { _ in [hit] }))
+        XCTAssertEqual(unproved.people.count, 1, "a claim alone is not shown, and the row stays")
+        XCTAssertNil(unproved.people.first?.username)
+    }
+
+    func testAFailedTokenCostsTheUsernameNeverTheRow() async throws {
+        let hit = try publicRecord(of: annaKey, accountId: annaAccount, name: "Anna Weber", username: "anna_w")
+        let legs = await PeopleSearch.networkLegs(
+            query: "anna web", records: [],
+            ports: ports(
+                nameLookup: { _ in [hit] },
+                usernameOprf: { _ in throw AnonTokenUnavailable.quotaExhausted(retryAfterSecs: 1) },
+                verifyCertificate: { _, _, _ in true }))
+        XCTAssertEqual(legs.people.map(\.displayName), ["Anna Weber"])
+        XCTAssertNil(legs.people.first?.username)
+        XCTAssertFalse(legs.failed)
+        XCTAssertFalse(legs.allowanceUsed)
+    }
+
+    func testNameMatchesAndIntroductionsShareTheCapOfThree() async throws {
+        var bundles: [Data: Data] = [:]
+        var hits: [PublicAccountHit] = []
+        for byte in UInt8(1)...5 {
+            let identity = try Identity.fromSeed(seed: Data(repeating: byte, count: 32))
+            let account = Data(repeating: byte, count: 16)
+            bundles[account] = identity.signaturePublicKey()
+            hits.append(try publicRecord(
+                of: identity, accountId: account, name: "Anna No\(byte)", username: "anna_\(byte)"))
+        }
+        let looked = await withLookups { [bundles] looked in
+            await PeopleSearch.networkLegs(
+                query: "anna", records: [try! self.annaRecordWithUsername(name: "Anna Weber", username: "anna_w")],
+                ports: self.ports(
+                    identityKey: { [bundles, annaAccount, annaKey] id in
+                        id == annaAccount ? annaKey.signaturePublicKey() : bundles[id]
+                    },
+                    nameLookup: { _ in hits },
+                    usernameOprf: { name in
+                        looked.note(name)
+                        return self.fakeOprf("user", name)
+                    },
+                    verifyCertificate: { _, _, _ in true }))
+        }
+        XCTAssertEqual(looked.names.filter { $0 != "anna" }.count, 3, "one token per proof, three at most")
+        XCTAssertEqual(looked.legs.people.compactMap(\.username).count, 3)
+        XCTAssertEqual(looked.legs.people.count, 6, "beyond the cap a row shows no username")
+    }
+
+    func testAPersonFoundAgainCostsNoToken() async throws {
+        let hit = try publicRecord(of: annaKey, accountId: annaAccount, name: "Anna Weber", username: "anna_w")
+        let kept = KeptUsernameLookupKeys()
+        let looked = Lookups()
+        func search() async -> PeopleNetworkLegs {
+            await PeopleSearch.networkLegs(
+                query: "anna web", records: [],
+                ports: ports(
+                    nameLookup: { _ in [hit] },
+                    usernameOprf: { name in
+                        looked.note(name)
+                        return self.fakeOprf("user", name)
+                    },
+                    verifyCertificate: { _, _, _ in true }
+                ).with(kept: kept))
+        }
+        _ = await search()
+        let again = await search()
+        XCTAssertEqual(looked.names, ["anna_w"])
+        XCTAssertEqual(again.people.first?.username, "anna_w")
+    }
+
+    func testKeptLookupKeysDropTheOldestAndAFailureKeepsNothing() async throws {
+        let kept = KeptUsernameLookupKeys(max: 2)
+        await kept.keep(Data([1]), for: "a")
+        await kept.keep(Data([2]), for: "b")
+        await kept.keep(Data([3]), for: "c")
+        let oldest = await kept.key(for: "a")
+        let newest = await kept.key(for: "c")
+        XCTAssertNil(oldest)
+        XCTAssertEqual(newest, Data([3]))
+
+        let empty = KeptUsernameLookupKeys()
+        var refused = ports(usernameOprf: { _ in throw URLError(.timedOut) })
+        refused = refused.with(kept: empty)
+        _ = try? await refused.usernameLookupKey("a")
+        let held = await empty.key(for: "a")
+        XCTAssertNil(held)
+    }
+
+    /// The usernames a search looked up.
+    private final class Lookups: @unchecked Sendable {
+        private let lock = NSLock()
+        private var seen: [String] = []
+        var names: [String] { lock.withLock { seen } }
+        func note(_ name: String) { lock.withLock { seen.append(name) } }
+    }
+
+    private func withLookups(
+        _ run: (Lookups) async -> PeopleNetworkLegs
+    ) async -> (names: [String], legs: PeopleNetworkLegs) {
+        let looked = Lookups()
+        let legs = await run(looked)
+        return (looked.names, legs)
     }
 
     /// A name-matched introduction's username is verified with an extra OPRF

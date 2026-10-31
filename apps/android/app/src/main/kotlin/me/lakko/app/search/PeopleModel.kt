@@ -333,6 +333,41 @@ public fun searchStateMessage(state: PeopleSearchState): UiText? = when (state) 
 public fun peopleSectionMessage(state: PeopleSearchState, personRows: Int): UiText? =
     searchStateMessage(state).takeUnless { state == PeopleSearchState.NOT_FOUND && personRows > 0 }
 
+/**
+ * The rows under People. [listedKeysB64] are shown above already (the Contacts
+ * list). [chatPeersB64] are the people whose one-to-one is among the matching
+ * conversations above: a contact among them stands there, so they are not
+ * listed twice. A person who is no contact keeps their row, and with it the way
+ * to add them.
+ */
+public fun peopleRows(
+    merged: List<PersonResult>,
+    listedKeysB64: Set<String>,
+    chatPeersB64: Set<String>,
+): List<PersonResult> = merged.filter { p ->
+    p.keyB64 !in listedKeysB64 && !(p.reach == PersonReach.CONTACT && p.keyB64 in chatPeersB64)
+}
+
+/**
+ * [merged] with whoever is a contact NOW shown as one. A remembered answer is up
+ * to [SEARCH_ANSWER_KEPT_MS] old, and a person who just accepted may not match
+ * the local half yet, because their name arrives after the Welcome: their row
+ * must not offer a second request.
+ */
+public fun withCurrentContacts(merged: List<PersonResult>, contactKeysB64: Set<String>): List<PersonResult> =
+    merged.map { p ->
+        if (p.reach == PersonReach.CONTACT || p.keyB64 !in contactKeysB64) {
+            p
+        } else {
+            p.copy(reach = PersonReach.CONTACT, grantWireB64 = null, grantChecked = false)
+        }
+    }
+
+/** Whether the heading **People** stands: over a row, the spinner or a line,
+ *  never alone. */
+public fun showsPeopleHeading(rows: Int, channel: Boolean, searching: Boolean, line: Boolean): Boolean =
+    rows > 0 || channel || searching || line
+
 /** Lower-case hex of a byte string. */
 public fun searchHex(bytes: ByteArray): String {
     val sb = StringBuilder(bytes.size * 2)

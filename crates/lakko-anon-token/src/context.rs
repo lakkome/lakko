@@ -69,11 +69,15 @@ pub enum TokenContext {
     /// call JWT is minted against this token instead of a session, so auth
     /// never learns which account joins which room.
     CallJoin = 12,
+    /// `services/ds`: claiming a circle directory (ADR-0086). A claim stores
+    /// up to a few megabytes under a key anyone can make, so it is rationed
+    /// like a vault claim.
+    CircleClaim = 13,
 }
 
 impl TokenContext {
     /// Every context, in wire order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::DiscoveryLookup,
         Self::DiscoveryRegister,
         Self::InviteConsume,
@@ -86,6 +90,7 @@ impl TokenContext {
         Self::BlobRead,
         Self::MailboxWrite,
         Self::CallJoin,
+        Self::CircleClaim,
     ];
 
     /// The frozen wire byte.
@@ -113,6 +118,7 @@ impl TokenContext {
             10 => Ok(Self::BlobRead),
             11 => Ok(Self::MailboxWrite),
             12 => Ok(Self::CallJoin),
+            13 => Ok(Self::CircleClaim),
             _ => Err(AnonTokenError::UnknownContext),
         }
     }
@@ -133,6 +139,7 @@ impl TokenContext {
             Self::BlobRead => "blob-read",
             Self::MailboxWrite => "mailbox-write",
             Self::CallJoin => "call-join",
+            Self::CircleClaim => "circle-claim",
         }
     }
 
@@ -183,7 +190,7 @@ mod tests {
             Err(AnonTokenError::UnknownContext)
         );
         assert_eq!(
-            TokenContext::from_u8(13),
+            TokenContext::from_u8(14),
             Err(AnonTokenError::UnknownContext)
         );
         assert_eq!(
@@ -200,14 +207,14 @@ mod tests {
     fn all_lists_every_context_once_in_wire_order() {
         // `ALL` is what `from_name`, the issuer's quota table and both FFI
         // surfaces enumerate: a context missing from it has no name lookup
-        // and no quota. Exactly the bytes 1..=12 parse, and `ALL` is those
+        // and no quota. Exactly the bytes 1..=13 parse, and `ALL` is those
         // contexts in that order.
         let parsed: Vec<TokenContext> = (0..=u8::MAX)
             .filter_map(|b| TokenContext::from_u8(b).ok())
             .collect();
         assert_eq!(parsed, TokenContext::ALL);
         let bytes: Vec<u8> = TokenContext::ALL.iter().map(|c| c.as_u8()).collect();
-        assert_eq!(bytes, (1..=12).collect::<Vec<u8>>());
+        assert_eq!(bytes, (1..=13).collect::<Vec<u8>>());
         let mut names: Vec<&str> = TokenContext::ALL.iter().map(|c| c.name()).collect();
         names.sort_unstable();
         names.dedup();
@@ -228,6 +235,7 @@ mod tests {
         assert_eq!(TokenContext::BlobRead.as_u8(), 10);
         assert_eq!(TokenContext::MailboxWrite.as_u8(), 11);
         assert_eq!(TokenContext::CallJoin.as_u8(), 12);
+        assert_eq!(TokenContext::CircleClaim.as_u8(), 13);
         assert_eq!(TokenContext::DiscoveryLookup.name(), "discovery-lookup");
         assert_eq!(TokenContext::DiscoveryRegister.name(), "discovery-register");
         assert_eq!(TokenContext::InviteConsume.name(), "invite-consume");
@@ -240,6 +248,7 @@ mod tests {
         assert_eq!(TokenContext::BlobRead.name(), "blob-read");
         assert_eq!(TokenContext::MailboxWrite.name(), "mailbox-write");
         assert_eq!(TokenContext::CallJoin.name(), "call-join");
+        assert_eq!(TokenContext::CircleClaim.name(), "circle-claim");
     }
 
     #[test]

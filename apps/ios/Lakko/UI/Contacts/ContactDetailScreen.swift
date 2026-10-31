@@ -48,6 +48,8 @@ struct ContactDetailScreen: View {
     @State private var confirmingDeleteChat = false
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
+    /// ADR-0060 — whether `Their contacts can find me` stands follows the setting.
+    @ObservedObject private var reach = ReachCenter.shared
 
     var body: some View {
         // One presentation: pushed on the tab's stack, from the Contacts list
@@ -89,7 +91,8 @@ struct ContactDetailScreen: View {
         let sections = personInfoSections(
             caps: PersonInfoCapabilities(
                 membershipEnded: chat.map { viewModel.membershipEnded(groupIdHex: $0) } ?? false,
-                isContact: isContact))
+                isContact: isContact,
+                contactsOfContactsOn: reach.setting.mode == .some && reach.setting.contactsOfContacts))
         List {
             Section {
                 VStack(spacing: 8) {
@@ -164,6 +167,10 @@ struct ContactDetailScreen: View {
                     .listRowBackground(Color.clear)
                     .listRowInsets(EdgeInsets())
                 }
+            }
+
+            if sections.contains(.theirContactsCanFindMe), let accountId = contact.request.fromAccountId {
+                TheirContactsCanFindMeSection(accountId: accountId)
             }
 
             Section {

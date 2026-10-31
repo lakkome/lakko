@@ -43,6 +43,8 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
     /// `POST /call/jwt` (ADR-0078 section 2): one SFU call admission (a join,
     /// a reconnect, the TURN credential of a one-to-one call).
     case callJoin = "call-join"
+    /// Claiming this account's one circle directory (ADR-0086).
+    case circleClaim = "circle-claim"
 
     /// Tokens a context keeps on hand: about a day of use plus a reserve, so
     /// a spend finds a token without waiting for an issuance (ADR-0078
@@ -61,6 +63,7 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
         case .blobUpload: return 4
         case .blobRead: return 4
         case .mailboxWrite: return 4
+        case .circleClaim: return 2
         // ADR-0078 section 2: a join, a reconnect, the TURN credential of a
         // one-to-one call. Chosen, not measured.
         case .callJoin: return 4

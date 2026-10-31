@@ -172,6 +172,8 @@ public class PeopleSearchService(
     public suspend fun search(query: String): PeopleSearchOutcome =
         DiscoveryClient().use { discovery -> searchPeople(query, deps(discovery)) }
 
+    private val usernameLookupKeys = KeptUsernameLookupKeys()
+
     private fun deps(discovery: DiscoveryClient): PeopleSearchDeps = object : PeopleSearchDeps {
         private var recordsHeld = 0
 
@@ -193,6 +195,9 @@ public class PeopleSearchService(
 
         override suspend fun usernameOprf(username: String): OprfResult = discovery.oprfUsername(username)
 
+        override suspend fun usernameLookupKey(username: String): ByteArray =
+            usernameLookupKeys.get(username) { discovery.oprfUsername(it).lookupKey }
+
         override suspend fun accountOfUsernameLookupKey(lookupKey: ByteArray): LookupHit? =
             discovery.lookupPublic(lookupKey)?.let { LookupHit(it.accountId, it.publicRecord) }
 
@@ -203,7 +208,10 @@ public class PeopleSearchService(
 
         override fun openPublicRecord(record: ByteArray, oprfOutput: ByteArray): OpenedPublicRecord? = try {
             uniffi.lakko_ffi_uniffi.openPublicRecord(record, oprfOutput)?.let {
-                OpenedPublicRecord(it.identityPk, it.accountId, it.displayName, it.mailboxBinding)
+                OpenedPublicRecord(
+                    it.identityPk, it.accountId, it.displayName, it.mailboxBinding,
+                    it.username, it.usernameCertificate,
+                )
             }
         } catch (_: Throwable) {
             null
@@ -333,9 +341,9 @@ public class PeopleSearchService(
      *  introduction (UX section 6.1). Never throws (a cancellation is let
      *  through). */
     public suspend fun send(person: PersonResult): SendOutcome =
-        sendFoundRequest(person, ByteArray(0), sendDeps(person.username))
+        sendFoundRequest(person, ByteArray(0), sendDeps(person.username, person.name))
 
-    private fun sendDeps(shownUsername: String?): SendDeps = object : SendDeps {
+    private fun sendDeps(shownUsername: String?, shownName: String): SendDeps = object : SendDeps {
         override suspend fun reachCheck(identityPk: ByteArray, grantWireB64: String): Boolean =
             reachCheckWith(identityPk, grantWireB64)
 
@@ -355,6 +363,7 @@ public class PeopleSearchService(
                 introMessage = intro,
                 grantWire = grantWireB64?.let { Base64.getDecoder().decode(it) },
                 mailboxBinding = bindingB64?.let { Base64.getDecoder().decode(it) },
+                shownName = shownName,
             )
         }
 
@@ -374,6 +383,7 @@ public class PeopleSearchService(
                 grantWire = grantWireB64?.let { Base64.getDecoder().decode(it) },
                 shownUsername = shownUsername,
                 mailboxBinding = bindingB64?.let { Base64.getDecoder().decode(it) },
+                shownName = shownName,
             )
         }
 

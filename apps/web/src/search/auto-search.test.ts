@@ -8,6 +8,7 @@ import {
   MAX_REMEMBERED_SEARCHES,
   NETWORK_SEARCH_DEBOUNCE_MS,
   NETWORK_SEARCH_MIN_CHARS,
+  SEARCH_ANSWER_KEPT_MS,
   SearchMemory,
   networkQueryOf,
   type NetworkQueryRules,
@@ -258,6 +259,53 @@ describe("AutoSearch", () => {
     h.auto.dispose();
     h.timers.advance(5_000);
     expect(h.run).not.toHaveBeenCalled();
+  });
+});
+
+describe("a remembered answer ages (UX 6.1)", () => {
+  it("is reused until SEARCH_ANSWER_KEPT_MS and asked again after", () => {
+    let now = 0;
+    const m = new SearchMemory(10, () => now);
+    m.remember("a", found("a"));
+    now = SEARCH_ANSWER_KEPT_MS - 1;
+    expect(m.get("a")).toBeDefined();
+    now = SEARCH_ANSWER_KEPT_MS;
+    expect(m.get("a")).toBeUndefined();
+  });
+
+  it("a not-found ages the same way", () => {
+    let now = 0;
+    const m = new SearchMemory(10, () => now);
+    m.remember("a", notFound);
+    now = SEARCH_ANSWER_KEPT_MS;
+    expect(m.get("a")).toBeUndefined();
+  });
+
+  it("the age is read when a text is asked: an old answer is asked again, and nothing asks by itself", async () => {
+    let now = 0;
+    const h = harness(async (q) => found(q), new SearchMemory(10, () => now));
+    h.type("anna");
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    await settle();
+    expect(h.run).toHaveBeenCalledTimes(1);
+
+    // Young: the same text again is answered from memory.
+    h.type("anna ");
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    await settle();
+    expect(h.run).toHaveBeenCalledTimes(1);
+
+    // Time passes with the text standing: nothing asks by itself.
+    now = SEARCH_ANSWER_KEPT_MS * 2;
+    h.timers.advance(SEARCH_ANSWER_KEPT_MS * 2);
+    await settle();
+    expect(h.run).toHaveBeenCalledTimes(1);
+
+    // The next time the text is asked, the answer is too old.
+    h.type("anna  ");
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    await settle();
+    expect(h.run).toHaveBeenCalledTimes(2);
   });
 });
 

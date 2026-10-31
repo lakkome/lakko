@@ -1254,15 +1254,27 @@ public final class ChatRepository: ObservableObject {
     /// Its Welcome to the requester goes out under the request's reply grant,
     /// then a contact grant, and nothing else (``deliverAnswerWelcome(welcome:toRequester:)``).
     ///
-    /// When that Welcome fails after this account's own other devices got
-    /// theirs, the group stands: the Welcome is recorded as owed and retried
-    /// (``resolveOwedAnswers(groupIdHex:)``), and the answer is
-    /// ``AnswerFounding/welcomeOwed(groupIdHex:)``. When nobody got a Welcome
-    /// nothing stands and it throws.
+    /// Once the group is founded and its journal claimed the answer is owed,
+    /// durably, before any Welcome goes out: a Welcome that fails (the
+    /// requester's mailbox refused it, a connection failed) keeps the group,
+    /// is retried (``resolveAllOwedAnswers()``), and the answer is
+    /// ``AnswerFounding/welcomeOwed(groupIdHex:)``. Only a failure before that
+    /// (no way to answer, the claim refused) throws, with nothing standing.
+    ///
+    /// A request with a founding on record never founds a second group: the
+    /// accept carries on from it.
     public func foundOneToOneAnswering(
         requestMessageId: Int64, recipientAccountId: Data, recipientSignaturePubkey: Data
     ) async throws -> AnswerFounding {
-        try await foundGroup(
+        if let accountIdB64 = currentAccountIdB64,
+           let held = OwedAnswers.foundedGroupHex(
+               requestMessageId: requestMessageId,
+               rows: commitOutbox.loadUnacked(accountIdB64: accountIdB64)) {
+            await resolveOwedAnswers(groupIdHex: held)
+            // Whatever landed was acked by the resolver.
+            return .welcomeOwed(groupIdHex: held)
+        }
+        return try await foundGroup(
             recipientAccountId: recipientAccountId, recipientSignaturePubkey: recipientSignaturePubkey,
             kind: .oneToOne, recipientPlan: nil, answeringRequest: requestMessageId)
     }
@@ -1392,18 +1404,38 @@ public final class ChatRepository: ObservableObject {
         // founder while its members joined it. A refused or failed persist
         // throws here, and nothing was published.
         let foundingAccount = try persistFoundingOrThrow(groupIdHex: groupIdHex)
+        // The founding of an accept is on record before any Welcome goes out,
+        // so whatever fails below, or a process death, leaves it owed and
+        // another Accept carries on from it. A refused write of the record
+        // means nothing was sent.
+        var owedAnswer: PendingCommitEntry?
+        if let answeringRequest {
+            do {
+                owedAnswer = try recordOwedAnswer(
+                    group: group, groupId: groupId, welcome: welcome,
+                    requesterKey: recipientSignaturePubkey, requestMessageId: answeringRequest,
+                    ownWelcomeOwed: targets.count > 1)
+            } catch {
+                knownGroupsStore.remove(accountIdB64: foundingAccount, groupIdHex: groupIdHex)
+                throw error
+            }
+        }
         var delivered = 0
         var welcomeOwed = false
         do {
             for target in targets {
-                if let answeringRequest, target.accountKey == recipientSignaturePubkey {
+                if answeringRequest != nil {
                     do {
-                        try await deliverAnswerWelcome(welcome: welcome, toRequester: recipientSignaturePubkey)
-                    } catch let error where FoundingRollback.owesAnswerWelcome(welcomesDelivered: delivered) {
+                        if target.accountKey == recipientSignaturePubkey {
+                            try await deliverAnswerWelcome(
+                                welcome: welcome, toRequester: recipientSignaturePubkey)
+                        } else {
+                            try await deliverWelcome(
+                                welcome: welcome, toAccountKey: target.accountKey, plan: target.plan)
+                            owedAnswer = noteOwnWelcomeLanded(owedAnswer)
+                        }
+                    } catch {
                         NSLog("contact accept: the Welcome stays owed: %@", ContactAccept.reason(of: error))
-                        try recordOwedAnswer(
-                            group: group, groupId: groupId, welcome: welcome,
-                            requesterKey: recipientSignaturePubkey, requestMessageId: answeringRequest)
                         welcomeOwed = true
                         break
                     }
@@ -1426,6 +1458,9 @@ public final class ChatRepository: ObservableObject {
             throw error
         }
 
+        if !welcomeOwed, let owedAnswer {
+            commitOutbox.deleteEntryBestEffort(accountIdB64: foundingAccount, id: owedAnswer.id)
+        }
         groups[groupIdHex] = GroupRecord(group: group, groupId: groupId)
         // ADR-0073 R.5 — a group that continues a conversation is known to
         // the notification extension as that conversation.
@@ -1450,36 +1485,60 @@ public final class ChatRepository: ObservableObject {
         return welcomeOwed ? .welcomeOwed(groupIdHex: groupIdHex) : .delivered(groupIdHex: groupIdHex)
     }
 
-    /// The Welcome of an accept stays owed, durably, in the outbox every owed
-    /// Welcome lives in. A failed write throws: the accept then failed.
+    /// The founding of an accept, on record in the outbox every owed Welcome
+    /// lives in. A failed write throws: the accept then failed.
     private func recordOwedAnswer(
-        group: Group, groupId: Data, welcome: Data, requesterKey: Data, requestMessageId: Int64
-    ) throws {
+        group: Group, groupId: Data, welcome: Data, requesterKey: Data, requestMessageId: Int64,
+        ownWelcomeOwed: Bool
+    ) throws -> PendingCommitEntry {
         guard let accountIdB64 = currentAccountIdB64 else {
             throw ChatError.argument("no account — cannot record the owed Welcome")
         }
-        try commitOutbox.putEntryDurable(
-            accountIdB64: accountIdB64,
-            entry: PendingCommitEntry(
-                id: newOutboxEntryId(),
-                accountId: accountIdB64,
-                groupId: base64Encode(groupId),
-                targetEpoch: String((try? group.epoch()) ?? 0),
-                commitB64: "",
-                secondArtifactB64: base64Encode(welcome),
-                secondArtifactKind: .welcome,
-                sweepVerdictPending: true,
-                sweepWelcomesOwed: true,
-                answerRequesterKeyB64: base64Encode(requesterKey),
-                answerRequestMessageId: requestMessageId))
+        var entry = PendingCommitEntry(
+            id: newOutboxEntryId(),
+            accountId: accountIdB64,
+            groupId: base64Encode(groupId),
+            targetEpoch: String((try? group.epoch()) ?? 0),
+            commitB64: "",
+            secondArtifactB64: base64Encode(welcome),
+            secondArtifactKind: .welcome,
+            sweepVerdictPending: true,
+            sweepWelcomesOwed: true,
+            answerRequesterKeyB64: base64Encode(requesterKey),
+            answerRequestMessageId: requestMessageId)
+        entry.answerOwnWelcomeOwed = ownWelcomeOwed
+        try commitOutbox.putEntryDurable(accountIdB64: accountIdB64, entry: entry)
+        return entry
+    }
+
+    /// This account's own mailbox holds the Welcome: a retry writes only the
+    /// requester's. Best effort: at worst the row is written twice.
+    private func noteOwnWelcomeLanded(_ entry: PendingCommitEntry?) -> PendingCommitEntry? {
+        guard var entry, let accountIdB64 = currentAccountIdB64 else { return entry }
+        entry.answerOwnWelcomeOwed = false
+        try? commitOutbox.putEntryDurable(accountIdB64: accountIdB64, entry: entry)
+        return entry
     }
 
     /// What ``resolveOwedAnswers(groupIdHex:)`` calls once a Welcome landed:
-    /// the ack of that request. Set by ``ContactsRepository``.
-    var owedAnswerAck: (@MainActor (_ requestMessageId: Int64) async -> Void)?
+    /// the accept is finished and its ack goes out. Set by
+    /// ``ContactsRepository``.
+    var owedAnswerAck: (@MainActor (_ requestMessageId: Int64, _ groupIdHex: String) async -> Void)?
     /// The groups whose owed answers are being written, so two triggers never
     /// write one Welcome twice at the same time.
     private var owedAnswersRunning: Set<String> = []
+
+    /// Retry every accept whose Welcome is owed: at launch and at the tail of
+    /// each inbox poll. Nothing owed reads one directory.
+    func resolveAllOwedAnswers() async {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        let owing = Set(commitOutbox.loadUnacked(accountIdB64: accountIdB64)
+            .filter { $0.answerRequesterKeyB64 != nil }
+            .compactMap { base64Decode($0.groupId) })
+        for groupId in owing {
+            await resolveOwedAnswers(groupIdHex: DsClient.pseudonymHex(groupId))
+        }
+    }
 
     /// Retry the accepts of `groupIdHex` whose Welcome is owed: at the tail of
     /// a poll, at launch, and when a key for someone arrived. A Welcome that
@@ -1500,6 +1559,15 @@ public final class ChatRepository: ObservableObject {
                     throw MailboxUnknown()
                 }
                 try bound.require()
+                // Own mailbox first (ADR-0079): whenever the requester holds
+                // the Welcome, every own device's mailbox holds it too.
+                if row.answerOwnWelcomeOwed == true, let own = ReachCenter.shared.ownAccountKey {
+                    try await deliverWelcome(
+                        welcome: welcome, toAccountKey: own,
+                        plan: ReachCenter.shared.writePlan(toAccountKey: own))
+                    try bound.require()
+                    _ = noteOwnWelcomeLanded(row)
+                }
                 try await deliverAnswerWelcome(welcome: welcome, toRequester: key)
             },
             landed: { [self] row in
@@ -1507,7 +1575,7 @@ public final class ChatRepository: ObservableObject {
             },
             ack: { [self] messageId in
                 guard bound.isCurrent else { return }
-                await owedAnswerAck?(messageId)
+                await owedAnswerAck?(messageId, groupIdHex)
             }))
     }
 
@@ -8703,7 +8771,8 @@ public final class ChatRepository: ObservableObject {
             else { continue }
             // An offer and a bundle go out once per conversation, so a device
             // that missed them asks, and the answer sends them again.
-            if let peer = oneToOnePeerSignatureKey(groupIdHex: groupIdHex) {
+            let peer = oneToOnePeerSignatureKey(groupIdHex: groupIdHex)
+            if let peer {
                 let held = ReachCenter.shared.heldIntroductions(
                     fromAccountKeyB64: peer.base64EncodedString())
                 if ReachRules.asksForIntroductions(
@@ -8713,7 +8782,14 @@ public final class ChatRepository: ObservableObject {
                     guard bound.isCurrent else { return }
                 }
             }
+            // The offer goes only to the contacts the setting allows; the
+            // answer to an ask comes through here too. The relay below is
+            // unchanged.
             if let offer, let offerKey,
+               ReachRules.offersRecord(
+                   to: peer.flatMap { ReachCenter.shared.contactAccountId(ofKey: $0) },
+                   setting: ReachCenter.shared.setting,
+                   allows: { allowsContact(setting: $0, accountId: $1) }),
                ReachCenter.shared.offerNeedsSending(groupIdHex: groupIdHex, key: offerKey) {
                 do {
                     try await publishApplicationMessage(
@@ -10363,16 +10439,10 @@ final class GroupRecord {
 enum FoundingRollback {
     /// `true` when no Welcome went out: nobody else holds the group, and the
     /// row goes again. Once one did, the group has a member and the row
-    /// stays.
+    /// stays. An accept never reaches this: its founding is on record and
+    /// stays owed.
     static func forgetsRow(welcomesDelivered: Int) -> Bool {
         welcomesDelivered == 0
-    }
-
-    /// Whether the requester's failed Welcome stays owed: only when another
-    /// Welcome already went out, so the group stands. With none, nothing
-    /// stands and the accept failed.
-    static func owesAnswerWelcome(welcomesDelivered: Int) -> Bool {
-        !forgetsRow(welcomesDelivered: welcomesDelivered)
     }
 }
 
@@ -10394,6 +10464,14 @@ public enum AnswerFounding: Equatable {
 /// only after its Welcome landed, the ack only after that; a failure leaves
 /// the entry for the next retry and sends no ack.
 enum OwedAnswers {
+    /// The group founded for request `requestMessageId`, when `rows` hold its
+    /// record: another Accept carries on from it and founds nothing.
+    static func foundedGroupHex(requestMessageId: Int64, rows: [PendingCommitEntry]) -> String? {
+        rows.first { $0.answerRequestMessageId == requestMessageId }
+            .flatMap { base64Decode($0.groupId) }
+            .map { DsClient.pseudonymHex($0) }
+    }
+
     struct Ports {
         var deliver: @MainActor (PendingCommitEntry) async throws -> Void
         var landed: @MainActor (PendingCommitEntry) -> Void

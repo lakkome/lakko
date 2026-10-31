@@ -10,6 +10,7 @@ import {
   matchesContactQuery,
   OTHER_LETTER,
   sortIncomingRequests,
+  sentRowLines,
   upsertSentRequest,
   waitingSentRequests,
   contactsBadge,
@@ -112,6 +113,35 @@ describe("the row under Sent", () => {
 
   it("stays while they are not", () => {
     expect(waitingSentRequests([record], new Set(["bb"]), new Set(["OTHER"]))).toEqual([record]);
+  });
+});
+
+describe("what a Sent row shows", () => {
+  const base = { recipientAccountIdHex: "aa", sentAtMs: 1 };
+
+  it("the name as found, and @username under it", () => {
+    expect(sentRowLines({ ...base, recipientUsername: "qa", recipientName: "Quinn" })).toEqual({
+      title: "Quinn",
+      username: "@qa",
+    });
+  });
+
+  it("a person found by name alone has no username line", () => {
+    expect(sentRowLines({ ...base, recipientUsername: "", recipientName: "Quinn" })).toEqual({
+      title: "Quinn",
+      username: null,
+    });
+  });
+
+  it("a person found by username alone is named by it, once", () => {
+    expect(sentRowLines({ ...base, recipientUsername: "qa", recipientName: "@qa" })).toEqual({
+      title: "@qa",
+      username: null,
+    });
+  });
+
+  it("an older record with no name reads by its username", () => {
+    expect(sentRowLines({ ...base, recipientUsername: "qa" })).toEqual({ title: "@qa", username: null });
   });
 });
 

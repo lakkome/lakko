@@ -60,13 +60,14 @@ export const paths = {
   settings: "/settings",
   /** Settings sub-sections; `settings` itself lands on Profile. `recovery`
    *  is reached from Security (the authenticator app), not from the
-   *  section list; `privacy-groups` (the chosen groups and channels) from
-   *  Privacy. */
+   *  section list; `privacy-groups` (the chosen groups and channels) and
+   *  `privacy-contacts` (the chosen contacts) from Privacy. */
   settingsSection(
     section:
       | "profile"
       | "privacy"
       | "privacy-groups"
+      | "privacy-contacts"
       | "security"
       | "notifications"
       | "folders"

@@ -14,9 +14,15 @@
  *
  * Until the answer arrives the person holds no grant: the row is a name. If
  * none passes that stays. If the check could not be made (a connection
- * failure) nothing was learned, so the row is what it was before this check
- * existed and the send path checks again; the next change of the text asks
+ * failure) nothing was learned: a verdict already held stands, with none the
+ * row is what it was before this check existed, and the send path checks
  * again.
+ *
+ * A check answers for one text (UX 6.1, "A row says what is true now"): a
+ * person's reach changes while the field is open, so every change of the text
+ * asks again about everyone it matches, whatever is held. The last answer
+ * stays until the new one arrives, so a row does not flicker as the person
+ * types.
  *
  * Verdicts are applied to the CANDIDATES, before the local match, so a person
  * nobody may find is matched by name alone and `localPeople` stays the one
@@ -26,6 +32,10 @@
  * No Solid, no wasm, no network: the check is an argument.
  */
 import { localPeople, type LocalCandidate, type Normalize } from "./people";
+
+/** How many people are checked at one time: the first letter typed can match
+ *  every member of every group. Chosen, not measured. */
+export const REACH_CHECKS_AT_ONCE = 4;
 
 /** What a finished check said. `unanswered` is not a verdict: the check could
  *  not be made. */
@@ -67,7 +77,17 @@ export function withVerdict(c: LocalCandidate, verdict: ReachVerdict | null): Lo
   if (c.isContact || c.keptGrantWires.length === 0) return c;
   if (verdict === null || verdict.kind === "dead") return { ...c, keptGrantWires: [] };
   if (verdict.kind === "unanswered") return c;
-  return { ...c, keptGrantWires: [verdict.wireB64], grantChecked: true };
+  // The grant that passed goes first, for the row. The others stay: a verdict
+  // is an answer about one moment, and the send tries everything held.
+  const rest = c.keptGrantWires.filter((w) => w !== verdict.wireB64);
+  return { ...c, keptGrantWires: [verdict.wireB64, ...rest], grantChecked: true };
+}
+
+/** What a finished check leaves. One that could not be made learned nothing,
+ *  so it never replaces a verdict. */
+export function verdictAfter(held: ReachVerdict | null, answer: ReachVerdict): ReachVerdict {
+  if (answer.kind !== "unanswered" || held === null) return answer;
+  return held;
 }
 
 interface Entry {
@@ -83,7 +103,12 @@ export class ReachVerdicts {
   private readonly reachCheck: (keyB64: string, wireB64: string) => Promise<boolean>;
   private readonly onChange: () => void;
   private readonly entries = new Map<string, Entry>();
+  /** Everyone with a check queued or running: at most one per person. */
   private readonly inFlight = new Set<string>();
+  private readonly queue: LocalCandidate[] = [];
+  private running = 0;
+  /** The text the last {@link ask} was for. */
+  private askedText: string | null = null;
 
   constructor(opts: {
     /** The DS reach check of the person's mailbox with a grant. */
@@ -101,16 +126,26 @@ export class ReachVerdicts {
     return entry !== undefined && entry.wires === wiresOf(c) ? entry.verdict : null;
   }
 
-  /** Start a check for every candidate that holds grants and has no verdict.
-   *  At most one check runs per person. */
-  ask(candidates: readonly LocalCandidate[]): void {
+  /** Start a check for every candidate that holds grants, as the field holds
+   *  `text`: everyone when the text changed, else whoever has no verdict. At
+   *  most one check runs per person. */
+  ask(candidates: readonly LocalCandidate[], text: string): void {
+    const textChanged = text !== this.askedText;
+    this.askedText = text;
     for (const c of candidates) {
       if (c.isContact || c.keptGrantWires.length === 0 || this.inFlight.has(c.keyHex)) continue;
       const verdict = this.verdictOf(c);
-      if (verdict !== null && verdict.kind !== "unanswered") continue;
+      if (!textChanged && verdict !== null && verdict.kind !== "unanswered") continue;
       this.inFlight.add(c.keyHex);
-      void this.check(c);
+      this.queue.push(c);
     }
+    this.pump();
+  }
+
+  /** The field is empty: nothing held answers for the next text. */
+  clear(): void {
+    this.entries.clear();
+    this.askedText = null;
   }
 
   /** The candidates with the verdicts applied. */
@@ -126,15 +161,27 @@ export class ReachVerdicts {
     this.onChange();
   }
 
+  private pump(): void {
+    while (this.running < REACH_CHECKS_AT_ONCE) {
+      const c = this.queue.shift();
+      if (c === undefined) return;
+      this.running += 1;
+      void this.check(c).finally(() => {
+        this.running -= 1;
+        this.pump();
+      });
+    }
+  }
+
   private async check(c: LocalCandidate): Promise<void> {
-    let verdict: ReachVerdict;
+    let answer: ReachVerdict;
     try {
-      verdict = await firstLiveGrant(c.keptGrantWires, (wire) => this.reachCheck(c.keyB64, wire));
+      answer = await firstLiveGrant(c.keptGrantWires, (wire) => this.reachCheck(c.keyB64, wire));
     } catch {
-      verdict = { kind: "unanswered" };
+      answer = { kind: "unanswered" };
     }
     this.inFlight.delete(c.keyHex);
-    this.entries.set(c.keyHex, { wires: wiresOf(c), verdict });
+    this.entries.set(c.keyHex, { wires: wiresOf(c), verdict: verdictAfter(this.verdictOf(c), answer) });
     this.onChange();
   }
 }

@@ -86,8 +86,11 @@ export function sortIncomingRequests<T extends { readonly messageId: number }>(
 
 /** A contact request this account sent and has not seen answered. */
 export interface SentRequestRecord {
-  /** The canonical username the request was addressed to. */
+  /** The canonical username the request was addressed to; empty for a person
+   *  found by name alone. */
   readonly recipientUsername: string;
+  /** The name the person was found under. Absent in older records. */
+  readonly recipientName?: string;
   /** The recipient's 16-byte account id as lower-case hex; the key the
    *  accepted list is matched on once their acceptance lands. */
   readonly recipientAccountIdHex: string;
@@ -126,6 +129,17 @@ export function waitingSentRequests(
         !(r.recipientKeyB64 !== undefined && acceptedKeysB64.has(r.recipientKeyB64)),
     )
     .sort((a, b) => b.sentAtMs - a.sentAtMs);
+}
+
+/** What a Sent row shows: the name as found, and `@username` under it. A
+ *  person found by their username alone is named by it, once. */
+export function sentRowLines(record: SentRequestRecord): {
+  readonly title: string;
+  readonly username: string | null;
+} {
+  const handle = record.recipientUsername.length > 0 ? `@${record.recipientUsername}` : null;
+  const name = record.recipientName ?? handle ?? "";
+  return { title: name, username: handle === name ? null : handle };
 }
 
 /** What the Contacts item of the rail shows for the requests waiting: the

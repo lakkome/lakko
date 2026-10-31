@@ -13,6 +13,7 @@ import {
   everyoneKey,
   offerKey,
   offerNeedsRebuild,
+  mayOfferTo,
   offerTargets,
   recordsDigest,
   termsToEvaluate,
@@ -56,8 +57,8 @@ describe("the introduction record", () => {
       offer: { key: "k2", recordB64: "r" },
       offerSentTo: { g1: "k2", g2: "k1" },
     };
-    expect(offerTargets(state, true, ["g1", "g2", "g3"])).toEqual(["g2", "g3"]);
-    expect(offerTargets(state, false, ["g1", "g2", "g3"])).toEqual([]);
+    expect(offerTargets(state, true, ["g1", "g2", "g3"], () => true)).toEqual(["g2", "g3"]);
+    expect(offerTargets(state, false, ["g1", "g2", "g3"], () => true)).toEqual([]);
   });
 
   it("relays a bundle only where its record set was not sent", () => {
@@ -115,5 +116,38 @@ describe("which scoped envelopes a conversation keeps", () => {
   });
   it("keeps a committer envelope from this account's other device", () => {
     expect(keepsScopedEnvelope("committer-delegation", { ...base, fromSelf: true, oneToOne: false })).toBe(true);
+  });
+});
+
+describe("the offer goes only to allowed contacts (who-can-find-me 4.1)", () => {
+  const state = { ...EMPTY_PUBLICATION, offer: { key: "k1", recordB64: "r" } };
+
+  it("passes over a conversation the setting does not allow, and leaves it unsent", () => {
+    expect(offerTargets(state, true, ["g1", "g2"], (g) => g === "g2")).toEqual(["g2"]);
+    // Switched on later: the same record goes, with no new key.
+    expect(offerTargets(state, true, ["g1", "g2"], () => true)).toEqual(["g1", "g2"]);
+  });
+
+  const contacts = [
+    { keyHex: "aa", accountIdHex: "11" },
+    { keyHex: "bb", accountIdHex: null },
+  ];
+  const chosen = (hex: string | null): boolean => hex === "11";
+
+  it("asks about the contact the conversation's person is, under any of their keys", () => {
+    expect(mayOfferTo(["aa"], contacts, chosen)).toBe(true);
+    expect(mayOfferTo(["new", "aa"], contacts, chosen)).toBe(true);
+  });
+
+  it("a contact with no known account id gets none when the setting names ids", () => {
+    expect(mayOfferTo(["bb"], contacts, chosen)).toBe(false);
+  });
+
+  it("under All everyone on the list gets it, known account id or not", () => {
+    expect(mayOfferTo(["bb"], contacts, () => true)).toBe(true);
+  });
+
+  it("a person the viewer removed keeps the conversation and never the record", () => {
+    expect(mayOfferTo(["cc"], contacts, () => true)).toBe(false);
   });
 });

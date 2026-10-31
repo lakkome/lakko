@@ -194,6 +194,10 @@ fn quota_variables_are_named_after_the_contexts() {
         quota_var(TokenContext::CallJoin),
         "LAKKO_ANON_TOKEN_QUOTA_CALL_JOIN"
     );
+    assert_eq!(
+        quota_var(TokenContext::CircleClaim),
+        "LAKKO_ANON_TOKEN_QUOTA_CIRCLE_CLAIM"
+    );
     // Every context has exactly one default, in wire order.
     let listed: Vec<TokenContext> = DEFAULT_QUOTAS.iter().map(|(c, _)| *c).collect();
     assert_eq!(listed, TokenContext::ALL);
@@ -221,6 +225,7 @@ fn the_default_quotas_are_the_documented_ones() {
     assert_eq!(default_quota(TokenContext::BlobRead), 96);
     assert_eq!(default_quota(TokenContext::MailboxWrite), 50);
     assert_eq!(default_quota(TokenContext::CallJoin), 100);
+    assert_eq!(default_quota(TokenContext::CircleClaim), 10);
 }
 
 #[test]
@@ -431,7 +436,7 @@ async fn issued_tokens_finalize_against_the_published_key_and_verify() {
     assert_eq!(status, StatusCode::OK, "{}", json(&body));
     let res = json(&body);
     assert_eq!(res["epoch"], epoch);
-    assert_eq!(res["remaining"], 95);
+    assert_eq!(res["remaining"], 295);
     let evaluations: Vec<[u8; 32]> = res["evaluations"]
         .as_array()
         .unwrap()

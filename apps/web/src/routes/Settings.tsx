@@ -30,7 +30,7 @@ import { Icon, type IconName } from "../ui/icons";
 import { setTheme, useTheme, type Theme } from "../ui/theme";
 import { currentLanguage, supportedLanguages, t } from "../l10n";
 import { LanguagePicker } from "../l10n/LanguagePicker";
-import { WhoCanFindMeList, WhoCanFindMeSection } from "../settings/WhoCanFindMe";
+import { WhoCanFindMeContactsList, WhoCanFindMeList, WhoCanFindMeSection } from "../settings/WhoCanFindMe";
 import { setShowCityToOwnDevices, showCityToOwnDevices } from "../devices/device-card-runtime";
 import { RecoveryPage } from "../settings/RecoveryPage";
 import { ProtectionCard } from "../auth/protect/ProtectionCard";
@@ -60,7 +60,7 @@ type Section =
   | "media"
   | "about"
   | "account";
-type Page = Section | "recovery" | "privacy-groups";
+type Page = Section | "recovery" | "privacy-groups" | "privacy-contacts";
 
 // Language sits after Appearance (`docs/ux/localization.md` section 1).
 const ALL_SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconName }> = [
@@ -89,7 +89,7 @@ function currentLanguageOwnName(): string {
 
 function pageOf(s: string | undefined): Page | null {
   if (s === "recovery") return "recovery";
-  if (s === "privacy-groups") return "privacy-groups";
+  if (s === "privacy-groups" || s === "privacy-contacts") return s;
   // The former Data section: its export card now sits under Account.
   if (s === "data") return "account";
   return SECTIONS.some((x) => x.id === s) ? (s as Section) : null;
@@ -116,7 +116,7 @@ export default function Settings(): JSX.Element {
   const highlighted = (): Section => {
     const p = shown();
     if (p === "recovery") return "security";
-    return p === "privacy-groups" ? "privacy" : p;
+    return p === "privacy-groups" || p === "privacy-contacts" ? "privacy" : p;
   };
 
   const username = (): string => {
@@ -187,6 +187,9 @@ export default function Settings(): JSX.Element {
           </Show>
           <Show when={shown() === "privacy-groups"}>
             <WhoCanFindMeList />
+          </Show>
+          <Show when={shown() === "privacy-contacts"}>
+            <WhoCanFindMeContactsList />
           </Show>
           <Show when={shown() === "security"}>
             <SecuritySection />

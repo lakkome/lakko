@@ -41,7 +41,7 @@ import {
 import { useCallHost } from "../calls/CallHostContext";
 import { quietCallKindLabel, quietCallOfferFor } from "../calls/quiet-call-offer";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
-import { ownPersonKeyB64, personKeysOf } from "./person-key";
+import { oneToOnePeerKey, ownPersonKeyB64, personKeysOf } from "./person-key";
 import { PeopleSearch } from "../search/PeopleSearch";
 import { rowHasUnread, type ConversationRow } from "./conversation-list";
 import { createConversationRows } from "./conversation-rows";
@@ -367,6 +367,27 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     for (const g of chats.groups()) for (const k of personKeysOf(g.group)) out.add(k);
     return [...out];
   });
+
+  /** The other person of a one-to-one, or `null`. */
+  const chatPeerOf = (g: ActiveGroup): string | null =>
+    kindOf(g) === "chat" ? oneToOnePeerKey(personKeysOf(g.group), ownPersonKeyB64(chats.identity())) : null;
+
+  /** The people whose one-to-one is among the matching conversations. */
+  const visibleChatPeers = (): ReadonlySet<string> => {
+    const out = new Set<string>();
+    for (const row of visibleRows()) {
+      const g = groupById().get(row.id);
+      const peer = g === undefined ? null : chatPeerOf(g);
+      if (peer !== null) out.add(peer);
+    }
+    return out;
+  };
+
+  /** The route of the one-to-one with a person, whatever the list shows. */
+  const chatHrefOf = (personKeyB64: string): string | null => {
+    const g = chats.groups().find((candidate) => chatPeerOf(candidate) === personKeyB64);
+    return g === undefined ? null : hrefOf(g);
+  };
 
   /** A channel the people search found by its handle opens its subscribe
    *  page. */
@@ -825,6 +846,8 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               conversationMatches={() => visibleRows().length}
               groupPeopleKeys={groupPeopleKeys}
               onOpenChannel={openFoundChannel}
+              chatPeersB64={visibleChatPeers}
+              chatHrefOf={chatHrefOf}
             />
           </Show>
         </div>

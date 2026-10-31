@@ -12,8 +12,9 @@ import Foundation
 // list lived in memory only, so a relaunch showed no pending request and a
 // re-send carried no intro.
 //
-// A row holds the recipient (account id, the name typed), the DS message id
-// and time of the last send, and the intro text. The intro is the person's
+// A row holds the recipient (account id, the name typed, and the name and key
+// a search found them under), the DS message id and time of the last send, and
+// the intro text. The intro is the person's
 // own words, so the list is kept in the Keychain
 // (`AfterFirstUnlockThisDeviceOnly`, the app's own group), not in
 // `UserDefaults`. A row is removed when the request is answered, when it can
@@ -89,6 +90,18 @@ public enum SentRequests {
             bytes += size
         }
         return out
+    }
+
+    /// Whether the list holds a request to this person, by account key or
+    /// account id (their key may have rotated since it went out).
+    public static func holds(
+        _ sent: [SentContactRequest], accountKey: Data, accountId: Data?
+    ) -> Bool {
+        let keyB64 = base64Encode(accountKey)
+        let idB64 = accountId.map { base64Encode($0) }
+        return sent.contains { row in
+            row.recipientKeyB64 == keyB64 || row.recipientAccountIdB64 == idB64
+        }
     }
 
     /// The intro a re-send to `recipientAccountIdB64` carries: the one stored

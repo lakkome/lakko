@@ -152,6 +152,9 @@ public struct PendingCommitEntry: Codable, Equatable {
     public var answerRequesterKeyB64: String?
     /// The mailbox id of that request: the ack follows once the Welcome landed.
     public var answerRequestMessageId: Int64?
+    /// That Welcome is also owed to this account's own mailbox (it has other
+    /// devices, and the write has not landed).
+    public var answerOwnWelcomeOwed: Bool?
     /// `false` until BOTH artifacts have (re)published. An un-acked entry is
     /// swept on the first `pollGroup` of a session.
     public var acked: Bool

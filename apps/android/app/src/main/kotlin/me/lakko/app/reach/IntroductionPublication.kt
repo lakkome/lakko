@@ -4,8 +4,10 @@
 package me.lakko.app.reach
 
 import kotlin.coroutines.cancellation.CancellationException
+import uniffi.lakko_ffi_uniffi.FfiContactsForm
 import uniffi.lakko_ffi_uniffi.FfiIntroductionPayload
 import uniffi.lakko_ffi_uniffi.FfiReachGrant
+import uniffi.lakko_ffi_uniffi.FfiVisibilitySetting
 import uniffi.lakko_ffi_uniffi.OprfResult
 
 /*
@@ -16,8 +18,8 @@ import uniffi.lakko_ffi_uniffi.OprfResult
  * - the **introduction record**, rebuilt when 2.1 is on and the `fof` key
  *   version, the name or the username changed, sealed under the OPRF OUTPUTS
  *   of the name search terms and the username;
- * - offered to every one-to-one contact not sent this version yet (only
- *   while 2.1 is on);
+ * - offered to every allowed one-to-one contact not sent this version yet
+ *   (only while 2.1 is on);
  * - the **bundle** this account relays: the records its contacts offered,
  *   capped at `maxBundleRecords()`, re-sent to a contact when that set
  *   changed.
@@ -45,6 +47,35 @@ internal fun offerTargets(
 ): List<String> {
     if (!contactsOfContacts || offerKey == null) return emptyList()
     return oneToOneGroups.filter { sentTo[it] != offerKey }
+}
+
+/**
+ * The one-to-ones the record may go to, [oneToOneGroups] kept in order. Under
+ * "only the ones I choose" a contact with no known account id cannot be chosen,
+ * so it gets none; [allowsContact] answers for the rest. The relay is not this:
+ * the bundle goes to every contact.
+ */
+internal fun offerGroups(
+    form: FfiContactsForm,
+    oneToOneGroups: List<String>,
+    peerAccountId: (groupHex: String) -> ByteArray?,
+    allowsContact: (ByteArray) -> Boolean,
+): List<String> = oneToOneGroups.filter { groupHex ->
+    val accountId = peerAccountId(groupHex)
+    if (accountId == null) form == FfiContactsForm.ALL else allowsContact(accountId)
+}
+
+/** What the narrowing rule reads of a setting. */
+internal fun FfiVisibilitySetting.contactsReach(): ContactsReach = ContactsReach(
+    onlyChosen = contactsForm == FfiContactsForm.CHOSEN,
+    chosenHex = chosenContacts.mapTo(HashSet(), ::reachHex),
+)
+
+/** [setting] with [accountId] off the chosen list, or `null` when it is not on
+ *  it. Removing an id needs no length check. */
+internal fun withoutChosenContact(setting: FfiVisibilitySetting, accountId: ByteArray): FfiVisibilitySetting? {
+    val kept = setting.chosenContacts.filterNot { it.contentEquals(accountId) }
+    return if (kept.size == setting.chosenContacts.size) null else setting.copy(chosenContacts = kept)
 }
 
 /** A stable digest of a set of record wires (order-independent). */
@@ -85,8 +116,10 @@ internal class IntroPublicationInputs(
     /** The record each contact offered, hex, in a stable order. */
     val offeredRecordsHex: List<String>,
     /** The one-to-one conversations with contacts that can still carry a
-     *  message, as group hex. */
+     *  message, as group hex. The bundle goes to all of them. */
     val oneToOneGroups: List<String>,
+    /** Those the own record may go to ([offerGroups]). */
+    val offerGroups: List<String>,
     val nowMs: Long,
 )
 
@@ -163,10 +196,11 @@ internal suspend fun publishIntroductions(
         }
     }
 
-    // 3. Offer the record to every contact not sent this version yet.
+    // 3. Offer the record to every allowed contact not sent this version yet.
+    //    An ask reopens a conversation, and goes through this same list.
     val offer = state.ownOffer
     if (offer != null) {
-        val targets = offerTargets(offer.key, state.offerSentTo, inputs.contactsOfContacts, inputs.oneToOneGroups)
+        val targets = offerTargets(offer.key, state.offerSentTo, inputs.contactsOfContacts, inputs.offerGroups)
         if (targets.isNotEmpty()) {
             val record = reachUnhex(offer.recordHex)
             if (record != null) {

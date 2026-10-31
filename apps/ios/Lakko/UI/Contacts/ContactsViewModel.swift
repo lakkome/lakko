@@ -188,6 +188,11 @@ public final class ContactsViewModel: ObservableObject {
         repository.declineContactRequest(messageId: messageId)
     }
 
+    /// **Dismiss** on a row under Sent.
+    public func onDismissSentClicked(_ request: SentContactRequest) {
+        repository.dismissSentRequest(request)
+    }
+
     /// The Contacts tab's badge: the incoming requests waiting, capped the
     /// way a chat row's unread count is; `nil` for none.
     public static func requestsBadge(waiting: Int) -> String? {

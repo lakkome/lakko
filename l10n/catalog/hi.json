@@ -8458,6 +8458,10 @@
       "text": "ग्रुप और चैनल चुनें",
       "status": "machine"
     },
+    "who_can_find_me.list.choose_contacts": {
+      "text": "संपर्क चुनें",
+      "status": "machine"
+    },
     "who_can_find_me.list.contacts_empty": {
       "text": "आपके अभी कोई संपर्क नहीं हैं।",
       "status": "machine"
