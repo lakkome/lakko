@@ -282,6 +282,23 @@ where
 
             conn.process_new_packets()
                 .map_err(|e| RealityServerDriverError::Rustls(e.to_string()))?;
+
+            // `read_tls` takes at most 4096 bytes per call, and
+            // bytes left here when the handshake ends would be
+            // lost: the first request can share a socket read
+            // with the ClientFinished.
+            while !state.inbound_buf.is_empty() {
+                let mut cur = Cursor::new(state.inbound_buf.as_slice());
+                let taken = conn
+                    .read_tls(&mut cur)
+                    .map_err(|e| RealityServerDriverError::Rustls(e.to_string()))?;
+                state.inbound_buf.drain(..taken);
+                conn.process_new_packets()
+                    .map_err(|e| RealityServerDriverError::Rustls(e.to_string()))?;
+                if taken == 0 {
+                    break;
+                }
+            }
         }
 
         // Outbound side — drain rustls's pending writes.

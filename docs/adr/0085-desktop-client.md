@@ -531,6 +531,16 @@ discovery lookup answered `429` to this one client on the stack, whose env file
 does not carry the raised discovery limits, so that answer is not shown to come
 from the tunnel.
 
+**Found on the first run with an account's real journals (2026-10-31):** a
+REALITY stream lost data on any socket read above 4096 bytes, which is all
+rustls takes per `read_tls`, so a response of more than about 4 KiB failed
+(`no header terminator`) or arrived cut off, and one group's poll failed every
+time. The fix feeds rustls the whole read, on both sides and in both handshake
+drivers, and `tunneled_request` refuses a body shorter than its `Content-Length`,
+because a tunnel that dies mid-response ends the read like a close does.
+`reality_tunnel_carries_a_large_request_and_response` failed before the fix
+with that same error. Shadowsocks has no such path.
+
 ## Alternatives
 
 - **B. A proxy for every wasm call.** The host holds the MLS objects and every

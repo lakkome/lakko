@@ -306,18 +306,21 @@ where
                 }
             }
 
-            // Feed buffered bytes to rustls in one go.
-            // `read_tls` consumes as many records as fit
-            // in the supplied reader; we then drain the
-            // consumed prefix from our buffer.
-            let mut cur = Cursor::new(state.inbound_buf.as_slice());
-            conn.read_tls(&mut cur)
-                .map_err(|e| RealityDriverError::Rustls(e.to_string()))?;
-            let consumed = usize::try_from(cur.position()).expect("Cursor position fits usize");
-            state.inbound_buf.drain(..consumed);
-
-            conn.process_new_packets()
-                .map_err(|e| RealityDriverError::Rustls(e.to_string()))?;
+            // Feed every buffered byte to rustls. `read_tls`
+            // takes at most 4096 bytes per call, and bytes
+            // left here when the handshake ends would be lost.
+            while !state.inbound_buf.is_empty() {
+                let mut cur = Cursor::new(state.inbound_buf.as_slice());
+                let taken = conn
+                    .read_tls(&mut cur)
+                    .map_err(|e| RealityDriverError::Rustls(e.to_string()))?;
+                state.inbound_buf.drain(..taken);
+                conn.process_new_packets()
+                    .map_err(|e| RealityDriverError::Rustls(e.to_string()))?;
+                if taken == 0 {
+                    break;
+                }
+            }
         }
     }
 

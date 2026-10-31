@@ -56,6 +56,55 @@ async fn spawn_origin() -> SocketAddr {
     addr
 }
 
+/// A body with no repeating record-sized pattern.
+fn large_body(len: usize) -> Vec<u8> {
+    (0..=250u8).cycle().take(len).collect()
+}
+
+/// An internal origin whose answer is far larger than one TLS read: rustls
+/// takes at most 4096 bytes per `read_tls`, so a large response is what shows
+/// whether a stream feeds it everything a socket read returned.
+async fn spawn_large_origin(body_len: usize) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                // Read the whole request: its body is large too.
+                let mut seen = Vec::new();
+                let mut buf = vec![0u8; 16 * 1024];
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    seen.extend_from_slice(&buf[..n]);
+                    let Some(end) = seen.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
+                    let want: usize = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length: "))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    if seen.len() >= end + 4 + want {
+                        break;
+                    }
+                }
+                let body = large_body(body_len);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&body).await;
+                let _ = sock.shutdown().await;
+            });
+        }
+    });
+    addr
+}
+
 /// A minimal internal WebSocket echo origin: accept the RFC 6455 handshake and
 /// echo every text/binary frame back. Stands in for the SFU signaling endpoint
 /// behind nginx.
@@ -159,6 +208,62 @@ async fn reality_tunnel_relays_http_request_to_internal_origin() {
         resp.body, b"pong",
         "origin body surfaces through the tunnel"
     );
+
+    proxy.await.expect("proxy relay task completes");
+}
+
+#[tokio::test]
+async fn reality_tunnel_carries_a_large_request_and_response() {
+    const BODY: usize = 300 * 1024;
+    install_crypto_provider();
+    let origin = spawn_large_origin(BODY).await;
+
+    let tag_secret = [0x42u8; 32];
+    let short_id = [0xABu8; 8];
+    let cover_sni = "www.microsoft.com";
+    let (chain, key) = make_self_signed_cert(cover_sni).expect("cover cert");
+    let tls = build_reality_server_config(chain, key).expect("server config");
+    let tcp = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let bound = tcp.local_addr().unwrap();
+    let mut listener = RealityListener::new(
+        tcp,
+        Arc::new(tls),
+        vec![(RealityShortId(short_id), RealityTagSecret(tag_secret))],
+        300,
+    );
+    let proxy = tokio::spawn(async move {
+        let (conn, _accepted) = listener.accept().await.expect("accept REALITY tunnel");
+        relay(conn, origin).await.expect("relay to origin");
+    });
+
+    let client = RealityTransport::new(RealityConfig {
+        sni: cover_sni.into(),
+        tag_secret_b64: B64.encode(tag_secret),
+        short_id_hex: hex::encode(short_id),
+        allowed_inner_servers: vec![],
+        remote: format!("{bound}"),
+        require_server_response: true,
+    })
+    .expect("client transport");
+    let conn = client
+        .connect(&Endpoint::Direct(bound))
+        .await
+        .expect("client completes the REALITY handshake");
+
+    let req = TunneledRequest {
+        method: "POST".into(),
+        path: "/large".into(),
+        host: "lakko.invalid".into(),
+        headers: vec![],
+        body: vec![7u8; BODY],
+    };
+    let resp = tunneled_request(conn, &req)
+        .await
+        .expect("a large answer crosses the tunnel whole");
+    assert_eq!(resp.status, 200);
+    assert!(resp.body == large_body(BODY), "the body arrives unchanged");
 
     proxy.await.expect("proxy relay task completes");
 }

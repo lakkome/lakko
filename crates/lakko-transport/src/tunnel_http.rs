@@ -142,6 +142,17 @@ fn parse_response(buf: &[u8]) -> Result<TunneledResponse, TunnelHttpError> {
         headers.retain(|(n, _)| n != "transfer-encoding");
         decode_chunked(&body)?
     } else {
+        // A tunnel that dies mid-response ends the read like a close does, so
+        // a short body is the only sign the answer was cut off.
+        let declared = headers
+            .iter()
+            .find(|(n, _)| n == "content-length")
+            .and_then(|(_, v)| v.parse::<usize>().ok());
+        if declared.is_some_and(|len| body.len() < len) {
+            return Err(TunnelHttpError::BadResponse(
+                "body shorter than Content-Length",
+            ));
+        }
         body
     };
 
@@ -238,6 +249,17 @@ mod tests {
     use super::*;
     use crate::in_memory;
     use bytes::Bytes;
+
+    #[test]
+    fn a_body_shorter_than_content_length_is_refused() {
+        let cut = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc";
+        assert!(matches!(
+            parse_response(cut),
+            Err(TunnelHttpError::BadResponse(_))
+        ));
+        let whole = b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc";
+        assert_eq!(parse_response(whole).unwrap().body, b"abc");
+    }
 
     #[test]
     fn encode_request_sets_host_length_and_close() {
