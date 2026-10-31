@@ -40,8 +40,9 @@
  *     take into preview (§2.7, §3.3).
  *   * The hold that triggered a permission PROMPT does not record (§6). When
  *     the browser cannot say whether it prompted, a grant that took longer
- *     than `PROMPT_INFERENCE_MS` is treated as a prompt — the safe side is a
- *     take that did not start, never a take the user did not mean to make.
+ *     than `PROMPT_INFERENCE_MS` after the pointer came up is treated as a
+ *     prompt — the safe side is a take that did not start, never a take the
+ *     user did not mean to make.
  *   * Permission revoked mid-take discards the take and shows the denied
  *     card (§6).
  */
@@ -66,9 +67,13 @@ export type PermissionHint = "granted" | "prompt" | "denied" | "unknown";
  *     the take records: there was no prompt for a slow grant to have been.
  *   * `certain` — the browser reported `prompt`. §6: the gesture that raises
  *     the prompt does not record.
- *   * `possible` — the browser would not say (Firefox and Safari, for camera
- *     and microphone), so the only signal left is how long the grant took
- *     (`PROMPT_INFERENCE_MS`).
+ *   * `possible` — the browser would not say (Firefox, Safari and the macOS
+ *     desktop webview, for camera and microphone), so the signals left are how
+ *     long the grant took (`PROMPT_INFERENCE_MS`) and whether the pointer is
+ *     still down. A person cannot answer a prompt with the pointer held on the
+ *     record button, so a slow grant under a held pointer is a slow device:
+ *     without this, the first take after every launch was lost in silence,
+ *     because opening the device took longer than the inference allows.
  */
 export type PromptRisk = "none" | "certain" | "possible";
 
@@ -110,7 +115,8 @@ export const TAP_SLOP_PX = 10;
 export const CANCEL_SLIDE_PX = 80;
 /** §2.5 — how far up a held pointer travels before the take locks. */
 export const LOCK_SLIDE_PX = 60;
-/** A permission grant slower than this is assumed to have shown a prompt. */
+/** A permission grant slower than this, with the pointer up, is assumed to
+ *  have shown a prompt. */
 export const PROMPT_INFERENCE_MS = 1000;
 
 export function capFor(kind: CaptureKind): number {
@@ -415,7 +421,9 @@ function fromRequesting(
       }
       const prompted =
         state.promptRisk === "certain" ||
-        (state.promptRisk === "possible" && event.at - state.pressedAt > PROMPT_INFERENCE_MS);
+        (state.promptRisk === "possible" &&
+          !state.held &&
+          event.at - state.pressedAt > PROMPT_INFERENCE_MS);
       if (prompted) {
         // §6: the gesture that raised the prompt does not record.
         return step(IDLE, { type: "release-stream" });

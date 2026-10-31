@@ -329,9 +329,24 @@ describe("permissions", () => {
     expect(r.effects).toContainEqual({ type: "start-capture", kind: "voice" });
   });
 
-  it("an unknown permission granted slowly is treated as a prompt", () => {
-    const r = run(hold({ permission: "unknown", acquireAt: HELD_AT + PROMPT_INFERENCE_MS + 1 }));
+  it("an unknown permission granted slowly under a held pointer records", () => {
+    // A person cannot answer a prompt while holding the button, so this is a
+    // device that took long to open: the first take after a launch.
+    const at = HELD_AT + PROMPT_INFERENCE_MS + 1;
+    const r = run(hold({ permission: "unknown", acquireAt: at }));
+    expect(r.state).toMatchObject({ phase: "recording", startedAt: at });
+    expect(r.effects).toContainEqual({ type: "start-capture", kind: "voice" });
+  });
+
+  it("an unknown permission granted slowly after the release is treated as a prompt", () => {
+    const r = run([
+      press({ permission: "unknown" }),
+      { type: "tick", at: HELD_AT },
+      { type: "release", at: HELD_AT + 50 },
+      { type: "permission-result", granted: true, at: HELD_AT + PROMPT_INFERENCE_MS + 1 },
+    ]);
     expect(r.state.phase).toBe("idle");
+    expect(r.effects).toContainEqual({ type: "release-stream" });
     expect(r.effects).not.toContainEqual({ type: "start-capture", kind: "voice" });
   });
 

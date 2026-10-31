@@ -513,6 +513,7 @@ import {
   type TimelineLayout,
 } from "../chat/timeline-layout";
 import { conversationKindOf, type ConversationKind } from "../chat/conversation-kind";
+import { createDraftSeed } from "../chat/draft-seed";
 import {
   membershipNoticeAfterAttempt,
   membershipNoticeLanded,
@@ -1659,20 +1660,12 @@ function ChatView(props: {
   // user mid-typing on this device when a stale sibling-device
   // update lands; the typing-side then broadcasts its own HLC
   // and wins by LWW.
-  let seededDraft = false;
+  const draftSeed = createDraftSeed();
   createEffect(() => {
     const draft = sync.drafts()[hexOf(conversationIdBytes())];
     if (draft === undefined) return;
-    if (seededDraft) return;
-    if (input() !== "") {
-      // User is already typing on this device — don't stomp.
-      // Mark seeded so we don't keep re-checking, and let the
-      // local broadcast win the LWW race.
-      seededDraft = true;
-      return;
-    }
-    setInput(draft.text);
-    seededDraft = true;
+    const text = draftSeed.offer(draft.text, untrack(input));
+    if (text !== null) setInput(text);
   });
 
   // Outbound broadcast — debounced. Every keystroke fires a
@@ -4571,6 +4564,7 @@ function ChatView(props: {
     // input is the all-empty composer.
     if (text.length === 0 && attached.length === 0) return;
     setError(null);
+    draftSeed.touched();
 
     // ADR-0024 — sending a message is a typing-stop transition;
     // emit one `typing:false` (best-effort) so peers clear our
@@ -8065,7 +8059,10 @@ function ChatView(props: {
           placeholder={t("chat.composer.placeholder")}
           autocomplete="off"
           value={input()}
-          onInput={(e) => setInput(e.currentTarget.value)}
+          onInput={(e) => {
+            draftSeed.touched();
+            setInput(e.currentTarget.value);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
               e.preventDefault();
