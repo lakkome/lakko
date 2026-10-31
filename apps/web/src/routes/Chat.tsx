@@ -2620,6 +2620,7 @@ function ChatView(props: {
           // eslint-disable-next-line no-console
           console.warn("push-routing secret redistribute failed", err);
         });
+        groupNames.addedHere(props.entry.groupIdB64);
       }
     }
     return outcome;

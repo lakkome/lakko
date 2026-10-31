@@ -94,6 +94,10 @@ export interface GroupNameApi {
   forgetGroup(groupIdB64: string): Promise<void>;
   /** `groupIdB64` gained at least one member: schedule the re-send. */
   groupGrew(groupIdB64: string): void;
+  /** This device committed an add: the name goes now, not on the growth
+   *  schedule, since the newcomer's list has no name until it arrives. The
+   *  schedule exists for the other members. */
+  addedHere(groupIdB64: string): void;
   /** This device's ADR-0022 role, read off the LIVE group now. */
   liveRole(group: WasmGroup): Promise<PushRotationRole>;
 }
@@ -396,6 +400,9 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
     },
     groupGrew(groupIdB64) {
       scheduler.groupGrew(groupIdB64);
+    },
+    addedHere(groupIdB64) {
+      void scheduler.joined(groupIdB64);
     },
     liveRole,
   };

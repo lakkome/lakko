@@ -1698,6 +1698,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       // ADR-0043 — a removal this sweep committed owes the push-routing
       // rotation, as the chat view's sweep would.
       void rotateIfShrank(account, entry, before);
+      if (outcome.addedCount > 0) groupNames.addedHere(entry.groupIdB64);
     }
     return outcome;
   }

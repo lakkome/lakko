@@ -100,7 +100,10 @@ never from a cached role.
 - **When:** right after the creating commit; on every rename; and **on group
   growth**, re-sent by the owner and admins that hold a name, throttled and
   jittered like the profile republish (`publish-scheduler.ts`), so a newcomer
-  learns the name within one poll of admission.
+  learns the name within one poll of admission. Amended 2026-10-31: the device
+  that committed the add sends at once, skipping the schedule, because the
+  jitter (up to 10 s, on a 30 s throttle) left a newcomer's list showing member
+  names for that long; the schedule stays for the other holders.
 - Stored per `(account, group)` as `{ name, updated_at_ms }` in a device
   store that survives a relaunch; the creator's own name is written to the
   same store, which retires the Android-only `GroupPresentationStore` name

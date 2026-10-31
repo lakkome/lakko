@@ -2475,7 +2475,8 @@ public final class ChatRepository: ObservableObject {
     /// roster gained a key it did not have before.
     private func noteProfileGrowthIfMembershipGrew(
         groupIdHex: String,
-        previousMemberKeys: [String]?
+        previousMemberKeys: [String]?,
+        ownAdd: Bool = false
     ) {
         guard let record = groups[groupIdHex] else { return }
         let current = PushGroupRouting.memberSignatureKeys(group: record.group)
@@ -2484,8 +2485,15 @@ public final class ChatRepository: ObservableObject {
         }
         profilePublisher.noteGrowth(groupIdHex: groupIdHex)
         // ADR-0051 §3 — the newcomer cannot read the epoch the group name was
-        // sent in either; an owner / admin holding one re-sends it.
-        groupNamePublisher.noteGrowth(groupIdHex: groupIdHex)
+        // sent in either; an owner / admin holding one re-sends it. The device
+        // that committed the add sends at once: the newcomer's list has no name
+        // until it does, and the schedule exists for the other members.
+        if ownAdd {
+            let publisher = groupNamePublisher
+            Task { await publisher.publishNow(groupIdHex: groupIdHex) }
+        } else {
+            groupNamePublisher.noteGrowth(groupIdHex: groupIdHex)
+        }
         // ADR-0052 decision 3 — nor the epochs the shared pins were sent in.
         pinPublisher.noteGrowth(groupIdHex: groupIdHex)
         // ADR-0059 section 6 — nor the channels this device shares there.
@@ -6654,7 +6662,8 @@ public final class ChatRepository: ObservableObject {
         // none.
         if addedCount > 0 { redistributePushRoutingSecret(groupIdHex: groupIdHex) }
         // ADR-0048 §2 — a swept Add is growth too.
-        noteProfileGrowthIfMembershipGrew(groupIdHex: groupIdHex, previousMemberKeys: before)
+        noteProfileGrowthIfMembershipGrew(
+            groupIdHex: groupIdHex, previousMemberKeys: before, ownAdd: addedCount > 0)
         return outcome
     }
 

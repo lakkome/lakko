@@ -5809,14 +5809,17 @@ public class ChatRepository(
         previousMemberKeys: List<String>?,
         currentMemberKeys: List<String>?,
         selfEvicted: Boolean,
+        ownAdd: Boolean = false,
     ) {
         if (selfEvicted) return
         if (me.lakko.app.profile.membershipGrew(previousMemberKeys, currentMemberKeys)) {
             profileRepublish.onGrowth(groupIdHex)
             // ADR-0051 §3 — the newcomer cannot read the earlier envelope, so
             // an owner / admin holding the name re-sends it (original stamp),
-            // on the same throttled + jittered schedule.
-            groupNameRepublish.onGrowth(groupIdHex)
+            // on the same throttled + jittered schedule. The device that
+            // committed the add sends at once: the newcomer's list has no name
+            // until it does, and the schedule exists for the other members.
+            if (ownAdd) groupNameRepublish.publishNow(groupIdHex) else groupNameRepublish.onGrowth(groupIdHex)
             // ADR-0052 decision 3 — and the shared pins, verbatim with their
             // original stamps, on the same schedule.
             pinRepublish.onGrowth(groupIdHex)
@@ -13016,6 +13019,7 @@ public class ChatRepository(
             previousMemberKeys = membersBefore,
             currentMemberKeys = membersAfterSweep,
             selfEvicted = evictedBySweep,
+            ownAdd = outcome.addedCount > 0,
         )
         // ADR-0042 — a swept ADD needs the current routing secret, exactly as
         // the direct add path re-broadcasts it. No-op when this device holds
