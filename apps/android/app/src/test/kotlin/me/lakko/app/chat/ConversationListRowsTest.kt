@@ -215,4 +215,11 @@ class ConversationListRowsTest {
         assertTrue(conversationRowMatchesQuery("", "Anna", "hello"))
         assertTrue(conversationRowMatchesQuery("   ", "Anna", "hello"))
     }
+
+    @Test
+    fun `a search that matches only a pending contact still has a row`() {
+        assertTrue(searchFoundNoRow(conversations = 0, pendingContacts = 0))
+        assertFalse(searchFoundNoRow(conversations = 0, pendingContacts = 1))
+        assertFalse(searchFoundNoRow(conversations = 2, pendingContacts = 0))
+    }
 }

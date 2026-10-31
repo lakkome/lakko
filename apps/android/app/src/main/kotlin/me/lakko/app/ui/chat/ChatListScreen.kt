@@ -90,6 +90,7 @@ import me.lakko.app.chat.folderRows
 import me.lakko.app.chat.membershipToggle
 import me.lakko.app.chat.membershipToggleBlocked
 import me.lakko.app.chat.rowsMatching
+import me.lakko.app.chat.searchFoundNoRow
 import me.lakko.app.chat.selectedTabIndex
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ChatThread
@@ -242,6 +243,11 @@ public fun ChatListScreen(
             row.peerKeyB64.takeIf { row.kind == ConversationRowKind.CHAT }
         }
     }
+    // The pending contacts the text matches: rows of the list, so the people
+    // half leaves them out (`docs/ux/who-can-find-me.md` section 6.1).
+    val visibleInvited = remember(invited, query) { me.lakko.app.contacts.PendingContacts.matching(invited, query) }
+    val visibleInvitedKeys = remember(visibleInvited) { visibleInvited.mapTo(HashSet()) { it.signaturePubkeyB64 } }
+    val foundNoRow = searchFoundNoRow(visible.size, visibleInvited.size)
     val synchronizing = remember(state) { repository.isSynchronizing() }
 
     // docs/ux/chat-folders.md — the person's folders, in their order.
@@ -398,11 +404,11 @@ public fun ChatListScreen(
                     // empty list a search still reaches the people half below
                     // (docs/ux/navigation.md section 4, "Also with an empty
                     // list").
-                    showsEmptyConversationState(rows.isEmpty(), query) && !showBar ->
+                    showsEmptyConversationState(rows.isEmpty() && invited.isEmpty(), query) && !showBar ->
                         EmptyPanel(onStart = { createMenuOpen = true })
                     // UX who-can-find-me 6.1 — the people half of the search
                     // field replaces the plain lookup row when it is wired.
-                    searching && visible.isEmpty() && peopleSearch != null && peopleSession != null -> Column(
+                    searching && foundNoRow && peopleSearch != null && peopleSession != null -> Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .verticalScroll(rememberScrollState()),
@@ -422,12 +428,12 @@ public fun ChatListScreen(
                             },
                         )
                     }
-                    searching && visible.isEmpty() -> NoMatchPanel()
+                    searching && foundNoRow -> NoMatchPanel()
                     searching || !showBar -> ConversationList(
                         rows = visible,
                         folder = null,
                         handlers = rowHandlers,
-                        invited = invitedMatching(invited, query),
+                        invited = visibleInvited,
                         onOpenPendingChat = onOpenPendingChat,
                         // UX who-can-find-me 6.1 — people under the matching
                         // conversations.
@@ -437,7 +443,7 @@ public fun ChatListScreen(
                                     query = query,
                                     service = peopleSearch,
                                     session = peopleSession,
-                                    conversationMatches = visible.size,
+                                    conversationMatches = visible.size + visibleInvited.size,
                                     onOpenChannel = { id, handle ->
                                         query = ""
                                         onSubscribeToChannel(id, handle)
@@ -446,6 +452,7 @@ public fun ChatListScreen(
                                         query = ""
                                         onOpenContact(key)
                                     },
+                                    excludeKeysB64 = visibleInvitedKeys,
                                     chatPeersB64 = visibleChatPeers,
                                 )
                             }
@@ -684,20 +691,6 @@ private fun ConversationList(
         if (footer != null) {
             item(key = "people-search") { footer() }
         }
-    }
-}
-
-/** The pending contacts whose stated name or username matches [query]. */
-@Composable
-private fun invitedMatching(
-    invited: List<me.lakko.app.contacts.PendingContact>,
-    query: String,
-): List<me.lakko.app.contacts.PendingContact> {
-    val q = query.trim()
-    if (q.isEmpty()) return invited
-    return invited.filter { c ->
-        me.lakko.app.contacts.PendingContacts.name(c)?.contains(q, ignoreCase = true) == true ||
-            c.username.contains(q.removePrefix("@"), ignoreCase = true)
     }
 }
 

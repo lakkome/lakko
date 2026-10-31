@@ -19,7 +19,8 @@
  *
  * In Contacts (`scope: "contacts"`) only people are matched: the contacts
  * list above already shows the contacts, so they are not repeated here, and
- * no channel handle is asked.
+ * no channel handle is asked. A person the list above shows is never repeated
+ * here, in either field.
  *
  * Every decision is in the plain modules beside this file; this renders them.
  */
@@ -46,6 +47,7 @@ import {
   canAddContact,
   localPeople,
   mergePeople,
+  namesFormerContact,
   peopleRows,
   type ContactSet,
   type LocalCandidate,
@@ -62,7 +64,7 @@ import {
   type OutgoingRequests,
   type RowSendState,
 } from "./row-send";
-import { peopleLineOf, REQUEST_FAILED, REQUEST_SENT } from "./search-state";
+import { peopleLineOf, REQUEST_FAILED, REQUEST_SENT, showsNoMatchLine } from "./search-state";
 import { sendFoundRequest, type SendOutcome } from "./send-request";
 import {
   canonicalUsernameOf,
@@ -73,6 +75,7 @@ import {
   sendDeps,
 } from "./wiring";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
+import { pendingContacts } from "../contacts/pending-contacts";
 
 /** Where the field is: Chats matches conversations too, Contacts only people. */
 export type PeopleSearchScope = "chats" | "contacts";
@@ -102,9 +105,15 @@ export function PeopleSearch(props: {
   readonly groupPeopleKeys: () => readonly string[];
   /** Open a channel's subscribe page (Chats only). */
   readonly onOpenChannel?: (channelIdHex: string, handle: string) => void;
-  /** The people whose one-to-one is among the matching conversations (Chats):
-   *  a contact among them stands there already. */
-  readonly chatPeersB64?: () => ReadonlySet<string>;
+  /** The people a list row above shows: the matching contacts and people
+   *  added through their link. They leave People whatever their reach. */
+  readonly listedB64?: () => ReadonlySet<string>;
+  /** The people whose one-to-one is among the matching conversations (Chats).
+   *  A contact among them is not listed twice; anyone else keeps the way to
+   *  add them. */
+  readonly standingAboveB64?: () => ReadonlySet<string>;
+  /** The line that nothing matches; `null` for none. Chats' line when absent. */
+  readonly noMatchLine?: () => string | null;
   /** The route of the one-to-one with a person, or `null` (Chats). */
   readonly chatHrefOf?: (personKeyB64: string) => string | null;
 }): JSX.Element {
@@ -176,7 +185,7 @@ export function PeopleSearch(props: {
   const outgoing = createMemo((): OutgoingRequests => {
     sentRequestsVersion();
     const account = reachSession()?.accountIdB64;
-    return outgoingOf(account === undefined ? [] : loadSentRequests(account));
+    return outgoingOf(account === undefined ? [] : loadSentRequests(account), pendingContacts());
   });
 
   /** The local half, as the person types. */
@@ -224,17 +233,22 @@ export function PeopleSearch(props: {
     return { query: asked.query, key: `${account}\u0000${props.scope}\u0000${asked.key}` };
   };
   createEffect(on(target, (next) => auto.input(next)));
+  // A contact removed with the text standing: an answer that calls them one
+  // is false now, and nothing else would ask again.
+  createEffect(
+    on(
+      contactSet,
+      (contacts) => auto.recheck((outcome) => namesFormerContact(outcome.people, contacts)),
+      { defer: true },
+    ),
+  );
 
   /** Everyone found, a person who became a contact since read as one. */
   const merged = (): PersonResult[] =>
     asContacts(mergePeople([local(), network().outcome?.people ?? []], ownKeyHex()), contactSet());
   const people = (): PersonResult[] => {
     const all = merged();
-    // The contacts list above already shows the contacts; in Chats, a contact
-    // whose conversation matched stands there.
-    return inContacts
-      ? all.filter((p) => p.reach !== "contact")
-      : peopleRows(all, props.chatPeersB64?.() ?? new Set());
+    return peopleRows(all, props.listedB64?.() ?? new Set(), props.standingAboveB64?.() ?? new Set());
   };
 
   const channel = () => (inContacts ? null : (network().outcome?.channel ?? null));
@@ -250,14 +264,21 @@ export function PeopleSearch(props: {
   const showsPeople = (): boolean =>
     people().length > 0 || channel() !== null || searching() || message() !== null;
 
-  const nothingLocal = (): boolean =>
-    (props.conversationMatches?.() ?? 0) === 0 && local().length === 0 && channel() === null;
+  /** The line that nothing matches, when nothing stands in the field. */
+  const noMatchLine = (): string | null => {
+    const nothing = showsNoMatchLine({
+      rowsAbove: (props.conversationMatches?.() ?? 0) + (props.listedB64?.().size ?? 0),
+      peopleRows: people().length,
+      channel: channel() !== null,
+      searchOut: searching() || network().waiting === true,
+    });
+    if (!nothing) return null;
+    return props.noMatchLine === undefined ? t("chats.search.no_results") : props.noMatchLine();
+  };
 
   return (
     <>
-      <Show when={!inContacts && nothingLocal() && network().outcome?.state.kind !== "found"}>
-        <p class="lk-pane-nomatch">{t("chats.search.no_results")}</p>
-      </Show>
+      <Show when={noMatchLine()}>{(line) => <p class="lk-pane-nomatch">{line()}</p>}</Show>
       <Show when={showsPeople()}>
         <div class="lk-section-label" style={{ display: "flex", "align-items": "center", gap: "8px" }}>
           <span>{t("search.people.heading")}</span>

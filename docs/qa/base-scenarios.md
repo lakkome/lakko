@@ -1,0 +1,65 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
+
+# Base scenarios
+
+What a person tries in their first hour. This list is walked whole, on running
+clients, before anything is handed to the maintainer: a pass over the fix at hand
+is not a pass over the product. Each scenario runs on web, iOS and Android, as sender
+and as receiver, with the other side on a different client. A step counts only when
+its visible result was seen on both sides. Scenarios marked (design) wait for
+ADR-0087. Add a scenario whenever a defect shows one was missing.
+
+## Account
+1. Sign up, sign out, sign in, on a second device of the same account.
+2. Set a name and a photo; both reach a contact and a group.
+3. Change the username; a contact still reaches the person.
+4. Lose the device: recover with another device, a passkey, the phrase.
+
+## Contacts
+5. Find a person by @username and by name; send a request; accept; decline; ask again.
+6. Invite link: open it signed in, signed out, offline inviter, dead link.
+7. Remove a contact, then find and add them again, from each side.
+8. Who can find me: each setting, and what a searcher sees under it.
+9. One person is one row in every list and every search.
+
+## One-to-one
+10. Text, reply, forward, edit, delete, react, pin, read state, typing.
+11. Photo, file, voice message, video note, GIF, both ways, on every pair.
+12. Call and video call: ring, answer, decline, miss, hang up, app closed, screen share.
+13. A message sent while the other side is offline arrives; push wakes a closed app.
+
+## Groups
+14. Create a group with nobody else, then add people.
+15. Create a group with contacts and with people found by search.
+16. Name, photo, roles, admins, ownership transfer.
+17. Add, remove, leave, and re-add the same person; the removed person loses the group
+    and its history on every device; a re-added person is back and sees new messages.
+18. Everything in 10 and 11 in a group, including a member who joined late.
+19. Group call: join, leave, camera, pin, a late joiner.
+20. Invite link and approval; a request to join, approved and rejected.
+21. Public and private group: found or not found, join by request or by invitation. (design)
+
+## Channels
+22. Create a channel; the Chats list stays whole and the channel sits in it.
+23. Open a channel: same screen as a group.
+24. Post text, photo, file, voice, video note, GIF; a subscriber sees each. (design)
+25. Find a channel by @handle and by name; subscribe; unsubscribe. (design)
+26. Invite a person to a channel, public and private. (design)
+27. A subscriber who joins later; one who was offline across a rotation.
+28. Admins of a channel; names in the subscriber list, no machinery. (design)
+
+## Lists and navigation
+29. Chats holds one-to-ones, groups and channels; unread, mute, archive, pin, folders.
+30. Every screen has a way back, on every width.
+31. Search from Chats and Contacts finds what the person expects.
+32. Feed, Saved, Calls: each shows real content or a clear empty state.
+    Discover in Feed shows public channels; subscribing from a card works.
+    A Feed card reads left aligned at any width: nothing centred, nothing cut by
+    the card's edge, a long text ending in an ellipsis after 8 lines, a photo in
+    place. Tapping the text opens the chat; tapping the photo opens the photo.
+33. Second device: messages, contacts, folders, read state, removal of a device.
+
+## Quality
+34. No protocol word and no meaningless line on any screen.
+35. Dark and light; a phone width; an Android, an iPhone, and Chrome, Safari, Firefox.

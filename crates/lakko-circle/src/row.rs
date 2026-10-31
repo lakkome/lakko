@@ -18,6 +18,13 @@
 //! short one. The associated data ties the row to its directory, its index
 //! and its epoch, so the server cannot serve one row as another.
 //!
+//! The epoch key opens a row, and every contact of the owner holds it, so a
+//! row alone hides a card from nobody in the circle. What a client stores here
+//! is the card sealed under its search terms ([`crate::card`]), which the
+//! person it describes sealed: walking the rows then yields only sealed cards.
+//! The row keeps the card from people outside the circle and from anyone
+//! removed before it was written.
+//!
 //! The card is opaque here; a reader decides what it means. `open_row` runs
 //! on bytes the Delivery Service returns: lengths and the format byte are
 //! checked first, the padding after authentication, and nothing panics
@@ -26,7 +33,8 @@
 use lakko_crypto::aead::{self, AeadKey, Algorithm, Nonce, NONCE_LEN, TAG_LEN};
 use lakko_crypto::{random, SecretBytes};
 
-use crate::codec::Reader;
+use crate::card::SEALED_CARD_LEN;
+use crate::codec::{pad, unpad, Reader, LEN_FIELD};
 use crate::epoch::EpochKey;
 use crate::error::CircleError;
 use crate::filter::MAX_ROWS;
@@ -34,13 +42,11 @@ use crate::keys::{open_wrap, seal_wrap, DIRECTORY_ID_LEN, KEY_LEN, WRAP_LEN};
 
 const FORMAT_V1: u8 = 0x01;
 const AAD_DOMAIN: &[u8] = b"lakko/circle/row/v1\0";
-const LEN_FIELD: usize = 2;
 
-/// Length of a row's padded plaintext. Chosen to hold the longest card
-/// `lakko_contacts` can compose today (724 bytes), with room for the fields a
-/// card still gains. Not measured against traffic: there is none.
-pub const ROW_PADDED_LEN: usize = 768;
-/// Longest card a row carries.
+/// Length of a row's padded plaintext: one sealed card and its length.
+pub const ROW_PADDED_LEN: usize = SEALED_CARD_LEN + LEN_FIELD;
+/// Most bytes a row carries: one sealed card. The longest plain card is
+/// [`crate::card::CARD_MAX_LEN`].
 pub const ROW_CARD_MAX_LEN: usize = ROW_PADDED_LEN - LEN_FIELD;
 /// Length of every sealed row.
 pub const ROW_LEN: usize = 1 + 8 + WRAP_LEN + NONCE_LEN + ROW_PADDED_LEN + TAG_LEN;
@@ -65,13 +71,7 @@ pub fn seal_row(key: &EpochKey, row: u32, card: &[u8]) -> Result<Vec<u8>, Circle
     if row >= MAX_ROWS {
         return Err(CircleError::RowOutOfRange);
     }
-    let card_len = u16::try_from(card.len()).map_err(|_| CircleError::CardTooLong)?;
-    if card.len() > ROW_CARD_MAX_LEN {
-        return Err(CircleError::CardTooLong);
-    }
-    let mut padded = vec![0u8; ROW_PADDED_LEN];
-    padded[..LEN_FIELD].copy_from_slice(&card_len.to_be_bytes());
-    padded[LEN_FIELD..LEN_FIELD + card.len()].copy_from_slice(card);
+    let padded = pad(card, ROW_PADDED_LEN)?;
 
     let binding = aad(key.directory_id(), row, key.epoch());
     let row_key = random::secret_bytes::<KEY_LEN>();
@@ -153,20 +153,7 @@ pub fn open_row(key: &EpochKey, row: u32, bytes: &[u8]) -> Result<Vec<u8>, Circl
 
 /// The card inside a padded plaintext.
 pub(crate) fn parse_padded(padded: &[u8]) -> Result<Vec<u8>, CircleError> {
-    if padded.len() != ROW_PADDED_LEN {
-        return Err(CircleError::Length);
-    }
-    let mut r = Reader::new(padded);
-    let len = usize::from(u16::from_be_bytes(r.array()?));
-    if len > ROW_CARD_MAX_LEN {
-        return Err(CircleError::Malformed);
-    }
-    let card = r.take(len)?.to_vec();
-    let padding = r.take(r.remaining())?;
-    if padding.iter().any(|b| *b != 0) {
-        return Err(CircleError::Malformed);
-    }
-    Ok(card)
+    unpad(padded, ROW_PADDED_LEN)
 }
 
 #[cfg(test)]

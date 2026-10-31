@@ -70,6 +70,9 @@ struct FeedMessage: Equatable {
     let replyTarget: Int64?
     /// One label per attachment ("Photo", "Voice message", ...).
     let attachmentLabels: [String]
+    /// The attachments themselves, for the media bubbles. Empty for a channel
+    /// post, which carries none yet.
+    let attachments: [AttachmentRef]
     let edited: Bool
     let deleted: Bool
     /// The original author's name when forwarded.
@@ -84,6 +87,7 @@ struct FeedMessage: Equatable {
         reactions: [(reactor: String, emoji: String)] = [],
         replyTarget: Int64? = nil,
         attachmentLabels: [String] = [],
+        attachments: [AttachmentRef] = [],
         edited: Bool = false,
         deleted: Bool = false,
         forwardAuthor: String? = nil
@@ -96,6 +100,7 @@ struct FeedMessage: Equatable {
         self.reactions = reactions
         self.replyTarget = replyTarget
         self.attachmentLabels = attachmentLabels
+        self.attachments = attachments
         self.edited = edited
         self.deleted = deleted
         self.forwardAuthor = forwardAuthor
@@ -109,6 +114,7 @@ struct FeedMessage: Equatable {
             && lhs.reactions.map(\.emoji) == rhs.reactions.map(\.emoji)
             && lhs.replyTarget == rhs.replyTarget
             && lhs.attachmentLabels == rhs.attachmentLabels
+            && lhs.attachments == rhs.attachments
             && lhs.edited == rhs.edited && lhs.deleted == rhs.deleted
             && lhs.forwardAuthor == rhs.forwardAuthor
     }
@@ -336,9 +342,54 @@ enum FeedCopy {
         Localization.text("feed.replies.count", counts: ["count": UInt64(max(0, count))])
     }
 
-    /// The item's text, or its attachment line when it has none.
+    /// A message's text, or its attachment line when it has none: for the
+    /// places that draw no media bubble (a folded reply, the editor's preview).
     static func body(_ message: FeedMessage) -> String {
         let trimmed = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? (attachmentLine(message) ?? "") : message.text
+    }
+
+    /// The attachments an item draws as chat bubbles (section 3): the same
+    /// decision as the timeline, so a file stays a line of text.
+    static func mediaRefs(
+        _ message: FeedMessage, allowlist: InlineMedia.Allowlist = InlineMedia.coreAllowlist
+    ) -> [AttachmentRef] {
+        message.attachments.filter { InlineMedia.decision(for: $0, allowlist: allowlist).bubble != .file }
+    }
+
+    /// The text line of an item that draws its bubbles: its text, else the
+    /// attachments no bubble draws, so a file beside a photo is not lost. A
+    /// media-only message has no line, the bubble says it.
+    static func itemBody(
+        _ message: FeedMessage, allowlist: InlineMedia.Allowlist = InlineMedia.coreAllowlist
+    ) -> String {
+        let trimmed = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return message.text }
+        if mediaRefs(message, allowlist: allowlist).isEmpty { return attachmentLine(message) ?? "" }
+        let files = zip(message.attachments, message.attachmentLabels)
+            .filter { InlineMedia.decision(for: $0.0, allowlist: allowlist).bubble == .file }
+            .map(\.1)
+        guard let first = files.first else { return "" }
+        if files.count > 1 {
+            return Localization.text("feed.attachments.count", counts: ["count": UInt64(files.count)])
+        }
+        return first
+    }
+}
+
+/// The widths of a feed item (`docs/ux/feed.md` section 3).
+enum FeedLayout {
+    /// Wide screens keep this content width; the column does not stretch.
+    static let maxContentWidth: CGFloat = 720
+    static let listPadding: CGFloat = 16
+    static let cardPadding: CGFloat = 12
+    static let avatarSize: CGFloat = 40
+    static let avatarGap: CGFloat = 12
+
+    /// The column beside the avatar in a list `viewport` wide: what a media
+    /// bubble has to fit in.
+    static func columnWidth(viewport: CGFloat) -> CGFloat {
+        let content = min(viewport - 2 * listPadding, maxContentWidth)
+        return max(0, content - 2 * cardPadding - avatarSize - avatarGap)
     }
 }

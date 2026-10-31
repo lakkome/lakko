@@ -23,6 +23,9 @@ struct PeopleSearchSection: View {
     /// ask the network, whose People part answers by itself (Chats: "No
     /// results" when no conversation matched either); `nil` shows nothing.
     let emptyText: String?
+    /// The people a list row above shows (a contact, someone added through
+    /// their invite link): one person, one row.
+    let listed: Set<Data>
     /// The people whose one-to-one is among the matching conversations above.
     let chatPeers: Set<Data>
     let onOpenPerson: (FoundPerson) -> Void
@@ -34,6 +37,7 @@ struct PeopleSearchSection: View {
         includesChannels: Bool,
         showsLocalContacts: Bool,
         emptyText: String? = nil,
+        listed: Set<Data> = [],
         chatPeers: Set<Data> = [],
         onOpenPerson: @escaping (FoundPerson) -> Void,
         onOpenChannel: @escaping (String, String) -> Void = { _, _ in }
@@ -43,24 +47,27 @@ struct PeopleSearchSection: View {
         self.includesChannels = includesChannels
         self.showsLocalContacts = showsLocalContacts
         self.emptyText = emptyText
+        self.listed = listed
         self.chatPeers = chatPeers
         self.onOpenPerson = onOpenPerson
         self.onOpenChannel = onOpenChannel
     }
 
     var body: some View {
-        let rows = model.rows(showsLocalContacts: showsLocalContacts, chatPeers: chatPeers)
+        let rows = model.rows(showsLocalContacts: showsLocalContacts, listed: listed, chatPeers: chatPeers)
         let channel = includesChannels ? model.answer?.channel : nil
         let message = model.peopleMessage(
             includesChannels: includesChannels, showsLocalContacts: showsLocalContacts,
-            chatPeers: chatPeers)
+            listed: listed, chatPeers: chatPeers)
         // No heading without something under it. Below 3 characters nothing
         // was asked, so a person row is all that can stand here.
         let showsHeading = model.searching || !rows.local.isEmpty || !rows.network.isEmpty
             || channel != nil || message != nil
         VStack(alignment: .leading, spacing: 10) {
             if let emptyText, !model.asksNetwork,
-               !model.showsAnything(includesChannels: includesChannels, showsLocalContacts: showsLocalContacts) {
+               !model.showsAnything(
+                   includesChannels: includesChannels, showsLocalContacts: showsLocalContacts,
+                   listed: listed, chatPeers: chatPeers) {
                 Text(emptyText)
                     .foregroundStyle(Color.lakkoTextMuted)
                     .frame(maxWidth: .infinity)

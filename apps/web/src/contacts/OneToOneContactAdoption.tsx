@@ -25,12 +25,16 @@
  * not this device's own account.
  */
 import { createEffect, createMemo, on, type Component } from "solid-js";
+import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
+import { sessionAccountOf } from "../chat/persist-hooks";
 import { oneToOnePeerKey, ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { useProfiles } from "../profile/ProfileContext";
+import { foundNameForKey } from "./contact-ack";
 import { adoptOneToOne } from "./local-store";
 
 export const OneToOneContactAdoption: Component = () => {
+  const auth = useAuth();
   const chats = useChats();
   const profiles = useProfiles();
 
@@ -53,12 +57,17 @@ export const OneToOneContactAdoption: Component = () => {
       for (const g of chats.groups()) {
         const peer = oneToOnePeerKey(personKeysOf(g.group), own);
         if (peer === null) continue;
-        adoptOneToOne({
+        const wrote = adoptOneToOne({
           signatureKey: peer,
           accountIdHex: profiles.accountIdHexOf(peer),
           groupIdB64: g.groupIdB64,
           nowMs,
         });
+        // A Welcome ahead of the ack makes the row: it is not a stand-in
+        // either (`contact-ack.ts`).
+        const account = wrote ? sessionAccountOf(auth.state()) : null;
+        const found = account === null ? null : foundNameForKey(account, peer);
+        if (found !== null) profiles.fileFoundName(peer, found);
       }
     }),
   );

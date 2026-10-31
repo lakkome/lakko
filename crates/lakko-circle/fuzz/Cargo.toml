@@ -63,6 +63,15 @@ test = false
 doc = false
 bench = false
 
+# ADR-0086 section 2: a sealed card inside a row, chosen by anyone who can
+# write a row or the Delivery Service, and the padding parser behind the AEAD.
+[[bin]]
+name = "card_open"
+path = "fuzz_targets/card_open.rs"
+test = false
+doc = false
+bench = false
+
 # ADR-0086: the owner's device-local state.
 [[bin]]
 name = "state_decode"

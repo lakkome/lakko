@@ -363,6 +363,14 @@ public fun withCurrentContacts(merged: List<PersonResult>, contactKeysB64: Set<S
         }
     }
 
+/**
+ * Whether an answer names as a contact someone who is no longer one. Such a row
+ * is wrong twice: the person has no way to be added from it, and a contact row
+ * may be hidden as listed above, where they no longer stand.
+ */
+public fun namesFormerContact(people: List<PersonResult>, contactKeysB64: Set<String>): Boolean =
+    people.any { it.reach == PersonReach.CONTACT && it.keyB64 !in contactKeysB64 }
+
 /** Whether the heading **People** stands: over a row, the spinner or a line,
  *  never alone. */
 public fun showsPeopleHeading(rows: Int, channel: Boolean, searching: Boolean, line: Boolean): Boolean =

@@ -96,7 +96,9 @@ open from its header; it is not a state with a screen.
   removal stays (amended 2026-10-24): the rule that makes a one-to-one peer a
   contact skips a removed person, so the remaining conversation never brings
   them back; adding them again (Accept, an invite link, starting a chat from
-  their profile) does.
+  their profile) does. The card closes once the removal is done, back to the
+  list or the conversation it was opened from (2026-10-31), on every client and
+  whichever way the contact came to be.
 - **Add to contacts**, on the card of a person the viewer removed (amended
   2026-10-24). The conversation's header still opens their card; it shows
   Message, Call or Delete this chat, and the safety number as before, and
@@ -132,6 +134,12 @@ either side.
 
 ### 2.2 A group
 
+**Amended 2026-10-31 ([`group-and-channel-privacy.md`](group-and-channel-privacy.md),
+[ADR-0087](../adr/0087-group-and-channel-handles-and-privacy.md)):** the header's one
+line is `Private group · 12 members` or `Public group · 1,204 members`, the `@name` is a
+row with a copy icon, and the owner has a `Group type` row. A group of one offers
+`Delete group` in the exit block.
+
 - Name, and the members' names when it has none.
 - How many people.
 - Members, each with their role shown where they have one, and add or remove
@@ -152,19 +160,26 @@ to the group's info by its back control (section 3.1).
 
 ### 2.3 A channel
 
-- Name, `@handle`, description.
-- Subscriber count where the client has it.
+**Amended 2026-10-31 ([`group-and-channel-privacy.md`](group-and-channel-privacy.md)
+sections 12 to 15):** a channel uses the group's shape and has no screen of its own. The
+Manage page and its cards go: Protection and List in Discover are removed, and what a
+person acts on is rows on this screen (`Invite people`, `Invite link`, `Subscribers`,
+`Admins`, `Channel type`). A publisher is the owner or an admin. Section 12.1 of that
+spec is the list of rows.
+
+- Name, `@name`, description.
+- Subscriber count: exact for the owner and admins, the band for everyone else.
 - Unsubscribe, for a subscriber and not for a publisher: a publisher reads
   its own channel from its own keys, so there is no subscription to end and
   a control offering to end one would end nothing.
-- For a publisher: the owner's screen it already has.
 
 **What `Unsubscribe` actually does, said plainly because the copy has to be
-true.** It takes the channel off this device's list and drops the subscriber
-keys, so the device stops reading it and can subscribe again later. It does
-not delete the registration on the server - no channels route retires a
-subscriber - so the copy says what happens to *this device* and never claims
-the channel has been told.
+true.** It takes the channel off the person's list and drops the subscriber keys,
+so their devices stop reading it and they can subscribe again later, and it removes
+the registration on the server through the signed route ADR-0060 added. (Amended
+2026-10-31: this paragraph said no channels route retires a subscriber, which stopped
+being true with that route, and that it applied to this device only, which the end of a
+membership no longer does.)
 
 ### 2.4 Adding members (decided 2026-10-29)
 
@@ -256,7 +271,8 @@ the icon.
 |---|---|
 | Default | The header, the actions, the detail. |
 | A group still loading its roster | The header and what is known; never an empty list presented as "no members". |
-| Membership ended | The info opens and is read-only: the conversation is over, and the record of who was in it is not ([ADR-0045](../adr/0045-remote-commit-epoch-fork.md) UX 6.2). `Call` goes, because the per-call key comes from a group this device is no longer in. `Delete this chat` arrives in its place - **on a one-to-one exactly as on a group**, because it is the one thing the reader still can do, and because the control used to live in the group panel that a one-to-one has just stopped opening. Everything about the PERSON is unaffected: the conversation ended, they did not. |
+| Membership ended, group or channel | **Amended 2026-10-31 (maintainer):** there is nothing to open. The row and the history are gone from the person's devices ([`group-and-channel-privacy.md`](group-and-channel-privacy.md) section 9). An info screen open at that moment closes with the conversation. |
+| Conversation ended, one-to-one | The info opens and is read-only. `Call` goes, because the per-call key comes from a group this device is no longer in. `Delete this chat` arrives in its place, because it is the one thing the reader still can do. Everything about the PERSON is unaffected: the conversation ended, they did not. A one-to-one has no removal, so this is the key-reset case ([ADR-0073](../adr/0073-account-key-reset.md)). |
 | An action refused | One sentence on what happened and one on what to do, in place, and the screen stays open. |
 | Some picks could not be added | "Could not add {names}. Try again." in the group's info; the others are added (section 2.4). |
 

@@ -4930,14 +4930,6 @@
       "text": "{count, plural, one {# ek} other {# ek}}",
       "status": "machine"
     },
-    "feed.banner.dismiss": {
-      "text": "Anladım",
-      "status": "machine"
-    },
-    "feed.banner.local": {
-      "text": "Akışınız bu cihazın aldığı mesajları gösterir.",
-      "status": "machine"
-    },
     "feed.divider.new": {
       "text": "Yeni",
       "status": "machine"

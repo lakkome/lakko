@@ -229,10 +229,84 @@ final class ContactRemovalTests: XCTestCase {
         XCTAssertEqual(repository.state.accepted.first?.groupIdHex, "g1")
     }
 
+    // MARK: - The card closes (section 2.1)
+
+    /// Remove closes the card in every case, also for a person the
+    /// conversation left behind still reads back under this row id.
+    func testRemoveClosesTheCardWhateverStaysBehindTheName() {
+        let person = contact(-5, byte: 0xA1)
+        XCTAssertEqual(ContactDetailScreen.cardPerson(person, removedHere: false), person)
+        XCTAssertNil(ContactDetailScreen.cardPerson(person, removedHere: true))
+        XCTAssertNil(ContactDetailScreen.cardPerson(nil, removedHere: false))
+    }
+
+    // MARK: - A new contact is not a stand-in
+
+    private final class FakeSentStore: SentRequestsStoring {
+        var rows: [SentContactRequest] = []
+        func load(accountIdB64: String) -> [SentContactRequest] { rows }
+        func save(_ sent: [SentContactRequest], accountIdB64: String) throws { rows = sent }
+        func clear(accountIdB64: String) { rows = [] }
+    }
+
+    private func ack(key: Data, accountId: Data) -> IncomingContactAck {
+        IncomingContactAck(
+            messageId: 9, accepterPubkey: key, accepterAccountId: accountId,
+            accepterX25519Pubkey: Data(count: 32), ackToPseudonym: Data(count: 32),
+            acceptedAtMs: 1, createdAt: "2026-10-31T00:00:00Z")
+    }
+
+    func testAnAckFilesTheNameBeforeTheSentRowGoes() {
+        ProfileDirectory.shared.activate(accountIdB64: account, username: nil)
+        defer { ProfileDirectory.shared.forget(accountIdB64: account) }
+        let key = Data(repeating: 0xC1, count: 32)
+        let accountId = Data(repeating: 0xC2, count: 16)
+        let sent = FakeSentStore()
+        sent.rows = [SentContactRequest(
+            recipientUsername: "", recipientAccountIdB64: base64Encode(accountId), messageId: 1,
+            createdAt: "", recipientName: "Anna Weber", recipientKeyB64: base64Encode(key))]
+        let repository = makeRepository(sentStore: sent)
+        XCTAssertEqual(repository.state.sent.count, 1)
+
+        repository.applyContactAck(ack(key: key, accountId: accountId))
+
+        XCTAssertEqual(repository.state.accepted.map(\.request.fromPubkey), [key])
+        XCTAssertTrue(repository.state.sent.isEmpty)
+        XCTAssertEqual(ProfileDirectory.shared.resolve(signatureKey: key).name, "Anna Weber")
+    }
+
+    /// An ack names its account itself: under a key the row did not find, the
+    /// found name is not theirs.
+    func testAnAckUnderAnotherKeyGetsNoName() {
+        ProfileDirectory.shared.activate(accountIdB64: account, username: nil)
+        defer { ProfileDirectory.shared.forget(accountIdB64: account) }
+        let key = Data(repeating: 0xC3, count: 32)
+        let stranger = Data(repeating: 0xC4, count: 32)
+        let accountId = Data(repeating: 0xC5, count: 16)
+        let sent = FakeSentStore()
+        sent.rows = [SentContactRequest(
+            recipientUsername: "", recipientAccountIdB64: base64Encode(accountId), messageId: 1,
+            createdAt: "", recipientName: "Anna Weber", recipientKeyB64: base64Encode(key))]
+        let repository = makeRepository(sentStore: sent)
+
+        repository.applyContactAck(ack(key: stranger, accountId: accountId))
+
+        XCTAssertTrue(ProfileDirectory.shared.resolve(signatureKey: stranger).isPlaceholder)
+    }
+
     // MARK: - Fixtures
 
-    private func makeRepository() -> ContactsRepository {
-        ContactsRepository(
+    private func makeRepository(sentStore: SentRequestsStoring? = nil) -> ContactsRepository {
+        if let sentStore {
+            return ContactsRepository(
+                authRepository: AuthRepository.offline(
+                    authClientFactory: { Offline.auth() },
+                    persistence: NoSessionPersistence(),
+                    nowMs: { 1_000_000 }),
+                sentStore: sentStore,
+                accountBinding: Just<String?>(account).eraseToAnyPublisher())
+        }
+        return ContactsRepository(
             authRepository: AuthRepository.offline(
                 authClientFactory: { Offline.auth() },
                 persistence: NoSessionPersistence(),

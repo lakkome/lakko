@@ -41,12 +41,24 @@ export interface OutgoingRequests {
   readonly accountIdsHex: ReadonlySet<string>;
 }
 
-export function outgoingOf(sent: readonly SentRequestRecord[]): OutgoingRequests {
+/**
+ * `invited` are the people added through their invite link who have not
+ * answered yet: the request went out when **Add** was pressed, so a row for
+ * them reads "Request sent" like any other and offers no second request.
+ */
+export function outgoingOf(
+  sent: readonly SentRequestRecord[],
+  invited: readonly { readonly accountIdHex: string; readonly signaturePubkeyB64: string }[] = [],
+): OutgoingRequests {
   const keysB64 = new Set<string>();
   const accountIdsHex = new Set<string>();
   for (const r of sent) {
     accountIdsHex.add(r.recipientAccountIdHex);
     if (r.recipientKeyB64 !== undefined) keysB64.add(r.recipientKeyB64);
+  }
+  for (const p of invited) {
+    accountIdsHex.add(p.accountIdHex);
+    keysB64.add(p.signaturePubkeyB64);
   }
   return { keysB64, accountIdsHex };
 }

@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { PersistedAttachment, PersistedMessage } from "../chat/message-log-store";
-import { attachmentLine, repliesLabel, whyLine } from "./feed-copy";
+import { attachmentLine, cardBody, repliesLabel, whyLine } from "./feed-copy";
 import type { FeedCandidateRef } from "./feed-model";
 
 function message(extra: Partial<PersistedMessage> = {}): PersistedMessage {
@@ -42,6 +42,27 @@ describe("whyLine", () => {
     expect(whyLine(reacted, "popular")).toBe("Popular in Book club");
     expect(whyLine(reacted, "latest")).toBeNull();
     expect(whyLine(ref(), "popular")).toBeNull();
+  });
+});
+
+describe("cardBody", () => {
+  const isPhoto = (a: PersistedAttachment): boolean => a.mime === "image/jpeg";
+  const photo = attachment({ mime: "image/jpeg" });
+  const pdf = attachment({ mime: "application/pdf" });
+
+  it("keeps the text of a message that has one", () => {
+    expect(cardBody(message({ text: "look", attachments: [photo] }), isPhoto)).toBe("look");
+  });
+
+  it("leaves a media-only message with no line, the bubble says it", () => {
+    expect(cardBody(message({ text: "  \n ", attachments: [photo] }), isPhoto)).toBe("");
+  });
+
+  it("names a file no bubble draws, alone or beside a photo", () => {
+    const line = attachmentLine(message({ attachments: [pdf] }));
+    expect(line).not.toBeNull();
+    expect(cardBody(message({ text: "", attachments: [pdf] }), isPhoto)).toBe(line);
+    expect(cardBody(message({ text: "", attachments: [photo, pdf] }), isPhoto)).toBe(line);
   });
 });
 

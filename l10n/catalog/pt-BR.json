@@ -4930,14 +4930,6 @@
       "text": "{count, plural, one {# anexo} other {# anexos}}",
       "status": "machine"
     },
-    "feed.banner.dismiss": {
-      "text": "Entendi",
-      "status": "machine"
-    },
-    "feed.banner.local": {
-      "text": "Seu feed mostra as mensagens que este dispositivo recebeu.",
-      "status": "machine"
-    },
     "feed.divider.new": {
       "text": "Novo",
       "status": "machine"

@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { memberListLabelOf, memberNameOf, UNNAMED_MEMBER } from "./member-label";
+import { memberListLabelOf, memberNameOf, ownAvatarLabel, UNNAMED_MEMBER } from "./member-label";
 import { resolveDisplay } from "./resolver";
 
 const key = new Uint8Array(32).fill(0xa1);
@@ -31,5 +31,20 @@ describe("member labels", () => {
     expect(memberNameOf(r)).toBe(UNNAMED_MEMBER());
     expect(memberListLabelOf(r)).toBe(UNNAMED_MEMBER());
     expect(memberListLabelOf(r)).not.toMatch(/[0-9a-f]{4} [0-9a-f]{4}/);
+  });
+});
+
+describe("the own avatar's letters", () => {
+  it("come from the display name when there is one", () => {
+    expect(ownAvatarLabel("Tuuli Aho", "t4x123")).toBe("Tuuli Aho");
+  });
+
+  it("come from the username only when there is no name", () => {
+    expect(ownAvatarLabel(null, "t4x123")).toBe("t4x123");
+    expect(ownAvatarLabel("  ", "t4x123")).toBe("t4x123");
+  });
+
+  it("are a question mark for a guest with neither", () => {
+    expect(ownAvatarLabel(null, "")).toBe("?");
   });
 });

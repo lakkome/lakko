@@ -469,6 +469,7 @@ public struct ChatListScreen: View {
                 if !query.isEmpty, let peopleSearch {
                     PeopleSearchSection(
                         model: peopleSearch, includesChannels: true, showsLocalContacts: true,
+                        listed: Set(invited.map(\.signaturePubkey)),
                         chatPeers: Set(visible.filter { $0.kind == .chat }.compactMap {
                             viewModel.peerSignatureKey(groupIdHex: $0.id)
                         }),

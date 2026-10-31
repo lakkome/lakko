@@ -743,7 +743,9 @@ public object StateBundle {
 
     /** The profiles to carry: every stored profile under a 32-byte person
      *  key that is not this account's own (by key, or by the account id the
-     *  profile names), in a stable order (by key), at most [MAX_PROFILES]. */
+     *  profile names), in a stable order (by key), at most [MAX_PROFILES].
+     *  A name a search found goes as the name alone
+     *  ([me.lakko.app.profile.PeerProfile.forStateBundle]). */
     internal fun carriedProfiles(
         stored: Map<String, me.lakko.app.profile.PeerProfile>,
         ownKeysB64: Set<String>,
@@ -759,7 +761,8 @@ public object StateBundle {
             val key = enc.encodeToString(keyBytes)
             if (key in ownKeysB64 || !seen.add(key)) continue
             if (ownAccountIdHex != null && profile.accountIdHex == ownAccountIdHex) continue
-            val envelope = compose(profile) ?: continue
+            val carried = profile.forStateBundle ?: continue
+            val envelope = compose(carried) ?: continue
             out += CarriedProfile(key, enc.encodeToString(envelope))
         }
         return out

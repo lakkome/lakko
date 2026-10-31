@@ -209,4 +209,21 @@ class InviteLinkRowsTest {
         assertEquals(SentRowText("@kaj_u", null), sentRowText(null, "kaj_u"))
         assertEquals(SentRowText("@kaj_u", null), sentRowText("  ", "kaj_u"))
     }
+
+    @Test
+    fun `the people the list shows count contacts and pending contacts alike`() {
+        val contact = ContactRowModel(key = "route-key", name = "Anna", username = null)
+        val invited = ContactRowModel(key = "invited:0a", name = "Ines", username = "ines", personKey = "ines-key")
+        val keys = listedPersonKeys(contactSections(listOf(contact, invited))) { rowKey ->
+            "anna-key".takeIf { rowKey == "route-key" }
+        }
+        assertEquals(setOf("anna-key", "ines-key"), keys)
+    }
+
+    @Test
+    fun `a pending contact the text does not match is not listed`() {
+        val invited = ContactRowModel(key = "invited:0a", name = "Ines", username = "ines", personKey = "ines-key")
+        val shown = contactSections(filterContacts(listOf(invited, ContactRowModel(key = "k", name = "Anna", username = null)), "anna"))
+        assertEquals(emptySet<String>(), listedPersonKeys(shown) { null })
+    }
 }

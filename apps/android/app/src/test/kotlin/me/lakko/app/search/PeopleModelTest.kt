@@ -226,6 +226,16 @@ class PeopleModelTest {
     }
 
     @Test
+    fun `a pending contact listed above leaves People whatever their reach`() {
+        // Added through their link and not answered yet: the row above is
+        // theirs, and People offers them no second row reading Request sent.
+        val pending = row("p", PersonReach.OPEN)
+        val granted = row("g", PersonReach.GRANT)
+        val elsewhere = row("e", PersonReach.OPEN)
+        assertEquals(listOf(elsewhere), peopleRows(listOf(pending, granted, elsewhere), setOf("p", "g"), emptySet()))
+    }
+
+    @Test
     fun `the heading never stands alone`() {
         assertFalse(showsPeopleHeading(rows = 0, channel = false, searching = false, line = false))
         assertTrue(showsPeopleHeading(rows = 1, channel = false, searching = false, line = false))

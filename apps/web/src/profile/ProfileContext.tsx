@@ -41,6 +41,7 @@ import { getDeviceKey } from "../auth/key-store";
 import { useChats } from "../chat/ChatContext";
 import { ChatClient } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
+import type { FoundName } from "../contacts/contact-list-model";
 import { loadKeyAliases, loadRenames, subscribeAcceptedChanged } from "../contacts/local-store";
 import { loadPendingContacts, pendingContacts, type PendingContact } from "../contacts/pending-contacts";
 import { loadWasm, type Wasm } from "../wasm";
@@ -56,8 +57,10 @@ import { OWN_AVATAR_KEY, avatarLookupChanged, bindAvatarRuntime, setAvatarLookup
 import { IdbProfileBackend } from "./profile-idb";
 import {
   ACCOUNT_ID_BYTES,
+  FOUND_NAME_STAMP,
   ProfileStore,
   accountIdHexOfBytes,
+  awaitsOwnProfile,
   type IncomingProfile,
 } from "./profile-store";
 import { ProfilePublishScheduler, type PublishReason } from "./publish-scheduler";
@@ -151,6 +154,10 @@ export interface ProfileApi {
   requestProfilesOnOpen(groupIdB64: string, memberKeysB64: readonly string[]): Promise<void>;
   /** Record a username binding a lookup already proved. */
   learnUsername(signatureKeyB64: string, username: string): void;
+  /** A new contact's name as a search found it, filed under their key at
+   *  {@link FOUND_NAME_STAMP}: what they send replaces it. Never over a
+   *  profile already held. */
+  fileFoundName(signatureKeyB64: string, found: FoundName): void;
   /** The own profile envelope, or `null` when there is nothing to publish.
    *  With `groupIdB64` it carries the ADR-0060 grants that conversation gets
    *  (`member` always, `group` when the setting allows, `contact` in a
@@ -832,13 +839,17 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       if (account === null || own === null) return;
       const w = await loadWasm();
       // The count reads the SAME resolver every screen renders from, so
-      // "unnamed" here is exactly a row that shows as `Member`.
+      // "unnamed" here is a row that shows as `Member`, or one that shows only
+      // what a search found: the person's own profile is still owed.
       const decision = decideProfileRequest(
         {
           joinedJustNow: false,
           memberKeysB64,
           isOwnKey: (k) => isOwnKeyB64(own, k),
-          sourceOf: (k) => api.resolve(k).source,
+          sourceOf: (k) => {
+            const source = api.resolve(k).source;
+            return source !== "rename" && awaitsOwnProfile(store.get(k)) ? "fingerprint" : source;
+          },
           lastRequestedAtMs: lastProfileRequestAt(account, groupIdB64),
           nowMs: Date.now(),
         },
@@ -851,6 +862,16 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       if (accountId() === null) return;
       verifier.learn(signatureKeyB64, username);
       bump();
+    },
+    fileFoundName(signatureKeyB64, found) {
+      const account = accountId();
+      if (account === null) return;
+      // Straight to the store: the check a stored username gets reads the
+      // certificate a profile carried, and this row has none. The search
+      // that showed the username verified it, so that verdict goes with it.
+      void store.ingest(account, signatureKeyB64, { ...found, updatedAtMs: FOUND_NAME_STAMP }).then((stored) => {
+        if (stored && found.username !== null) api.learnUsername(signatureKeyB64, found.username);
+      });
     },
     ownProfileEnvelope,
     ownUsernameCertificate: () => ownCert(),

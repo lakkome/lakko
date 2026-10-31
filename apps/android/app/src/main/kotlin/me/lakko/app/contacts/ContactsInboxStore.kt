@@ -446,6 +446,59 @@ public fun applyContactAcks(
     return AppliedContactAcks(nextAccepted, nextSent, changed)
 }
 
+/** What a Sent record knew about the person it went to. */
+public data class FoundName(
+    /** The person's signature key, standard base64. */
+    val signatureKeyB64: String,
+    /** The name the row showed; `null` when it showed the username alone. */
+    val displayName: String?,
+    /** The username the row showed, which the search had verified. */
+    val verifiedUsername: String?,
+)
+
+/**
+ * The names [sent] holds for the people who just answered (an ack, or the
+ * Welcome of [answeredKeysB64]), read before the answer drops the records. A
+ * new contact has no name until their profile arrives, and this is what stands
+ * in for it (`docs/ux/who-can-find-me.md` section 6.1).
+ *
+ * Matched on the KEY the request was sealed to, not the account id an ack
+ * claims: anyone can sign an ack naming another account, and a name found for
+ * one key must not land on a different one. A record with no name or no key
+ * gives nothing, and neither does a name that is only the key's fingerprint,
+ * which is a label and not a name. A found person's username is only ever kept
+ * on the record when the row showed it, so it counts as verified; a request
+ * sent by typing a username keeps no name and never reaches here. A person who
+ * rotated keys between the search and the ack reads as before until their
+ * profile arrives.
+ */
+public fun foundNamesOfAnswers(
+    sent: List<SentContactRequest>,
+    acks: List<IncomingContactAck>,
+    answeredKeysB64: Set<String>,
+): List<FoundName> {
+    val encoder = java.util.Base64.getEncoder()
+    val keys = answeredKeysB64 + acks.map { encoder.encodeToString(it.accepterPubkey) }
+    return sent.mapNotNull { record ->
+        val key = record.recipientKeyB64?.takeIf { it in keys } ?: return@mapNotNull null
+        val name = record.recipientName?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+        val keyBytes = try {
+            java.util.Base64.getDecoder().decode(key)
+        } catch (_: IllegalArgumentException) {
+            return@mapNotNull null
+        }
+        if (name == me.lakko.app.profile.fingerprintLabel(keyBytes)) return@mapNotNull null
+        val username = record.recipientUsername.takeIf { it.isNotEmpty() }
+        FoundName(
+            signatureKeyB64 = key,
+            // A person found by username alone is listed under `@username`:
+            // that is the username again, not a name they gave.
+            displayName = name.takeUnless { username != null && it == "@$username" },
+            verifiedUsername = username,
+        )
+    }.distinctBy { it.signatureKeyB64 }
+}
+
 // =============================================================================
 // Codec — the same field shape as the accepted store's record, minus the
 // accepted-only fields (`groupIdHex`, `displayName`). Kept separate so the

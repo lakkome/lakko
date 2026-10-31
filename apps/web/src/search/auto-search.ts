@@ -107,6 +107,13 @@ export class SearchMemory {
     }
   }
 
+  /** Forget every answer `stale` calls no longer true. */
+  forgetWhere(stale: (outcome: PeopleSearchOutcome) => boolean): void {
+    for (const [key, kept] of [...this.answers]) {
+      if (stale(kept.outcome)) this.answers.delete(key);
+    }
+  }
+
   clear(): void {
     this.answers.clear();
   }
@@ -119,6 +126,9 @@ export interface NetworkView {
   readonly outcome: PeopleSearchOutcome | null;
   /** A question for the current text is in flight. */
   readonly searching: boolean;
+  /** The current text will be asked once the typing pauses. No spinner yet,
+   *  but nothing may be said to be missing either. */
+  readonly waiting?: true;
 }
 
 /** The clock, injectable for the tests. */
@@ -146,6 +156,8 @@ export class AutoSearch {
   private timer: unknown = null;
   /** The key of the text the field holds now (`null`: nothing to ask). */
   private current: string | null = null;
+  /** The text behind {@link current}, for asking it again. */
+  private currentTarget: NetworkQuery | null = null;
   private view: NetworkView = { outcome: null, searching: false };
   private disposed = false;
 
@@ -169,6 +181,7 @@ export class AutoSearch {
     if (target === null) {
       this.cancelTimer();
       this.current = null;
+      this.currentTarget = null;
       this.show({ outcome: null, searching: false });
       return;
     }
@@ -181,6 +194,7 @@ export class AutoSearch {
       return;
     }
     this.current = target.key;
+    this.currentTarget = target;
     this.cancelTimer();
     const remembered = this.memory.get(target.key);
     if (remembered !== undefined) {
@@ -188,11 +202,27 @@ export class AutoSearch {
       return;
     }
     // The earlier answer stays; the spinner waits for the question itself.
-    this.show({ outcome: this.view.outcome, searching: false });
+    this.show({ outcome: this.view.outcome, searching: false, waiting: true });
     this.timer = this.timers.set(() => {
       this.timer = null;
       void this.ask(target);
     }, this.delayMs);
+  }
+
+  /**
+   * Something this device knows moved under the answers: `stale` says which
+   * are no longer true. They are forgotten, and the one on screen is asked
+   * again at once, since nothing else would ask while the text stands.
+   */
+  recheck(stale: (outcome: PeopleSearchOutcome) => boolean): void {
+    if (this.disposed) return;
+    this.memory.forgetWhere(stale);
+    const shown = this.view.outcome;
+    const target = this.currentTarget;
+    if (shown === null || target === null || !stale(shown)) return;
+    this.cancelTimer();
+    this.show({ outcome: null, searching: false });
+    void this.ask(target);
   }
 
   /** Stop: nothing is shown or asked after this. */

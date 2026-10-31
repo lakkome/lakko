@@ -86,6 +86,12 @@ describe("Request sent comes from the Sent list (UX 6.1)", () => {
     expect(rowSendState(person({ accountIdHex: null }), "idle", outgoingOf([record("22", "KEY")]))).toBe("sent");
   });
 
+  it("a person added through their link reads Request sent, never Add contact", () => {
+    const invited = [{ accountIdHex: "33", signaturePubkeyB64: "KEY" }];
+    expect(rowSendState(person({ accountIdHex: null }), "idle", outgoingOf([], invited))).toBe("sent");
+    expect(isOutgoing(person({ keyB64: "NEW", accountIdHex: "33" }), outgoingOf([], invited))).toBe(true);
+  });
+
   it("a rotated key does not lose the request: the account id still names them", () => {
     expect(isOutgoing(person({ keyB64: "NEW" }), outgoingOf([record("11", "OLD")]))).toBe(true);
   });

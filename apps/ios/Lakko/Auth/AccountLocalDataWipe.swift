@@ -393,10 +393,9 @@ enum AccountLocalDataWipe {
         step("feeds") { FeedStore().delete(accountIdB64: accountIdB64) }
         step("feed-reading") { FeedReadingStore().delete(accountIdB64: accountIdB64) }
         // The Feed tab's selection (it can name one of this account's saved
-        // feeds) and the device banner: device-wide keys, as on Android.
+        // feeds): a device-wide key, as on Android.
         step("feed-prefs") {
             standard.removeObject(forKey: FeedViewModel.selectionKey)
-            standard.removeObject(forKey: FeedViewModel.bannerKey)
         }
 
         // 7. Calls and media.

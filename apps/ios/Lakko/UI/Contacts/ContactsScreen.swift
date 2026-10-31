@@ -98,6 +98,16 @@ public struct ContactsScreen: View {
         return accepted + invited
     }
 
+    /// The account keys the list shows for this text: contacts and the people
+    /// added through their link. A contact whose name has not arrived is not
+    /// among them: they stand under People meanwhile.
+    private var listedKeys: Set<Data> {
+        ContactRowId.listedKeys(
+            shown: items.map(\.id),
+            accepted: viewModel.repositoryState.accepted,
+            invited: viewModel.shownInvited)
+    }
+
     private var sections: [ContactListPresentation.LetterSection<ContactRowId>] {
         ContactListPresentation.sections(items)
     }
@@ -146,8 +156,9 @@ public struct ContactsScreen: View {
                     if isSearching, let peopleSearch {
                         Section {
                             PeopleSearchSection(
-                                model: peopleSearch, includesChannels: false, showsLocalContacts: false,
+                                model: peopleSearch, includesChannels: false, showsLocalContacts: true,
                                 emptyText: noMatchText,
+                                listed: listedKeys,
                                 onOpenPerson: onOpenPerson)
                         }
                         .listRowSeparator(.hidden)
@@ -370,6 +381,20 @@ private struct SentRequestRow: View {
 enum ContactRowId: Hashable {
     case contact(Int64)
     case invited(String)
+
+    /// The account keys of the people the rows `shown` stand for.
+    static func listedKeys(
+        shown: [ContactRowId], accepted: [AcceptedContact], invited: [PendingContact]
+    ) -> Set<Data> {
+        let shown = Set(shown)
+        let contacts = accepted
+            .filter { shown.contains(.contact($0.request.messageId)) }
+            .map(\.request.fromPubkey)
+        let added = invited
+            .filter { shown.contains(.invited($0.accountIdHex)) }
+            .map(\.signaturePubkey)
+        return Set(contacts + added)
+    }
 }
 
 /// ADR-0079 — a person added through their invite link, before their app has

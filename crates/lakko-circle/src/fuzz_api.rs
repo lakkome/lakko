@@ -9,15 +9,17 @@
 
 use lakko_crypto::SecretBytes;
 
+use crate::card::{self, open_card, seal_card, CARD_MAX_LEN, CARD_PADDED_LEN, SEALED_CARD_LEN};
 use crate::epoch::EpochKey;
 use crate::filter::{self, filter_header, open_filter};
 use crate::head::{DirectoryHead, MemberGrant, HEAD_LEN};
-use crate::keys::{self, KEY_LEN, WRAP_LEN};
+use crate::keys::{self, KEY_LEN, OPRF_OUTPUT_LEN, WRAP_LEN};
 use crate::row::{self, open_row, row_epoch, ROW_PADDED_LEN};
 use crate::tree::{member_epoch_key, TreeOwner};
 use crate::writer::DirectoryWriter;
 
 const FUZZ_ACCOUNT: [u8; KEY_LEN] = [0x6B; KEY_LEN];
+const FUZZ_TERM: [u8; OPRF_OUTPUT_LEN] = [0x7C; OPRF_OUTPUT_LEN];
 
 fn fuzz_key() -> EpochKey {
     EpochKey::from_root([0x1D; 32], 3, &SecretBytes::new([0x2E; KEY_LEN]))
@@ -108,6 +110,38 @@ pub fn row_open(data: &[u8]) {
     let _ = open_row(&fuzz_key(), 0, data);
     if let Ok(card) = row::parse_padded(data) {
         assert!(card.len() < ROW_PADDED_LEN, "a card longer than its row");
+    }
+}
+
+/// Parse the bytes as a sealed card and as a card's padded plaintext, and seal
+/// them as a card.
+///
+/// # Panics
+///
+/// When a parsed card is longer than the padded plaintext, or a card this
+/// crate sealed does not open to itself at the one length.
+pub fn card_open(data: &[u8]) {
+    let _ = open_card(data, &FUZZ_TERM);
+    if let Ok(parsed) = card::parse_padded(data) {
+        assert!(
+            parsed.len() < CARD_PADDED_LEN,
+            "a card longer than its padding"
+        );
+    }
+    if data.len() <= CARD_MAX_LEN {
+        let Ok(sealed) = seal_card(data, &[FUZZ_TERM]) else {
+            return;
+        };
+        assert_eq!(
+            sealed.len(),
+            SEALED_CARD_LEN,
+            "a sealed card has one length"
+        );
+        assert_eq!(
+            open_card(&sealed, &FUZZ_TERM).as_deref(),
+            Ok(data),
+            "a sealed card opens to itself"
+        );
     }
 }
 

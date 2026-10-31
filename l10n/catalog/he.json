@@ -4930,14 +4930,6 @@
       "text": "{count, plural, one {קובץ מצורף אחד} two {שני קבצים מצורפים} other {# קבצים מצורפים}}",
       "status": "machine"
     },
-    "feed.banner.dismiss": {
-      "text": "הבנתי",
-      "status": "machine"
-    },
-    "feed.banner.local": {
-      "text": "הפיד מציג הודעות שהמכשיר הזה קיבל.",
-      "status": "machine"
-    },
     "feed.divider.new": {
       "text": "חדש",
       "status": "machine"

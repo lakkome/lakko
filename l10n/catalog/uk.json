@@ -4930,14 +4930,6 @@
       "text": "{count, plural, one {# вкладення} few {# вкладення} many {# вкладень} other {# вкладення}}",
       "status": "machine"
     },
-    "feed.banner.dismiss": {
-      "text": "Зрозуміло",
-      "status": "machine"
-    },
-    "feed.banner.local": {
-      "text": "Стрічка показує повідомлення, які отримав цей пристрій.",
-      "status": "machine"
-    },
     "feed.divider.new": {
       "text": "Нове",
       "status": "machine"

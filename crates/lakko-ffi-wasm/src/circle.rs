@@ -9,28 +9,35 @@
 //! [`CircleEpochKey`] signs reads, walks the chain and opens what a read
 //! returned, and [`CircleFilter`] tests a term tag, locally.
 //!
+//! A row carries a card the person it describes sealed with `circleSealCard`,
+//! and `circleOpenCard` opens it with the OPRF output of the term searched for:
+//! the epoch key opens every row, and every contact of the owner holds it, so
+//! only the term keeps a card from a contact who has not searched for it.
+//!
 //! ## Shapes
 //!
 //! Lists of fixed-length values cross flat: `setFilter(tags, rows, rowCount)`
 //! takes the tags concatenated, 32 bytes each, and `circleMemberEpochKey(grant,
 //! head, nodes, wraps)` the wraps concatenated, 60 bytes each, `nodes[i]` going
-//! with the `i`-th. 64-bit integers are `bigint`.
+//! with the `i`-th. `circleSealCard(card, termOutputs)` takes the OPRF outputs
+//! concatenated, 64 bytes each. 64-bit integers are `bigint`.
 //!
 //! ## Errors
 //!
 //! Every refusal throws an `Error` whose message is `"<code>: <reason>"`. The
 //! code is the frozen `lakko_circle::CircleError::code()`, or `keyLength`,
-//! `tagLength`, `wrapLength` for an argument of the wrong length.
+//! `tagLength`, `wrapLength`, `outputLength` for an argument of the wrong
+//! length.
 //!
 //! [ADR-0086]: ../../../docs/adr/0086-circle-directories.md
 
 use std::fmt;
 
 use lakko_circle::{
-    directory_path, filter_header, member_epoch_key, open_filter, open_row, path_nodes, row_epoch,
-    CircleError, DirectoryHead, DirectoryWrite, DirectoryWriter, EpochKey, FilterEntry,
-    MemberGrant, OpenedFilter, Wrap, GRANT_LEN, MAX_ROWS_PER_TERM, MAX_ROWS_PER_WRITE,
-    OWNER_PROOF_EPOCH, ROW_CARD_MAX_LEN, TAG_LEN_BYTES, WRAP_LEN,
+    directory_path, filter_header, member_epoch_key, open_card, open_filter, open_row, path_nodes,
+    row_epoch, seal_card, CircleError, DirectoryHead, DirectoryWrite, DirectoryWriter, EpochKey,
+    FilterEntry, MemberGrant, OpenedFilter, Wrap, GRANT_LEN, MAX_ROWS_PER_TERM, MAX_ROWS_PER_WRITE,
+    OPRF_OUTPUT_LEN, OWNER_PROOF_EPOCH, ROW_CARD_MAX_LEN, SEALED_CARD_LEN, TAG_LEN_BYTES, WRAP_LEN,
 };
 use lakko_crypto::SecretBytes;
 use lakko_ds_proof::DsProofSigner as InnerSigner;
@@ -333,7 +340,9 @@ impl CircleWriter {
         Ok(self.inner.remove_members(leaves).map_err(Refusal::from)?)
     }
 
-    /// Queue a card as row `index`.
+    /// Queue a card as row `index`. Pass the bytes `circleSealCard` gave the
+    /// person the card describes: a plain card here would be readable by every
+    /// contact of this owner.
     #[wasm_bindgen(js_name = putRow)]
     pub fn put_row(&mut self, index: u32, card: Vec<u8>) -> Result<(), JsError> {
         Ok(self.inner.put_row(index, card).map_err(Refusal::from)?)
@@ -416,7 +425,7 @@ impl CircleEpochKey {
         })
     }
 
-    /// Open row `index`, sealed at this epoch, to its card.
+    /// Open row `index`, sealed at this epoch, to the sealed card inside it.
     #[wasm_bindgen(js_name = openRow)]
     pub fn open_row(&self, index: u32, row: &[u8]) -> Result<Vec<u8>, JsError> {
         Ok(open_row(&self.inner, index, row).map_err(Refusal::from)?)
@@ -524,6 +533,43 @@ pub fn circle_row_epoch(row: &[u8]) -> Result<u64, JsError> {
     Ok(row_epoch(row).map_err(Refusal::from)?)
 }
 
+fn try_seal_card(card: &[u8], term_outputs: &[u8]) -> Result<Vec<u8>, Refusal> {
+    if term_outputs.len() % OPRF_OUTPUT_LEN != 0 {
+        return Err(Refusal::new(
+            "outputLength",
+            format_args!("{} bytes of OPRF outputs", term_outputs.len()),
+        ));
+    }
+    let mut outputs = Vec::with_capacity(term_outputs.len() / OPRF_OUTPUT_LEN);
+    for output in term_outputs.chunks_exact(OPRF_OUTPUT_LEN) {
+        outputs.push(fixed::<OPRF_OUTPUT_LEN>(
+            output,
+            "outputLength",
+            "an OPRF output",
+        )?);
+    }
+    Ok(seal_card(card, &outputs)?)
+}
+
+fn try_open_card(sealed: &[u8], oprf_output: &[u8]) -> Result<Vec<u8>, Refusal> {
+    let output = fixed::<OPRF_OUTPUT_LEN>(oprf_output, "outputLength", "an OPRF output")?;
+    Ok(open_card(sealed, &output)?)
+}
+
+/// Seal `card` under the search terms of the person it describes:
+/// `termOutputs` concatenated, 64 bytes each. Each opens it, and nothing else
+/// does: not the epoch key, not a term tag. Every sealed card has one length.
+#[wasm_bindgen(js_name = circleSealCard)]
+pub fn circle_seal_card(card: &[u8], term_outputs: &[u8]) -> Result<Vec<u8>, JsError> {
+    Ok(try_seal_card(card, term_outputs)?)
+}
+
+/// Open a sealed card with the 64-byte OPRF output of a search term.
+#[wasm_bindgen(js_name = circleOpenCard)]
+pub fn circle_open_card(sealed: &[u8], oprf_output: &[u8]) -> Result<Vec<u8>, JsError> {
+    Ok(try_open_card(sealed, oprf_output)?)
+}
+
 /// The path of a directory on the Delivery Service, without a prefix. Its
 /// routes hang off it: `/header`, `/filter`, `/rows/<index>`.
 #[wasm_bindgen(js_name = circleDirectoryPath)]
@@ -551,12 +597,21 @@ pub fn circle_grant_len() -> u32 {
     value
 }
 
-/// The longest card a row carries.
+/// The most bytes a row carries: one sealed card.
 #[wasm_bindgen(js_name = circleRowCardMaxLen)]
 #[must_use]
 pub fn circle_row_card_max_len() -> u32 {
     #[allow(clippy::cast_possible_truncation)] // a small constant
     let value = ROW_CARD_MAX_LEN as u32;
+    value
+}
+
+/// The length of every sealed card.
+#[wasm_bindgen(js_name = circleSealedCardLen)]
+#[must_use]
+pub fn circle_sealed_card_len() -> u32 {
+    #[allow(clippy::cast_possible_truncation)] // a small constant
+    let value = SEALED_CARD_LEN as u32;
     value
 }
 
@@ -626,6 +681,32 @@ mod tests {
             .err()
             .unwrap();
         assert!(refused.0.starts_with("wrapLength:"));
+    }
+
+    #[test]
+    fn a_card_opens_with_its_terms_only() {
+        let terms = [[1u8; OPRF_OUTPUT_LEN], [2u8; OPRF_OUTPUT_LEN]].concat();
+        let sealed = try_seal_card(b"anna", &terms).unwrap();
+        assert_eq!(sealed.len(), circle_sealed_card_len() as usize);
+        assert_eq!(circle_row_card_max_len(), circle_sealed_card_len());
+        assert_eq!(
+            try_open_card(&sealed, &[2u8; OPRF_OUTPUT_LEN]).unwrap(),
+            b"anna"
+        );
+        let refused = try_open_card(&sealed, &[3u8; OPRF_OUTPUT_LEN]).unwrap_err();
+        assert!(refused.0.starts_with("authentication:"));
+    }
+
+    #[test]
+    fn a_card_refuses_a_bad_argument_with_a_code() {
+        let refused = try_seal_card(b"x", &[1u8; 63]).unwrap_err();
+        assert!(refused.0.starts_with("outputLength:"));
+        let refused = try_open_card(&[0u8; 8], &[1u8; 63]).unwrap_err();
+        assert!(refused.0.starts_with("outputLength:"));
+        let refused = try_seal_card(b"x", &[]).unwrap_err();
+        assert!(refused.0.starts_with("empty:"));
+        let refused = try_seal_card(b"x", &[1u8; 66 * OPRF_OUTPUT_LEN]).unwrap_err();
+        assert!(refused.0.starts_with("tooManyTerms:"));
     }
 
     #[test]

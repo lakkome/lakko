@@ -4930,14 +4930,6 @@
       "text": "{count, plural, zero {لا مرفقات} one {مرفق واحد} two {مرفقان} few {# مرفقات} many {# مرفقًا} other {# مرفق}}",
       "status": "machine"
     },
-    "feed.banner.dismiss": {
-      "text": "حسنًا",
-      "status": "machine"
-    },
-    "feed.banner.local": {
-      "text": "يعرض موجزك الرسائل التي تلقّاها هذا الجهاز.",
-      "status": "machine"
-    },
     "feed.divider.new": {
       "text": "جديد",
       "status": "machine"

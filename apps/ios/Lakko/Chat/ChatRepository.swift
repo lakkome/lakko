@@ -1790,7 +1790,7 @@ public final class ChatRepository: ObservableObject {
         let own = AuthorIdentity.own(group: record.group)
         return people.filter { person in
             base64Encode(person.signaturePublicKey) != own
-                && ProfileDirectory.shared.resolve(signatureKey: person.signaturePublicKey).isPlaceholder
+                && ProfileDirectory.shared.countsAsUnnamed(signatureKey: person.signaturePublicKey)
         }.count
     }
 

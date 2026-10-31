@@ -10,11 +10,12 @@
 use std::collections::BTreeMap;
 
 use lakko_circle::{
-    filter_header, member_epoch_key, open_filter, open_row, path_nodes, row_epoch, CircleError,
-    DirectoryHead, DirectoryWrite, DirectoryWriter, EpochKey, FilterEntry, MemberGrant, Wrap,
-    MAX_ROWS_PER_WRITE, ROW_LEN, WRAP_LEN,
+    filter_header, member_epoch_key, open_card, open_filter, open_row, path_nodes, row_epoch,
+    seal_card, CircleError, DirectoryHead, DirectoryWrite, DirectoryWriter, EpochKey, FilterEntry,
+    MemberGrant, Wrap, CARD_MAX_LEN, MAX_ROWS_PER_WRITE, OPRF_OUTPUT_LEN, ROW_CARD_MAX_LEN,
+    ROW_LEN, SEALED_CARD_LEN, WRAP_LEN,
 };
-use lakko_crypto::hash::blake3;
+use lakko_crypto::hash::{blake3, blake3_derive_key_from_material};
 use proptest::prelude::*;
 
 #[derive(Default)]
@@ -100,6 +101,22 @@ fn term(name: &str) -> [u8; 32] {
     blake3(name.as_bytes())
 }
 
+/// The OPRF output the cards of these tests are sealed under, where the card's
+/// sealing is not what a test is about.
+const ANY_TERM: [u8; OPRF_OUTPUT_LEN] = [0x4c; OPRF_OUTPUT_LEN];
+
+fn card(plain: &[u8]) -> Vec<u8> {
+    seal_card(plain, &[ANY_TERM]).unwrap()
+}
+
+fn plain(sealed: &[u8]) -> Vec<u8> {
+    open_card(sealed, &ANY_TERM).unwrap()
+}
+
+fn plains(sealed: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    sealed.iter().map(|row| plain(row)).collect()
+}
+
 fn setup() -> (DirectoryWriter, Server) {
     let mut writer = DirectoryWriter::create(&[0x51; 32]).unwrap();
     let mut server = Server::default();
@@ -120,7 +137,7 @@ fn the_worked_example() {
     let (mut katya, mut server) = setup();
     let bob = katya.add_member().unwrap();
     let anna_card = b"anna's card".to_vec();
-    katya.put_row(0, anna_card.clone()).unwrap();
+    katya.put_row(0, card(&anna_card)).unwrap();
     katya
         .set_filter(
             vec![FilterEntry {
@@ -132,8 +149,98 @@ fn the_worked_example() {
         .unwrap();
     flush(&mut katya, &mut server);
 
-    assert_eq!(server.search(&bob, &term("ann")), vec![anna_card]);
+    assert_eq!(plains(server.search(&bob, &term("ann"))), vec![anna_card]);
     assert!(server.search(&bob, &term("zed")).is_empty());
+}
+
+/// The OPRF output of `word`, as the discovery service would give it: this
+/// test stands in for that evaluation, which costs one token per term.
+fn oprf(word: &str) -> [u8; OPRF_OUTPUT_LEN] {
+    let first = blake3(word.as_bytes());
+    let mut out = [0u8; OPRF_OUTPUT_LEN];
+    out[..32].copy_from_slice(&first);
+    out[32..].copy_from_slice(&blake3(&first));
+    out
+}
+
+/// `lakko_contacts::fof_tag`, the tag an offer carries.
+fn tag(word: &str) -> [u8; 32] {
+    blake3_derive_key_from_material("lakko/fof/tag/v1", &oprf(word))
+}
+
+#[test]
+fn a_contact_walking_every_row_reads_no_card_without_its_term() {
+    // The defect this module closes. Bob is in Katya's circle, so he holds the
+    // epoch key and every row is numbered. He opens all of them with no search.
+    // What he has then is sealed cards.
+    let (mut katya, mut server) = setup();
+    let bob = katya.add_member().unwrap();
+    let cards: [(&str, &[u8]); 2] = [("anna", b"anna's card"), ("oleg", b"oleg's card")];
+    let mut entries = Vec::new();
+    for (index, (word, card)) in (0u32..).zip(cards) {
+        // Anna seals her own card and offers it with her tags; Katya stores
+        // what she cannot read.
+        let sealed = seal_card(card, &[oprf(word)]).unwrap();
+        assert_eq!(sealed.len(), SEALED_CARD_LEN);
+        katya.put_row(index, sealed).unwrap();
+        entries.push(FilterEntry {
+            tag: tag(word),
+            row: index,
+        });
+    }
+    katya.set_filter(entries, 2).unwrap();
+    flush(&mut katya, &mut server);
+
+    let key = server.current_key(&bob).unwrap();
+    let rows: Vec<Vec<u8>> = server
+        .rows
+        .iter()
+        .map(|(index, row)| open_row(&key, *index, row).unwrap())
+        .collect();
+    assert_eq!(rows.len(), 2);
+    for (sealed, (word, card)) in rows.iter().zip(cards) {
+        assert_eq!(sealed.len(), SEALED_CARD_LEN);
+        assert!(
+            !sealed.windows(card.len()).any(|w| w == card),
+            "the plain card in a row"
+        );
+        // Nothing the epoch key or the filter gives opens it.
+        let mut from_the_tag = [0u8; OPRF_OUTPUT_LEN];
+        from_the_tag[..32].copy_from_slice(&tag(word));
+        assert_eq!(
+            open_card(sealed, &from_the_tag),
+            Err(CircleError::Authentication)
+        );
+        let mut from_the_epoch_key = [0u8; OPRF_OUTPUT_LEN];
+        from_the_epoch_key[..32].copy_from_slice(key.read_seed().as_bytes());
+        assert_eq!(
+            open_card(sealed, &from_the_epoch_key),
+            Err(CircleError::Authentication)
+        );
+    }
+
+    // A search for one person gives that person and no one else, and costs an
+    // OPRF output per term.
+    let found = server.search(&bob, &tag("anna"));
+    assert_eq!(found.len(), 1);
+    assert_eq!(open_card(&found[0], &oprf("anna")).unwrap(), b"anna's card");
+    assert_eq!(
+        open_card(&rows[1], &oprf("anna")),
+        Err(CircleError::Authentication)
+    );
+}
+
+#[test]
+fn a_row_holds_the_largest_sealed_card() {
+    assert_eq!(ROW_CARD_MAX_LEN, SEALED_CARD_LEN);
+    let (mut katya, mut server) = setup();
+    let bob = katya.add_member().unwrap();
+    let sealed = seal_card(&[7u8; CARD_MAX_LEN], &[oprf("anna")]).unwrap();
+    katya.put_row(0, sealed.clone()).unwrap();
+    flush(&mut katya, &mut server);
+    assert_eq!(server.rows[&0].len(), ROW_LEN);
+    let key = server.current_key(&bob).unwrap();
+    assert_eq!(open_row(&key, 0, &server.rows[&0]).unwrap(), sealed);
 }
 
 #[test]
@@ -141,7 +248,7 @@ fn a_removal_moves_nothing_but_the_path_and_the_key() {
     let (mut katya, mut server) = setup();
     let bob = katya.add_member().unwrap();
     let carol = katya.add_member().unwrap();
-    katya.put_row(0, b"before".to_vec()).unwrap();
+    katya.put_row(0, card(b"before")).unwrap();
     katya
         .set_filter(
             vec![FilterEntry {
@@ -169,14 +276,14 @@ fn a_removal_moves_nothing_but_the_path_and_the_key() {
     // Bob's key is gone, Carol's is not.
     assert!(server.current_key(&bob).is_err());
     assert_eq!(
-        server.search(&carol, &term("old")),
+        plains(server.search(&carol, &term("old"))),
         vec![b"before".to_vec()]
     );
     assert_ne!(bob_key.read_public_key(), server.read_pk);
 
     // A row written after the removal is under a key Bob does not have, even
     // with the bytes in his hands.
-    katya.put_row(1, b"after".to_vec()).unwrap();
+    katya.put_row(1, card(b"after")).unwrap();
     katya
         .set_filter(
             vec![
@@ -201,14 +308,17 @@ fn a_removal_moves_nothing_but_the_path_and_the_key() {
         open_filter(&bob_key, server.filter.as_ref().unwrap()).map(|_| ()),
         Err(CircleError::WrongEpoch)
     );
-    assert_eq!(server.search(&carol, &term("new")), vec![b"after".to_vec()]);
+    assert_eq!(
+        plains(server.search(&carol, &term("new"))),
+        vec![b"after".to_vec()]
+    );
 }
 
 #[test]
 fn a_contact_who_joined_later_opens_older_rows_through_the_chain() {
     let (mut katya, mut server) = setup();
     let bob = katya.add_member().unwrap();
-    katya.put_row(0, b"from epoch one".to_vec()).unwrap();
+    katya.put_row(0, card(b"from epoch one")).unwrap();
     flush(&mut katya, &mut server);
     katya.remove_members(&[bob.leaf]).unwrap();
     flush(&mut katya, &mut server);
@@ -226,7 +336,7 @@ fn a_contact_who_joined_later_opens_older_rows_through_the_chain() {
         let current = server.current_key(joined_later).unwrap();
         let old_key = server.key_at(&current, 1);
         assert_eq!(
-            open_row(&old_key, 0, &server.rows[&0]).unwrap(),
+            plain(&open_row(&old_key, 0, &server.rows[&0]).unwrap()),
             b"from epoch one"
         );
     }
@@ -241,7 +351,7 @@ fn a_write_seals_under_the_epoch_it_ends_on() {
     flush(&mut katya, &mut server);
     let bob_key = server.current_key(&bob).unwrap();
 
-    katya.put_row(0, b"late".to_vec()).unwrap();
+    katya.put_row(0, card(b"late")).unwrap();
     katya.remove_members(&[bob.leaf]).unwrap();
     flush(&mut katya, &mut server);
     assert_eq!(row_epoch(&server.rows[&0]).unwrap(), 2);
@@ -270,7 +380,7 @@ fn a_large_change_goes_over_several_writes_and_the_filter_goes_last() {
     let rows = u32::try_from(MAX_ROWS_PER_WRITE).unwrap() + 3;
     let mut entries = Vec::new();
     for row in 0..rows {
-        katya.put_row(row, vec![0x10; 4]).unwrap();
+        katya.put_row(row, card(&[0x10; 4])).unwrap();
         entries.push(FilterEntry {
             tag: blake3(&row.to_be_bytes()),
             row,
@@ -304,7 +414,7 @@ fn a_restored_writer_continues() {
     assert_eq!(again.members(), vec![carol.leaf]);
     assert_eq!(again.version(), server.version);
     let dora = again.add_member().unwrap();
-    again.put_row(0, b"x".to_vec()).unwrap();
+    again.put_row(0, card(b"x")).unwrap();
     flush(&mut again, &mut server);
     assert!(server.current_key(&dora).is_ok());
     assert!(server.current_key(&carol).is_ok());
@@ -354,7 +464,7 @@ proptest! {
     fn a_body_names_its_version_and_epoch(rows in 0u32..8) {
         let (mut katya, mut server) = setup();
         for row in 0..rows {
-            katya.put_row(row, vec![1, 2, 3]).unwrap();
+            katya.put_row(row, card(&[1, 2, 3])).unwrap();
         }
         if let Some(write) = katya.take_write().unwrap() {
             let body = write.body_json();
@@ -365,4 +475,18 @@ proptest! {
             server.apply(write);
         }
     }
+}
+
+#[test]
+fn a_row_refuses_a_plain_card() {
+    let (mut katya, _server) = setup();
+    assert_eq!(
+        katya.put_row(0, b"anna's card".to_vec()),
+        Err(CircleError::CardNotSealed)
+    );
+    assert_eq!(
+        katya.put_row(0, vec![0u8; SEALED_CARD_LEN]),
+        Err(CircleError::CardNotSealed)
+    );
+    assert!(katya.put_row(0, card(b"anna's card")).is_ok());
 }

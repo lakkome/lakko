@@ -5,7 +5,8 @@
 
 - **Status:** Proposed (2026-10-30). The maintainer chose this mechanism over
   private information retrieval and over a hardware enclave the same day. Open
-  question 1 needs its own ADR. Nothing is built.
+  question 1 needs its own ADR. The `lakko-circle` crate, both FFI surfaces and
+  the Delivery Service routes are built and host-tested; no client uses them.
 - **Date:** 2026-10-30
 - **Context:** the scale requirement in `CLAUDE.md`: users potentially on par with
   Telegram or WhatsApp.
@@ -55,14 +56,19 @@ Anna are not. Bob types `anna`.
 
 Anna's device computes the OPRF output of each of her search terms once (one
 anonymous token each, kept, ADR-0060 section 5) and sends each contact it allows
-(`allows_contact`) an offer in their one-to-one conversation: her card and the
-term tags `BLAKE3-derive-key("lakko/fof/tag/v1", oprf_output)`.
+(`allows_contact`) an offer in their one-to-one conversation: her card, sealed under
+those terms (section 2), and the term tags
+`BLAKE3-derive-key("lakko/fof/tag/v1", oprf_output)`.
 
 - The card is what the record payload is today, with the reach seed of section 5.
+  Anna seals it, once per contact because the reach seed differs. Katya stores it and
+  cannot read it.
 - The terms are the username and, for each word of the name, its prefixes of 3 to
   6 letters and the whole word when it is longer. A query longer than the longest
   prefix asks with that prefix, and the phone filters the opened cards by the whole
-  query. This replaces prefixes of 3 to 16 letters.
+  query. This replaces prefixes of 3 to 16 letters. The code does not build this
+  rule yet (`NAME_TERM_MAX_CHARS` is 16, `MAX_NAME_TERMS` 64), which is why a sealed
+  card has 65 slots.
 - An offer goes once per contact and again only when Anna's name, username or
   grant for that contact changes.
 
@@ -74,14 +80,39 @@ from her account seed:
 - **Header**, readable by anyone holding the id, opaque: the epoch, the key tree of
   section 3, and the chain of older epoch keys.
 - **Filter**, sealed under the current epoch key: a static retrieval filter of the
-  binary fuse or ribbon family, mapping `BLAKE3-keyed(filter key, term tag)` to a
-  row index, at about 3 bytes per term.
-- **Rows**, each a card sealed under its own key. A row key is wrapped under the
-  epoch key current when the row was written.
+  binary fuse or ribbon family, mapping a term tag under a key derived from the epoch
+  key to a row index, at 3.6 to 3.8 bytes per term (measured: 5,118 bytes for 1,350
+  terms, 327,678 for 90,000).
+- **Rows**, numbered, one per contact, each holding one card sealed under its terms.
+  A row is sealed under its own key, and the row key is wrapped under the epoch key
+  current when the row was written.
 
 The filter is rebuilt when a contact joins or a card changes, and only the filter
-and the changed row are uploaded. A directory reveals its size in buckets, as a
-bundle does today.
+and the changed row are uploaded. The filter's size shows in buckets; the rows are
+numbered, so the server can count them, which is how many contacts the owner has.
+That count is the price of reading one row at a time.
+
+**A card is sealed under its terms.** Rows are numbered and the epoch key opens all of
+them, and every contact of Katya holds that key. If the row were the only seal, any
+contact could walk rows 0..N and read all of her contacts with no OPRF and no token.
+So Anna seals her card herself, and what she offers Katya is opaque to Katya:
+
+```text
+term_key := BLAKE3-derive-key("lakko/circle/term-key/v1", oprf_output)
+card_key := 32 random bytes, one per seal
+sealed   := format(1) || salt(16) || slots(32 x 65) || nonce(12) || ciphertext
+slot_i   := card_key XOR BLAKE3-keyed(term_key_i, "lakko/circle/card-slot/v1" || salt)
+plain    := card_len(2) || card || zeros, 768 bytes
+aad      := "lakko/circle/card/v1\0" || format || salt || slots
+```
+
+Unused slots are random bytes and the used ones sit in random order, so every sealed
+card is 2,893 bytes and nothing shows how many terms it has or how long the name is.
+The term key is not the term tag: Katya holds the tags to build her filter, and a tag
+opens nothing. A reader tries each slot with the key its OPRF output gives, at most 65
+AEAD trials, local. The slots are in the associated data because a reader looks at no
+slot but its own: without that, whoever stores the card could rewrite another term's
+slot unseen. A row holds one sealed card, so a row is 2,992 bytes.
 
 ### 3. Who can read: a read key and a key tree
 
@@ -96,17 +127,18 @@ conversation; the path keys are in the header.
 **Katya removes Bob:**
 
 1. Her device derives a new epoch key and writes log2 N wrapped path keys into the
-   header, with one wrap of the previous epoch key for the chain. That is about
-   1 KB at N = 10,000, a single write.
+   header, with one wrap of the previous epoch key for the chain. That is 662 bytes
+   of payload at N = 150 and 1,046 at N = 10,000 (measured), a single write.
 2. She registers the new read key. **From that moment Bob's reads are refused.**
 3. No row and no filter moves. Everyone else does nothing until their next read,
-   when a refused proof sends them to the public header for the new key, about
-   0.5 KB.
+   when a refused proof sends them to the public header for the new key, 570 bytes
+   of payload at N = 150 and 954 at N = 10,000 (measured).
 
 Rows from before the removal stay wrapped under the older epoch, and the chain lets
 a contact who joined later open them. A row written after the removal is under a
-key Bob does not have. An operator colluding with Bob can open what Bob could read
-when he was removed, and nothing written after it.
+key Bob does not have. An operator colluding with Bob can open the rows Bob could
+read when he was removed, and nothing written after it. The cards inside those rows
+need a term, and the operator holds the OPRF key (see Consequences).
 
 ### 4. The search
 
@@ -115,8 +147,8 @@ Bob's phone holds a filter per contact.
 1. It gets the OPRF output of `anna`: one request, one anonymous token.
 2. It tests every held filter locally. No network per circle.
 3. On a hit it reads that row, with the read proof of that circle.
-4. It opens the card, filters by the whole query, runs the reach check and shows
-   Anna.
+4. It opens the row, opens the card inside it with the OPRF output of step 1,
+   filters by the whole query, runs the reach check and shows Anna.
 
 At most 20 rows are read per search (chosen, not measured). A query that hits more
 says so, and asks for more letters.
@@ -130,8 +162,8 @@ over the first sessions, most used contacts first.
 **The 150 most used contacts (decided 2026-10-30).** A device keeps the filters of
 its 150 most used contacts current. The rest load gradually, in batches inside the
 session budget, so a person with 10,000 contacts reaches full coverage over time
-rather than in one 30 MB load. Their contacts are not searched until their filter
-has arrived.
+rather than in one load of about 57 MB (10,000 x (5,118 + 570) bytes, arithmetic).
+Their contacts are not searched until their filter has arrived.
 
 Version checks are the largest load at scale, about 750,000 reads a second at peak
 at a billion accounts (derived). From about 100 million accounts they move onto
@@ -194,23 +226,47 @@ shows the reader's address to the Delivery Service, recorded as a gap.
 
 ## Cost
 
-Derived from stated assumptions, not measured: 150 contacts, 9 terms, 2 searches a
-day per account, 1 removal per 180 days, 1 added contact per 30 days, 200-byte rows.
+Assumptions: 150 contacts, 9 terms, 2 searches a day per account, 1 removal per 180
+days, 1 added contact per 30 days. Nothing here was measured on a network. The sizes
+of a row (2,992 bytes), a sealed card (2,893), a filter, a removal and a path read are
+what the crate produces, and the rest is arithmetic on them.
 
-| | Typical | 10,000 contacts |
+| | Typical | 10,000 contacts | Basis |
+|---|---|---|---|
+| Offer, one contact | 3,181 bytes | same | arithmetic: 2,893 + 9 x 32, before framing |
+| Search, one row read | about 4-5 KB | about 6 KB with channels capped | arithmetic: the earlier 1-2 KB and 3 KB with a 2,992-byte row for a 200-byte one |
+| Search, 20 rows | about 60 KB more | same | arithmetic: 19 x 2,992 |
+| Removal, the remover | 1,058 bytes of JSON | 1,606 bytes of JSON | measured |
+| Removal, others | 570 bytes at next read | 954 bytes | measured payload |
+| At rest | about 14 KB a day | bounded by the session budget | arithmetic: the earlier 8 KB with the two rows of two searches, an upper bound |
+| First load | 853 KB, a few directories per session | the same for the 150 most used, the rest in batches | arithmetic: 150 x (5,118 + 570) |
+| Stored per account | 938 KB with 2 copies | 62 MB with 2 copies | arithmetic, below |
+
+Stored per copy, arithmetic on the sizes above:
+
+| | 150 contacts | 10,000 contacts |
 |---|---|---|
-| Search | 1-2 KB | about 3 KB with channels capped |
-| Removal, the remover | about 1 KB | about 1 KB |
-| Removal, others | 0.5 KB at next read | same |
-| At rest | about 8 KB a day | bounded by the session budget |
-| First load | 450 KB, a few directories per session | about 450 KB for the 150 most used, the rest in batches |
-| Stored per account | about 61 KB with 2 copies | scales with contacts |
+| Rows | 448,800 bytes | 29,920,000 bytes |
+| Edges | 15,300 bytes | 982,980 bytes |
+| Filter | 5,118 bytes | 327,678 bytes |
+| Per copy | 469,218 bytes | 31,230,658 bytes |
 
-The 1 KB removal is lower than the study's 10 KB because rows are not re-wrapped: the
-epoch chain makes that unnecessary, at the cost stated in section 3.
+At a billion accounts of 150 contacts that is 469 TB per copy, 938 TB with 2 copies
+(arithmetic). Rows are 96% of it. This ADR first assumed 200-byte rows, 61 TB with 2
+copies, and the row was already 865 bytes when first built, about 300 TB. Sealing the
+card under its terms takes it to 938 TB: the disk the maintainer accepted on
+2026-10-30 to close the row walk. Each slot is 4.8 TB per copy at this scale
+(32 x 150 x 10^9), so moving to the 3-to-6-letter terms of section 1 and to fewer
+slots gets some of that back.
 
-Service cost, EUR a month on Hetzner list prices of 2026-10: 174 at 100 accounts, 174
-at 100,000, 217 at 1 million, 4,510 at 100 million, about 36,000 at a billion. The
+The removal is lower than the study's 10 KB because rows are not re-wrapped: the epoch
+chain makes that unnecessary, at the cost stated in section 3.
+
+Service cost, EUR a month on Hetzner list prices of 2026-10, **from the study, for the
+61 KB account**: 174 at 100 accounts, 174 at 100,000, 217 at 1 million, 4,510 at 100
+million, about 36,000 at a billion. The study is not in the repository, so these were
+not redone. The stored size behind them is now about 15 times what they priced
+(938 / 61), so the upper figures are too low by an amount not worked out here. The
 floor prices the relay as a stand-in: no relay price was found.
 
 ## Alternatives
@@ -219,6 +275,15 @@ floor prices the relay as a stand-in: no relay price was found.
 - **Keyed rows on the server, one per contact and term, written by the person found
   or by their contact.** Rejected by the maintainer: a removal re-uploads megabytes,
   or leaves the removed person with access.
+- **Rows sealed under the epoch key alone.** Built first, and wrong: every contact
+  holds that key, so any contact reads all of a person's contacts by walking the rows,
+  with no OPRF and no token. Rejected by the maintainer on 2026-10-30 in favour of the
+  sealed card, accepting the disk.
+- **A 60-byte AEAD wrap per term instead of a 32-byte slot.** Rejected: 28 bytes more
+  per slot is 1,820 bytes a row, 273 TB per copy at a billion (arithmetic), for
+  nothing the slot does not give.
+- **Slots for the terms a card has, not for the most it may have.** Rejected: the row
+  would then show how long the name is.
 - **Private information retrieval over every circle.** Rejected: 7.4 MB per search at
   150 circles, 1.45 GB at 30,000. PIR hides reads and cannot refuse one, so revocation
   rests on the same keys. It stays possible later for the single row read of step 3,
@@ -246,20 +311,29 @@ floor prices the relay as a stand-in: no relay price was found.
 - **Neutral:** channels are off by default (decided 2026-10-30): the part of the
   setting splits into members of groups, on, and subscribers of channels, off. UX
   section 1.
-- **Neutral:** enumeration by prefix stays what it is, bound by tokens; it now also
-  needs a member's filter key. The Everyone path does not change.
+- **Neutral:** enumeration. A contact of Katya can read every row and gets sealed
+  cards: none opens without the OPRF output of a term on it. What remains: a contact
+  with tokens can ask for the output of a guessed term, so walking prefixes from 3
+  letters collects part of the circle, at a rate the `discovery-lookup` quota bounds.
+  That quota is 300 a day per account (chosen, and a real search spends up to three),
+  and one output tests every filter the phone holds. The 17,576 prefixes of 3 Latin
+  letters take one account 59 days (arithmetic), and a walk that starts from common
+  names gets further sooner. Many accounts share no bound. A card once read stays
+  read. The operator holds the OPRF key, so with a member's epoch key it needs no token
+  and has no limit. The Everyone path does not change.
 
 **Invariants:** #1 and #2 hold: a directory is ciphertext. #5 holds with the relay;
 until then the server sees reader addresses per directory. #3 is untouched: the tree
 is not MLS and no group state changes. #4 is untouched: a failed read shows no result.
-A `lakko-security` pass is due before merge; the key tree and the filter are new
-attacker-touchable parsers and get fuzz targets.
+A `lakko-security` pass is due before merge; the key tree, the filter and the sealed
+card are new attacker-touchable parsers and get fuzz targets.
 
 ## Plan
 
-1. `lakko-circle` crate: the tree, the epoch chain, the filter, the directory codec,
-   property tests and fuzz targets.
-2. `services/ds`: directory routes and store, read proofs, public header.
+1. `lakko-circle` crate: the tree, the epoch chain, the filter, the sealed card, the
+   directory codec, property tests and fuzz targets.
+2. `services/ds`: directory routes and store, read proofs, public header. A row
+   takes a sealed card only (`CircleError::CardNotSealed`), checked by the writer.
 3. Both FFI surfaces.
 4. Web, then iOS and Android: offers, the directory writer, the filter store, search,
    per-circle reach keys. Remove bundles, the ask and the `fof` rotation.

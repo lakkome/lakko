@@ -763,12 +763,26 @@ pub enum FfiError {
     /// `lakko_circle::CircleError` (`length`, `unknownFormat`, `malformed`,
     /// `authentication`, `seal`, `wrongEpoch`, `headerMismatch`, `notAMember`,
     /// `treeFull`, `empty`, `writePending`, `overflow`, `filterTooLarge`,
-    /// `cardTooLong`, `rowOutOfRange`) or `keyLength` / `tagLength` /
+    /// `cardTooLong`, `cardNotSealed`, `rowOutOfRange`) or `keyLength` / `tagLength` /
     /// `wrapLength` for an argument of the wrong length. `headerMismatch`
     /// from `circleMemberEpochKey` means the header is stale or partial, or
     /// this contact was removed.
     #[error("{0}")]
     Circle(String),
+
+    // ------------------------------------------------------------------
+    // Rejoin (ADR-0045 amendment of 2026-10-31, C-88). APPENDED last: a
+    // `flat_error` lowers by ordinal.
+    // ------------------------------------------------------------------
+    /// This device still holds a group as active, so a Welcome into it was
+    /// refused or its local state was not deleted, and nothing changed.
+    ///
+    /// **The message is a value here, not a sentence:** it is exactly the
+    /// lower-case hex of the group id, the same form `DsClient.pseudonymHex`
+    /// gives, because a `flat_error` carries no field and the caller has to
+    /// know which journal to read. Nothing else is ever in it.
+    #[error("{0}")]
+    MembershipGroupStillActive(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {
@@ -838,6 +852,9 @@ impl From<lakko_mls::Error> for FfiError {
             lakko_mls::Error::MembershipRefused { reason, detail } => {
                 Self::from_refusal(reason, detail)
             },
+            lakko_mls::Error::GroupStillActive { group_id } => {
+                Self::MembershipGroupStillActive(lakko_mls::group_id_hex(&group_id))
+            },
             lakko_mls::Error::PayloadBounds(e) => Self::DeviceGroupPayloadRefused(e.to_string()),
         }
     }
@@ -879,6 +896,7 @@ impl FfiError {
             },
             MlsRefusalReason::OneToOneHasNoRoles => Self::MembershipOneToOneHasNoRoles(detail),
             MlsRefusalReason::GroupKindChanged => Self::MembershipGroupKindChanged(detail),
+            MlsRefusalReason::GroupStillActive => Self::MembershipGroupStillActive(detail),
         }
     }
 
@@ -917,6 +935,7 @@ impl FfiError {
             Self::MembershipOneToOneMembershipFixed(_) => FfiRefusalReason::OneToOneMembershipFixed,
             Self::MembershipOneToOneHasNoRoles(_) => FfiRefusalReason::OneToOneHasNoRoles,
             Self::MembershipGroupKindChanged(_) => FfiRefusalReason::GroupKindChanged,
+            Self::MembershipGroupStillActive(_) => FfiRefusalReason::GroupStillActive,
             _ => return None,
         })
     }
@@ -989,6 +1008,9 @@ pub enum FfiRefusalReason {
     /// The operation would change or remove the conversation's kind
     /// (ADR-0062).
     GroupKindChanged,
+    /// This device still holds the group as active, so a Welcome into it
+    /// cannot land (C-88). Appended: a uniffi enum lowers by ordinal.
+    GroupStillActive,
 }
 
 impl From<MlsRefusalReason> for FfiRefusalReason {
@@ -1017,6 +1039,7 @@ impl From<MlsRefusalReason> for FfiRefusalReason {
             MlsRefusalReason::OneToOneMembershipFixed => Self::OneToOneMembershipFixed,
             MlsRefusalReason::OneToOneHasNoRoles => Self::OneToOneHasNoRoles,
             MlsRefusalReason::GroupKindChanged => Self::GroupKindChanged,
+            MlsRefusalReason::GroupStillActive => Self::GroupStillActive,
         }
     }
 }
@@ -1047,6 +1070,7 @@ impl From<FfiRefusalReason> for MlsRefusalReason {
             FfiRefusalReason::OneToOneMembershipFixed => Self::OneToOneMembershipFixed,
             FfiRefusalReason::OneToOneHasNoRoles => Self::OneToOneHasNoRoles,
             FfiRefusalReason::GroupKindChanged => Self::GroupKindChanged,
+            FfiRefusalReason::GroupStillActive => Self::GroupStillActive,
         }
     }
 }
@@ -2654,6 +2678,19 @@ impl Group {
     pub fn is_active(&self) -> Result<bool, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.is_active())
+    }
+
+    /// Delete this group's state from `identity`'s storage, for a group this
+    /// device is out of (C-88). This is local: it tells nobody anything and
+    /// does not leave the group, which is why it is not called `delete`.
+    /// Repeating it changes nothing. Persist the snapshot afterwards.
+    ///
+    /// Refused with `MembershipGroupStillActive`, changing nothing, when the
+    /// group stored under this id is active, which also covers a stale handle
+    /// of a group a Welcome has since replaced.
+    pub fn delete_locally(&self, identity: &Identity) -> Result<(), FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.delete(&identity.inner)?)
     }
 
     /// Local leaf index of the calling identity.
@@ -6728,6 +6765,34 @@ mod tests {
     // ========================================================================
     // Typed membership refusals (ADR-0045 §9.1 item 1 / §12 item 6)
     // ========================================================================
+
+    /// `MembershipGroupStillActive` is the one variant whose message is a
+    /// value: a `flat_error` carries no field, so the group id the caller needs
+    /// is the whole message, in the hex every client keys a group on.
+    #[test]
+    fn a_group_still_active_refusal_names_the_group_in_hex() {
+        let alice = Identity::from_seed(vec![0xE1u8; 64]).unwrap();
+        let bob = Identity::from_seed(vec![0xE2u8; 64]).unwrap();
+        let alice_g = Group::create(&alice, GroupKind::Group).unwrap();
+        let add = alice_g
+            .add_member_from_wire(&alice, bob.create_key_package().unwrap())
+            .unwrap();
+        let bob_g = Group::join_from_welcome(add.welcome.clone(), &bob).unwrap();
+        let hex = lakko_mls::group_id_hex(&alice_g.group_id().unwrap());
+        assert_eq!(hex.len(), 64, "lower-case hex of a 32-byte id");
+        assert_eq!(hex, hex.to_lowercase());
+
+        for refused in [
+            Group::join_from_welcome(add.welcome, &bob).err().unwrap(),
+            bob_g.delete_locally(&bob).unwrap_err(),
+        ] {
+            assert_eq!(
+                refused.refusal_reason(),
+                Some(FfiRefusalReason::GroupStillActive)
+            );
+            assert_eq!(refused.to_string(), hex);
+        }
+    }
 
     /// Every core [`RefusalReason`] reaches Swift / Kotlin as its **own**
     /// `FfiError` variant, and no two share one.

@@ -1201,9 +1201,18 @@ public final class PeopleSearchSession: ObservableObject {
     /// The answer remembered for `key`, while it is young enough to reuse.
     public func remembered(_ key: String) -> PeopleSearchAnswer? {
         guard let held = answers[key] else { return nil }
-        if uptime() - held.at < PeopleSearch.answerKeptSeconds { return held.answer }
+        if uptime() - held.at < PeopleSearch.answerKeptSeconds, !namesFormerContact(held.answer) {
+            return held.answer
+        }
         answers[key] = nil
         return nil
+    }
+
+    /// Whether `answer` names as a contact someone who is no longer one. Such
+    /// a row is wrong twice: the person has no way to be added from it, and
+    /// in Contacts it is hidden as "listed above", where they no longer stand.
+    func namesFormerContact(_ answer: PeopleSearchAnswer) -> Bool {
+        answer.people.contains { $0.reach == .contact && !ports.isContact($0) }
     }
 
     /// The answer for `key`: the remembered one, the one already being asked,
@@ -1385,8 +1394,20 @@ public final class PeopleSearchModel: ObservableObject {
         // Sent on the main actor, and a subject calls its sink at once.
         // A verdict arrived, or the contacts or the outgoing list changed.
         reachSubscription = session.reachChanged.sink { [weak self] in
-            MainActor.assumeIsolated { self?.refreshLocal() }
+            MainActor.assumeIsolated {
+                self?.refreshLocal()
+                self?.askAgainIfAnswerIsFalse()
+            }
         }
+    }
+
+    /// A contact removed with the text standing: the answer on screen calls
+    /// them one, and nothing else would ask while the text stands.
+    private func askAgainIfAnswerIsFalse() {
+        guard let answer, session.namesFormerContact(answer),
+              let key = PeopleSearch.searchKey(query) else { return }
+        self.answer = nil
+        ask(key: key, typed: query)
     }
 
     private func refreshLocal() {
@@ -1419,16 +1440,29 @@ public final class PeopleSearchModel: ObservableObject {
         }
         searching = false
         let sleep = self.sleep
-        let session = self.session
         pending = Task { @MainActor [weak self] in
             do { try await sleep(PeopleSearch.networkDebounceMs) } catch { return }
             guard let self, !Task.isCancelled, self.generation == current else { return }
-            self.searching = true
-            let result = await session.answer(key: key, query: typed)
-            guard self.generation == current else { return }
-            self.answer = result
-            self.searching = false
+            await self.ask(key: key, typed: typed, generation: current)
         }
+    }
+
+    /// Ask for the current text now, with no pause for typing.
+    private func ask(key: String, typed: String) {
+        generation += 1
+        let current = generation
+        pending?.cancel()
+        pending = Task { @MainActor [weak self] in
+            await self?.ask(key: key, typed: typed, generation: current)
+        }
+    }
+
+    private func ask(key: String, typed: String, generation current: Int) async {
+        searching = true
+        let result = await session.answer(key: key, query: typed)
+        guard generation == current else { return }
+        answer = result
+        searching = false
     }
 
     /// Wait for the field's pending search, if any (tests).
@@ -1443,16 +1477,22 @@ public final class PeopleSearchModel: ObservableObject {
     /// already shows the matching contacts.
     ///
     /// A person who became a contact while the text stands leaves the network
-    /// part at once, whatever the remembered answer says of them. `chatPeers`
-    /// are the people whose one-to-one is among the matching conversations: a
-    /// contact among them stands there already, so they are not listed twice.
-    /// Someone who is no contact keeps their row, and the way to add them.
+    /// part at once, whatever the remembered answer says of them.
+    ///
+    /// One person, one row (UX section 6.1). `listed` are the people a list
+    /// row above shows, a contact or someone added through their invite link:
+    /// they stand nowhere here, whatever their reach. `chatPeers` are the
+    /// people whose one-to-one matched above: a contact among them is not
+    /// listed twice, and someone who is no contact keeps their row, and the
+    /// way to add them. A contact the list does not match yet (their name has
+    /// not arrived) is in neither and keeps a row, so the field is never
+    /// blank.
     public func rows(
-        showsLocalContacts: Bool, chatPeers: Set<Data> = []
+        showsLocalContacts: Bool, listed: Set<Data> = [], chatPeers: Set<Data> = []
     ) -> (local: [FoundPerson], network: [FoundPerson]) {
         let merged = PeopleSearch.merge([local, answer?.people ?? []], ownAccountKey: nil).map { person in
             person.reach != .contact && session.ports.isContact(person) ? person.asContact : person
-        }
+        }.filter { !listed.contains($0.accountKey) }
         let localKeys = Set(local.map(\.accountKey))
         func isLocal(_ person: FoundPerson) -> Bool {
             localKeys.contains(person.accountKey) || person.reach == .contact
@@ -1473,19 +1513,23 @@ public final class PeopleSearchModel: ObservableObject {
     /// The line under People. "No one found" says nobody stands there, so it
     /// goes whenever a person row does.
     public func peopleMessage(
-        includesChannels: Bool, showsLocalContacts: Bool, chatPeers: Set<Data> = []
+        includesChannels: Bool, showsLocalContacts: Bool, listed: Set<Data> = [],
+        chatPeers: Set<Data> = []
     ) -> String? {
         let state = networkState(includesChannels: includesChannels)
-        let rows = rows(showsLocalContacts: showsLocalContacts, chatPeers: chatPeers)
+        let rows = rows(showsLocalContacts: showsLocalContacts, listed: listed, chatPeers: chatPeers)
         if state == .notFound, !rows.local.isEmpty || !rows.network.isEmpty { return nil }
         return state?.message
     }
 
     /// Whether the field shows anything of its own (a row, the spinner or a
     /// line under People).
-    public func showsAnything(includesChannels: Bool, showsLocalContacts: Bool) -> Bool {
+    public func showsAnything(
+        includesChannels: Bool, showsLocalContacts: Bool, listed: Set<Data> = [],
+        chatPeers: Set<Data> = []
+    ) -> Bool {
         if searching { return true }
-        let rows = rows(showsLocalContacts: showsLocalContacts)
+        let rows = rows(showsLocalContacts: showsLocalContacts, listed: listed, chatPeers: chatPeers)
         if !rows.local.isEmpty || !rows.network.isEmpty { return true }
         if includesChannels, answer?.channel != nil { return true }
         if let state = networkState(includesChannels: includesChannels), state != .found { return true }

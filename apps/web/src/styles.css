@@ -6270,26 +6270,55 @@ html[data-call-bar] body {
   gap: 12px;
 }
 .lk-feed-item {
+  /* flex: none - in the scrolling column a card keeps its height; shrinking
+     to the list is what cut every message off at its first line. */
+  flex: none;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  column-gap: 12px;
+  padding: 14px 16px 12px;
   background: var(--surface-elevated);
   border: 1px solid var(--surface-border);
   border-radius: var(--radius-md);
-  overflow: hidden;
 }
-.lk-feed-open {
+.lk-feed-item:hover {
+  background: var(--surface-hover);
+}
+.lk-feed-body {
+  min-width: 0;
   display: flex;
   flex-direction: column;
+  gap: 6px;
+}
+.lk-feed-open {
+  /* Every value here undoes the global button: a centred, nowrap control. */
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
   gap: 4px;
   width: 100%;
-  padding: 14px 16px 10px;
+  min-height: 0;
+  padding: 0;
   border: none;
+  border-radius: 0;
   background: none;
   color: inherit;
   text-align: left;
+  white-space: normal;
   font: inherit;
   cursor: pointer;
 }
-.lk-feed-open:hover {
-  background: var(--surface-hover);
+.lk-feed-open:hover:not(:disabled) {
+  background: none;
+}
+.lk-feed-media {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
 }
 .lk-feed-meta {
   display: flex;
@@ -6342,7 +6371,6 @@ html[data-call-bar] body {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 0 16px 10px;
 }
 .lk-feed-reaction {
   padding: 2px 8px;
@@ -6354,9 +6382,13 @@ html[data-call-bar] body {
   display: flex;
   gap: 8px;
   align-items: baseline;
+  justify-content: flex-start;
   width: 100%;
-  padding: 10px 16px;
+  min-height: 0;
+  margin-top: 4px;
+  padding: 10px 0 0;
   border: none;
+  border-radius: 0;
   border-top: 1px solid var(--surface-border);
   background: none;
   color: var(--accent);
@@ -6377,23 +6409,31 @@ html[data-call-bar] body {
 .lk-feed-replies {
   list-style: none;
   margin: 0;
-  padding: 0 0 8px;
+  padding: 0;
+}
+.lk-feed-replies-toggle:hover:not(:disabled) {
+  background: none;
 }
 .lk-feed-reply {
   display: flex;
   flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
   gap: 2px;
   width: 100%;
-  padding: 8px 16px 8px 28px;
+  min-height: 0;
+  padding: 8px 0;
   border: none;
+  border-radius: 0;
   background: none;
   color: inherit;
   font: inherit;
   text-align: left;
+  white-space: normal;
   cursor: pointer;
 }
-.lk-feed-reply:hover {
-  background: var(--surface-hover);
+.lk-feed-reply:hover:not(:disabled) {
+  background: none;
 }
 .lk-feed-end {
   padding: 12px 0;
@@ -6720,6 +6760,9 @@ html[data-call-bar] body {
 }
 .lk-feed-item {
   position: relative;
+}
+.lk-feed-source-avatar {
+  grid-column: 1;
 }
 .lk-feed-item-more {
   position: absolute;

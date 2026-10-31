@@ -4930,14 +4930,6 @@
       "text": "{count, plural, other {# 个附件}}",
       "status": "machine"
     },
-    "feed.banner.dismiss": {
-      "text": "知道了",
-      "status": "machine"
-    },
-    "feed.banner.local": {
-      "text": "你的动态显示这台设备收到的消息。",
-      "status": "machine"
-    },
     "feed.divider.new": {
       "text": "新内容",
       "status": "machine"

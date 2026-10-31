@@ -149,7 +149,12 @@ public class PeerProfileStore(
             // No account signed in: nothing to file it under.
             val account = loadedFor ?: return ProfileOffer.NO_ACCOUNT
             val held = profiles[signatureKeyB64]
-            if (held != null && !isNewer(profile.updatedAtMs, held.updatedAtMs)) {
+            // An account that never set a name publishes at stamp 0, level
+            // with a name found for it: theirs still replaces that. A profile
+            // saying nothing does not, or the row would read `Member` again.
+            val replacesFoundName = held?.isFoundName == true && !profile.isFoundName &&
+                (profile.displayName != null || profile.username != null)
+            if (held != null && !replacesFoundName && !isNewer(profile.updatedAtMs, held.updatedAtMs)) {
                 // The same profile sent again (a growth or request answer
                 // carries the stamp it was set at) is not newer, but it can
                 // carry an account id the held row never had: a row filed

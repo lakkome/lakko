@@ -6,6 +6,42 @@
 
 use crate::error::CircleError;
 
+/// Length of the length field of a padded plaintext.
+pub(crate) const LEN_FIELD: usize = 2;
+
+/// `card_len(2) || card || zeros`, `padded_len` bytes. The caller has checked
+/// that the card fits.
+pub(crate) fn pad(card: &[u8], padded_len: usize) -> Result<Vec<u8>, CircleError> {
+    let card_len = u16::try_from(card.len()).map_err(|_| CircleError::CardTooLong)?;
+    if card.len() + LEN_FIELD > padded_len {
+        return Err(CircleError::CardTooLong);
+    }
+    let mut padded = Vec::with_capacity(padded_len);
+    padded.extend_from_slice(&card_len.to_be_bytes());
+    padded.extend_from_slice(card);
+    padded.resize(padded_len, 0);
+    Ok(padded)
+}
+
+/// The card inside a padded plaintext. The padding must be the canonical one,
+/// all zeros.
+pub(crate) fn unpad(padded: &[u8], padded_len: usize) -> Result<Vec<u8>, CircleError> {
+    if padded.len() != padded_len {
+        return Err(CircleError::Length);
+    }
+    let mut r = Reader::new(padded);
+    let len = usize::from(u16::from_be_bytes(r.array()?));
+    if len + LEN_FIELD > padded_len {
+        return Err(CircleError::Malformed);
+    }
+    let card = r.take(len)?.to_vec();
+    let padding = r.take(r.remaining())?;
+    if padding.iter().any(|b| *b != 0) {
+        return Err(CircleError::Malformed);
+    }
+    Ok(card)
+}
+
 /// Bytes still to be read.
 pub(crate) struct Reader<'a> {
     rest: &'a [u8],

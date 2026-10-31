@@ -24,9 +24,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.Button
@@ -61,8 +61,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -81,6 +83,7 @@ import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.channels.ChannelsUiState
 import me.lakko.app.chat.ChatMessage
+import me.lakko.app.chat.AttachmentBridge
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.Direction
 import me.lakko.app.config.ApiEndpoints
@@ -123,7 +126,9 @@ import me.lakko.app.feed.bodyOf
 import me.lakko.app.feed.buildFeedInput
 import me.lakko.app.feed.exportDraft
 import me.lakko.app.feed.isSeen
+import me.lakko.app.feed.itemBodyOf
 import me.lakko.app.feed.itemKey
+import me.lakko.app.feed.mediaRefsOf
 import me.lakko.app.feed.newFeedId
 import me.lakko.app.feed.rankFeedInput
 import me.lakko.app.feed.reactionSummary
@@ -139,9 +144,12 @@ import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.channels.channelTitle
 import me.lakko.app.ui.discover.DiscoverCardView
 import me.lakko.app.ui.discover.DiscoverView
+import me.lakko.app.ui.chat.AttachmentView
 import me.lakko.app.ui.chat.conversationTitle
 import me.lakko.app.ui.chat.formatListTime
 import me.lakko.app.ui.chat.isGroupConversation
+import me.lakko.app.media.ChatMediaHub
+import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.FeedRule
 import java.time.ZoneId
 import java.util.Locale
@@ -154,9 +162,10 @@ import me.lakko.app.ui.components.LakkoDialogAction
  *
  * Messages from the person's groups and posts from their channels, ranked on
  * this device by the one rule engine in the core. What is here: the preset
- * switcher and the saved feeds, the items with their reactions and folded
- * replies, opening an item in its chat or channel, the "Show N new" pill, the
- * empty and first-run states, Edit and Share for a saved feed, and the editor.
+ * switcher and the saved feeds, the items with their media, reactions and
+ * folded replies, opening an item in its chat or channel, the "Show N new"
+ * pill, the empty and first-run states, Edit and Share for a saved feed, and
+ * the editor.
  *
  * Seen (ADR-0063 section 5): a group message fully on screen for
  * [FEED_SEEN_DWELL_MS] joins its group's seen set; when that makes the set
@@ -217,6 +226,28 @@ public fun FeedScreen(
     val nameVersion by directory.version.collectAsStateWithLifecycle()
     val groupNameVersion by me.lakko.app.chat.GroupNameStore.version.collectAsStateWithLifecycle()
     val strings = LocalStrings.current
+
+    // ADR-0047 — the same bubbles as the chat, on the chat's runtime: decrypted
+    // files live while this screen does. No voice queue: a voice message that
+    // ends starts nothing after it here.
+    val mediaHub = remember { ChatMediaHub(context, scope) }
+    DisposableEffect(mediaHub) {
+        onDispose { mediaHub.dispose() }
+    }
+    val fileSaver = me.lakko.app.ui.components.rememberFileSaver()
+    val saveMedia: (AttachmentRef) -> Unit = { ref ->
+        scope.launch {
+            val bytes = mediaHub.loadBytes(ref).getOrNull() ?: return@launch
+            fileSaver.save(
+                name = AttachmentBridge.safeFileName(
+                    ref.name,
+                    fallback = "attachment-${AttachmentBridge.hex(ref.blobId).take(8)}",
+                ),
+                mime = ref.mime,
+                bytes = bytes,
+            )
+        }
+    }
 
     // UX spec section 5 — hidden from feeds, the "New" divider's last looks,
     // and the channel read markers, per account on this device.
@@ -329,7 +360,6 @@ public fun FeedScreen(
     var editing by remember { mutableStateOf<Editing?>(null) }
     var editError by remember { mutableStateOf<UiText?>(null) }
     var sharing by remember { mutableStateOf<SavedView?>(null) }
-    var bannerDismissed by remember { mutableStateOf(FeedPrefs.bannerDismissed(context)) }
     var showingHidden by remember { mutableStateOf(false) }
     var feedMenuOpen by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
@@ -899,32 +929,6 @@ public fun FeedScreen(
                     onOpenChannel = onOpenChannel,
                 )
             } else {
-            if (!bannerDismissed && input.candidates.isNotEmpty()) {
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
-                    shape = MaterialTheme.shapes.medium,
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(Icons.Outlined.Info, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            t("feed.banner.local"),
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(onClick = {
-                            bannerDismissed = true
-                            FeedPrefs.dismissBanner(context)
-                        }) { Text(t("feed.banner.dismiss")) }
-                    }
-                }
-            }
             if (refreshFailed) {
                 Surface(
                     color = MaterialTheme.colorScheme.errorContainer,
@@ -1004,6 +1008,8 @@ public fun FeedScreen(
                                 onToggleReplies = {
                                     if (key in expanded) expanded.remove(key) else expanded.add(key)
                                 },
+                                hub = mediaHub,
+                                onSaveMedia = saveMedia,
                                 menu = itemMenu,
                                 menuOpen = menuFor == key,
                                 onMenuOpenChange = { open -> menuFor = if (open) key else null },
@@ -1087,6 +1093,18 @@ private const val PREVIEW_ITEMS = 8
 private const val SEEN_TICK_MS = 250L
 private const val FLUSH_DELAY_MS = 800L
 
+/** UX spec section 3 — an item's text stops here with an ellipsis; opening the
+ *  item shows the rest. */
+private const val ITEM_TEXT_MAX_LINES = 8
+
+/** UX spec section 3 — the source avatar, the left column of an item. */
+private val SOURCE_AVATAR_SIZE = 40.dp
+private val ITEM_SIDE_PADDING = 16.dp
+private val ITEM_COLUMN_GAP = 12.dp
+
+/** Where an item's text column starts, which a folded reply lines up with. */
+private val ITEM_TEXT_START = ITEM_SIDE_PADDING + SOURCE_AVATAR_SIZE + ITEM_COLUMN_GAP
+
 /** Within this many pixels of the top, new items are shown at once. */
 private const val TOP_SLACK_PX = 40
 
@@ -1143,7 +1161,7 @@ internal fun feedMessageOf(m: ChatMessage): FeedMessage = FeedMessage(
         Direction.System -> "system"
     },
     text = m.text,
-    attachments = m.attachments.map { FeedAttachment(it.kind, it.mime) },
+    attachments = m.attachments.map { FeedAttachment(it.kind, it.mime, it) },
     createdAt = m.createdAt,
     authorKeyB64 = m.authorKey,
     edited = m.edited,
@@ -1202,7 +1220,7 @@ private fun EmptyFeed(
 }
 
 /** What the item menu can do (UX spec section 5). */
-private class ItemMenuActions(
+internal class ItemMenuActions(
     val open: (FeedCandidateRef) -> Unit,
     val reply: (FeedCandidateRef) -> Unit,
     val copy: (FeedCandidateRef) -> Unit,
@@ -1301,9 +1319,17 @@ private fun HiddenFromFeedsScreen(
     }
 }
 
+/**
+ * One item (UX spec section 3): the source's avatar, and everything else in the
+ * column beside it. As tall as its content; nothing in it has a fixed height.
+ *
+ * The first row and the text open the conversation at the message. The media
+ * sits outside that area, so a bubble's own controls, and the gaps between
+ * them, are the bubble's; its long press opens the item's menu.
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun FeedItemCard(
+internal fun FeedItemCard(
     item: RankedItem,
     why: String?,
     author: String,
@@ -1312,6 +1338,8 @@ private fun FeedItemCard(
     lastReplyLine: String?,
     onOpen: () -> Unit,
     onToggleReplies: () -> Unit,
+    hub: ChatMediaHub,
+    onSaveMedia: (AttachmentRef) -> Unit,
     menu: ItemMenuActions,
     menuOpen: Boolean,
     onMenuOpenChange: (Boolean) -> Unit,
@@ -1319,112 +1347,172 @@ private fun FeedItemCard(
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     val ref = item.ref
     val closeMenu = { onMenuOpenChange(false) }
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Box {
-        Column(
+    val opensItem = Modifier.combinedClickable(onClick = onOpen, onLongClick = { onMenuOpenChange(true) })
+    val strings = LocalStrings.current
+    val media = remember(ref.message) { mediaRefsOf(ref.message, hub.allowlist) }
+    val body = remember(ref.message, strings) { itemBodyOf(ref, strings, hub.allowlist) }
+    val edited = if (ref.message.edited) t("chat.message.edited") else ""
+    val textLine = listOf(body, edited).filter { it.isNotEmpty() }.joinToString(" ")
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = ITEM_SIDE_PADDING, vertical = 10.dp),
+    ) {
+        // The conversation's row in Chats, so it has one colour on both
+        // screens: the same seed, the conversation id. TalkBack reads the
+        // source's name beside it.
+        me.lakko.app.ui.components.LakkoAvatar(
+            name = ref.source.title,
+            seed = me.lakko.app.feed.feedSourceKey(ref.source),
+            size = SOURCE_AVATAR_SIZE,
+            group = true,
             modifier = Modifier
-                .fillMaxWidth()
-                .combinedClickable(onClick = onOpen, onLongClick = { onMenuOpenChange(true) })
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+                .clip(CircleShape)
+                .clearAndSetSemantics {}
+                .then(opensItem),
+        )
+        Spacer(Modifier.width(ITEM_COLUMN_GAP))
+        Column(modifier = Modifier.weight(1f)) {
+            Box {
+                Column(modifier = Modifier.fillMaxWidth().then(opensItem)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            ref.source.title,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = muted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(time, style = MaterialTheme.typography.labelSmall, color = muted)
+                    }
+                    // A channel speaks as itself: its name is already the source.
+                    if (ref.source.kind == FeedSourceKind.GROUP) {
+                        // ADR-0084 — the person's photo beside their name.
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            val outgoing = ref.message.direction == "outgoing"
+                            me.lakko.app.ui.components.LakkoAvatar(
+                                name = if (outgoing) {
+                                    me.lakko.app.ui.components.rememberOwnAvatarName(author)
+                                } else {
+                                    author
+                                },
+                                seed = ref.message.authorKeyB64 ?: author,
+                                size = 24.dp,
+                                personKey = if (outgoing) null else me.lakko.app.ui.components.personKeyBytes(ref.message.authorKeyB64),
+                                avatar = if (outgoing) me.lakko.app.ui.components.rememberOwnAvatar() else null,
+                            )
+                            androidx.compose.foundation.layout.Spacer(Modifier.width(8.dp))
+                            Text(author, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                    ref.message.forwardAuthor?.let {
+                        Text(t("chat.forward.from", mapOf("name" to it)), style = MaterialTheme.typography.labelSmall, color = muted)
+                    }
+                    if (textLine.isNotEmpty()) {
+                        Text(
+                            textLine,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = ITEM_TEXT_MAX_LINES,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                // UX spec section 5 — Open, Reply (group messages only), Copy,
+                // Forward, Hide from feeds.
+                DropdownMenu(expanded = menuOpen, onDismissRequest = closeMenu) {
+                    DropdownMenuItem(text = { Text(t("common.open")) }, onClick = {
+                        closeMenu()
+                        menu.open(ref)
+                    })
+                    if (ref.source.kind == FeedSourceKind.GROUP) {
+                        DropdownMenuItem(text = { Text(t("chat.message.reply")) }, onClick = {
+                            closeMenu()
+                            menu.reply(ref)
+                        })
+                    }
+                    DropdownMenuItem(
+                        text = { Text(t("common.copy")) },
+                        enabled = ref.message.text.isNotBlank(),
+                        onClick = {
+                            closeMenu()
+                            menu.copy(ref)
+                        },
+                    )
+                    DropdownMenuItem(text = { Text(t("chat.message.forward")) }, onClick = {
+                        closeMenu()
+                        menu.forward(ref)
+                    })
+                    DropdownMenuItem(text = { Text(t("feed.action.hide")) }, onClick = {
+                        closeMenu()
+                        menu.hide(ref)
+                    })
+                }
+            }
+            if (media.isNotEmpty()) {
+                Column(
+                    modifier = Modifier.padding(top = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    for (attachment in media) {
+                        AttachmentView(
+                            ref = attachment,
+                            hub = hub,
+                            isOwn = ref.message.direction == "outgoing",
+                            contentColor = MaterialTheme.colorScheme.onSurface,
+                            bubbleColor = MaterialTheme.colorScheme.surface,
+                            onSave = onSaveMedia,
+                            onLongPress = { onMenuOpenChange(true) },
+                            // Only media reaches here: a file is the text line.
+                            fileChip = {},
+                        )
+                    }
+                }
+            }
+            why?.let {
                 Text(
-                    ref.source.title,
-                    style = MaterialTheme.typography.labelMedium,
+                    it,
+                    style = MaterialTheme.typography.labelSmall,
                     color = muted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .padding(top = 2.dp)
+                        .fillMaxWidth()
+                        .then(opensItem),
                 )
-                Text(time, style = MaterialTheme.typography.labelSmall, color = muted)
             }
-            // A channel speaks as itself: its name is already the source.
-            if (ref.source.kind == FeedSourceKind.GROUP) {
-                // ADR-0084 — the person's photo beside their name.
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    val outgoing = ref.message.direction == "outgoing"
-                    me.lakko.app.ui.components.LakkoAvatar(
-                        name = author,
-                        seed = ref.message.authorKeyB64 ?: author,
-                        size = 24.dp,
-                        personKey = if (outgoing) null else me.lakko.app.ui.components.personKeyBytes(ref.message.authorKeyB64),
-                        avatar = if (outgoing) me.lakko.app.ui.components.rememberOwnAvatar() else null,
-                    )
-                    androidx.compose.foundation.layout.Spacer(Modifier.width(8.dp))
-                    Text(author, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            val reactions = reactionSummary(ref.message)
+            if (reactions.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.padding(top = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    for (r in reactions) {
+                        Text("${r.emoji} ${r.count}", style = MaterialTheme.typography.labelMedium)
+                    }
                 }
             }
-            ref.message.forwardAuthor?.let {
-                Text(t("chat.forward.from", mapOf("name" to it)), style = MaterialTheme.typography.labelSmall, color = muted)
-            }
-            Text(
-                bodyOf(ref, LocalStrings.current) + if (ref.message.edited) " " + t("chat.message.edited") else "",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            why?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = muted) }
-        }
-        // UX spec section 5 — Open, Reply (group messages only), Copy,
-        // Forward, Hide from feeds.
-        DropdownMenu(expanded = menuOpen, onDismissRequest = closeMenu) {
-            DropdownMenuItem(text = { Text(t("common.open")) }, onClick = {
-                closeMenu()
-                menu.open(ref)
-            })
-            if (ref.source.kind == FeedSourceKind.GROUP) {
-                DropdownMenuItem(text = { Text(t("chat.message.reply")) }, onClick = {
-                    closeMenu()
-                    menu.reply(ref)
-                })
-            }
-            DropdownMenuItem(
-                text = { Text(t("common.copy")) },
-                enabled = ref.message.text.isNotBlank(),
-                onClick = {
-                    closeMenu()
-                    menu.copy(ref)
-                },
-            )
-            DropdownMenuItem(text = { Text(t("chat.message.forward")) }, onClick = {
-                closeMenu()
-                menu.forward(ref)
-            })
-            DropdownMenuItem(text = { Text(t("feed.action.hide")) }, onClick = {
-                closeMenu()
-                menu.hide(ref)
-            })
-        }
-        }
-        val reactions = reactionSummary(ref.message)
-        if (reactions.isNotEmpty()) {
-            Row(
-                modifier = Modifier.padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                for (r in reactions) {
-                    Text("${r.emoji} ${r.count}", style = MaterialTheme.typography.labelMedium)
-                }
-            }
-        }
-        if (item.replies.isNotEmpty()) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onToggleReplies)
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-            ) {
-                Text(
-                    repliesLabel(item.replies.size).text(),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                if (!expanded && lastReplyLine != null) {
+            if (item.replies.isNotEmpty()) {
+                HorizontalDivider(modifier = Modifier.padding(top = 6.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onToggleReplies)
+                        .padding(vertical = 6.dp),
+                ) {
                     Text(
-                        lastReplyLine,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = muted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                        repliesLabel(item.replies.size).text(),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
                     )
+                    if (!expanded && lastReplyLine != null) {
+                        Text(
+                            lastReplyLine,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = muted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
         }
@@ -1438,7 +1526,7 @@ private fun ReplyRow(author: String, text: String, onOpen: () -> Unit, onLongPre
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(onClick = onOpen, onLongClick = onLongPress)
-            .padding(start = 32.dp, end = 16.dp, top = 4.dp, bottom = 4.dp),
+            .padding(start = ITEM_TEXT_START, end = ITEM_SIDE_PADDING, top = 4.dp, bottom = 4.dp),
     ) {
         Text(author, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
         Text(text, style = MaterialTheme.typography.bodySmall)

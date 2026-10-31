@@ -31,6 +31,7 @@ import {
 } from "../contacts/pending-contacts";
 import { avatarToWasm, type AvatarWasm } from "../profile/avatar-model";
 import { IdbProfileBackend } from "../profile/profile-idb";
+import { forStateBundle } from "../profile/profile-store";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import type { Wasm } from "../wasm";
 import {
@@ -113,8 +114,10 @@ export async function collectCarriedExtras(args: {
   try {
     const own = new Set(args.ownKeysB64);
     const row = await new IdbProfileBackend(async () => args.deviceKey, () => new Map()).load(args.accountIdB64);
-    for (const [personKeyB64, p] of row?.profiles ?? []) {
+    for (const [personKeyB64, stored] of row?.profiles ?? []) {
       if (own.has(personKeyB64)) continue;
+      const p = forStateBundle(stored);
+      if (p === null) continue;
       try {
         const avatar =
           p.avatar === undefined || p.avatar === null

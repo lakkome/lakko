@@ -184,6 +184,33 @@ public class ProfileDirectory internal constructor(
     }
 
     /**
+     * A person this account found by search answered its request, so they are
+     * a contact before their profile has arrived: file what the Sent record
+     * held at stamp 0, so the row is not a stand-in meanwhile
+     * (`docs/ux/who-can-find-me.md` section 6.1). Any profile the person sends
+     * that says something replaces it, whatever its stamp
+     * ([PeerProfileStore.offer]), and one held already stays. It persists as
+     * any profile does.
+     *
+     * [verifiedUsername] was verified when the person was found. That is
+     * recorded with it: this entry carries no certificate, so a check could
+     * never complete, and it would retry until the real profile came.
+     */
+    public fun onFoundPersonAnswered(
+        signatureKeyB64: String,
+        name: String?,
+        verifiedUsername: String?,
+    ): ProfileOffer {
+        val stated = PeerProfile(displayName = name, username = verifiedUsername, updatedAtMs = 0uL)
+        val offer = profiles.offer(signatureKeyB64, stated)
+        if (offer == ProfileOffer.STORED) {
+            verifiedUsername?.let { verifications.put(signatureKeyB64, it, UsernameVerification.VERIFIED) }
+            bump()
+        }
+        return offer
+    }
+
+    /**
      * ADR-0050 section 2.9 (state bundle v3) — store a profile a pairing
      * bundle carried for [accountIdB64], under the same strictly-newer rule
      * as a received one. When that account is the one signed in it goes
@@ -278,6 +305,19 @@ public class ProfileDirectory internal constructor(
             signatureKey = previousBytes,
         )
         return if (inherited.isPlaceholder) own else inherited
+    }
+
+    /**
+     * Whether this person's own profile is still owed: nothing names them, or
+     * only what [onFoundPersonAnswered] filed. The name found stands in on the
+     * row, and the daily profile request (ADR-0048 trigger 4) must go on asking
+     * for the real one, or a contact whose Welcome failed never gets it. A
+     * local rename names them as it always did.
+     */
+    public fun awaitsProfile(signatureKey: ByteArray): Boolean {
+        val keyB64 = Base64.getEncoder().encodeToString(signatureKey)
+        if (resolve(keyB64).isPlaceholder) return true
+        return renames[keyB64] == null && profiles.get(keyB64)?.isFoundName == true
     }
 
     /** [resolve] for raw key bytes. */

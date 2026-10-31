@@ -239,6 +239,20 @@ class ResetVerdictTest {
     }
 
     @Test
+    fun `a row under the key that signed is that contact whatever it says of the account`() {
+        assertTrue(isContactKey("signer", listOf("other", "signer")))
+        val rows = listOf(ContactRowKeys(null, "signer"))
+        assertNull(establishedContactOfAccount(rows, "acct", emptyList(), null))
+        assertTrue(isContactKey("signer", rows.map { it.keyB64 }))
+    }
+
+    @Test
+    fun `another key finds nothing so a claimed account id swallows no request`() {
+        assertFalse(isContactKey("victim-key", listOf("member-key")))
+        assertFalse(isContactKey("", listOf("", "member-key")))
+    }
+
+    @Test
     fun `devices bound to another key than the expected one are never added`() {
         assertEquals(setOf("k"), acceptableBoundKeys("k", null))
         assertEquals(setOf("k"), acceptableBoundKeys("k", listOf("pinned", "pred")))

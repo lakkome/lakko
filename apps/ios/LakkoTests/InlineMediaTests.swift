@@ -118,6 +118,25 @@ final class InlineMediaTests: XCTestCase {
         XCTAssertLessThanOrEqual(sliver.width, 260)
     }
 
+    func testABoxFitsAColumnWithItsAspectKept() {
+        let box = CGSize(width: 260, height: 130)
+        XCTAssertEqual(InlineMedia.fit(box, within: 200), CGSize(width: 200, height: 100))
+    }
+
+    func testABoxIsNeverScaledUpOrChangedByNoColumn() {
+        let box = CGSize(width: 260, height: 130)
+        XCTAssertEqual(InlineMedia.fit(box, within: 300), box)
+        XCTAssertEqual(InlineMedia.fit(box, within: nil), box)
+        XCTAssertEqual(InlineMedia.fit(box, within: 0), box)
+    }
+
+    func testTheVoiceWaveformGivesWayToAColumn() {
+        XCTAssertEqual(InlineMedia.voiceWaveformWidth(within: nil), 170)
+        XCTAssertEqual(InlineMedia.voiceWaveformWidth(within: 400), 170)
+        XCTAssertEqual(InlineMedia.voiceWaveformWidth(within: 188), 140)
+        XCTAssertEqual(InlineMedia.voiceWaveformWidth(within: 100), 80)
+    }
+
     func testWireDimensionsScaleDownToFit4096() {
         XCTAssertEqual(InlineMedia.wireDimensions(width: 1920, height: 1080)?.width, 1920)
         let big = InlineMedia.wireDimensions(width: 8192, height: 6144)

@@ -184,27 +184,18 @@ public object FeedSealedStore {
 }
 
 /**
- * The feed's per-device conveniences: the selected feed and whether the
- * "this device" banner was dismissed. Plain preferences — neither is a
- * secret, and losing them only resets the switcher to Latest.
+ * The feed's per-device convenience: the selected feed. A plain preference: it
+ * is no secret, and losing it only resets the switcher to Latest.
  */
 public object FeedPrefs {
     private const val FILE = "lakko.feed"
     private const val KEY_SELECTION = "selection"
-    private const val KEY_BANNER = "device-banner-dismissed"
 
     public fun selection(context: Context): String? =
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString(KEY_SELECTION, null)
 
     public fun setSelection(context: Context, value: String) {
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putString(KEY_SELECTION, value).apply()
-    }
-
-    public fun bannerDismissed(context: Context): Boolean =
-        context.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean(KEY_BANNER, false)
-
-    public fun dismissBanner(context: Context) {
-        context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean(KEY_BANNER, true).apply()
     }
 
     public fun clear(context: Context) {

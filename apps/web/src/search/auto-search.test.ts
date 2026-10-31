@@ -101,6 +101,73 @@ describe("networkQueryOf (UX 6.1: when it asks the network)", () => {
   });
 });
 
+describe("AutoSearch: waiting for the pause", () => {
+  it("says a question is coming from the moment a new text is typed", async () => {
+    const h = harness(async (q) => found(q));
+    h.type("anna");
+    expect(h.last().waiting).toBe(true);
+    expect(h.last().searching).toBe(false);
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    expect(h.last().waiting).toBeUndefined();
+    expect(h.last().searching).toBe(true);
+    await settle();
+    expect(h.last().waiting).toBeUndefined();
+  });
+
+  it("does not wait on a text that asks nothing, or on a remembered answer", async () => {
+    const h = harness(async (q) => found(q));
+    h.type("an");
+    expect(h.last().waiting).toBeUndefined();
+    h.type("anna");
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    await settle();
+    h.type("an");
+    h.type("anna");
+    expect(h.last().waiting).toBeUndefined();
+  });
+});
+
+describe("AutoSearch.recheck", () => {
+  const isAnna = (o: PeopleSearchOutcome): boolean => o.people.some((p) => p.name === "anna");
+
+  it("asks at once for the text standing when its answer is false", async () => {
+    const h = harness(async (q) => found(q));
+    h.type("anna");
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    await settle();
+    expect(h.run).toHaveBeenCalledTimes(1);
+    h.auto.recheck(isAnna);
+    await settle();
+    expect(h.run).toHaveBeenCalledTimes(2);
+    expect(h.last().outcome?.state.kind).toBe("found");
+  });
+
+  it("leaves a true answer and asks nothing", async () => {
+    const h = harness(async (q) => found(q));
+    h.type("anna");
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    await settle();
+    h.auto.recheck(() => false);
+    await settle();
+    expect(h.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("forgets a false answer for a text not on screen", async () => {
+    const h = harness(async (q) => found(q));
+    h.type("anna");
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    await settle();
+    h.type("bert");
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    await settle();
+    h.auto.recheck(isAnna);
+    await settle();
+    expect(h.memory.get("anna")).toBeUndefined();
+    expect(h.memory.get("bert")).toBeDefined();
+    expect(h.run).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("AutoSearch", () => {
   it("asks after 500 ms without typing, once, with the last text", async () => {
     expect(NETWORK_SEARCH_DEBOUNCE_MS).toBe(500);

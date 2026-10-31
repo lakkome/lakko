@@ -149,3 +149,11 @@ public fun conversationRowMatchesQuery(
  */
 public fun showsEmptyConversationState(listIsEmpty: Boolean, query: String): Boolean =
     listIsEmpty && query.isBlank()
+
+/**
+ * Whether a search of the conversation list found no row at all. A pending
+ * contact's chat is a row like any other (ADR-0079), so a search that matches
+ * only one still has a list, with the people half under it.
+ */
+public fun searchFoundNoRow(conversations: Int, pendingContacts: Int): Boolean =
+    conversations == 0 && pendingContacts == 0
