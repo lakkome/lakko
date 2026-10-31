@@ -403,7 +403,9 @@ export async function saveMessageLog(
   deviceKey: CryptoKey,
   payload: MessageLogPayload,
 ): Promise<void> {
-  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
+  const plaintext = new TextEncoder().encode(
+    JSON.stringify(withoutBlockedSlots(accountIdB64, payload)),
+  );
   const ciphertext = await encryptBlob(deviceKey, plaintext);
   const row: PersistedRow = { accountId: accountIdB64, ciphertext };
   const db = await openDb();
@@ -459,6 +461,49 @@ export async function loadMessageLog(
   } catch {
     return null;
   }
+}
+
+/**
+ * ADR-0087 section 9 — groups whose history is gone from this device, in this
+ * page. A chat view that was open keeps its rows in memory and writes them on
+ * its way out, and a poll that was in flight files what it decrypted: either
+ * would put a wiped conversation back. Every write goes through
+ * {@link saveMessageLog}, so that is where the slot is left out. Lifted when
+ * the person is added again ({@link allowGroupInMessageLog}), whose new rows
+ * belong here. In memory: after a reload no such writer exists.
+ */
+const blockedSlots = new Set<string>();
+
+function blockKey(accountIdB64: string, groupIdHex: string): string {
+  return `${accountIdB64}|${groupIdHex}`;
+}
+
+/** Refuse this group's rows from now on (the end of a membership). */
+export function blockGroupInMessageLog(accountIdB64: string, groupIdHex: string): void {
+  blockedSlots.add(blockKey(accountIdB64, groupIdHex));
+}
+
+/** Take this group's rows again (a Welcome brought the group back). */
+export function allowGroupInMessageLog(accountIdB64: string, groupIdHex: string): void {
+  blockedSlots.delete(blockKey(accountIdB64, groupIdHex));
+}
+
+/** The payload as it may be written: no blocked slot. Pure over the block
+ *  set; the same object when nothing is blocked. */
+export function withoutBlockedSlots(
+  accountIdB64: string,
+  payload: MessageLogPayload,
+): MessageLogPayload {
+  if (blockedSlots.size === 0) return payload;
+  const blocked = Object.keys(payload.groups).filter((hex) =>
+    blockedSlots.has(blockKey(accountIdB64, hex)),
+  );
+  if (blocked.length === 0) return payload;
+  const groups: { [k: string]: PersistedGroup } = {};
+  for (const [k, v] of Object.entries(payload.groups)) {
+    if (!blocked.includes(k)) groups[k] = v;
+  }
+  return carryHeld(payload, { version: payload.version, groups });
 }
 
 /** Per-account tail of the in-page write chain — see {@link updateMessageLog}. */
@@ -578,22 +623,21 @@ export function setHeldInMessageLog(
  * row, or no entry for this group), so the caller can tell "deleted" from
  * "there was nothing there" without a second read.
  *
- * **What this does NOT remove, stated because the confirmation copy is exact
- * rather than sweeping:** the inactive MLS group stays in the provider
- * snapshot as inert bytes. `Group` exposes no delete, so a `Group::delete` is
- * a real (small) core follow-up rather than something this rides free. The
- * remnant is inert in the strong sense — it cannot send, decrypt, export or
- * process — but it is not nothing.
+ * The MLS group goes separately, through `Group.deleteLocally`
+ * (`chat/membership-wipe.ts`).
  */
 export async function deleteGroupFromMessageLog(
   accountIdB64: string,
   deviceKey: CryptoKey,
   groupIdHex: string,
 ): Promise<boolean> {
-  const payload = await loadMessageLog(accountIdB64, deviceKey);
-  if (payload === null) return false;
-  const next = withoutGroup(payload, groupIdHex);
-  if (next === null) return false;
-  await saveMessageLog(accountIdB64, deviceKey, next);
-  return true;
+  // Through the write chain: a row filed for another group while this ran
+  // must not be lost to a read of the blob from before it.
+  let dropped = false;
+  await updateMessageLog(accountIdB64, deviceKey, (current) => {
+    const next = current === null ? null : withoutGroup(current, groupIdHex);
+    dropped = next !== null;
+    return next;
+  });
+  return dropped;
 }

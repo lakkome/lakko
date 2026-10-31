@@ -98,6 +98,7 @@ import {
 } from "./background-receive-scheduler";
 import { onGroupCheckRequested, reportGroupCheck, resetFeedRefresh } from "../feed/feed-refresh-store";
 import { useChats, type ActiveGroup } from "./ChatContext";
+import { useMembershipEnd } from "./MembershipEndContext";
 import { ChatClient, type IncomingChatEvent } from "./client";
 import {
   decideActingCommitter,
@@ -308,6 +309,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   const callHost = useCallHost();
   const sync = useDeviceGroupSync();
   const lineageView = useLineage();
+  const membershipEnd = useMembershipEnd();
 
   const coordinator = new ReceiveCoordinator<IncomingChatEvent>();
   const backoff = new GroupBackoff();
@@ -452,6 +454,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // ADR-0045 UX §6.2.8 — a group this device is no longer in is never polled:
     // every row would be refused and logged, forever.
     if (entry === undefined || readIsActive(entry.group) === false) return true;
+    // ADR-0087 section 9 — and neither is a group whose end is under way, a
+    // heard one included: that handle is still active.
+    if (membershipEnd.isEnding(groupIdB64)) return true;
     // ADR-0073 R.5 — an older group of a conversation that moved: a
     // one-to-one's old journal is not read at all (its only other sender is
     // the superseded identity); a group's is read for the retention window,
@@ -508,7 +513,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       },
       signal,
     );
-    if (result.outcome === "cursor-moved") return { yieldedRows: false };
+    if (result.outcome === "cursor-moved") return { yieldedRows: false, cursorMoved: true };
     if (!current()) {
       // Signed out while the poll was out. Only the durable half.
       await settle(
@@ -1863,6 +1868,10 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         return deviceKey === null ? null : loadMessageLog(account, deviceKey);
       },
     });
+    // ADR-0087 section 9 — the batch that ended this conversation: every row
+    // of it is being wiped, and nothing it carried (a pin, a name, a list a
+    // member shared) may land in a store behind the wipe.
+    if (membershipEnd.isEnding(groupIdB64)) return;
     // ADR-0073 R.8 — in a conversation that cannot be repaired in place for
     // a reset, or that already moved, nothing from the retired key acts:
     // its control and service envelopes are dropped with its rows.
@@ -2189,6 +2198,42 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // under the MLS lock makes a race with the sweep or the call lane benign.
     await pollGroup(groupIdB64, 0, new AbortController().signal);
   }
+
+  // ADR-0045 amendment (C-88) - a Welcome refused because this device holds
+  // its group as active waits for that group's journal to be read to its
+  // head. A group whose view is open is long-polled by that view: asked to
+  // poll now, and answered `false`, since nothing here can say it got there.
+  onCleanup(
+    membershipEnd.registerJournalReader(async (groupIdB64) => {
+      if (chats.get(groupIdB64) === undefined) return true;
+      if (coordinator.isForeground(groupIdB64)) {
+        coordinator.requestPoll(groupIdB64);
+        return false;
+      }
+      try {
+        for (let i = 0; i < JOURNAL_REPAIR_MAX_POLLS; i++) {
+          const r = await pollGroup(groupIdB64, 0, new AbortController().signal);
+          // Another path took this batch and may be applying it still: that
+          // is not the head, and calling it the head would drop the Welcome.
+          if (r.cursorMoved === true) continue;
+          if (!r.yieldedRows) return true;
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("journal read for a held Welcome failed", err instanceof Error ? err.name : "");
+      }
+      return false;
+    }),
+  );
+  // The group is gone from this device, and with it its position in the
+  // journal: a person added back starts as a new member does.
+  onCleanup(
+    membershipEnd.onGroupWiped((groupIdB64) => {
+      coordinator.forget(groupIdB64);
+      logCursors = null;
+      backoff.succeeded(groupIdB64);
+    }),
+  );
 
   let unregisterGroupCheck: (() => void) | null = null;
 

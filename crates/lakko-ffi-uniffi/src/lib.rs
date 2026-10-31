@@ -2693,6 +2693,30 @@ impl Group {
         Ok(g.delete(&identity.inner)?)
     }
 
+    /// Delete this group's state on the word of this account's other devices,
+    /// without having applied the commit that ended it (ADR-0087 section 9,
+    /// C-88). The one way a device offline past the journal's retention stops
+    /// holding a group.
+    ///
+    /// **Call this only holding a `conversationEnded` register from the
+    /// account's own synced state, and pass that register's `epoch`.** The core
+    /// cannot see the register: called on anything else, this deletes a live
+    /// membership. Never on a refused Delivery Service read.
+    ///
+    /// Refused with `MembershipGroupStillActive`, changing nothing, when the
+    /// stored group is active at an epoch above `ended_epoch`: this device
+    /// came back after that end, so it answers with a `joined` register. A
+    /// group that is not active goes at any epoch. Repeating it changes
+    /// nothing. Persist the snapshot afterwards.
+    pub fn delete_after_ended_elsewhere(
+        &self,
+        identity: &Identity,
+        ended_epoch: u64,
+    ) -> Result<(), FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.delete_after_ended_elsewhere(&identity.inner, ended_epoch)?)
+    }
+
     /// Local leaf index of the calling identity.
     pub fn own_leaf_index(&self) -> Result<u32, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
@@ -6785,6 +6809,9 @@ mod tests {
         for refused in [
             Group::join_from_welcome(add.welcome, &bob).err().unwrap(),
             bob_g.delete_locally(&bob).unwrap_err(),
+            bob_g
+                .delete_after_ended_elsewhere(&bob, bob_g.epoch().unwrap() - 1)
+                .unwrap_err(),
         ] {
             assert_eq!(
                 refused.refusal_reason(),

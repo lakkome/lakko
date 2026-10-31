@@ -2817,6 +2817,33 @@ none calls `deleteLocally` or holds a Welcome on the refusal. A person whose
 Welcome was already refused and read past needs one more removal and add. This
 amendment widens the surface of G-39.
 
+**Added the same day: deleting a group that has not ended here
+(`Group::delete_after_ended_elsewhere`).** `Group::delete` refuses an active group,
+and that refusal is what ADR-0087 section 9 needs to get past: a person's other
+device hears of the end from a `conversation_ended` register in the account's
+synced state, holds the group active because the commit is still ahead of it in
+the journal, and past the 30-day retention that commit never arrives. So this one
+entry point deletes an active group, on the condition that its caller holds such a
+register from its own account. It reuses `delete_stored_group`, so the same rows
+go, a staged sweep's among them.
+
+It takes the register's MLS epoch, and this is what keeps it from being a loaded
+gun: a group that is stored active at an epoch ABOVE `ended_epoch` is one this
+device has rejoined since that end, and it is refused with `GroupStillActive`,
+nothing changed. A Welcome comes back under the same group id at a later epoch, so
+the epoch separates the group that ended from the group that replaced it with no
+clock involved. A stale handle changes nothing, since the stored state is what is
+judged. A group that is not active goes at any epoch, as under `Group::delete`.
+
+The core cannot verify the register. What this rests on is the DeviceGroup carrying
+it, so the threat is the account's own device, and such a device already holds every
+key this deletes. A server cannot reach it: a refused read is not a register, and
+clients are told so in the documentation of both FFI surfaces. Deleting this way
+says nothing to the group, and the leaf stays in the tree until a commit removes
+it. Pinned by the `delete_after_ended_elsewhere` tests in `tests/group_rejoin.rs`,
+the proptest `a_register_takes_the_ended_group_and_never_a_later_one` among them.
+Host-tested; no client calls it yet.
+
 ## Blast radius, per sprint
 
 | Sprint | Surface | What changes |

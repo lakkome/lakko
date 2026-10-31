@@ -158,6 +158,24 @@ export function setAwaitedSwaps(
   save(accountIdB64, row);
 }
 
+/** Forget everything held for one group (ADR-0087 section 9). */
+export function clearContinuityStateForGroup(accountIdB64: string, groupIdB64: string): void {
+  const row = load(accountIdB64);
+  const had =
+    groupIdB64 in row.moved ||
+    groupIdB64 in row.resent ||
+    groupIdB64 in row.swapping ||
+    groupIdB64 in row.pushRetired ||
+    groupIdB64 in row.resendCursor;
+  if (!had) return;
+  delete row.moved[groupIdB64];
+  delete row.resent[groupIdB64];
+  delete row.swapping[groupIdB64];
+  delete row.pushRetired[groupIdB64];
+  delete row.resendCursor[groupIdB64];
+  save(accountIdB64, row);
+}
+
 /** Forget everything for the account (its data is wiped). */
 export function clearContinuityStateForAccount(accountIdB64: string): void {
   try {

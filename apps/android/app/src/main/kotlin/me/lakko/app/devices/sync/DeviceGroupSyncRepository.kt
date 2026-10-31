@@ -46,6 +46,8 @@ import me.lakko.app.ds.DsNetworkError
 import uniffi.lakko_ffi_uniffi.DeviceGroup
 import uniffi.lakko_ffi_uniffi.DeviceGroupBody
 import uniffi.lakko_ffi_uniffi.FolderChangeSet
+import uniffi.lakko_ffi_uniffi.FolderConversationKind
+import uniffi.lakko_ffi_uniffi.FolderConversationRef
 import uniffi.lakko_ffi_uniffi.FolderView
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.LinkAnswerVerdict
@@ -359,15 +361,21 @@ public class DeviceGroupSyncRepository(
         // starts empty, and the persistence writer's first write replaces the
         // refused file.
         if (seedState) {
-            val restored = runCatching {
+            val stored = runCatching {
                 DeviceGroupSnapshotStore.getSnapshot(
                     context = applicationContext,
                     accountIdB64 = accountIdB64,
                     dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
-                )?.let { SyncedState.fromBytes(it) }
-            }.onFailure { Log.w(LOG_TAG, "persisted synced state dropped", it) }.getOrNull()
+                )
+            }.onFailure { Log.w(LOG_TAG, "persisted synced state not read", it) }.getOrNull()
+            val seeded = seedStateOrFresh(
+                stored = stored,
+                open = { SyncedState.fromBytes(it) },
+                fresh = { SyncedState() },
+                onRefused = { Log.w(LOG_TAG, "persisted synced state dropped", it) },
+            )
             synchronized(stateLock) {
-                syncedState = restored ?: SyncedState()
+                syncedState = seeded
             }
             val prefs = applicationContext.getSharedPreferences(PENDING_PREFS, Context.MODE_PRIVATE)
             pendingFlag = PendingSyncFlag(prefs.getBoolean(accountIdB64, false)) { value ->
@@ -443,6 +451,7 @@ public class DeviceGroupSyncRepository(
         cancelPollAndDropHandles()
         activeAccountIdB64.set(null)
         activeAccountId.set(null)
+        me.lakko.app.chat.ConversationEndsMirror.publish(null)
         synchronized(stateLock) {
             syncedState = null
             mutableRecoveryEmail.value = RecoveryAddressState.NOT_READY
@@ -626,6 +635,7 @@ public class DeviceGroupSyncRepository(
                 }
                 mutableFolders.value = state.folders()
                 mutableSaved.value = state.saved()
+                republishConversationEnds(state)
                 // A restored or received stamp may be ahead of this device's
                 // clock; the next local write must still out-rank it.
                 Hlc.advancePast(state.maxHlc())
@@ -732,6 +742,150 @@ public class DeviceGroupSyncRepository(
         }
         if (changed) republish()
     }
+
+    // ------------------------------------------------------------
+    // ADR-0087 section 9 - the end of a membership
+    // ------------------------------------------------------------
+
+    /** Project the ended registers for the chat layer. Under [stateLock]. */
+    private fun republishConversationEnds(state: SyncedState) {
+        val account = activeAccountIdB64.get() ?: return
+        val ends = try {
+            state.endedConversations().map {
+                me.lakko.app.chat.HeardConversationEnd(
+                    idHex = groupIdHexOf(it.conversation.id).lowercase(),
+                    channel = it.conversation.kind == FolderConversationKind.CHANNEL,
+                    epoch = it.epoch,
+                )
+            }
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "conversation ends not read (${cause.javaClass.simpleName})")
+            return
+        }
+        me.lakko.app.chat.ConversationEndsMirror.publish(me.lakko.app.chat.HeardConversationEnds(account, ends))
+    }
+
+    /** Whether the fold says the account is out of [conversation]. */
+    public fun isConversationEnded(conversation: FolderConversationRef): Boolean = synchronized(stateLock) {
+        try {
+            syncedState?.isConversationEnded(conversation) == true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Tell the account's other devices the account is out of [conversation],
+     * at the MLS [epoch] of the end (0 for a channel).
+     */
+    public suspend fun publishConversationEnded(
+        conversation: FolderConversationRef,
+        epoch: ULong,
+    ): me.lakko.app.chat.EndPublish = publishEndRegister { state, hlc ->
+        state.composeConversationEnded(hlc, conversation, epoch)
+    }
+
+    /**
+     * Tell them the account is back in [conversation], at the epoch the join
+     * brought it to. A first join finds no register and writes none.
+     */
+    public suspend fun publishConversationJoined(
+        conversation: FolderConversationRef,
+        epoch: ULong,
+    ): me.lakko.app.chat.EndPublish = publishEndRegister { state, hlc ->
+        state.composeConversationJoined(hlc, conversation, epoch)
+    }
+
+    private suspend fun publishEndRegister(
+        compose: (SyncedState, ULong) -> uniffi.lakko_ffi_uniffi.ConversationEndRegister?,
+    ): me.lakko.app.chat.EndPublish {
+        val register = synchronized(stateLock) {
+            val state = syncedState ?: return me.lakko.app.chat.EndPublish.NOT_OPEN
+            try {
+                compose(state, Hlc.mint())
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "conversation end register refused (${cause.javaClass.simpleName})")
+                null
+            }
+        } ?: return me.lakko.app.chat.EndPublish.NOTHING_TO_TELL
+        try {
+            applyFolderChanges(
+                FolderChangeSet(
+                    metas = emptyList(),
+                    members = emptyList(),
+                    pins = emptyList(),
+                    removed = emptyList(),
+                    order = null,
+                    conversationEnds = listOf(register),
+                ),
+            )
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "conversation end register not applied (${cause.javaClass.simpleName})")
+            return me.lakko.app.chat.EndPublish.NOTHING_TO_TELL
+        }
+        // Past the debounce: the owed record moves on once this returns, and
+        // nothing else would write this register again.
+        syncStatePersistence.writeNow()
+        return me.lakko.app.chat.EndPublish.PUBLISHED
+    }
+
+    /**
+     * Clear what the synced state still holds of [conversation], each register
+     * by its own tombstone: saved messages, folder rows and folder pins, flags,
+     * the read position, the draft, the place in the order. Only what is held
+     * is written, so a device that hears of an end after the others cleared it
+     * sends nothing. The synced register of a profile is not tied to a group.
+     */
+    public suspend fun clearConversationRegisters(conversation: FolderConversationRef) {
+        val groupId = conversation.id
+        val conversationId = conversationOf(groupId).first
+        class Held(
+            val saved: List<uniffi.lakko_ffi_uniffi.SavedMessageView>,
+            val folders: List<me.lakko.app.chat.ChatFolder>,
+            val draft: Boolean,
+            val flags: Boolean,
+            val cursor: Boolean,
+            val order: List<ByteArray>?,
+        )
+        val held = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                Held(
+                    saved = state.saved().filter { hexEquals(it.conversation.id, groupId) || hexEquals(it.conversation.id, conversationId) },
+                    folders = state.folders().map(me.lakko.app.chat.ChatFolder::of),
+                    draft = state.draft(conversationId)?.text?.isNotEmpty() == true,
+                    flags = state.flags(conversationId)?.let { it.pinned || it.muted || it.archived || it.unreadOverride } == true,
+                    cursor = state.readCursor(conversationId)?.upToMessageId?.isNotEmpty() == true,
+                    order = state.conversationOrder()?.groupIds?.takeIf { ids -> ids.any { hexEquals(it, conversationId) } },
+                )
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "conversation registers not read (${cause.javaClass.simpleName})")
+                return
+            }
+        }
+        val savedRegisters = held.saved.map {
+            uniffi.lakko_ffi_uniffi.composeSavedRemoval(Hlc.mint(), it.conversation, it.messageId)
+        }
+        if (savedRegisters.isNotEmpty()) {
+            runCatching { applySavedChanges(savedRegisters) }
+                .onFailure { if (it is CancellationException) throw it }
+        }
+        val folderRef = FolderConversationRef(kind = conversation.kind, id = conversationId)
+        me.lakko.app.chat.conversationRemovalChanges(held.folders, folderRef) { Hlc.mint() }?.let { changes ->
+            runCatching { applyFolderChanges(changes) }
+                .onFailure { if (it is CancellationException) throw it }
+        }
+        if (held.draft) setDraft(groupId, "")
+        if (held.flags) setFlags(groupId, pinned = false, muted = false, archived = false, unreadOverride = false)
+        if (held.cursor) {
+            writeLocal(DeviceGroupBody.ReadCursor(groupId = conversationId, upToMessageId = ByteArray(0), readAtMs = 0u))
+        }
+        held.order?.let { ids -> setOrder(ids.filterNot { hexEquals(it, conversationId) }) }
+    }
+
+    private fun hexEquals(a: ByteArray, b: ByteArray): Boolean = a.contentEquals(b)
 
     // ------------------------------------------------------------
     // ADR-0075 (amended 2026-10-13) - the recovery email address

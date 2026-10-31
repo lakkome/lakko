@@ -271,6 +271,8 @@ struct ChannelReaderScreen: View {
     /// bootstrap a returning subscriber runs.
     private func subscribe() async {
         ensureListed()
+        // ADR-0087 section 9 — clears an end the account holds for it.
+        state.onSubscribedHere?(channelId)
         await runBootstrap()
     }
 

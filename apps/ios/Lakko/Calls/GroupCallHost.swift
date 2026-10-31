@@ -227,6 +227,18 @@ final class GroupCallHost: ObservableObject {
             self?.groupMlsSettled(groupIdHex)
         }
         repository.groupCallEndSink = { [weak self] end in self?.receivedEnd(end) }
+        repository.onMembershipEndRecorded = { [weak self] groupIdHex, left in
+            self?.endForMembership(groupIdHex: groupIdHex, left: left)
+        }
+    }
+
+    /// UX 9.1 — this account is out of the group of the live call. Nothing can
+    /// be published any more, so the call ends here, with the line; the notice
+    /// of the group follows as anywhere else. A person who left asked for it.
+    func endForMembership(groupIdHex: String, left: Bool) {
+        guard liveGroupIdHex == groupIdHex else { return }
+        if !left { callNotice = .key("call.ended.no_longer_in_group") }
+        releaseSession()
     }
 
     // MARK: - Slot

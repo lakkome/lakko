@@ -25,6 +25,27 @@ public enum QuietNotifications {
             .map(\.identifier)
     }
 
+    /// The delivered notifications of the conversations in `threads`.
+    public static func identifiers(
+        _ delivered: [(identifier: String, thread: String)], inThreads threads: Set<String>
+    ) -> [String] {
+        delivered.filter { threads.contains($0.thread) }.map(\.identifier)
+    }
+
+    /// ADR-0087 section 9 — a conversation that goes takes what the lock
+    /// screen still shows of it. Fire-and-forget.
+    public static func removeDelivered(threads: Set<String>) {
+        Task {
+            let center = UNUserNotificationCenter.current()
+            let delivered = await center.deliveredNotifications().map {
+                (identifier: $0.request.identifier, thread: $0.request.content.threadIdentifier)
+            }
+            let ids = identifiers(delivered, inThreads: threads)
+            guard !ids.isEmpty else { return }
+            center.removeDeliveredNotifications(withIdentifiers: ids)
+        }
+    }
+
     /// Remove them. Fire-and-forget; nothing is reported.
     public static func removeDelivered() {
         Task {

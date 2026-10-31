@@ -301,6 +301,20 @@ public object DeviceReadmission {
             emptySet()
         }
 
+    /** Forget what was remembered of one group (ADR-0087 section 9). */
+    public fun clearGroup(context: Context, accountIdB64: String, groupIdHex: String) {
+        clearSlot(groupIdHex)
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                    .remove("$accountIdB64|$groupIdHex")
+                    .apply()
+            } catch (cause: Throwable) {
+                android.util.Log.w("DeviceReadmission", "removed-device memory not cleared", cause)
+            }
+        }
+    }
+
     public fun clearForAccount(context: Context, accountIdB64: String) {
         try {
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

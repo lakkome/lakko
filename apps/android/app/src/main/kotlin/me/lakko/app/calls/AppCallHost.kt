@@ -4,6 +4,7 @@
 package me.lakko.app.calls
 
 import android.content.Context
+import me.lakko.app.l10n.UiText
 import me.lakko.app.profile.peerProfileOf
 import me.lakko.app.profile.toFfi
 import kotlinx.coroutines.CancellationException
@@ -85,6 +86,7 @@ public object AppCallHost {
             },
             onSlotChanged = { occupied -> instance.setOtherCallActive(GROUP_SLOT_KEY, occupied) },
             notifyEndedForEveryone = { name -> endedForEveryone.show(name) },
+            notifyNoLongerInGroup = { endedForEveryone.showLine(UiText("call.ended.no_longer_in_group")) },
         )
     }
 
@@ -127,6 +129,9 @@ public object AppCallHost {
 
     private var idleSubscription: (() -> Unit)? = null
 
+    /** Dropped when another repository attaches. */
+    private var membershipEndSubscription: (() -> Unit)? = null
+
     /**
      * Install the platform effects for the current activity's repository. An
      * activity recreate builds a new repository, so this runs each time and
@@ -157,6 +162,11 @@ public object AppCallHost {
         // G-18 / ADR-0029 — the hosted group call rekeys whenever its group's
         // MLS work settles, whichever receive path applied it.
         idleSubscription = repository.addGroupMlsIdleListener { groupIdHex -> group.onGroupSettled(groupIdHex) }
+        // ADR-0087 UX 9.1 - this account is out of the group a call is in.
+        membershipEndSubscription?.invoke()
+        membershipEndSubscription = repository.addMembershipEndListener { groupIdHex ->
+            group.onMembershipEnded(groupIdHex)
+        }
     }
 
     /**

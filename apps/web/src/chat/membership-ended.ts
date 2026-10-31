@@ -4,6 +4,16 @@
 /**
  * ADR-0045 UX §6.2 — the end of your own membership.
  *
+ * ## Since ADR-0087 section 9
+ *
+ * A person out of a group loses it: `membership-end.ts` carries that out, and
+ * the view is gone before any of this applies. What is below now describes one
+ * device only: one whose own leaf was retired while the account stays in the
+ * group (ADR-0050). It keeps its history and the ended presentation here
+ * (the terminal row, the withdrawn composer, the frozen roster, `Delete this
+ * chat`) until it is re-admitted. "The answer to keep the history is yes"
+ * below is true of that device and no other.
+ *
  * ## What this is for
  *
  * The commit that removes your own leaf arrives on an ordinary poll, merges,
@@ -197,12 +207,7 @@ export const DELETE_CHAT_CONTROL = (): string => t("chat.delete.control");
 export const DELETE_CHAT_TITLE = (): string => t("chat.delete.title");
 
 /**
- * §6.2.4 — confirmation body, exact rather than sweeping, and the precision is
- * load-bearing: **the messages really are gone, and the dead MLS handle is
- * not.** `Group` exposes no delete, so the inactive group's state stays in the
- * provider snapshot as inert bytes — inert in the strong sense (it cannot
- * send, decrypt, export or process) but not nothing. A `Group::delete` is a
- * real, small core follow-up this does not ride free.
+ * §6.2.4 — confirmation body, exact rather than sweeping.
  */
 export const DELETE_CHAT_BODY = (): string => t("chat.delete.body");
 

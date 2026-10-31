@@ -194,6 +194,7 @@ import { decideInboundSignaling } from "./call-host-routing";
 import { CallSoundController } from "./CallSoundController";
 import { classifyCallOutcome, type CallLogEntry } from "./call-log";
 import { useCallLog } from "./CallLogContext";
+import { useMembershipEnd } from "../chat/MembershipEndContext";
 import { CallJwtClient, turnProviderForCall } from "./call-jwt-client";
 import { groupPeerAnnouncer } from "./call-relay";
 import {
@@ -501,6 +502,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const ownTileName = (): string =>
     profiles.ownProfile().displayName?.trim() || t("call.participant.you");
   const callLog = useCallLog();
+  const membershipEnd = useMembershipEnd();
   const groupNames = useGroupNames();
 
   // Seals and publishes signaling through the locked, fail-closed-persisting
@@ -527,7 +529,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const [endedForEveryoneNotice, setEndedForEveryoneNotice] = createSignal<string | null>(null);
   let endedForEveryoneTimer: ReturnType<typeof setTimeout> | null = null;
   function showEndedForEveryone(starterName: string | null): void {
-    setEndedForEveryoneNotice(endedForEveryoneLine(starterName));
+    showCallEndedLine(endedForEveryoneLine(starterName));
+  }
+  function showCallEndedLine(line: string): void {
+    setEndedForEveryoneNotice(line);
     if (endedForEveryoneTimer !== null) clearTimeout(endedForEveryoneTimer);
     endedForEveryoneTimer = setTimeout(() => {
       endedForEveryoneTimer = null;
@@ -2249,6 +2254,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       case "end-locally":
         // Nothing can be published to a group this device has left.
         releaseGroupSlot();
+        // ADR-0087 section 9 - the person is out of the group, not only this
+        // device: the same batch is ending the conversation.
+        if (membershipEnd.isEnding(groupIdB64)) showCallEndedLine(t("call.ended.no_longer_in_group"));
         return;
       case "rekey": {
         const id = chats.identity();
@@ -2265,6 +2273,15 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     }
   }
   onCleanup(onGroupMlsIdle(onGroupMlsSettled));
+  // ADR-0087 section 9 - an end heard from the account's other devices: this
+  // group's handle may still be active, so no lock drain ends the call.
+  onCleanup(
+    membershipEnd.registerCallStop((groupIdB64) => {
+      if (groupSlot()?.groupIdB64 !== groupIdB64) return;
+      releaseGroupSlot();
+      showCallEndedLine(t("call.ended.no_longer_in_group"));
+    }),
+  );
   onCleanup(() => {
     if (activeGroupCall !== null) stopGroupHeartbeat(activeGroupCall);
   });

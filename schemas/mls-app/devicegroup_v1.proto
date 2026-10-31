@@ -25,9 +25,10 @@ package lakko.mls_app.devicegroup.v1;
 //   * `ConversationOrder` — explicit display ordering for the
 //                          conversation list (overrides the
 //                          fallback "by latest message" order)
-//   * `FolderChanges`    — a live chat-folder edit (ADR-0058), and
-//                          since ADR-0065 section 4 a live Save /
-//                          Remove of a saved message
+//   * `FolderChanges`    — a live chat-folder edit (ADR-0058), since
+//                          ADR-0065 section 4 a live Save / Remove of
+//                          a saved message, and since ADR-0087 section 9
+//                          a conversation-end register
 //   * `StateSnapshot`    — the catch-up re-send of the whole folded
 //                          state to a device that joined late
 //                          (ADR-0058 section 5)
@@ -292,13 +293,37 @@ message SavedMessage {
     reserved 11 to 15;
 }
 
+// One conversation-end register (ADR-0087 section 9): how this account's
+// membership of a conversation stands, so a device that cannot apply the
+// commit that ended it still hears of it. One register per conversation an
+// end has reached. The fold orders values by (epoch, hlc, canonical bytes):
+// a group keeps its id across a removal and a re-add and its MLS epoch only
+// rises, so the epoch says which event came later whatever the clocks say.
+message ConversationEnd {
+    enum State {
+        // Refused: a register must say what it is.
+        STATE_UNSPECIFIED = 0;
+        // No device of this account is left in the conversation.
+        ENDED = 1;
+        // The account joined again after an end.
+        JOINED = 2;
+    }
+    uint64 hlc = 1;
+    ConversationRef conversation = 2;
+    State state = 3;
+    // The MLS epoch of the end (the epoch the group froze at) or of the join
+    // (the epoch of the Welcome). 0 for a channel, which has none.
+    uint64 epoch = 4;
+    reserved 5 to 7;
+}
+
 // A live edit: only the registers that changed, each with its stamp.
 // At most 1024 registers in total.
 //
 // Named for the chat folders it was built for; since ADR-0065 section 4 it
-// also carries saved-message registers, so a Save or a Remove travels like
-// a folder edit and `StateSnapshot.folders` hands a late device the saved
-// list with no further field.
+// also carries saved-message registers and since ADR-0087 section 9
+// conversation-end registers, so each travels like a folder edit and
+// `StateSnapshot.folders` hands them to a late device with no further field.
 message FolderChanges {
     repeated FolderMeta metas = 1;
     repeated FolderMember members = 2;
@@ -308,7 +333,9 @@ message FolderChanges {
     FolderOrder order = 5;
     // ADR-0065 section 4: saves and removals.
     repeated SavedMessage saved = 6;
-    reserved 7 to 15;
+    // ADR-0087 section 9: ends and joins.
+    repeated ConversationEnd conversation_ends = 7;
+    reserved 8 to 15;
 }
 
 // The catch-up re-send (ADR-0058 section 5): the whole folded state of this
@@ -331,7 +358,8 @@ message StateSnapshot {
     // Absent = none held.
     StampedOrder conversation_order = 2;
 
-    // Folder registers, and the saved-message registers (ADR-0065).
+    // Folder registers, the saved-message registers (ADR-0065) and the
+    // conversation-end registers (ADR-0087).
     FolderChanges folders = 3;
     // 0-based; must be < parts.
     uint32 part = 4;

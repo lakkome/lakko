@@ -578,6 +578,10 @@
       "text": "{name} aramayı herkes için bitirdi",
       "status": "machine"
     },
+    "call.ended.no_longer_in_group": {
+      "text": "Artık bu grupta değilsiniz.",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "Arama şifrelemesi kurulamadı, bu yüzden arama başlamadı.",
       "status": "machine"
@@ -1363,7 +1367,7 @@
       "status": "machine"
     },
     "channels.info.unsubscribe_sub": {
-      "text": "Kanalı listenizden kaldırır ve bu cihaz onu okumayı bırakır. Daha sonra yeniden abone olabilirsiniz.",
+      "text": "Kanalı listenizden kaldırır ve gönderilerini tüm cihazlarınızdan siler. Daha sonra yeniden abone olabilirsiniz.",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1775,7 +1779,7 @@
       "status": "machine"
     },
     "channels.unsubscribe.body": {
-      "text": "Kanal listenizden çıkar ve bu cihaz onu okumayı bırakır. Daha sonra yeniden abone olabilirsiniz.",
+      "text": "Listenizden kalkar ve gönderileri tüm cihazlarınızdan silinir. Daha sonra yeniden abone olabilirsiniz.",
       "status": "machine"
     },
     "channels.unsubscribe.title": {
@@ -2090,6 +2094,14 @@
       "text": "Artık bu grubun üyesi değilsiniz.",
       "status": "machine"
     },
+    "chat.ended.notice": {
+      "text": "Artık {name} içinde değilsiniz.",
+      "status": "machine"
+    },
+    "chat.ended.notice_body": {
+      "text": "Grup ve mesajları cihazlarınızdan silindi.",
+      "status": "machine"
+    },
     "chat.ended.unsent_draft": {
       "text": "Gönderilmemiş taslak",
       "status": "machine"
@@ -2323,7 +2335,7 @@
       "status": "machine"
     },
     "chat.leave.body": {
-      "text": "Bir sahip veya yönetici isteğinizi uygulayana kadar mesaj almaya devam edeceksiniz. Yeniden katılmak için yeni bir davet gerekir.",
+      "text": "Listenizden kalkar ve mesajları tüm cihazlarınızdan silinir. Bir sahip veya yönetici isteğinizi uygulayana kadar mesaj almaya devam edeceksiniz.",
       "status": "machine"
     },
     "chat.leave.confirm": {

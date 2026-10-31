@@ -329,6 +329,36 @@ export async function deleteEntry(id: string): Promise<void> {
 }
 
 /**
+ * Drop every entry of one group (ADR-0087 section 9): whatever it still owed
+ * (a re-publish, a Welcome fan-out) is moot once the group is gone from this
+ * device. No-op when there is nothing to drop.
+ */
+export async function deleteOutboxForGroup(
+  accountIdB64: string,
+  groupIdB64: string,
+): Promise<void> {
+  const db = await openMlsDb();
+  try {
+    const rows = await new Promise<PendingCommitEntry[]>((resolve, reject) => {
+      const tx = db.transaction(OUTBOX_STORE, "readonly");
+      const req = tx.objectStore(OUTBOX_STORE).getAll();
+      req.onsuccess = (): void =>
+        resolve((req.result as PendingCommitEntry[] | undefined) ?? []);
+      req.onerror = (): void =>
+        reject(req.error ?? new Error("commit-outbox getAll failed"));
+    });
+    const victims = rows.filter((r) => r.accountId === accountIdB64 && r.groupId === groupIdB64);
+    if (victims.length === 0) return;
+    const tx = db.transaction(OUTBOX_STORE, "readwrite");
+    const store = tx.objectStore(OUTBOX_STORE);
+    for (const v of victims) store.delete(v.id);
+    await awaitTx(tx, undefined);
+  } finally {
+    db.close();
+  }
+}
+
+/**
  * Purge every entry for an account — logout / recover / forget-device hygiene, so
  * a prior session's pending commits never get swept into a later one. No-op when
  * there is nothing to purge.

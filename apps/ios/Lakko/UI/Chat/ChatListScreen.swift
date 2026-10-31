@@ -156,12 +156,6 @@ public struct ChatListScreen: View {
             // search is over everything (section 2.4).
             .safeAreaInset(edge: .top, spacing: 0) {
               VStack(spacing: 0) {
-                // UX 17.5 — "A device was added to your account", above the
-                // folder bar. Its own view observes the notice, so this
-                // screen is not re-evaluated by it.
-                NewDeviceNoticeBanner(center: .shared, onOpenDevices: onOpenDevices)
-                if let accountNotice { accountNotice }
-                if let recalledNotice { recalledNotice }
                 if showsFolderBar {
                     FolderBar(
                         folders: deviceGroupSync.folders,
@@ -311,7 +305,10 @@ public struct ChatListScreen: View {
                 id: thread.conversationIdHex,
                 kind: kind == .group ? .group : .chat,
                 title: viewModel.title(groupIdHex: thread.groupIdHex),
-                preview: viewModel.preview(thread: thread, isGroup: kind == .group),
+                // UX 9.4 — the row stays while a leave waits, and says so.
+                preview: thread.leaveRequested
+                    ? waitingToLeaveLine
+                    : viewModel.preview(thread: thread, isGroup: kind == .group),
                 lastActivityMs: viewModel.lastMessageMs(thread: thread),
                 unread: UnreadCounting.displayed(
                     local: thread.unread,
@@ -321,10 +318,9 @@ public struct ChatListScreen: View {
                 pinned: flags?.pinned == true,
                 muted: flags?.muted == true,
                 archived: flags?.archived == true,
-                // ADR-0045 UX §6.2.4 — the chat STAYS in the list and gains one
-                // muted line in the slot the preview occupies. Removing it
-                // would delete a transcript the user still has as a side effect
-                // of something somebody else did.
+                // ADR-0045 UX §6.2.4 — a device whose own leaf was retired
+                // keeps the chat, with one muted line in the preview's slot. A
+                // person who is out has no row at all (ADR-0087 section 9).
                 endedLine: chatListLine(
                     membershipState(
                         isActive: !thread.membershipEnded, leaveRequestedAtMs: nil)),
@@ -392,6 +388,25 @@ public struct ChatListScreen: View {
         }
     }
 
+    /// The notices at the top of the list. Rows of the list, not an inset over
+    /// it: an inset stays put while the large title and the search field move,
+    /// so it hid the title and lay across the field on a pull. A `Group`, not a
+    /// stack, so that with no notice the list holds no empty row.
+    private var listNotices: some View {
+        Group {
+            // UX 17.5 — "A device was added to your account". Its own view
+            // observes the notice, so this screen is not re-evaluated by it.
+            NewDeviceNoticeBanner(center: .shared, onOpenDevices: onOpenDevices)
+            // UX 9.1 — removed from a group, anywhere but in it.
+            MembershipEndBanner(
+                center: viewModel.endNotices, onClose: viewModel.closeEndNotice(groupIdHex:))
+            if let accountNotice { accountNotice }
+            if let recalledNotice { recalledNotice }
+        }
+        .listRowInsets(EdgeInsets())
+        .listRowSeparator(.hidden)
+    }
+
     /// One page: All chats (`folder == nil`) or one folder's rows.
     @ViewBuilder
     private func listPage(rows visible: [ConversationListRow], folder: FolderView?) -> some View {
@@ -400,6 +415,7 @@ public struct ChatListScreen: View {
             // Inside a scroll view so the pull gesture works on the empty list
             // too.
             ScrollView {
+                listNotices
                 if let folder {
                     folderEmptyState(folder)
                 } else if query.isEmpty {
@@ -424,6 +440,7 @@ public struct ChatListScreen: View {
         } else {
             let quietCall = callHost.quietIncomingCall
             List {
+                listNotices
                 ForEach(invited) { contact in
                     InvitedChatRow(contact: contact)
                         .listRowSeparator(.hidden)
@@ -1014,6 +1031,14 @@ public final class ChatListViewModel: ObservableObject {
         StateBundle.pendingKnownGroups(joinedGroupIdHexes: repository.knownGroupIdHexes) > 0
     }
 
+    /// UX 9.1 — the notices the banner shows.
+    var endNotices: MembershipEndNoticeCenter { repository.membershipEndNotices }
+
+    /// UX 9.1 — the close icon. The name goes with it.
+    func closeEndNotice(groupIdHex: String) {
+        repository.closeEndNotice(groupIdHex: groupIdHex)
+    }
+
     /// The conversation's kind (ADR-0062, read from the group's own
     /// GroupContext). Routes a tap, splits Chats from Groups and picks the
     /// preview's sender prefix. A two-person group is a group here, on every
@@ -1150,5 +1175,38 @@ struct InvitedChatRow: View {
             .padding(.vertical, 4)
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// UX 9.1 — "You are no longer in {name}." with a close icon, at the top of
+/// Chats. It observes the notices itself, so the list is not re-evaluated by
+/// them. One at a time: closing one shows the next.
+struct MembershipEndBanner: View {
+    @ObservedObject var center: MembershipEndNoticeCenter
+    let onClose: (String) -> Void
+    @ObservedObject private var l10n = Localization.shared
+
+    var body: some View {
+        if let notice = center.notices.first {
+            HStack(alignment: .center, spacing: 12) {
+                Text(l10n.t("chat.ended.notice", texts: ["name": notice.name]))
+                    .font(.subheadline)
+                    .foregroundStyle(Color.lakkoText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button {
+                    onClose(notice.groupIdHex)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel(l10n.t("common.dismiss"))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 4)
+            .background(Color.lakkoSurface)
+        }
     }
 }

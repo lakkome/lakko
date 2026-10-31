@@ -58,8 +58,12 @@ public object ChannelUnsubscribe {
      * tell the server in the background with a client on [baseUrl]. A failure
      * to reach the server is logged; the local state is gone either way (the
      * server's 90-day prune retires a row nobody reads).
+     *
+     * ADR-0087 section 9.5: the row and its posts go from every device of the
+     * person. [tellDevices] says so over the DeviceGroup; a device acting on
+     * that register passes `false`.
      */
-    public fun leave(state: ChannelsUiState, channelId: String, baseUrl: String) {
+    public fun leave(state: ChannelsUiState, channelId: String, baseUrl: String, tellDevices: Boolean = true) {
         val keys = state.subscriberKeysByChannel.value[channelId]?.let {
             ChannelSubscriberKeys(secret = it.secret.copyOf(), publicKey = it.publicKey.copyOf())
         }
@@ -68,6 +72,21 @@ public object ChannelUnsubscribe {
         // ADR-0060 §3 — the server drops the member card with the
         // subscription, so a later subscription uploads afresh.
         ChannelMemberCards.forgetUploads(channelId)
+        // The post log keeps only the channels held, at its next sync.
+        me.lakko.app.feed.requestChannelPostSync()
+        channelRef(channelId)?.let { ref ->
+            scope.launch {
+                try {
+                    val sync = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active
+                    if (tellDevices) sync?.publishConversationEnded(ref, 0u)
+                    sync?.clearConversationRegisters(ref)
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (cause: Throwable) {
+                    Log.w(LOG_TAG, "unsubscribe not told to the other devices: ${cause.javaClass.simpleName}")
+                }
+            }
+        }
         if (keys == null) return
         scope.launch {
             try {
@@ -82,6 +101,45 @@ public object ChannelUnsubscribe {
             }
         }
     }
+
+    /**
+     * This device follows [channelId] again: tell the account's other devices,
+     * or the register keeps saying it left. A first subscription finds no
+     * register and writes none.
+     */
+    public fun noteFollowing(channelId: String) {
+        val ref = channelRef(channelId) ?: return
+        scope.launch {
+            try {
+                me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.publishConversationJoined(ref, 0u)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "following not told to the other devices: ${cause.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /**
+     * ADR-0087 section 9.5 - what a register that says this account left a
+     * channel changes on this device: the channels to drop, given what it
+     * follows. A channel this device publishes is not a subscription.
+     */
+    internal fun channelsToLeave(
+        ended: List<me.lakko.app.chat.HeardConversationEnd>,
+        followed: Set<String>,
+        published: Set<String>,
+    ): List<String> = ended.filter { it.channel }.map { it.idHex }
+        .filter { id -> followed.any { it.equals(id, ignoreCase = true) } && published.none { it.equals(id, ignoreCase = true) } }
+
+    /** The reference a register names [channelId] with. */
+    private fun channelRef(channelId: String): uniffi.lakko_ffi_uniffi.FolderConversationRef? =
+        me.lakko.app.chat.bytesOfHex(channelId)?.let {
+            uniffi.lakko_ffi_uniffi.FolderConversationRef(
+                kind = uniffi.lakko_ffi_uniffi.FolderConversationKind.CHANNEL,
+                id = it,
+            )
+        }
 
     private fun coreSignature(secret: ByteArray, channelId: ByteArray, issuedAtMs: ULong): String {
         val keypair = ChannelSubscriberKeypair.fromSecret(secret)

@@ -166,6 +166,7 @@ import {
   mergeRestoredFold,
   openPersistedFold,
   projectSyncedState,
+  type EndedConversation,
   type SavedEntry,
 } from "./synced-projection";
 import { drainOutbox, type OutboxBatch } from "./folder-outbox";
@@ -186,6 +187,7 @@ import {
 import {
   bytesToHex,
   stampEdits,
+  type ConversationRef,
   type FolderModel,
   type RegisterEdit,
 } from "../../chat/folders/folder-model";
@@ -246,6 +248,9 @@ export interface DeviceGroupSyncApi {
   readonly saved: Accessor<readonly SavedEntry[]>;
   /** Reactive: every blob id a saved message names (lower-case hex). */
   readonly savedBlobIdsHex: Accessor<readonly string[]>;
+  /** ADR-0087 section 9 — reactive: the conversations whose register says
+   *  this account is out of them, from every device. */
+  readonly endedConversations: Accessor<readonly EndedConversation[]>;
   /** Reactive: the conversation lineage registers (ADR-0073 R.5): which
    *  group continues which conversation. Read through `chat/lineage.ts`. */
   readonly lineage: Accessor<readonly LineageEntry[]>;
@@ -309,6 +314,21 @@ export interface DeviceGroupSyncApi {
    * error, it waits in the outbox.
    */
   applyFolderEdits(edits: readonly RegisterEdit[]): Promise<void>;
+
+  /**
+   * ADR-0087 section 9 — this account's membership of a conversation ended,
+   * or it joined one again, at MLS `epoch` (`0n` for a channel). Fold the
+   * register, keep it on disk and send it to the account's other devices.
+   * `false` when there is nothing to tell them (the core's compose returned
+   * nothing), which never stops the wipe. Rejects while the synced state is
+   * not loaded, or when the row could not be written; a send failure is not
+   * an error, the register waits in the outbox.
+   */
+  writeConversationEnd(
+    ref: ConversationRef,
+    state: "ended" | "joined",
+    epoch: bigint,
+  ): Promise<boolean>;
 
   /**
    * ADR-0073 R.5 — record that `successorGroupId` continues the conversation
@@ -425,6 +445,7 @@ export function DeviceGroupSyncProvider(props: {
   const [lineage, setLineageEntries] = createSignal<readonly LineageEntry[]>([]);
   const [saved, setSaved] = createSignal<readonly SavedEntry[]>([]);
   const [savedBlobIdsHex, setSavedBlobIdsHex] = createSignal<readonly string[]>([]);
+  const [endedConversations, setEndedConversations] = createSignal<readonly EndedConversation[]>([]);
   const [linkRecords, setLinkRecords] = createSignal<readonly LinkRecordModel[]>([]);
   const [linkClaimsVersion, setLinkClaimsVersion] = createSignal(0);
   const [outbox, setOutbox] = createSignal<readonly OutboxBatch[]>([]);
@@ -642,6 +663,7 @@ export function DeviceGroupSyncProvider(props: {
     setLineageEntries(p.lineage);
     setSaved(p.saved);
     setSavedBlobIdsHex(p.savedBlobIdsHex);
+    setEndedConversations(p.endedConversations);
     if (wasmSync !== null) setLinkRecords(readLinkRecords(synced, wasmSync.LinkRecordKind.Contact));
     // ADR-0075 (amended 2026-10-13): the recovery address the account's
     // devices keep, for the screens above this provider.
@@ -1050,6 +1072,7 @@ export function DeviceGroupSyncProvider(props: {
     setLineageEntries([]);
     setSaved([]);
     setSavedBlobIdsHex([]);
+    setEndedConversations([]);
     setLinkRecords([]);
     setOutbox([]);
   }
@@ -2665,6 +2688,39 @@ export function DeviceGroupSyncProvider(props: {
     void drainFolderOutbox();
   }
 
+  // ----- The end of a membership (ADR-0087 section 9) ----------------
+
+  async function writeConversationEndImpl(
+    ref: ConversationRef,
+    state: "ended" | "joined",
+    epoch: bigint,
+  ): Promise<boolean> {
+    const { s } = requireReady();
+    const wasm = await loadWasm();
+    if (synced !== s) throw new Error("DeviceGroupSyncProvider is not ready");
+    const hlc = mintHlc();
+    const register =
+      state === "ended"
+        ? s.composeConversationEnded(hlc, ref.kind, ref.id, epoch)
+        : s.composeConversationJoined(hlc, ref.kind, ref.id, epoch);
+    if (register === undefined) return false;
+    const cs = new wasm.FolderChangeSet();
+    try {
+      cs.addConversationEnd(register);
+      s.applyFolderChanges(cs);
+    } finally {
+      cs.free();
+      register.free();
+    }
+    setOutbox((q) => [...q, stampEdits([{ t: "conversation-end", ref }], mintHlc)]);
+    refresh();
+    // On disk before the caller goes on: what comes next deletes what this
+    // register is the only remaining record of.
+    if (!(await persistSyncedNow())) throw new Error("synced state not written");
+    void drainFolderOutbox();
+    return true;
+  }
+
   function scheduleOutboxRetry(): void {
     if (outboxTimer !== null || deviceRemoved()) return;
     outboxTimer = setTimeout(() => {
@@ -2695,8 +2751,13 @@ export function DeviceGroupSyncProvider(props: {
           // Not `StaleBindingError`: a failed batch only stops the drain, and
           // the stale result is dropped below.
           if (!current() || group === null || identity === null) throw new Error("not ready");
-          const cs = buildFolderChangeSet(wasm, batch);
+          const cs = buildFolderChangeSet(wasm, batch, (ref) =>
+            synced?.conversationEnd(ref.kind, ref.id),
+          );
           try {
+            // A conversation-end edit whose register is no longer held sends
+            // nothing, and takes its place in the queue with it.
+            if (cs.registerCount === 0) return;
             const bytes = group.createDeviceGroupFolderChangesMessage(identity, cs, mintHlc());
             await publishGroupMessage(bytes);
           } finally {
@@ -2733,6 +2794,8 @@ export function DeviceGroupSyncProvider(props: {
     pendingFolderSync: () => outbox().length > 0,
     saved,
     savedBlobIdsHex,
+    endedConversations,
+    writeConversationEnd: writeConversationEndImpl,
     lineage,
     setLineage: setLineageImpl,
     linkRecords,

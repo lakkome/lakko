@@ -52,6 +52,7 @@ import { createLongPress } from "../ui/long-press";
 import { currentLanguage, t } from "../l10n";
 import { FolderBar, type FolderTab } from "./folders/FolderBar";
 import { DeviceAddedBanner } from "../devices/DeviceAddedNotice";
+import { MembershipEndBanners } from "./MembershipEndNotices";
 import { RecallDoneNotice } from "../devices/RecallDoneNotice";
 import { KeysRotatedNotice } from "../devices/KeysRotatedNotice";
 import { AddToFolderItems } from "./folders/AddToFolderMenu";
@@ -510,6 +511,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       </label>
       {/* docs/ux/identity-recovery.md 17.5: a device joined the account. */}
       <DeviceAddedBanner />
+      <MembershipEndBanners activeSlug={props.activeGroupIdB64} />
       {/* docs/ux/identity-recovery.md 18.4: the account was taken back here. */}
       <RecallDoneNotice />
       <KeysRotatedNotice />

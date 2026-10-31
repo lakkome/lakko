@@ -578,6 +578,10 @@
       "text": "{name} 为所有人结束了通话",
       "status": "machine"
     },
+    "call.ended.no_longer_in_group": {
+      "text": "你已不在此群组中。",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "无法设置通话加密，因此通话未开始。",
       "status": "machine"
@@ -1363,7 +1367,7 @@
       "status": "machine"
     },
     "channels.info.unsubscribe_sub": {
-      "text": "将频道从你的列表中移除，此设备不再读取它。你以后可以再次订阅。",
+      "text": "将频道从你的列表中移除，并从你的所有设备上删除其帖子。你以后可以重新订阅。",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1775,7 +1779,7 @@
       "status": "machine"
     },
     "channels.unsubscribe.body": {
-      "text": "它会从你的列表中移除，此设备不再读取它。你以后可以再次订阅。",
+      "text": "它会从你的列表中移除，其帖子也会从你的所有设备上删除。你以后可以重新订阅。",
       "status": "machine"
     },
     "channels.unsubscribe.title": {
@@ -2090,6 +2094,14 @@
       "text": "你已不再是此群组的成员。",
       "status": "machine"
     },
+    "chat.ended.notice": {
+      "text": "你已不在 {name} 中。",
+      "status": "machine"
+    },
+    "chat.ended.notice_body": {
+      "text": "该群组及其消息已从你的设备上移除。",
+      "status": "machine"
+    },
     "chat.ended.unsent_draft": {
       "text": "未发送的草稿",
       "status": "machine"
@@ -2323,7 +2335,7 @@
       "status": "machine"
     },
     "chat.leave.body": {
-      "text": "在群主或管理员应用你的请求之前，你会继续收到消息。重新加入需要新的邀请。",
+      "text": "它会从你的列表中移除，其消息也会从你的所有设备上删除。在群主或管理员应用你的请求之前，你会继续收到消息。",
       "status": "machine"
     },
     "chat.leave.confirm": {

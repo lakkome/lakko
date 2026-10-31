@@ -185,7 +185,7 @@ final class BackupApplyTests: XCTestCase {
             contacts: [contactRecord(0x01, "Alice")],
             groupIds: [g1],
             syncedState: try syncedStateBytes(pinning: g1))
-        XCTAssertEqual(parsed.syncedState.first, 0x06)
+        XCTAssertEqual(parsed.syncedState.first, 0x07)
         parsed.syncedState[parsed.syncedState.startIndex] = 0x01
 
         let announced = expectation(forNotification: .lakkoSyncedStateRestored, object: nil)
@@ -1067,9 +1067,7 @@ final class RestoredKnownGroupsLifecycleTests: XCTestCase {
             accountIdentitySeed: seed,
             sessionToken: "t",
             sessionExpiresAtMs: 0))
-        XCTAssertTrue(
-            repo.state.threads.contains { $0.groupIdHex == groupIdHex },
-            "the fixture holds the group")
+        XCTAssertNotNil(repo.groups[groupIdHex], "the fixture holds the group")
         return Fixture(repo: repo, groupIdHex: groupIdHex, accountIdB64: accountIdB64)
     }
 

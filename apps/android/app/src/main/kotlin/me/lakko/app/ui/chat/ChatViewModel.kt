@@ -388,6 +388,23 @@ public class ChatViewModel(
      */
     private val teardownLatch = me.lakko.app.chat.EndedTeardownLatch()
 
+    /**
+     * ADR-0087 section 9 — this account is out of the group and the person is
+     * in the conversation: the dialog, with what the composer held. Held here
+     * from the moment it is seen, so the draft is the one on screen then.
+     */
+    private val mutableEndDialog: MutableStateFlow<me.lakko.app.chat.EndDialog?> = MutableStateFlow(null)
+    internal val endDialog: StateFlow<me.lakko.app.chat.EndDialog?> = mutableEndDialog.asStateFlow()
+
+    /** ADR-0087 section 9.4 — the leave landed on this device: no notice, and
+     *  the screen is about a row that is gone. */
+    private val mutableConversationGone: MutableStateFlow<Boolean> = MutableStateFlow(false)
+    public val conversationGone: StateFlow<Boolean> = mutableConversationGone.asStateFlow()
+
+    /** Whether this screen ever showed the group held, so its absence means
+     *  something. */
+    private var sawConversation: Boolean = false
+
     private val derived: MutableStateFlow<ChatScreenUiState> =
         MutableStateFlow(buildState(repo.state.value, composer.value, typingText = null))
 
@@ -464,6 +481,7 @@ public class ChatViewModel(
                 }
                 lastTypingText = live.typingText
                 derived.value = buildState(repoState, composer.value, live.typingText)
+                noteConversationEnd(repoState)
                 mutableOtherMemberIdentities.value = live.otherIdentities
                 // ADR-0052 decision 3 — the local half of the shared-pin
                 // standing, re-read with the roster (a role change or a
@@ -491,6 +509,13 @@ public class ChatViewModel(
         // on the transition; the latch makes a re-run harmless either way.
         viewModelScope.launch {
             mutableMembership.collect { state ->
+                // A Welcome replaced the group under this screen (a retired
+                // leaf came back): what stopped runs again, and the teardown
+                // is owed again the next time.
+                if (!me.lakko.app.chat.membershipEnded(state)) {
+                    teardownLatch.reset()
+                    mutableBeaconTickerRunning.value = true
+                }
                 me.lakko.app.chat.runEndedTeardown(
                     state = state,
                     latch = teardownLatch,
@@ -1493,6 +1518,40 @@ public class ChatViewModel(
         applyMembership(repo.isGroupActive(groupIdHex))
     }
 
+    /** ADR-0087 section 9 — read off every repository emission. The notice is
+     *  in the state from the moment the end is recorded. */
+    private fun noteConversationEnd(state: me.lakko.app.chat.ChatRepositoryState) {
+        val hex = groupIdHex.lowercase()
+        // The threads leave out what is ending, and a dropped record is not in
+        // them either; read off the state, so no Rust call runs on main.
+        val held = state.threads.any { it.groupIdHex.equals(hex, ignoreCase = true) }
+        val notice = state.endNotices.firstOrNull { it.idHex == hex }
+        if (notice != null) {
+            if (mutableEndDialog.value == null) {
+                mutableEndDialog.value = me.lakko.app.chat.endDialogFor(notice, composer.value.draft)
+            }
+            return
+        }
+        // The notice turned out not to be owed: this person's own leave landed.
+        if (mutableEndDialog.value != null) {
+            mutableEndDialog.value = null
+            mutableConversationGone.value = true
+            return
+        }
+        if (!state.bootstrapped) return
+        if (me.lakko.app.chat.conversationIsGone(sawConversation, held, repo.isEndOwed(hex))) {
+            mutableConversationGone.value = true
+        }
+        if (held) sawConversation = true
+    }
+
+    /** `OK` on the dialog: the name goes, and the screen goes back to Chats. */
+    public fun onEndNoticeAcknowledged() {
+        mutableEndDialog.value = null
+        mutableConversationGone.value = true
+        repo.dismissEndNotice(groupIdHex)
+    }
+
     /** [refreshMembership] with the core's `isActive` already read (off main). */
     private fun applyMembership(isActive: Boolean?) {
         mutableMembership.value = me.lakko.app.chat.membershipState(
@@ -2225,12 +2284,11 @@ public class ChatViewModel(
      * confirmation says so in as many words, and that is the only protection
      * there is.
      *
-     * Synchronous, so the caller can navigate away on the next line: the
-     * repository's work is local (a message-log rewrite plus four
-     * `SharedPreferences` rows) and the push subscription is already gone by
-     * this point — the §6.2.8 teardown retires it at the moment of the
-     * eviction, not at the moment of the delete, so a user who never presses
-     * this button still stops being woken.
+     * The caller can navigate away on the next line: the row goes at once and
+     * the walk behind it resumes after a crash ([me.lakko.app.chat.OwedEnd]).
+     * The push subscription is already gone by this point — the §6.2.8 teardown
+     * retires it at the moment of the eviction, not at the moment of the
+     * delete, so a user who never presses this button still stops being woken.
      */
     public fun onDeleteChat() {
         repo.deleteEndedChat(groupIdHex)
@@ -2816,8 +2874,11 @@ public class ChatViewModel(
     }
 
     private fun scheduleDraftBroadcast(text: String, gid: ByteArray) {
-        if (text == lastBroadcastDraft) return
+        // Cancelled first: a message sent within the debounce leaves the
+        // composer where the last write left it, and the pending write would
+        // save what was sent.
         draftBroadcastJob?.cancel()
+        if (text == lastBroadcastDraft) return
         draftBroadcastJob = viewModelScope.launch {
             delay(DRAFT_DEBOUNCE_MS)
             lastBroadcastDraft = text

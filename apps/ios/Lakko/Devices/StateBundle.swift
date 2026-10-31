@@ -994,6 +994,20 @@ public enum StateBundle {
         defaults.removeObject(forKey: legacyKnownGroupsKey)
     }
 
+    /// A group the bundle named ended for this account (ADR-0087 section 9):
+    /// this device will not join it, and "Synchronizing..." does not wait for
+    /// it.
+    static func forgetKnownGroup(
+        groupIdHex: String, accountIdB64: String, defaults: UserDefaults = .standard
+    ) {
+        guard let id = hexDecode(groupIdHex) else { return }
+        let known = loadKnownGroupIds(accountIdB64: accountIdB64, defaults: defaults)
+        let kept = known.filter { $0 != base64Encode(id) }
+        if kept.count != known.count {
+            saveKnownGroupIds(kept, accountIdB64: accountIdB64, defaults: defaults)
+        }
+    }
+
     /// How many known groups this device has not joined yet. Clears the stored
     /// list once every known group is held, so the label cannot outlive its
     /// cause. `joinedGroupIdHexes` are this device's hex group ids.

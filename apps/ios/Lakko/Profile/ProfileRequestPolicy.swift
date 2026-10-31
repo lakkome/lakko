@@ -188,6 +188,15 @@ public final class ProfileRequestStore {
         defaults.set(current, forKey: Self.key(accountIdB64))
     }
 
+    /// Forget one group this device is no longer in (ADR-0087 section 9).
+    public func forgetGroup(accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        var current = map(accountIdB64: accountIdB64)
+        guard current.removeValue(forKey: groupIdHex) != nil else { return }
+        defaults.set(current, forKey: Self.key(accountIdB64))
+    }
+
     public func clear(accountIdB64: String) {
         defaults.removeObject(forKey: Self.key(accountIdB64))
     }

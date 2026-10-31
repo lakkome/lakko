@@ -4,34 +4,16 @@
 /**
  * ADR-0045 UX §6 — the `Leave this group?` confirmation.
  *
- * ## What is new here, and what is not
- *
- * The copy is §6's, verbatim, and was already correct in the app. What was
- * missing is that it lived as a string literal inside `routes/Chat.tsx`'s
- * `onLeaveGroup`, which `vitest.config.ts` cannot load at all (plain `node`,
- * no jsdom, no Solid JSX transform) — so the one exit from an unwithdrawable
- * action had no assertion anywhere. Moving it here is the same split
- * `remove-member-confirm.ts` already uses, for the same reason.
- *
  * ## Why the confirmation is the LAST exit
  *
  * §3: once published, a request is in every member's proposal store and dies
  * only when some commit lands. The core has no withdraw and MLS offers no
  * mechanism for one, so a `Cancel` afterwards could not be honoured and must
- * not be built. As with removing somebody else, that argument does not weaken
- * on the direct-commit path — it sharpens: there the departure lands at once.
+ * not be built.
  *
- * ## One thing deliberately NOT done here
- *
- * `remove-member-confirm.ts` drops its body on the direct-commit path,
- * because "they will keep receiving messages until an owner or an admin
- * applies the change" is false when the commit lands immediately. The same
- * reasoning would apply to this body's FIRST sentence — and §6 nevertheless
- * writes one unconditional body for leaving, which is what the app has always
- * shown. Splitting it would be inventing copy this design never wrote, in a
- * flow whose second sentence (`You will need a new invite to rejoin.`) is
- * true on both paths. Left as specified, and flagged rather than silently
- * diverged from.
+ * The copy is `docs/ux/group-and-channel-privacy.md` section 9.4, and lives
+ * here rather than in `routes/Chat.tsx` so the one exit from an unwithdrawable
+ * action has an assertion somewhere.
  */
 
 import { type ConfirmRequest, namedActionKey } from "../ui/confirm-dialog";
@@ -41,12 +23,9 @@ import { t } from "../l10n";
 export const LEAVE_GROUP_TITLE = (): string => t("chat.leave.title");
 
 /**
- * §6 — the body.
- *
- * The first sentence is §3's honesty rule applied to your own departure: you
- * are still cryptographically in the group — still receiving, still able to
- * decrypt — until the commit lands, and the UI must not imply otherwise. The
- * second is the fact that decides whether to press the button at all.
+ * The body: what leaving does, then §3's honesty rule applied to your own
+ * departure: you are still in the group until the commit lands, and the UI
+ * must not imply otherwise.
  */
 export const LEAVE_GROUP_BODY = (): string => t("chat.leave.body");
 

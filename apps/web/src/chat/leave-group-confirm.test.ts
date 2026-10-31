@@ -26,8 +26,8 @@ describe("the leave-group confirmation", () => {
     const c = leaveGroupConfirmation({ groupLabel: null });
     expect(c.title).toBe("Leave this group?");
     expect(c.body).toBe(
-      "You will keep receiving messages until an owner or an admin applies " +
-        "your request. You will need a new invite to rejoin.",
+      "It leaves your list and its messages are removed from all your devices. " +
+        "You keep receiving messages until an owner or an admin applies your request.",
     );
     expect(LEAVE_GROUP_TITLE()).toBe(c.title);
     expect(LEAVE_GROUP_BODY()).toBe(c.body);

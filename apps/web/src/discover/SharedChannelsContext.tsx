@@ -80,6 +80,9 @@ export interface SharedChannelsApi {
   setSharing(entry: ActiveGroup, on: boolean): Promise<void>;
   /** File an incoming list. Never throws; `null` when nothing was decided. */
   receive(entry: ActiveGroup, event: SharedChannelsEvent): Promise<SharedChannelsVerdict | null>;
+  /** Drop everything held for a group: the lists its members shared, what
+   *  was sent there, the switch (ADR-0087 section 9). */
+  forgetGroup(groupIdB64: string): Promise<void>;
   /** The group gained a member: schedule the verbatim re-send. */
   groupGrew(groupIdB64: string): void;
 }
@@ -298,6 +301,28 @@ export function SharedChannelsProvider(props: { children: JSX.Element }): JSX.El
         console.warn("shared channels receive failed", err);
         return null;
       }
+    },
+    async forgetGroup(groupIdB64) {
+      const account = accountId();
+      if (account === null) return;
+      await withRoutingRowLock(account, groupIdB64, async () => {
+        await opened;
+        if (
+          !current.received.has(groupIdB64) &&
+          !current.sent.has(groupIdB64) &&
+          !current.shareOn.has(groupIdB64)
+        ) {
+          return;
+        }
+        const received = new Map(current.received);
+        received.delete(groupIdB64);
+        const sent = new Map(current.sent);
+        sent.delete(groupIdB64);
+        const shareOn = new Set(current.shareOn);
+        shareOn.delete(groupIdB64);
+        install({ ...current, received, sent, shareOn });
+        await persist(account);
+      });
     },
     groupGrew(groupIdB64) {
       if (current.shareOn.has(groupIdB64)) scheduler.groupGrew(groupIdB64);

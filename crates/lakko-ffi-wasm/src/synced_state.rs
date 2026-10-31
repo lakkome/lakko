@@ -30,6 +30,22 @@
 //! gets the list in the snapshot parts. Read with `saved()`, `isSaved` and
 //! `savedBlobIds()`.
 //!
+//! ## Conversation ends (ADR-0087 section 9)
+//!
+//! One more register of the same state. Ask
+//! `composeConversationEnded` / `composeConversationJoined` on the state,
+//! passing the MLS epoch (`Group.epoch`; `0n` for a channel): `undefined`
+//! means there is nothing to tell the other devices, so go on with the rest of
+//! the end without it. Otherwise hand the register to
+//! `FolderChangeSet.addConversationEnd`, fold with `applyFolderChanges` and
+//! send with `DeviceGroup.createDeviceGroupFolderChangesMessage`. A received
+//! one arrives through `applyPayload`; read `endedConversations()` after every
+//! apply and at launch. The register's `epoch` is what
+//! `Group.deleteAfterEndedElsewhere` takes. A device holding an active group
+//! at an epoch ABOVE a register's has come back since that end: it does not
+//! act on the register, and answers with `composeConversationJoined` at its
+//! own epoch.
+//!
 //! Blob ids cross this boundary **flat-concatenated**: one `Uint8Array`
 //! holding N ids of 32 bytes each, in and out. A length that is not a
 //! multiple of 32 is refused.
@@ -151,6 +167,49 @@ impl FolderConversationRef {
     #[wasm_bindgen(getter)]
     pub fn id(&self) -> Vec<u8> {
         self.id.clone()
+    }
+}
+
+/// How this account's membership of a conversation stands, stamped (ADR-0087
+/// section 9). Build it with `SyncedState.composeConversationEnded` /
+/// `composeConversationJoined`.
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConversationEndRegister {
+    inner: Stamped<core::ConversationEnd>,
+}
+
+impl From<Stamped<core::ConversationEnd>> for ConversationEndRegister {
+    fn from(inner: Stamped<core::ConversationEnd>) -> Self {
+        Self { inner }
+    }
+}
+
+#[wasm_bindgen]
+impl ConversationEndRegister {
+    /// HLC stamp of this register.
+    #[wasm_bindgen(getter)]
+    pub fn hlc(&self) -> u64 {
+        self.inner.hlc
+    }
+
+    /// The conversation.
+    #[wasm_bindgen(getter)]
+    pub fn conversation(&self) -> FolderConversationRef {
+        self.inner.value.conversation.clone().into()
+    }
+
+    /// `true` for an end, `false` for a join after one.
+    #[wasm_bindgen(getter)]
+    pub fn ended(&self) -> bool {
+        self.inner.value.state == core::ConversationEndState::Ended
+    }
+
+    /// The MLS epoch of the end or the join; `0n` for a channel. The fold
+    /// orders by this before the stamp.
+    #[wasm_bindgen(getter)]
+    pub fn epoch(&self) -> u64 {
+        self.inner.value.epoch
     }
 }
 
@@ -340,6 +399,12 @@ impl FolderChangeSet {
             .saved
             .push(saved_removed(hlc, ref_kind, ref_id, message_id).map_err(js)?);
         Ok(())
+    }
+
+    /// Add a conversation-end register a `compose` call returned.
+    #[wasm_bindgen(js_name = addConversationEnd)]
+    pub fn add_conversation_end(&mut self, register: &ConversationEndRegister) {
+        self.inner.conversation_ends.push(register.inner.clone());
     }
 
     /// Number of registers carried.
@@ -1537,6 +1602,90 @@ impl SyncedState {
         self.with(|s| s.saved_blob_ids().concat())
     }
 
+    /// The register to write now that this account's membership has ended,
+    /// or `undefined` when there is nothing to tell the other devices (the
+    /// register already says so, the account has rejoined at a later epoch, or
+    /// `conversationEndsMaxClient()` are held). `epoch` is the epoch the group
+    /// froze at, `0n` for a channel. `undefined` never stops the end itself:
+    /// the device still wipes the conversation. Folds nothing. Throws on a
+    /// conversation reference that is not well formed.
+    #[wasm_bindgen(js_name = composeConversationEnded)]
+    pub fn compose_conversation_ended(
+        &self,
+        hlc: u64,
+        ref_kind: u8,
+        ref_id: &[u8],
+        epoch: u64,
+    ) -> Result<Option<ConversationEndRegister>, JsError> {
+        let conversation = cref(ref_kind, ref_id)?;
+        self.with(|s| s.compose_conversation_ended(hlc, &conversation, epoch))?
+            .map(|r| r.map(Into::into))
+            .map_err(js)
+    }
+
+    /// The register to write now that this account has joined a conversation,
+    /// or `undefined` when no end is held to clear: a first join writes
+    /// nothing. `epoch` is the epoch the Welcome joined at, `0n` for a
+    /// channel. Folds nothing. Throws on a conversation reference that is not
+    /// well formed.
+    #[wasm_bindgen(js_name = composeConversationJoined)]
+    pub fn compose_conversation_joined(
+        &self,
+        hlc: u64,
+        ref_kind: u8,
+        ref_id: &[u8],
+        epoch: u64,
+    ) -> Result<Option<ConversationEndRegister>, JsError> {
+        let conversation = cref(ref_kind, ref_id)?;
+        self.with(|s| s.compose_conversation_joined(hlc, &conversation, epoch))?
+            .map(|r| r.map(Into::into))
+            .map_err(js)
+    }
+
+    /// The register held for a conversation, a "joined" included; `undefined`
+    /// when no end ever reached it or the reference is not well formed.
+    #[wasm_bindgen(js_name = conversationEnd)]
+    pub fn conversation_end(
+        &self,
+        ref_kind: u8,
+        ref_id: &[u8],
+    ) -> Result<Option<ConversationEndRegister>, JsError> {
+        let Ok(kind) = ConversationRefKind::from_wire(i64::from(ref_kind)) else {
+            return Ok(None);
+        };
+        let conversation = ConversationRef {
+            kind,
+            id: ref_id.to_vec(),
+        };
+        self.with(|s| s.conversation_end(&conversation).map(Into::into))
+    }
+
+    /// Whether this account's membership of a conversation has ended. `false`
+    /// for one never ended, for one joined again since, and for a reference
+    /// that is not well formed.
+    #[wasm_bindgen(js_name = isConversationEnded)]
+    pub fn is_conversation_ended(&self, ref_kind: u8, ref_id: &[u8]) -> Result<bool, JsError> {
+        let Ok(kind) = ConversationRefKind::from_wire(i64::from(ref_kind)) else {
+            return Ok(false);
+        };
+        let conversation = ConversationRef {
+            kind,
+            id: ref_id.to_vec(),
+        };
+        self.with(|s| s.is_conversation_ended(&conversation))
+    }
+
+    /// Every conversation whose register says ended, by `(kind, id)`.
+    #[wasm_bindgen(js_name = endedConversations)]
+    pub fn ended_conversations(&self) -> Result<Vec<ConversationEndRegister>, JsError> {
+        self.with(|s| {
+            s.ended_conversations()
+                .into_iter()
+                .map(Into::into)
+                .collect()
+        })
+    }
+
     /// The greatest stamp held, or 0. Seed the HLC above it after a restore.
     #[wasm_bindgen(js_name = maxHlc)]
     pub fn max_hlc(&self) -> Result<u64, JsError> {
@@ -1669,6 +1818,15 @@ pub fn mint_folder_id() -> Vec<u8> {
 #[must_use]
 pub fn saved_max_client() -> u32 {
     u32::try_from(core::SAVED_MAX_CLIENT).unwrap_or(u32::MAX)
+}
+
+/// How many conversation-end registers a client writes:
+/// `composeConversationEnded` answers `undefined` for a new conversation past
+/// it. A client-side limit, chosen; NOT a decode bound.
+#[wasm_bindgen(js_name = conversationEndsMaxClient)]
+#[must_use]
+pub fn conversation_ends_max_client() -> u32 {
+    u32::try_from(core::CONVERSATION_ENDS_MAX_CLIENT).unwrap_or(u32::MAX)
 }
 
 /// How many saved registers a client puts in one change set. A larger
@@ -2152,8 +2310,81 @@ mod tests {
         assert_eq!(saved_removed(1, 1, &CHAT, 7).map(|_| ()), Ok(()));
     }
 
+    fn end_of(s: &SyncedState, hlc: u64, epoch: u64) -> Option<ConversationEndRegister> {
+        s.compose_conversation_ended(hlc, 2, &CHAT, epoch)
+            .unwrap_or_else(|_| unreachable!())
+    }
+
+    fn join_of(s: &SyncedState, hlc: u64, epoch: u64) -> Option<ConversationEndRegister> {
+        s.compose_conversation_joined(hlc, 2, &CHAT, epoch)
+            .unwrap_or_else(|_| unreachable!())
+    }
+
+    fn fold_end(s: &SyncedState, register: &ConversationEndRegister) {
+        let mut c = FolderChangeSet::new();
+        c.add_conversation_end(register);
+        assert_eq!(c.register_count(), 1);
+        assert!(apply(s, &c));
+    }
+
+    /// An end, its reads, a late device, and a join clearing it.
+    #[test]
+    fn a_conversation_end_folds_reads_and_clears() {
+        let s = SyncedState::new();
+        // A first join leaves no register.
+        assert_eq!(join_of(&s, 1, 3), None);
+
+        let end = end_of(&s, 5, 7).unwrap_or_else(|| unreachable!());
+        assert!(end.ended());
+        assert_eq!((end.hlc(), end.epoch()), (5, 7));
+        assert_eq!(end.conversation().id(), CHAT.to_vec());
+        fold_end(&s, &end);
+        assert_eq!(s.is_conversation_ended(2, &CHAT).ok(), Some(true));
+        assert_eq!(s.is_conversation_ended(9, &CHAT).ok(), Some(false));
+        let listed = s.ended_conversations().unwrap_or_default();
+        assert_eq!(listed, vec![end.clone()]);
+        // The same end from another device tells nobody anything.
+        assert_eq!(end_of(&s, 9, 7), None);
+
+        assert_eq!(
+            s.snapshot_parts().unwrap_or_default()[0].entry_count(),
+            1,
+            "the snapshot carries it"
+        );
+        let back = SyncedState::from_bytes(&s.to_bytes().unwrap_or_default()).unwrap_or_default();
+        assert_eq!(back.is_conversation_ended(2, &CHAT).ok(), Some(true));
+
+        let join = join_of(&s, 6, 9).unwrap_or_else(|| unreachable!());
+        assert!(!join.ended());
+        fold_end(&s, &join);
+        assert_eq!(s.is_conversation_ended(2, &CHAT).ok(), Some(false));
+        assert_eq!(
+            s.conversation_end(2, &CHAT)
+                .ok()
+                .flatten()
+                .map(|r| r.epoch()),
+            Some(9)
+        );
+        // An end older than the join: nothing to write, and a stale one that
+        // arrives anyway does not stand.
+        assert_eq!(end_of(&s, 99, 7), None);
+        assert!(!s
+            .apply_folder_changes(&{
+                let mut c = FolderChangeSet::new();
+                c.add_conversation_end(&end);
+                c
+            })
+            .unwrap_or(true));
+        assert_eq!(s.is_conversation_ended(2, &CHAT).ok(), Some(false));
+    }
+
     #[test]
     fn the_client_limits_are_the_core_constants() {
+        assert_eq!(conversation_ends_max_client(), 4096);
+        assert_eq!(
+            conversation_ends_max_client() as usize,
+            core::CONVERSATION_ENDS_MAX_CLIENT
+        );
         assert_eq!(saved_max_client(), 2000);
         assert_eq!(saved_max_per_change_set(), 32);
         assert_eq!(saved_max_client() as usize, core::SAVED_MAX_CLIENT);

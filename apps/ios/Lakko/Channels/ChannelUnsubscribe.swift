@@ -11,6 +11,34 @@ import LakkoCore
 /// row, its seed envelopes and its member card.
 enum ChannelUnsubscribe {
 
+    /// UX 9.5 — stop following `channelId` on this device: the server row, the
+    /// keys, the row and its posts. The local state goes whatever the network
+    /// does (a failure is logged). The keys are captured before they are
+    /// forgotten: the request is signed by them. The posts leave the feed's
+    /// log at its next sync, which keeps only the channels in the list.
+    @MainActor
+    static func stopFollowing(state: ChannelsUiState, channelId: String) {
+        if let keys = state.subscriberKeysByChannel[channelId] {
+            Task { await run(keys: keys, channelId: channelId) }
+        }
+        ChannelMemberCards.forgetUploads(channelId: channelId)
+        state.clearSubscriberKeys(channelId)
+        state.removeChannel(channelId)
+        // ADR-0078 section 9 — the channel's members hold this account's one
+        // `channel` key: the registration sees the channel gone and rotates it.
+        ReachCenter.shared.sync()
+    }
+
+    /// ADR-0087 section 9 — the account's other devices said this channel
+    /// ended. A channel this device publishes is not its to drop: unsubscribing
+    /// is a subscriber's act.
+    @MainActor
+    static func endedElsewhere(state: ChannelsUiState, channelIdHex: String) {
+        guard let channel = state.channels.first(where: { $0.id.lowercased() == channelIdHex.lowercased() }),
+              state.keysByChannel[channel.id] == nil else { return }
+        stopFollowing(state: state, channelId: channel.id)
+    }
+
     /// The signed request for leaving `channelId` with `keys`, stamped
     /// `issuedAtMs` (this device's clock; the server accepts it within its
     /// freshness window).

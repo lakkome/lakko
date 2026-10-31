@@ -499,6 +499,28 @@ The device, in this order, from one durable owed record:
 A device that hears of it from the register does 3 to 5 without applying the commit.
 This is what reaches a device offline past the journal's 30-day retention.
 
+**Built 2026-10-31 in the core, with one change to step 2.** The register carries the
+MLS epoch of the end, and of a join, and the fold orders it by `(epoch, stamp,
+canonical bytes)`, not by the stamp alone. By stamps a device that was offline across
+a removal and a re-add would apply the old removal when it came back, write "ended"
+with the newest stamp of all, and delete the group from every device that had rejoined.
+A group keeps its id through both events and its epoch only rises, so the epoch says
+which came later whatever the clocks say. A channel has no epoch and writes 0, so
+there the stamp decides, as written above. `Group::delete` became two entry points:
+`delete` for a group that ended here, and `delete_after_ended_elsewhere(identity,
+ended_epoch)` for a device acting on the register, which refuses an active group above
+that epoch. A device that holds such a group has come back since, and answers with a
+`joined` register.
+
+The register is never dropped: the journal's 30 days bound what a device can read, not
+how long it can stay offline, and a device past that horizon catches up from the
+snapshot, so no age can be shown safe. What bounds it is a client-side limit of 4096
+registers (`CONVERSATION_ENDS_MAX_CLIENT`, chosen, about 230 KiB at rest), past which
+a device still wipes a conversation but stops telling its other devices, and a first
+join writes no register at all. Whether a person left or was removed is not in the
+register, so a device that hears of it from the register shows the notice for a leave
+made on another device.
+
 **Re-added.** A Welcome makes a new conversation under the same group id with empty
 stores, which is what "only new messages" means. The register is cleared by a stamp
 newer than the end.

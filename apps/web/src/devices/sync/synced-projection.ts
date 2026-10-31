@@ -14,6 +14,7 @@
  */
 
 import type {
+  ConversationEndRegister as WasmConversationEndRegister,
   FolderChangeSet as WasmFolderChangeSet,
   FolderConversationRef as WasmRef,
   SyncedState as WasmSyncedState,
@@ -49,6 +50,15 @@ export interface SyncedProjection {
   readonly saved: readonly SavedEntry[];
   /** Every blob id a saved message names, lower-case hex (the keeps). */
   readonly savedBlobIdsHex: readonly string[];
+  /** ADR-0087 section 9 — the conversations whose register says ended. */
+  readonly endedConversations: readonly EndedConversation[];
+}
+
+/** A conversation this account's register says it is out of. */
+export interface EndedConversation {
+  readonly ref: ConversationRef;
+  /** The MLS epoch of the end; `0n` for a channel. */
+  readonly epoch: bigint;
 }
 
 /** One saved message, as the Saved screen draws it. */
@@ -170,17 +180,31 @@ export function projectSyncedState(state: WasmSyncedState): SyncedProjection {
     v.free();
   }
   const savedBlobIdsHex = splitIds(state.savedBlobIds());
-  return { drafts, flags, readCursors, order, folders, lineage, saved, savedBlobIdsHex };
+  const endedConversations: EndedConversation[] = [];
+  for (const r of state.endedConversations()) {
+    const c = r.conversation;
+    const kind = c.kind;
+    if (kind === 1 || kind === 2 || kind === 3) {
+      endedConversations.push({ ref: { kind: kind as RefKind, id: c.id }, epoch: r.epoch });
+    }
+    c.free();
+    r.free();
+  }
+  return { drafts, flags, readCursors, order, folders, lineage, saved, savedBlobIdsHex, endedConversations };
 }
 
 /**
  * The wasm change set for one edit: exactly the stamped registers given,
  * nothing else. The caller folds it locally AND sends it, then frees it.
  * Throws when a folder id is not 16 bytes or a register breaks a bound.
+ *
+ * `heldEnd` reads the conversation-end register a `conversation-end` edit
+ * names; with none held (a fold that came back empty) the edit adds nothing.
  */
 export function buildFolderChangeSet(
   wasm: Pick<Wasm, "FolderChangeSet">,
   edits: readonly StampedEdit[],
+  heldEnd?: (ref: ConversationRef) => WasmConversationEndRegister | undefined,
 ): WasmFolderChangeSet {
   const cs = new wasm.FolderChangeSet();
   const fid = (hex: string): Uint8Array => {
@@ -228,6 +252,14 @@ export function buildFolderChangeSet(
         case "saved-removed":
           cs.addSavedRemoved(e.hlc, e.ref.kind, e.ref.id, e.messageId);
           break;
+        case "conversation-end": {
+          const register = heldEnd?.(e.ref);
+          if (register !== undefined) {
+            cs.addConversationEnd(register);
+            register.free();
+          }
+          break;
+        }
       }
     }
     cs.validate();

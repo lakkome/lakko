@@ -86,6 +86,7 @@ import { clearLastObservedOwnerForAccount } from "../chat/ownership-transfer";
 import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 import { clearRemovedDevicesForAccount } from "../chat/device-readmission";
 import { clearKnockCursorsForAccount } from "../chat/knock-cursor";
+import { deleteMembershipEndRow } from "../chat/membership-end-idb";
 import { deleteGroupClosedRow } from "../chat/group-closed-idb";
 import { deleteGroupNameRow } from "../chat/group-name-idb";
 import { deletePinRow } from "../chat/pin-idb";
@@ -218,6 +219,9 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "avatars", run: () => deleteAvatarCache(accountIdB64) },
     { name: "group-names", run: () => deleteGroupNameRow(accountIdB64) },
     { name: "group-closed", run: () => deleteGroupClosedRow(accountIdB64) },
+    // ADR-0087 section 9: ends under way, the notices not yet closed and the
+    // Welcomes held.
+    { name: "membership-end", run: () => deleteMembershipEndRow(accountIdB64) },
     { name: "registrar-seeds", run: () => deleteRegistrarSeedRow(accountIdB64) },
     { name: "pending-root-seeds", run: () => deletePendingRootSeedRow(accountIdB64) },
     { name: "pins", run: () => deletePinRow(accountIdB64) },

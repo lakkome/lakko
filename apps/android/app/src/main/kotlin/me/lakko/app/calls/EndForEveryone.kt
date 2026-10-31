@@ -148,7 +148,12 @@ public class EndedForEveryoneNotice(
     /** Show the line for [starterName] (`null` when the device cannot name
      *  the starter). A second end inside the window restarts it. */
     public fun show(starterName: String?) {
-        mutableLine.value = endedForEveryoneLine(starterName)
+        showLine(endedForEveryoneLine(starterName))
+    }
+
+    /** Show [line]: why a call closed that this device did not hang up. */
+    public fun showLine(line: UiText) {
+        mutableLine.value = line
         clear?.cancel()
         clear = scope.launch {
             delay(holdMs)

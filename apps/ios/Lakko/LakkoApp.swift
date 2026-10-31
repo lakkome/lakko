@@ -399,8 +399,11 @@ struct LakkoApp: App {
         // state runs once it is loaded, and every change of the register
         // (this device, a sibling, a restored backup) re-evaluates the
         // automatic re-seal.
-        sync.onSyncedStateReady = { [weak auth, weak sync] in
+        sync.onSyncedStateReady = { [weak auth, weak sync, weak chat] in
             accountProtection.syncedStateReady()
+            // ADR-0087 section 9 — step 2 of an owed end waits for this.
+            chat?.applyHeardEnds()
+            chat?.resumeOwedEnds()
             // ADR-0076 — the own-username register: seeded once from the
             // local name, or a name written elsewhere adopted.
             Task { await auth?.ownUsernameRegisterChanged(sync?.ownUsername) }
@@ -548,6 +551,17 @@ struct LakkoApp: App {
             .receive(on: RunLoop.main)
             .sink { [weak chat] entries in chat?.applyLineage(entries) }
         chat.applyLineage(sync.lineage)
+        // ADR-0087 section 9 — the end of a membership travels between the
+        // account's devices as a register of the same state. Read after every
+        // change of the fold; delivered on the main run loop, so the property
+        // holds the new value by then.
+        chat.conversationEndSync = sync
+        chat.conversationEndsWatch = sync.$endedConversations
+            .receive(on: RunLoop.main)
+            .sink { [weak chat] _ in
+                chat?.applyHeardEnds()
+                chat?.resumeOwedEnds()
+            }
         chat.lineageWriter = { [weak sync] successor, root in
             await sync?.setLineage(successorGroupId: successor, rootConversationId: root) ?? false
         }
@@ -691,6 +705,8 @@ struct LakkoApp: App {
                     // ADR-0080 — the first foreground counts as an action,
                     // and a growth re-send owed from the background goes.
                     DeviceCardCenter.shared.noteForeground()
+                    // ADR-0087 section 9 — an end a wake only recorded.
+                    services.chatRepository.resumeOwedEnds()
                 }
             }
             // ADR-0061 — the mirrored names carry words of the interface
@@ -1288,6 +1304,17 @@ private final class SessionModels: ObservableObject {
             .sink { [weak searchSession] in
                 MainActor.assumeIsolated { searchSession?.noteContactsChanged() }
             }
+        // ADR-0087 section 9 — a channel's end, in both directions.
+        channels.onUnsubscribedHere = { [weak chatRepository] channelId in
+            chatRepository?.noteChannelUnsubscribed(channelIdHex: channelId.lowercased())
+        }
+        channels.onSubscribedHere = { [weak chatRepository] channelId in
+            chatRepository?.noteChannelSubscribed(channelIdHex: channelId.lowercased())
+        }
+        chatRepository.onChannelEndedElsewhere = { [weak channels] channelIdHex in
+            guard let channels else { return }
+            ChannelUnsubscribe.endedElsewhere(state: channels, channelIdHex: channelIdHex)
+        }
         let hub = chatRepository.sharedChannels
         // ADR-0059 section 6 — the listed channels this device follows, as the
         // share rule reads them: subscribed (a subscriber key is held), listed

@@ -358,6 +358,14 @@ public object PushRoutingSecretStore {
         groupIdHex: String,
     ): Boolean = openPrefs(context).contains(rowKey(accountIdB64, groupIdHex))
 
+    /** Erase the secret of one group (ADR-0087 section 9): the wake of a group
+     *  this device is out of opens nothing here. */
+    public fun remove(context: Context, accountIdB64: String, groupIdHex: String) {
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            openPrefs(context).edit().remove(rowKey(accountIdB64, groupIdHex)).apply()
+        }
+    }
+
     /**
      * Erase EVERY secret held for [accountIdB64] (all groups).
      * Called from `ChatRepository.forgetDevice` alongside the other

@@ -578,6 +578,10 @@
       "text": "{name} encerrou a chamada para todos",
       "status": "machine"
     },
+    "call.ended.no_longer_in_group": {
+      "text": "Você não está mais neste grupo.",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "Não foi possível configurar a criptografia da chamada, então a chamada não começou.",
       "status": "machine"
@@ -1363,7 +1367,7 @@
       "status": "machine"
     },
     "channels.info.unsubscribe_sub": {
-      "text": "Remove o canal da sua lista e faz este dispositivo parar de lê-lo. Você pode se inscrever de novo depois.",
+      "text": "Tira o canal da sua lista e remove as publicações dele de todos os seus dispositivos. Você pode se inscrever de novo depois.",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1775,7 +1779,7 @@
       "status": "machine"
     },
     "channels.unsubscribe.body": {
-      "text": "Ele sai da sua lista e este dispositivo para de lê-lo. Você pode se inscrever de novo depois.",
+      "text": "Ele sai da sua lista e as publicações dele são removidas de todos os seus dispositivos. Você pode se inscrever de novo depois.",
       "status": "machine"
     },
     "channels.unsubscribe.title": {
@@ -2090,6 +2094,14 @@
       "text": "Você não é mais membro deste grupo.",
       "status": "machine"
     },
+    "chat.ended.notice": {
+      "text": "Você não está mais em {name}.",
+      "status": "machine"
+    },
+    "chat.ended.notice_body": {
+      "text": "O grupo e as mensagens dele não estão mais nos seus dispositivos.",
+      "status": "machine"
+    },
     "chat.ended.unsent_draft": {
       "text": "Rascunho não enviado",
       "status": "machine"
@@ -2323,7 +2335,7 @@
       "status": "machine"
     },
     "chat.leave.body": {
-      "text": "Você continuará recebendo mensagens até que um proprietário ou administrador aplique seu pedido. Você precisará de um novo convite para voltar.",
+      "text": "Ele sai da sua lista e as mensagens dele são removidas de todos os seus dispositivos. Você continuará recebendo mensagens até que um proprietário ou administrador aplique seu pedido.",
       "status": "machine"
     },
     "chat.leave.confirm": {

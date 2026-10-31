@@ -222,6 +222,15 @@ export function recordProfileRequest(
   }
 }
 
+/** Drop one group's stamp (ADR-0087 section 9). Never throws. */
+export function clearProfileRequestForGroup(accountIdB64: string, groupIdB64: string): void {
+  try {
+    globalThis.localStorage?.removeItem(storeKey(accountIdB64, groupIdB64));
+  } catch {
+    /* storage blocked: nothing was stored either */
+  }
+}
+
 /** Drop every profile-request stamp row of one account (Forget device, Delete account).
  *  Another account's rows on this browser are its own. Never throws. */
 export function clearProfileRequestsForAccount(accountIdB64: string): void {

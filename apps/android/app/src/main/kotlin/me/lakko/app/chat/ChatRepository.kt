@@ -14,7 +14,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.lakko.app.BindingEpoch
@@ -86,6 +89,13 @@ import uniffi.lakko_ffi_uniffi.membershipRefusalRetryMaySucceed
  * worst-case chat-list latency from `waitSecs * N` to `waitSecs * ceil(N / 3)`.
  */
 internal const val POLL_ALL_CONCURRENCY: Int = 3
+
+/** ADR-0087 section 9 — pages of a journal read for a held Welcome before the
+ *  pass gives up and tries again later. Chosen, not measured. */
+private const val MAX_HELD_WELCOME_PAGES: Int = 50
+
+/** ADR-0087 section 9 — the wait before a read another poll held. */
+private const val HELD_WELCOME_RETRY_DELAY_MS: Long = 250L
 
 /** Characters of a group's DS pseudonym that identify it in a log line. Enough
  *  to follow one conversation through a run, never enough to name it. */
@@ -1120,6 +1130,9 @@ public class ChatRepository(
                 standDownStaleBootstrap(newAccountIdB64, publishAccount)
                 return
             }
+            // ADR-0087 section 9 — an end owed from before: its row is gone
+            // from the list from the first frame, and nothing polls it.
+            loadOwedEndsBestEffort(newAccountIdB64)
             mutableState.update { it.copy(bootstrapped = true) }
             // ADR-0073 R.7 case 1 — the messages held when the process died.
             restoreHeldSends()
@@ -1127,6 +1140,8 @@ public class ChatRepository(
             restoreHeldCopies()
         }
         if (!bound.isCurrent) return
+        // ADR-0087 section 9 — the launch sweep over the stored groups.
+        pushScope.launchSession { sweepMembershipEnds() }
         // ADR-0053 — sign reads of both own mailboxes and claim them.
         claimOwnMailboxesBestEffort()
         // ADR-0060 — bind the reach keys to this account and reconcile its
@@ -2293,13 +2308,16 @@ public class ChatRepository(
             forAnotherDevice = isWelcomeForAnotherDevice(e)
             throw e
         } finally {
-            // After EVERY other attempt, success or failure. A successful join
-            // consumed the published KeyPackage (OpenMLS deletes its private
-            // key; the directory holds one row per account), so the row is now
-            // dead. A failed join is often the symptom of a dead row — e.g.
-            // one minted before this fix by a throwaway identity — and a fresh
-            // one is the only way the NEXT adder can succeed. Numbered here,
-            // after the join, so it is served by a KeyPackage minted after it.
+            // After every other attempt. A KeyPackage is a last-resort package
+            // (ADR-0050 section 2.6): a join leaves it in the directory, one
+            // row per device, and this keeps the row fresh rather than replacing
+            // a dead one. A failed join can still be the symptom of a row that
+            // no longer opens anything, and a fresh one is the only way the
+            // NEXT adder can succeed. A Welcome refused for a group this device
+            // still holds as active consumed nothing and is kept
+            // ([holdWelcome]); the republish it costs is harmless. Numbered
+            // here, after the join, so it is served by a KeyPackage minted
+            // after it.
             if (!forAnotherDevice) requestKeyPackageRepublish()
         }
     }
@@ -2313,29 +2331,59 @@ public class ChatRepository(
         // not known until the join has run, so the provider lock alone covers
         // it. Nothing else can be operating on a group this device is only now
         // learning about.
-        val groupIdHex = providerLock.sessionLock {
-            val group = try {
-                Group.joinFromWelcome(welcomeBytes, identity)
-            } catch (e: FfiException) {
-                throw ChatError("joinFromWelcome failed", e)
+        var joinedFresh = false
+        var joinedEpoch: ULong? = null
+        var joinedGroup: Group? = null
+        // ADR-0087 section 9 — one at a time with an end's run, which reads the
+        // registry and the stored group across several regions: a join lands
+        // before a run or after it, never between its delete and its drop.
+        val groupIdHex = membershipEndRun.sessionLock {
+            val joinedHex = providerLock.sessionLock {
+                val group = try {
+                    Group.joinFromWelcome(welcomeBytes, identity)
+                } catch (e: FfiException) {
+                    throw ChatError("joinFromWelcome failed", e)
+                }
+                val groupId = group.groupId()
+                val groupIdHex = DsClient.pseudonymHex(groupId)
+                // ADR-0087 section 9 — a Welcome replaces an ended group. What it
+                // replaces decides what the new record starts with.
+                val old = groups[groupIdHex]
+                val replacement = joinReplacement(
+                    oldHeld = old != null,
+                    endOwed = groupIdHex.lowercase() in endingGroups,
+                    accountStillInRoster = old?.let { accountInRosterOrNull(it.group) },
+                )
+                joinedFresh = replacement == JoinReplacement.FRESH
+                joinedEpoch = runCatching { group.epoch() }.getOrNull()
+                joinedGroup = group
+                if (replacement == JoinReplacement.KEEP_HISTORY && old != null) {
+                    // A retired leaf came back: same conversation, new handle.
+                    old.replaceGroup(group)
+                } else {
+                    registerJoinedGroup(groupIdHex, GroupRecord(group = group, groupId = groupId))
+                }
+                // ADR-0053 — sign this journal's requests from now on, and claim it
+                // at the epoch the Welcome brought us to (idempotent).
+                openJournal(groupIdHex)
+                persistKnownGroupBestEffort(groupIdHex)
+                persistSnapshotBestEffort()
+                // ADR-0042 — a joiner is not the owner: `ensure` defers the
+                // subscription (never under group_id) until the owner's
+                // distribution envelope arrives on the journal, unless this
+                // device already holds the secret (e.g. a prior receive).
+                // G-37 — kept INSIDE the provider critical section: it reads
+                // `group.ownRole` / `group.groupId` synchronously and only LAUNCHES
+                // the routing work, so no locks nest here. After a replacement
+                // whose stores are about to go, the secret goes with them: that
+                // path provisions below, once they have.
+                if (!joinedFresh) ensurePushRoutingBestEffort(group, identity)
+                groupIdHex
             }
-            val groupId = group.groupId()
-            val groupIdHex = DsClient.pseudonymHex(groupId)
-            registerJoinedGroup(groupIdHex, GroupRecord(group = group, groupId = groupId))
-            // ADR-0053 — sign this journal's requests from now on, and claim it
-            // at the epoch the Welcome brought us to (idempotent).
-            openJournal(groupIdHex)
-            persistKnownGroupBestEffort(groupIdHex)
-            persistSnapshotBestEffort()
-            // ADR-0042 — a joiner is not the owner: `ensure` defers the
-            // subscription (never under group_id) until the owner's
-            // distribution envelope arrives on the journal, unless this
-            // device already holds the secret (e.g. a prior receive).
-            // G-37 — kept INSIDE the provider critical section: it reads
-            // `group.ownRole` / `group.groupId` synchronously and only LAUNCHES
-            // the routing work, so no locks nest here.
-            ensurePushRoutingBestEffort(group, identity)
-            groupIdHex
+            // What was left of the membership that ended goes before anything
+            // of the new one arrives.
+            settleJoinedOverEnd(joinedHex, identity, joinedFresh, joinedGroup, joinedEpoch)
+            joinedHex
         }
         // ADR-0024 — a group re-joined under the same id keeps the read state
         // this device already persisted for it. Read outside the provider lock.
@@ -8547,6 +8595,9 @@ public class ChatRepository(
         // (§6.2.13): it costs nothing, and whether a rejoin wants it reset is
         // the rejoin path's question, not this one's.
         if (readIsActive { record.group.isActive() } == false) return GroupPollOutcome.UNAVAILABLE
+        // ADR-0087 section 9 — and for one this device is out of on another
+        // device's word: its handle still reads active, nothing here reads it.
+        if (groupIdHex.lowercase() in endingGroups) return GroupPollOutcome.UNAVAILABLE
 
         // ADR-0073 R.5 "the old segment after the move" — a one-to-one's old
         // journal is not read at all once the conversation moved (its only
@@ -8594,6 +8645,9 @@ public class ChatRepository(
             },
         ) { after, raw ->
             MainThreadGuard.assertOffMain("pollGroup apply")
+            // ADR-0087 section 9 — a Welcome replaced this record during the
+            // fetch and closed its handle: the rows are read by the new one.
+            if (groups[groupIdHex] !== record) return@runSplitPoll
             // A long poll is the call most likely to be out when the account
             // leaves. What it fetched is applied to the group, the reach
             // manager, the profile directory and the per-account stores of the
@@ -8822,6 +8876,9 @@ public class ChatRepository(
             // The local group has ended: the backup stops naming it on the
             // strength of an earlier restore.
             if (evictedByBatch) dropRestoredKnownGroupBestEffort(groupIdHex)
+            // ADR-0087 section 9 — the one seam: record the end durably here,
+            // in the region that read the state. The steps run at the tail.
+            if (evictedByBatch) recordEndIfOutLocked(groupIdHex, record)
             rotatePushRoutingIfShrankBestEffort(
                 groupIdHex = groupIdHex,
                 group = record.group,
@@ -8865,6 +8922,12 @@ public class ChatRepository(
         // sweep prelude and the re-admission check here would only burn the
         // provider lock and FFI reads on a result that cannot have changed.
         if (outcome != SplitPollOutcome.APPLIED) return outcome.toGroupPollOutcome()
+        // ADR-0087 section 9 — this batch took the account out of the group:
+        // nothing below applies to it. Outside both locks.
+        if (groupIdHex.lowercase() in endingGroups) {
+            runOwedMembershipEnds()
+            return GroupPollOutcome.APPLIED
+        }
         // ADR-0057 obligation 3 — outside both locks; launched, best effort,
         // and only when the batch moved the epoch (a no-op for a non-owner).
         val epochAfterBatch = providerLock.sessionLock { runCatching { record.group.epoch() }.getOrNull() }
@@ -9741,7 +9804,12 @@ public class ChatRepository(
         // device has all been removed from would return instantly, forever.
         // Filtering first lets the empty case take one honest long-poll-shaped
         // pause instead.
-        val active = groupIds.filter { isGroupActive(it) != false }
+        val active = groupIds.filter { isGroupActive(it) != false && it.lowercase() !in endingGroups }
+        // ADR-0087 section 9 — an end that stopped on a failed step, and a
+        // Welcome kept for a group that may have ended since, are retried by
+        // every sweep.
+        if (endingGroups.isNotEmpty()) runOwedMembershipEnds()
+        resolveHeldWelcomes()
         if (active.isEmpty()) {
             if (waitSecs > 0) delay(waitSecs.toLong() * MILLIS_PER_SECOND)
             return me.lakko.app.feed.SourceCheck.NONE
@@ -9795,6 +9863,7 @@ public class ChatRepository(
         // Keyed by group id alone, so the next account on this phone that is
         // a member of the same group would inherit them.
         supersededCheckedEpoch.clear()
+        endingGroups.clear()
         appointmentAttemptAtMs.clear()
         undeliveredWelcomeGroups.clear()
         committerEnvelopeNothingToSend.forgetAll()
@@ -11843,6 +11912,20 @@ public class ChatRepository(
      */
     public fun noteOwnLeaveRequested(groupIdHex: String) {
         val accountIdB64 = currentAccountIdB64.get() ?: return
+        // ADR-0087 UX 9.4 — an admin's own sweep can land the leave before this
+        // runs. A person who asked is told nothing, and a record written now
+        // would read "Waiting to leave." on a later membership.
+        val hex = groupIdHex.lowercase()
+        val landed = membershipEnds.load(accountIdB64).firstOrNull { it.idHex == hex }
+        if (landed != null) {
+            if (landed.stage == EndStage.NOTICE_ONLY) {
+                membershipEnds.remove(accountIdB64, hex)
+            } else {
+                membershipEnds.save(accountIdB64, landed.copy(noticeClosed = true))
+            }
+            publishEndState()
+            return
+        }
         recordLeaveRequested(
             store = leaveRecords,
             accountIdB64 = accountIdB64,
@@ -11896,87 +11979,440 @@ public class ChatRepository(
         }
     }
 
+    // -----------------------------------------------------------------
+    // ADR-0087 section 9 — the end of a membership.
+    //
+    // Every rule lives in `MembershipEnd.kt`, where the host suite runs it;
+    // what is here feeds it live group state and supplies the ports.
+    // -----------------------------------------------------------------
+
+    private val membershipEnds: MembershipEndStore by lazy { SharedPrefsMembershipEndStore(applicationContext) }
+
+    private val heldWelcomes: HeldWelcomeStore by lazy { SharedPrefsHeldWelcomeStore(applicationContext) }
+
+    /** The groups an end is running for (lower-case hex): gone from the lists
+     *  and from every poll, sweep and beacon. Rows of the durable store, kept
+     *  here because the poll path asks on every call. */
+    private val endingGroups: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** One run at a time, so two tails never walk one row together. */
+    private val membershipEndRun = Mutex()
+
+    private val heldWelcomeRun = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private val membershipEndListeners =
+        java.util.concurrent.CopyOnWriteArrayList<(groupIdHex: String) -> Unit>()
+
     /**
-     * §6.2.4 — `Delete this chat`.
-     *
-     * Removes this group's transcript from the message log, its pending-request
-     * observations, its durable leave record, its known-groups entry and its
-     * in-memory record. The REGISTRY row goes LAST, so a failure above leaves
-     * the chat reachable rather than orphaning a transcript behind a row the
-     * user can no longer open.
-     *
-     * **What it does NOT remove, which is why [DELETE_CHAT_BODY] is exact
-     * rather than sweeping:** the inactive MLS group stays in the provider
-     * snapshot as inert bytes. `Group` exposes no delete, so a `Group::delete`
-     * is a real (small) core follow-up rather than something this rides free.
-     *
-     * The push subscription is already gone by this point: the §6.2.8 teardown
-     * retires it at the moment of the eviction, not at the moment of the
-     * delete, so a user who never presses this button still stops being woken.
+     * Observe the moment this account is out of a group, before anything of it
+     * is deleted: a call in it ends here. Called on the end run's coroutine; a
+     * listener only hands the event off. Returns the unsubscribe.
      */
-    public fun deleteEndedChat(groupIdHex: String) {
-        // ADR-0073 R.5 — deleting a conversation deletes every segment this
-        // device holds, the older ones first and the one asked for last
-        // ([conversationDeleteOrder]).
-        for (hex in olderSegmentsOf(groupIdHex)) deleteOneSegment(hex)
-        deleteOneSegment(groupIdHex)
+    public fun addMembershipEndListener(listener: (groupIdHex: String) -> Unit): () -> Unit {
+        membershipEndListeners += listener
+        return { membershipEndListeners -= listener }
     }
 
-    private fun deleteOneSegment(groupIdHex: String) {
+    init {
+        // After the fields above, and declared before nothing it reads: the
+        // collector does nothing until a bootstrap has finished. The register
+        // arrives on the sync runtime's own schedule, and a value here is also
+        // what an end waiting for an open synced state resumes on.
+        pushScope.launch {
+            combine(
+                mutableState.map { it.bootstrapped }.distinctUntilChanged(),
+                ConversationEndsMirror.registers,
+            ) { ready, heard -> heard.takeIf { ready } }.collect { heard ->
+                if (heard == null) return@collect
+                try {
+                    pushScope.launchSession { reactToHeardEnds(heard) }
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatRepository", "ADR-0087: register not acted on: ${cause.javaClass.simpleName}")
+                }
+            }
+        }
+    }
+
+    /** The conversation reference a register names a group with. */
+    private fun groupRefOf(groupIdHex: String): uniffi.lakko_ffi_uniffi.FolderConversationRef? =
+        hexToBytes(groupIdHex)?.let {
+            uniffi.lakko_ffi_uniffi.FolderConversationRef(
+                kind = uniffi.lakko_ffi_uniffi.FolderConversationKind.GROUP,
+                id = it,
+            )
+        }
+
+    /**
+     * Every key this account's leaves may be bound under: the conversation
+     * identity, the published one, the proven predecessors. Empty when any of
+     * it cannot be read, which reads as "not out": a key left out here is a
+     * person's history.
+     */
+    private fun ownAccountKeysB64(): Set<String> {
+        val accountIdB64 = currentAccountIdB64.get() ?: return emptySet()
+        return try {
+            val keys = LinkedHashSet<String>()
+            ownAccountKey()?.let { keys += outboxB64(it) } ?: return emptySet()
+            rootAccountIdentity()?.let { keys += outboxB64(it.signaturePublicKey()) }
+            val rows = me.lakko.app.auth.OwnPredecessorStore.onDevice(applicationContext).load(accountIdB64)
+            try {
+                rows.forEach { keys += outboxB64(it.signaturePubkey) }
+            } finally {
+                rows.forEach { it.zero() }
+            }
+            keys
+        } catch (_: Throwable) {
+            emptySet()
+        }
+    }
+
+    /** Does a leaf of this account stand in [group]'s roster? `null` when it
+     *  cannot be told. On the provider critical path. */
+    private fun accountInRosterOrNull(group: Group): Boolean? {
+        val roster = memberAccountKeysOrNull(group) ?: return null
+        val own = ownAccountKeysB64()
+        if (own.isEmpty()) return null
+        return roster.any { it in own }
+    }
+
+    /**
+     * The seam: called after a commit was applied, and over the stored groups
+     * at launch. Writes the owed record of an end this device has just seen,
+     * and nothing else. On the provider critical path (it reads the roster),
+     * and it runs no step, because the steps take that lock themselves.
+     */
+    private fun recordEndIfOutLocked(groupIdHex: String, record: GroupRecord) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val hex = groupIdHex.lowercase()
+        if (hex in endingGroups) return
+        val isActive = readIsActive { record.group.isActive() }
+        if (isActive != false) return
+        val out = membershipFullyEnded(
+            isActive = isActive,
+            isGroupKind = runCatching { record.group.groupKind() }.getOrNull() == GroupKind.GROUP,
+            rosterAccountKeys = memberAccountKeysOrNull(record.group),
+            ownAccountKeys = ownAccountKeysB64(),
+        )
+        if (!out) return
+        val epoch = runCatching { record.group.epoch() }.getOrNull() ?: return
+        val row = appliedEnd(
+            idHex = hex,
+            name = GroupNameStore.name(applicationContext, accountIdB64, groupIdHex).orEmpty(),
+            left = loadLeaveRequestedAt(leaveRecords, accountIdB64, groupIdHex) != null,
+            epoch = epoch,
+        )
+        // Not saved: nothing ran, and the launch sweep sees this state again.
+        if (!membershipEnds.save(accountIdB64, row)) return
+        endingGroups += hex
+        android.util.Log.i("ChatRepository", "ADR-0087: this account is out of a group")
+    }
+
+    /** Whether an end of this group is recorded and not yet carried out. */
+    public fun isEndOwed(groupIdHex: String): Boolean = groupIdHex.lowercase() in endingGroups
+
+    /** Fill [endingGroups] and the state from the durable rows. */
+    private fun loadOwedEndsBestEffort(accountIdB64: String) {
+        val rows = try {
+            membershipEnds.load(accountIdB64)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        endingGroups += endingIdsOf(rows)
+        mutableState.update { it.copy(endNotices = endNoticesOf(rows), endingIds = endingGroups.toSet()) }
+    }
+
+    /** Publish what the durable rows say, and the list without what is ending. */
+    private fun publishEndState() {
+        currentAccountIdB64.get()?.let { loadOwedEndsBestEffort(it) }
+        publishThreadList()
+    }
+
+    /** The launch sweep: stored groups, owed rows, the register, held Welcomes. */
+    private suspend fun sweepMembershipEnds() {
+        val records = synchronized(groups) { groups.toMap() }
+        providerLock.sessionLock {
+            for ((hex, record) in records) recordEndIfOutLocked(hex, record)
+        }
+        publishEndState()
+        ConversationEndsMirror.registers.value?.let { reactToHeardEnds(it) }
+        if (endingGroups.isNotEmpty()) runOwedMembershipEnds()
+        resolveHeldWelcomes()
+    }
+
+    /**
+     * Rule 4 of the register: compare epochs before anything stops. Read after
+     * every change to the synced state and at launch, and idempotent: a wiped
+     * group has nothing left to act on.
+     */
+    private suspend fun reactToHeardEnds(heard: HeardConversationEnds) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        if (heard.accountIdB64 != accountIdB64) return
+        for (end in heard.ends) {
+            if (end.channel || end.idHex in endingGroups) continue
+            val record = groups[end.idHex]
+            val read = record?.let {
+                providerLock.sessionLock {
+                    readIsActive { it.group.isActive() } to runCatching { it.group.epoch() }.getOrNull()
+                }
+            }
+            when (heardEndVerdict(record != null, read?.first, read?.second, end.epoch)) {
+                HeardEndVerdict.NOTHING -> Unit
+                HeardEndVerdict.ANSWER_JOINED -> {
+                    val ref = groupRefOf(end.idHex) ?: continue
+                    val epoch = read?.second ?: continue
+                    me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.publishConversationJoined(ref, epoch)
+                }
+                HeardEndVerdict.ACT -> {
+                    val name = GroupNameStore.name(applicationContext, accountIdB64, end.idHex).orEmpty()
+                    if (membershipEnds.save(accountIdB64, heardEnd(end.idHex, name, end.epoch))) {
+                        endingGroups += end.idHex
+                    }
+                }
+            }
+        }
+        if (endingGroups.isNotEmpty()) runOwedMembershipEnds()
+    }
+
+    /**
+     * Walk every owed row. Never under a group or provider lock: the steps take
+     * them. A row that stopped on a failed step stays owed, and the next sweep
+     * of the groups comes back to it.
+     */
+    private suspend fun runOwedMembershipEnds() {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        publishEndState()
+        membershipEndRun.sessionLock {
+            for (row in membershipEnds.load(accountIdB64)) {
+                if (row.stage == EndStage.NOTICE_ONLY) continue
+                // Recorded, and then the snapshot that holds the commit did not
+                // land: the commit comes round again, and the seam with it.
+                val record = groups[row.idHex]
+                if (row.source == EndSource.APPLIED && record != null &&
+                    readIsActive { record.group.isActive() } == true
+                ) {
+                    membershipEnds.remove(accountIdB64, row.idHex)
+                    endingGroups -= row.idHex
+                    continue
+                }
+                val outcome = runMembershipEnd(accountIdB64, row, membershipEnds, membershipEndPorts)
+                if (outcome == EndRun.DONE || outcome == EndRun.ABANDONED) endingGroups -= row.idHex
+            }
+        }
+        publishEndState()
+        resolveHeldWelcomes()
+    }
+
+    private val membershipEndPorts: MembershipEndPorts = object : MembershipEndPorts {
+        override suspend fun publishEnded(row: OwedEnd): EndPublish {
+            val sync = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active ?: return EndPublish.NOT_OPEN
+            val ref = groupRefOf(row.idHex) ?: return EndPublish.NOTHING_TO_TELL
+            return sync.publishConversationEnded(ref, row.epochValue)
+        }
+
+        override suspend fun stop(row: OwedEnd) {
+            for (listener in membershipEndListeners) {
+                try {
+                    listener(row.idHex)
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatRepository", "membership end listener failed", cause)
+                }
+            }
+            for (hex in olderSegmentsOf(row.idHex) + row.idHex) {
+                val retired = try {
+                    groups[hex] != null && retirePushSubscriptionAfterEviction(hex)
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (_: Throwable) {
+                    false
+                }
+                if (!retired) keepPushRetireOwed(hex)
+            }
+        }
+
+        override suspend fun wipeStores(row: OwedEnd) {
+            val segments = olderSegmentsOf(row.idHex) + row.idHex
+            // A chosen delete has no stop step: whatever the screen's teardown
+            // did not retire is kept owed before the route row goes.
+            if (row.source == EndSource.CHOSEN) segments.forEach { keepPushRetireOwed(it) }
+            for (hex in segments) wipeSegmentStores(hex)
+            // A person's own choice on a device whose account may still be in
+            // the group says nothing to the account's other devices.
+            if (row.source != EndSource.CHOSEN) {
+                val sync = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active
+                for (hex in segments) groupRefOf(hex)?.let { sync?.clearConversationRegisters(it) }
+            }
+        }
+
+        override suspend fun deleteMls(row: OwedEnd): MlsDelete {
+            val identity = canonicalIdentity.get() ?: return MlsDelete.FAILED
+            return groupLock(row.idHex).sessionLock {
+                providerLock.sessionLock {
+                    for (older in olderSegmentsOf(row.idHex)) {
+                        val record = groups[older] ?: continue
+                        // A superseded group this device is still in stays in
+                        // the provider, inert: only a register may delete a
+                        // group that reads active, and none names it.
+                        if (readIsActive { record.group.isActive() } == false) {
+                            runCatching { record.group.deleteLocally(identity) }
+                        }
+                    }
+                    val record = groups[row.idHex] ?: return@sessionLock MlsDelete.DELETED
+                    try {
+                        when (row.source) {
+                            EndSource.HEARD -> record.group.deleteAfterEndedElsewhere(identity, row.epochValue)
+                            EndSource.APPLIED, EndSource.CHOSEN -> record.group.deleteLocally(identity)
+                        }
+                        MlsDelete.DELETED
+                    } catch (_: FfiException.MembershipGroupStillActive) {
+                        MlsDelete.STILL_ACTIVE
+                    } catch (cause: FfiException) {
+                        android.util.Log.w("ChatRepository", "ADR-0087: group not deleted (${cause.javaClass.simpleName})")
+                        MlsDelete.FAILED
+                    }
+                }
+            }
+        }
+
+        override suspend fun persistDurably(): Boolean = providerLock.sessionLock {
+            try {
+                persistSnapshotDurableOrThrow()
+                true
+            } catch (ended: me.lakko.app.StaleBindingException) {
+                throw ended
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0087: snapshot not persisted (${cause.javaClass.simpleName})")
+                false
+            }
+        }
+
+        override suspend fun dropRegistry(row: OwedEnd) {
+            for (hex in olderSegmentsOf(row.idHex)) dropGroupRecord(hex)
+            dropGroupRecord(row.idHex)
+        }
+
+        override suspend fun cameBack(row: OwedEnd) {
+            val record = groups[row.idHex] ?: return
+            val ref = groupRefOf(row.idHex) ?: return
+            val epoch = providerLock.sessionLock { runCatching { record.group.epoch() }.getOrNull() } ?: return
+            me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.publishConversationJoined(ref, epoch)
+        }
+    }
+
+    /**
+     * A retire that could not run or land: the route row goes with the wipe, so
+     * the subscription id is kept for the next unsubscribe, and a wake that
+     * still arrives finds no route and opens nothing (ADR-0078).
+     */
+    private fun keepPushRetireOwed(groupIdHex: String) {
         val accountIdB64 = currentAccountIdB64.get() ?: return
         try {
-            MessageLogStore.deleteGroupFromLog(applicationContext, accountIdB64, groupIdHex)
+            val secret = PushRoutingSecretStore.get(applicationContext, accountIdB64, groupIdHex) ?: return
+            val gidHex = DsClient.pseudonymHex(uniffi.lakko_ffi_uniffi.derivePushGid(secret))
+            pushRouteStore.subscriptionId(accountIdB64, gidHex)?.let {
+                me.lakko.app.push.PendingPushUnsubscribes(applicationContext).stash(listOf(it))
+            }
+            pushRouteStore.remove(accountIdB64, gidHex)
         } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0045 delete chat: message log", cause)
+            android.util.Log.w("ChatRepository", "ADR-0087: push retire not kept: ${cause.javaClass.simpleName}")
         }
-        try {
-            // The whole row, own request intents included: the prune keeps
-            // those, and they describe a group this device is deleting.
-            pendingRequestObservations.save(accountIdB64, groupIdHex, emptyMap())
-        } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0045 delete chat: observations", cause)
+    }
+
+    /**
+     * The local half of ending one group: every store keyed by it, and the
+     * in-memory state, the record's timeline first so a log persist of another
+     * group cannot write it back. Idempotent. Profiles are not tied to a group
+     * and stay; the synced registers go by their own tombstones.
+     */
+    private fun wipeSegmentStores(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val hex = groupIdHex.lowercase()
+        fun step(what: String, block: () -> Unit) {
+            try {
+                block()
+            } catch (ended: me.lakko.app.StaleBindingException) {
+                throw ended
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0087 wipe: $what (${cause.javaClass.simpleName})")
+            }
         }
-        try {
-            sentCommitterEnvelopes.save(accountIdB64, groupIdHex, emptyMap())
-        } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0060 delete chat: sent envelopes", cause)
+        val record = groups[groupIdHex]
+        record?.wipeTimeline()
+        synchronized(groups) { waitingLogSlots.take(groupIdHex) }
+        step("message log") { MessageLogStore.deleteGroupFromLog(applicationContext, accountIdB64, groupIdHex) }
+        // The whole row, own request intents included: the prune keeps those,
+        // and they describe a group this device is deleting.
+        step("observations") { pendingRequestObservations.save(accountIdB64, groupIdHex, emptyMap()) }
+        step("sent envelopes") { sentCommitterEnvelopes.save(accountIdB64, groupIdHex, emptyMap()) }
+        step("unapplied rows") { unappliedRequests.clearForGroup(accountIdB64, groupIdHex) }
+        step("leave record") { leaveRecords.clear(accountIdB64, groupIdHex) }
+        step("pins") { PinStore.deleteGroup(applicationContext, accountIdB64, groupIdHex) }
+        step("shared channels") { sharedChannels.forgetGroup(groupIdHex) }
+        step("claim state") {
+            successorClaims.remove(accountIdB64, hex)
+            invalidateDeadSession(groupIdHex)
         }
-        try {
-            unappliedRequests.clearForGroup(accountIdB64, groupIdHex)
-        } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0045 delete chat: unapplied rows", cause)
+        step("continuity") { continuityStore.update(accountIdB64) { it.withoutGroup(hex) } }
+        step("read watermarks") { readWatermarkStore.deleteGroup(accountIdB64, groupIdHex) }
+        step("group call") {
+            mutableGroupCalls.update { it - groupIdHex }
+            synchronized(groupCallPersistLock) { groupCallStore.save(accountIdB64, groupIdHex, null) }
         }
-        try {
-            leaveRecords.clear(accountIdB64, groupIdHex)
-        } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0045 delete chat: leave record", cause)
+        step("call log") {
+            me.lakko.app.calls.CallHistoryStore.deleteConversation(applicationContext, accountIdB64, conversationIdOf(hex))
+            me.lakko.app.calls.CallHistoryStore.deleteConversation(applicationContext, accountIdB64, hex)
         }
+        step("own echoes") { if (chatClientLazy.isInitialized()) chatClient.forgetOwnEchoesOf(groupIdHex) }
+        step("group name") { GroupNameStore.delete(applicationContext, accountIdB64, groupIdHex) }
+        step("push secret") { PushRoutingSecretStore.remove(applicationContext, accountIdB64, groupIdHex) }
+        step("held") {
+            val conversation = conversationIdOf(hex)
+            val dropped = listOf(conversation, hex).map { heldSends.remove(it) != null }.any { it }
+            if (dropped) persistHeldSends()
+            heldCopyRows.remove(groupIdHex)
+            heldCopyStore.clear(accountIdB64, groupIdHex)
+        }
+        step("journal seeds") {
+            journalOwnershipStore.remove(accountIdB64, groupIdHex)
+            journalOwnershipStore.rootHeld.clear(accountIdB64, groupIdHex)
+            journalOwnershipStore.appointments.put(accountIdB64, groupIdHex, emptyMap())
+            journalOwnershipStore.registrarList.put(accountIdB64, groupIdHex, emptyMap())
+            clearHandoverOwed(accountIdB64, groupIdHex)
+        }
+        step("commit outbox") {
+            hexToBytes(hex)?.let { id ->
+                for (entry in CommitOutboxStore.loadForGroup(applicationContext, accountIdB64, outboxB64(id))) {
+                    CommitOutboxStore.deleteEntry(applicationContext, entry.id)
+                }
+            }
+        }
+        step("beacons") { beaconObservations.save(accountIdB64, groupIdHex, emptyMap()) }
+        step("last owner") { lastObservedOwnerStore.clear(accountIdB64, groupIdHex) }
+        step("profile requests") { profileRequestStore.deleteGroup(accountIdB64, groupIdHex) }
+        step("readmission") { DeviceReadmission.clearGroup(applicationContext, accountIdB64, groupIdHex) }
+        step("reach grants") { me.lakko.app.reach.ReachManager.peek()?.forgetHeldScope(hex) }
+        // In memory, per group.
+        localUnread.forget(groupIdHex)
+        composerCarry.forget(conversationIdOf(hex))
+        supersededCheckedEpoch.remove(groupIdHex)
+        appointmentAttemptAtMs.remove(groupIdHex)
+        lastBeaconAtMs.remove(groupIdHex)
+        peerCheckedAt.remove(groupIdHex)
+    }
+
+    /** LAST: dropping the record is what makes a group unreachable, and the
+     *  known-groups row is what brings it back at the next start. */
+    private fun dropGroupRecord(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
         try {
             knownGroupsStore.remove(accountIdB64, groupIdHex)
         } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0045 delete chat: known groups", cause)
+            android.util.Log.w("ChatRepository", "ADR-0087: known groups row kept", cause)
         }
         // And from the ids a restored backup named, or the next upload would
-        // list a conversation the person deleted.
+        // list a conversation the person no longer has.
         dropRestoredKnownGroupBestEffort(groupIdHex)
-        // ADR-0052 decision 3 — the pins are wiped with the conversation.
-        try {
-            PinStore.deleteGroup(applicationContext, accountIdB64, groupIdHex)
-        } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0052 delete chat: pins", cause)
-        }
-        // ADR-0059 section 6 — and the channel lists shared in it.
-        sharedChannels.forgetGroup(groupIdHex)
-        // ADR-0073 R.6 — the claim state goes with the conversation.
-        try {
-            successorClaims.remove(accountIdB64, groupIdHex.lowercase())
-            invalidateDeadSession(groupIdHex)
-        } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0073 delete chat: claim state", cause)
-        }
-        // LAST, and only after everything above had its chance: dropping the
-        // registry row is what makes the chat unreachable, so it must not
-        // happen while a transcript is still behind it.
         val removed = synchronized(groups) { groups.remove(groupIdHex) }
         dsSigners.remove(dsGroupKeyHex(groupIdHex))
         try {
@@ -11984,7 +12420,177 @@ public class ChatRepository(
         } catch (_: Throwable) {
             // best-effort — releasing the Rust-side Arc must not fail a delete.
         }
+        // Again, now that no record can write it: a log persist that read the
+        // records before the timeline went may have landed since.
+        try {
+            MessageLogStore.deleteGroupFromLog(applicationContext, accountIdB64, groupIdHex)
+        } catch (_: Throwable) {
+            // best-effort — a join refuses a slot of a group the register ended
+        }
+    }
+
+    /**
+     * What a join owes the membership it replaced, and the register. [fresh]:
+     * the person was out, so what is left of that membership goes before any
+     * row of the new one is read. Any row owed for the group goes, its notice
+     * too: the sentence is no longer true. Failures here never fail the join.
+     */
+    private suspend fun settleJoinedOverEnd(
+        groupIdHex: String,
+        identity: Identity,
+        fresh: Boolean,
+        group: Group?,
+        epoch: ULong?,
+    ) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val hex = groupIdHex.lowercase()
+        val ref = groupRefOf(groupIdHex)
+        val sync = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active
+        if (fresh) {
+            try {
+                retirePushSubscriptionAfterEviction(groupIdHex)
+                wipeSegmentStores(groupIdHex)
+                if (ref != null) sync?.clearConversationRegisters(ref)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0087: join over an end: ${cause.javaClass.simpleName}")
+            }
+            if (group != null) providerLock.sessionLock { ensurePushRoutingBestEffort(group, identity) }
+        }
+        val owed = hex in endingGroups || membershipEnds.load(accountIdB64).any { it.idHex == hex }
+        if (owed) {
+            membershipEnds.remove(accountIdB64, hex)
+            endingGroups -= hex
+            publishEndState()
+        }
+        // A first join finds no register and writes none. Launched: the join
+        // of a person back into a group does not wait for the DeviceGroup.
+        if (ref != null && epoch != null && sync != null) {
+            pushScope.launchSession { sync.publishConversationJoined(ref, epoch) }
+        }
+    }
+
+    /** The notice was closed: the name goes with it. */
+    public fun dismissEndNotice(idHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val hex = idHex.lowercase()
+        if (membershipEnds.load(accountIdB64).any { it.idHex == hex && it.stage == EndStage.NOTICE_ONLY }) {
+            membershipEnds.remove(accountIdB64, hex)
+        } else {
+            // Still running: the steps finish without saying anything.
+            membershipEnds.load(accountIdB64).firstOrNull { it.idHex == hex }?.let {
+                membershipEnds.save(accountIdB64, it.copy(noticeClosed = true))
+            }
+        }
+        publishEndState()
+    }
+
+    /** A channel went on another device (ADR-0087 section 9.5): the channel
+     *  layer dropped it, and the person is told like for a group. */
+    public fun noteChannelEndHeard(channelIdHex: String, name: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val row = heardEnd(channelIdHex, name, 0u).copy(stage = EndStage.NOTICE_ONLY)
+        if (membershipEnds.save(accountIdB64, row)) publishEndState()
+    }
+
+    /**
+     * A Welcome the core refused because this device holds the group as active.
+     * Kept durably before the mailbox cursor moves past it; `false` when it did
+     * not reach the disk, and the caller then keeps the cursor.
+     */
+    public fun holdWelcome(groupIdHex: String, welcomeBytes: ByteArray): Boolean {
+        val accountIdB64 = currentAccountIdB64.get() ?: return false
+        val saved = heldWelcomes.add(accountIdB64, HeldWelcome(groupIdHex.lowercase(), outboxB64(welcomeBytes)))
+        if (saved) pushScope.launchSession { resolveHeldWelcomes() }
+        return saved
+    }
+
+    /** Read [groupIdHex]'s journal to its end. `false` when a read did not
+     *  answer: nothing may be concluded from a read that failed. */
+    private suspend fun journalDrained(groupIdHex: String): Boolean {
+        repeat(MAX_HELD_WELCOME_PAGES) {
+            val record = groups[groupIdHex] ?: return true
+            val before = record.cursor
+            val outcome = try {
+                pollGroup(groupIdHex, waitSecs = 0, joinInFlight = true)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (_: Throwable) {
+                return false
+            }
+            when (outcome) {
+                GroupPollOutcome.APPLIED -> if (groups[groupIdHex]?.cursor == before) return true
+                GroupPollOutcome.UNAVAILABLE -> return true
+                else -> delay(HELD_WELCOME_RETRY_DELAY_MS)
+            }
+        }
+        return false
+    }
+
+    /**
+     * Each held Welcome: read its group's journal and retry the join once the
+     * group ended, drop it when the journal is drained and the group is still
+     * active (a duplicate or a forgery: the core does not report a Welcome's
+     * epoch, so no client can tell sooner), keep it when a read failed.
+     */
+    private suspend fun resolveHeldWelcomes() {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        if (heldWelcomes.load(accountIdB64).isEmpty()) return
+        if (!heldWelcomeRun.compareAndSet(false, true)) return
+        try {
+            for (held in heldWelcomes.load(accountIdB64)) {
+                val hex = held.groupIdHex
+                // An end still running decides this on a later pass.
+                if (hex in endingGroups) continue
+                val drained = journalDrained(hex)
+                if (hex in endingGroups) continue
+                when (heldWelcomeVerdict(drained, isGroupActive(hex))) {
+                    HeldWelcomeVerdict.KEEP -> Unit
+                    HeldWelcomeVerdict.DROP -> {
+                        android.util.Log.i("ChatRepository", "a held Welcome was dropped: the group is still active")
+                        heldWelcomes.remove(accountIdB64, held)
+                    }
+                    HeldWelcomeVerdict.RETRY -> try {
+                        joinGroupFromWelcome(outboxUnb64(held.welcomeB64))
+                        heldWelcomes.remove(accountIdB64, held)
+                    } catch (cause: kotlinx.coroutines.CancellationException) {
+                        throw cause
+                    } catch (cause: Throwable) {
+                        // Still refused: the next pass reads the journal again.
+                        if (groupStillActiveHex(cause) == null) {
+                            android.util.Log.w("ChatRepository", "a held Welcome failed", cause)
+                            heldWelcomes.remove(accountIdB64, held)
+                        }
+                    }
+                }
+            }
+        } finally {
+            heldWelcomeRun.set(false)
+        }
+    }
+
+    /**
+     * §6.2.4 — `Delete this chat`, on what stays ended on this device: a
+     * one-to-one, or a group whose account is still in it on another device.
+     *
+     * The same walk as an end ([runMembershipEnd]), from the wipe on: every
+     * segment of the conversation, its stores, the MLS group, the provider
+     * snapshot, and the known-groups row and the record last. The row goes at
+     * once; the rest resumes after a crash. No register and no tombstone, since
+     * the account's other devices are not in the state this one is.
+     *
+     * The push subscription is already gone by this point: the §6.2.8 teardown
+     * retires it at the moment of the eviction, not at the moment of the
+     * delete, so a user who never presses this button still stops being woken.
+     */
+    public fun deleteEndedChat(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val hex = groupIdHex.lowercase()
+        if (!membershipEnds.save(accountIdB64, chosenEnd(hex, 0u))) return
+        endingGroups += hex
         publishThreadList()
+        pushScope.launchSession { runOwedMembershipEnds() }
     }
 
     /**
@@ -12247,8 +12853,10 @@ public class ChatRepository(
             // being retried on every tick. The ticker is stopped too (the
             // §6.2.8 one-shot teardown), so this is belt and braces — but it is
             // the half that is a GATE, and the gate is what makes a surviving
-            // ticker harmless rather than merely unlikely.
-            membershipEnded = readIsActive { record.group.isActive() } == false,
+            // ticker harmless rather than merely unlikely. ADR-0087 section 9:
+            // a group left on another device's word still reads active here.
+            membershipEnded = readIsActive { record.group.isActive() } == false ||
+                groupIdHex.lowercase() in endingGroups,
             canRegister = canRegister,
         )
         if (verdict != BeaconEmitVerdict.EMIT) return verdict.name
@@ -12309,6 +12917,8 @@ public class ChatRepository(
     private suspend fun sweepIfCommitterOnMlsThread(groupIdHex: String): SweepOutcome? {
         // ADR-0073 R.7 case 1 — a dead one-to-one commits nothing.
         if (deadOneToOne(groupIdHex)) return null
+        // ADR-0087 section 9 — and nor does a group this account is out of.
+        if (groupIdHex.lowercase() in endingGroups) return null
         val identity = canonicalIdentity.get() ?: return null
         val record = groups[groupIdHex] ?: return null
         if (currentAccountIdB64.get() == null) return null
@@ -12389,6 +12999,8 @@ public class ChatRepository(
         val membersAfterSweep = providerLock.sessionLock { memberSignatureKeysOrNull(record.group) }
         val evictedBySweep = readIsActive { record.group.isActive() } == false
         if (evictedBySweep) dropRestoredKnownGroupBestEffort(groupIdHex)
+        // ADR-0087 section 9 — the seam on the path that merges its own commit.
+        if (evictedBySweep) providerLock.sessionLock { recordEndIfOutLocked(groupIdHex, record) }
         rotatePushRoutingIfShrankBestEffort(
             groupIdHex = groupIdHex,
             group = record.group,
@@ -12409,6 +13021,7 @@ public class ChatRepository(
         // the direct add path re-broadcasts it. No-op when this device holds
         // none.
         if (outcome.addedCount > 0) redistributePushRoutingBestEffort(groupIdHex)
+        if (groupIdHex.lowercase() in endingGroups) runOwedMembershipEnds()
         return outcome
     }
 
@@ -12968,6 +13581,13 @@ public class ChatRepository(
                 // attempt; the poll tail retries continuously.
                 android.util.Log.w("ChatRepository", "ADR-0045 owed verdict unresolved", cause)
             }
+            // ADR-0087 section 9 — that verdict may have merged this account's
+            // own removal.
+            providerLock.sessionLock { recordEndIfOutLocked(groupIdHex, record) }
+            if (groupIdHex.lowercase() in endingGroups) {
+                runOwedMembershipEnds()
+                return
+            }
             // A sweep whose verdict SETTLED but whose Welcome never reached the
             // wire owes only the fan-out. It is invisible to every other recovery
             // path — the merge cleared `hasStagedSweep()` and emptied the pending
@@ -13301,9 +13921,25 @@ public class ChatRepository(
      * bundle away.
      */
     private fun registerJoinedGroup(groupIdHex: String, record: GroupRecord) {
-        synchronized(groups) {
-            groups[groupIdHex] = record
-            waitingLogSlots.take(groupIdHex)?.let { record.adoptHistory(it) }
+        // ADR-0087 section 9 — a group this account came back to starts empty,
+        // so a slot a stale log write left behind is not history for it.
+        val cameBack = groupRefOf(groupIdHex)?.let {
+            me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.isConversationEnded(it)
+        } == true
+        val replaced = synchronized(groups) {
+            val previous = groups.put(groupIdHex, record)
+            val slot = waitingLogSlots.take(groupIdHex)
+            if (!cameBack && previous == null) slot?.let { record.adoptHistory(it) }
+            previous
+        }
+        // The ended group's handle: nothing reads it any more, and every poll
+        // that held it checks the map before it applies.
+        if (replaced != null && replaced !== record) {
+            try {
+                replaced.group.close()
+            } catch (_: Throwable) {
+                // best-effort — releasing the stale Rust Arc must not fail a join.
+            }
         }
     }
 
@@ -13340,11 +13976,17 @@ public class ChatRepository(
         // the handle's own `Mutex`, blocking on it while holding the `groups`
         // monitor would stall every unrelated lookup behind whatever MLS call
         // happens to hold the handle.
+        // ADR-0087 section 9 — the row goes the moment the end is recorded,
+        // whatever the steps behind it still have to do.
         val records = synchronized(groups) { groups.values.toList() }
+            .filter { DsClient.pseudonymHex(it.groupId).lowercase() !in endingGroups }
+        val leaveAccount = currentAccountIdB64.get()
         val threads = records.map { record ->
             val thread = record.toThread()
             val unread = localUnread.snapshot(thread.groupIdHex)
             thread.copy(
+                leaveWaiting = !thread.membershipEnded && leaveAccount != null &&
+                    loadLeaveRequestedAt(leaveRecords, leaveAccount, thread.groupIdHex) != null,
                 localUnread = unread.count,
                 unreadViewedThisSession = unread.viewedThisSession,
             )
@@ -13486,6 +14128,12 @@ public data class ChatRepositoryState(
      * stays one entry per MLS group for everything that walks groups.
      */
     val conversations: List<ChatThread> = emptyList(),
+    /** ADR-0087 section 9 — "You are no longer in {name}.", each owed once on
+     *  this device. */
+    val endNotices: List<MembershipEndNotice> = emptyList(),
+    /** ADR-0087 section 9 — the conversations on their way out on this device
+     *  (lower-case hex): gone from every list, with their steps still running. */
+    val endingIds: Set<String> = emptySet(),
 )
 
 /** One conversation thread — keyed by hex group id. */
@@ -13527,6 +14175,9 @@ public data class ChatThread(
      * (see [membershipState]).
      */
     val membershipEnded: Boolean = false,
+    /** ADR-0087 UX 9.4 — this device asked to leave and the request has not
+     *  landed: the row says so. */
+    val leaveWaiting: Boolean = false,
     /** Incoming chat messages this device applied while the chat was not on
      *  screen, since it was last shown or since the process started (in
      *  memory). The chat list folds it with the cross-device read cursor. */
@@ -14437,6 +15088,17 @@ private class GroupRecord(
 
     /** Read-only snapshot for the persistence layer. */
     fun snapshot(): List<ChatMessage> = messages.toList()
+
+    /** ADR-0087 section 9 — the record stays a little longer than what it
+     *  showed: a log persist of another group writes this one from here. */
+    fun wipeTimeline() {
+        messages.clear()
+        seedFeedSeen(emptySet(), null)
+        synchronized(presenceLock) {
+            typingByMember = emptyMap()
+            readUpToByMember = emptyMap()
+        }
+    }
 
     /** ADR-0063 section 5 — ids the feed kept on screen above the watermark. */
     @Volatile

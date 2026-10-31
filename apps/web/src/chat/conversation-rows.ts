@@ -27,7 +27,8 @@ import { groupTitle } from "./group-title";
 import { previewLine } from "./list-preview";
 import { memberNameOf } from "../profile/member-label";
 import { useChats, type ActiveGroup } from "./ChatContext";
-import { chatListLine, membershipState, readIsActive } from "./membership-ended";
+import { chatListLine, loadLeaveRequestedAt, membershipState, readIsActive } from "./membership-ended";
+import { useMembershipEnd } from "./MembershipEndContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import { loadMessageLog, type PersistedGroup } from "./message-log-store";
@@ -57,6 +58,7 @@ export function createConversationRows() {
   // in a successor group keeps its row, and everything a person attached to
   // it (pin / mute / archive, folder, read position) stays keyed on its id.
   const lineageView = useLineage();
+  const membershipEnd = useMembershipEnd();
 
   const accountId = (): string | null => {
     const s = auth.state();
@@ -202,6 +204,13 @@ export function createConversationRows() {
   const subOf = (g: ActiveGroup): string => {
     const ended = endedLine(g);
     if (ended !== null) return ended;
+    // `docs/ux/group-and-channel-privacy.md` section 9.4 — the row stays
+    // while the request to leave waits; when it lands the row goes.
+    membershipEnd.leaveVersion();
+    const account = accountId();
+    if (account !== null && loadLeaveRequestedAt(account, g.groupIdB64) !== undefined) {
+      return t("chat.members.pending.waiting_leave");
+    }
     const s = summaryFor(g.group.groupId);
     const line = previewLine({
       preview: s.preview,
@@ -235,7 +244,8 @@ export function createConversationRows() {
   const channelRows = (): readonly ConversationRow[] => {
     const meta = channelsState.metaByChannel();
     const posts = channelsState.postsByChannel();
-    return channelsState.channels().map((c) => {
+    const held = channelsState.channels().filter((c) => !membershipEnd.isChannelEnding(c.id));
+    return held.map((c) => {
       const lastPostMs = posts.get(c.id)?.at(-1)?.serverTsMs ?? null;
       const model = channelRowModel(
         {
@@ -275,7 +285,7 @@ export function createConversationRows() {
     return sortConversations(
       [
       ...channelRows(),
-      ...lineageView.conversations().map((c) => {
+      ...lineageView.conversations().filter((c) => !membershipEnd.isEnding(c.head.groupIdB64)).map((c) => {
         const g = c.head;
         const f = flagsMap[c.conversationHex];
         return {

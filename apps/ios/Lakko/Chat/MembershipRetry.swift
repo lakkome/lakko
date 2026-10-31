@@ -835,4 +835,10 @@ public struct SupersededTrigger {
         lastEvaluatedEpoch[groupIdHex] = epoch
         return true
     }
+
+    /// Forget a group this device is no longer in: a rejoin may land at any
+    /// epoch.
+    public mutating func forget(groupIdHex: String) {
+        lastEvaluatedEpoch[groupIdHex] = nil
+    }
 }

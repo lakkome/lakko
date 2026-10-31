@@ -87,6 +87,18 @@ export function showConversation(marks: FeedMarks, id: string): FeedMarks {
   return { ...marks, hidden: marks.hidden.filter((h) => h !== id) };
 }
 
+/** What a conversation gone from this device leaves behind here: its hidden
+ *  mark and, for a channel, its read position (ADR-0087 section 9). The same
+ *  object when it left nothing. */
+export function withoutConversation(marks: FeedMarks, id: string): FeedMarks {
+  const hidden = marks.hidden.includes(id);
+  const read = id in marks.channelRead;
+  if (!hidden && !read) return marks;
+  const channelRead = { ...marks.channelRead };
+  delete channelRead[id];
+  return { ...marks, hidden: marks.hidden.filter((h) => h !== id), channelRead };
+}
+
 /** The sources a feed may draw from: every one not hidden. Applied before
  *  ranking, so a hidden conversation never reaches the core. */
 export function withoutHidden<T extends { readonly idHex: string; readonly conversationHex?: string }>(

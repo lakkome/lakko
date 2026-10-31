@@ -262,6 +262,12 @@ public final class ChannelsUiState: ObservableObject {
 
     // MARK: - Mutations
 
+    /// ADR-0087 section 9 — this device unsubscribed, or subscribed to a
+    /// channel. Wired by the signed-in shell, which reaches the account's
+    /// other devices.
+    public var onUnsubscribedHere: ((String) -> Void)?
+    public var onSubscribedHere: ((String) -> Void)?
+
     public func addChannel(_ handle: ChannelHandle) {
         // Id-idempotent: re-adding refreshes the local
         // metadata rather than appending a duplicate.

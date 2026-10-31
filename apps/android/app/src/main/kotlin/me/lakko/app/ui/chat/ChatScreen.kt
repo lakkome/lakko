@@ -236,6 +236,19 @@ public fun ChatScreen(
     val membership by viewModel.membership.collectAsStateWithLifecycle()
     val membershipEnded = me.lakko.app.chat.membershipEnded(membership)
 
+    // ADR-0087 section 9 — this account is out of the group: the dialog when
+    // the person is told, straight back to Chats when they asked for it.
+    val endDialog by viewModel.endDialog.collectAsStateWithLifecycle()
+    val conversationGone by viewModel.conversationGone.collectAsStateWithLifecycle()
+    LaunchedEffect(conversationGone) { if (conversationGone) onNavigateBack() }
+    endDialog?.let { dialog ->
+        MembershipEndDialog(
+            dialog = dialog,
+            shownTitle = groupTitle,
+            onOk = viewModel::onEndNoticeAcknowledged,
+        )
+    }
+
     // 1.19c4 — preview-attachment sheet state. When the user
     // taps "Open" on an image chip we resolve the bytes off
     // the main thread + populate this, which surfaces an
@@ -3204,15 +3217,50 @@ private fun LeaveGroupDialog(
  * ADR-0045 (UX §6.2.4) — the `Delete this chat` confirmation.
  *
  * The only protection there is, which is why the body is exact rather than
- * sweeping: **the messages really are gone, and the dead MLS handle is not.**
- * `Group` exposes no delete, so the inactive group's state stays in the
- * provider snapshot as inert bytes — inert in the strong sense (it cannot send,
- * decrypt, export or process) but not nothing.
+ * sweeping.
  *
  * Copy from [me.lakko.app.chat.DELETE_CHAT_TITLE] /
  * [me.lakko.app.chat.DELETE_CHAT_BODY] rather than inline, so the three clients
  * cannot drift on the one string that describes an irreversible deletion.
  */
+/**
+ * ADR-0087 UX 9.1 — this account is out of the group the person has open. One
+ * button, which goes back to Chats; it never says who. What the composer held
+ * is shown selectable: the conversation it was typed in is gone.
+ */
+@Composable
+private fun MembershipEndDialog(
+    dialog: me.lakko.app.chat.EndDialog,
+    /** The title on screen, for a group with no shared name. */
+    shownTitle: String?,
+    onOk: () -> Unit,
+) {
+    val fallback = shownTitle ?: t("chat.group.fallback_name")
+    LakkoDialog(
+        onDismissRequest = {},
+        title = me.lakko.app.chat.endNoticeLine(dialog.name, fallback).text(),
+        body = t("chat.ended.notice_body"),
+        confirm = LakkoDialogAction(t("common.ok"), LakkoDialogTone.Primary, onClick = onOk),
+        cancel = null,
+        content = dialog.draft?.let { draft ->
+            {
+                val clipboard = LocalClipboardManager.current
+                Text(
+                    text = t("chat.ended.unsent_draft"),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                androidx.compose.foundation.text.selection.SelectionContainer {
+                    Text(text = draft, style = MaterialTheme.typography.bodyMedium)
+                }
+                TextButton(onClick = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(draft)) }) {
+                    Text(t("common.copy"))
+                }
+            }
+        },
+    )
+}
+
 /** ADR-0045 UX 6.2.4 — `internal` so the person layer raises the same one. */
 @Composable
 internal fun DeleteChatDialog(

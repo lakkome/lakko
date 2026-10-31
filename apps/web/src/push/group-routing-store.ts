@@ -722,6 +722,31 @@ function fromHex(hex: string): Uint8Array {
 }
 
 /**
+ * Delete one group's routing secret and every reverse-index row that points
+ * at it (ADR-0087 section 9). The caller retired the subscription first
+ * (`retireOldPushGid`). No-op when absent.
+ */
+export async function deleteGroupRouting(accountId: string, groupIdB64: string): Promise<void> {
+  const db = await openPushRoutingDb();
+  try {
+    const tx = db.transaction([SECRETS_STORE, ROUTES_STORE], "readwrite");
+    tx.objectStore(SECRETS_STORE).delete(secretRowKey(accountId, groupIdB64));
+    const routes = tx.objectStore(ROUTES_STORE);
+    const rows = routes.getAll();
+    rows.onsuccess = (): void => {
+      for (const row of rows.result as RouteRow[]) {
+        if (row.accountId === accountId && row.groupIdB64 === groupIdB64) {
+          routes.delete(routeRowKey(accountId, row.pushGidHex));
+        }
+      }
+    };
+    await awaitTx(tx);
+  } finally {
+    db.close();
+  }
+}
+
+/**
  * Forget device: wipe `accountId`'s push-routing secrets and the reverse-index
  * entries that name it, in one transaction. Another account's rows on this
  * browser are left alone (2026-09-30 — Forget device used to call

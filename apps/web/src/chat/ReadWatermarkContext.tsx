@@ -40,6 +40,8 @@ export interface ReadWatermarkApi {
   /** Fold one incoming read receipt. Monotone; a receipt with no resolved
    *  sender is dropped. Never throws. */
   ingest(groupIdB64: string, sender: MemberIdentity | undefined, upTo: number): void;
+  /** Drop a group's watermarks (ADR-0087 section 9). */
+  forgetGroup(groupIdB64: string): void;
 }
 
 const ReadWatermarkContext = createContext<ReadWatermarkApi>();
@@ -82,6 +84,11 @@ export function ReadWatermarkProvider(props: { children: JSX.Element }): JSX.Ele
       const account = untrack(accountId);
       if (account === null || sender === undefined) return;
       store.ingest(account, groupIdB64, sender, upTo);
+    },
+    forgetGroup(groupIdB64) {
+      const account = untrack(accountId);
+      if (account === null) return;
+      store.forget(account, groupIdB64);
     },
   };
 

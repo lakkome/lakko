@@ -329,6 +329,24 @@ export class GroupNameStore {
     return this.rows.entries();
   }
 
+  /** Drop a group's name and persist (ADR-0087 section 9: the group is gone
+   *  from this device). A failed write is reported and swallowed, as in
+   *  {@link set}; the next write of the row carries the removal. */
+  forget(accountId: string, groupIdB64: string): Promise<void> {
+    if (!this.rows.has(groupIdB64)) return Promise.resolve();
+    const next = new Map(this.rows);
+    next.delete(groupIdB64);
+    this.rows = next;
+    this.notify();
+    if (this.account !== accountId) return Promise.resolve();
+    const snapshot: ReadonlyMap<string, StoredGroupName> = this.rows;
+    const run = this.chain.then(() => this.backend.save(accountId, snapshot));
+    this.chain = run.catch((err: unknown) => {
+      this.onPersistError(err);
+    });
+    return this.chain;
+  }
+
   /** Replace the value for a group and persist. The caller has already
    *  decided (verdict, or its own rename). Resolves once the write settled;
    *  a persist failure is reported and swallowed — the in-memory value

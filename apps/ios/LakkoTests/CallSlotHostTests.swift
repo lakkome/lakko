@@ -749,6 +749,33 @@ final class GroupCallHostTests: XCTestCase {
         XCTAssertEqual(h.published.count, publishedBefore, "no Leave or End to a group this device left")
     }
 
+    /// UX 9.1 — this account is out of the group of the live call: the call
+    /// ends now, publishes nothing, and says why.
+    func testAnEndOfMembershipEndsTheCallWithTheLine() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        let handle = try await startLiveCall(host, h)
+        let publishedBefore = h.published.count
+        host.endForMembership(groupIdHex: otherGroup, left: false)
+        XCTAssertEqual(handle.hangUps, 0, "another group's end is not this call's")
+        host.endForMembership(groupIdHex: group, left: false)
+        XCTAssertEqual(handle.hangUps, 1)
+        XCTAssertFalse(host.occupiesSlot)
+        XCTAssertEqual(host.callNotice?.text, Localization.text("call.ended.no_longer_in_group"))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(h.published.count, publishedBefore)
+    }
+
+    /// UX 9.4 — a person who left asked for it: no line.
+    func testALeaveLandingInACallEndsItQuietly() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        let handle = try await startLiveCall(host, h)
+        host.endForMembership(groupIdHex: group, left: true)
+        XCTAssertEqual(handle.hangUps, 1)
+        XCTAssertNil(host.callNotice)
+    }
+
     /// The in-call End button only moves the screen to `ended`; the host turns
     /// that into a hang-up and the Leave / End the group is owed, in order.
     func testEndingFromTheCallScreenHangsUpAndTellsTheGroup() async throws {

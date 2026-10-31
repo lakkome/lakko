@@ -77,14 +77,47 @@
 //! a removal is held as a tombstone, and a later save with a greater stamp
 //! saves the message again. It is not folder-scoped: no folder deletion
 //! touches it.
+//!
+//! ## Conversation ends (ADR-0087 section 9)
+//!
+//! One register per conversation an end has reached, holding "ended" or
+//! "joined again" with the MLS epoch of that event. Its order is `(epoch,
+//! stamp, canonical bytes)`: the rule above with the epoch in front, the
+//! link-record shape again, so the fold stays commutative, associative and
+//! idempotent. The stamp alone cannot decide this register. A device that was
+//! offline across a removal and a re-add applies the old removal when it comes
+//! back and writes "ended" with a stamp newer than the "joined" its account
+//! already holds; by stamps that would delete the conversation from every
+//! device that rejoined. An MLS group keeps its id through all of it and its
+//! epoch only ever rises, so the epoch says which event is the later one
+//! whatever the clocks say. A channel subscription has no epoch and writes `0`,
+//! so a channel's registers are ordered by stamps alone, and that is what
+//! "strictly newer stamp wins" comes to there. At a complete tie "joined" has
+//! the larger bytes: a tie must not delete a conversation.
+//!
+//! [`SyncedState::compose_conversation_ended`] and
+//! [`SyncedState::compose_conversation_joined`] are the only writers a client
+//! uses. Each answers with the register to send, or `None` when writing one
+//! would tell nobody anything: an end older than what is held, or at
+//! [`super::entry::CONVERSATION_ENDS_MAX_CLIENT`]; a join with no end held, so
+//! the state does not grow with every group the person ever joined.
+//!
+//! **A register is never dropped.** A tombstone could go only if no device can
+//! still need it, and no age shows that: the 30-day retention bounds what a
+//! device can read from a journal, not how long it can stay offline, and a
+//! device behind that horizon catches up from the snapshot, which is a re-send
+//! of this state. Dropping a register at 30 days, or at any other age, is
+//! exactly what leaves that device holding the conversation. The client-side
+//! limit bounds the state instead.
 
 use std::collections::BTreeMap;
 
 use super::entry::{
-    take_bytes32, take_u32, take_u64, take_u8, BlobId, CodecError, ConversationEntry,
-    ConversationOrderEntry, ConversationRef, DraftEntry, FlagsEntry, FolderChanges, FolderId,
-    FolderMeta, LineageEntry, MemberState, OwnUsernameEntry, ReadCursorEntry, RecoveryEmailEntry,
-    RegisterKey, SavedSnapshot, SavedValue, Stamped, StateSnapshot, SyncEntry,
+    take_bytes32, take_u32, take_u64, take_u8, BlobId, CodecError, ConversationEnd,
+    ConversationEndState, ConversationEntry, ConversationOrderEntry, ConversationRef, DraftEntry,
+    FlagsEntry, FolderChanges, FolderId, FolderMeta, LineageEntry, MemberState, OwnUsernameEntry,
+    ReadCursorEntry, RecoveryEmailEntry, RegisterKey, SavedSnapshot, SavedValue, Stamped,
+    StateSnapshot, SyncEntry, CONVERSATION_ENDS_MAX_CLIENT,
 };
 use super::lineage::{
     compose_lineage_envelope, decode_lineage_envelope, LineageEnvelopeError,
@@ -111,11 +144,12 @@ use super::recovery_email::{
 /// reworked 2026-10-17), `5` since a link record carries the `shared` flag
 /// (2026-10-26), `6` since a saved-message snapshot carries the message's
 /// own time (`SavedSnapshot::sent_at_ms`; the two branches that made the
-/// last two changes had each called theirs `5`). Older
+/// last two changes had each called theirs `5`), `7` since the
+/// conversation-end register (ADR-0087 section 9). Older
 /// versions are refused rather than read: nothing is deployed, and a build
 /// that silently accepted an older layout would be a second decoder nobody
 /// tests.
-const STATE_VERSION: u8 = 6;
+const STATE_VERSION: u8 = 7;
 
 /// A stored register value with its stamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,7 +212,9 @@ pub struct SyncedState {
 /// `true` when `(a_hlc, a_bytes)` beats `(b_hlc, b_bytes)`. Between two link
 /// records a revoked one beats a live one first (ADR-0079: a revocation is
 /// final), then a shared one beats an unshared one (a copied link never
-/// becomes editable again, 2026-10-26).
+/// becomes editable again, 2026-10-26). Between two conversation-end registers
+/// the greater MLS epoch wins first (ADR-0087 section 9: the epoch, not a
+/// clock, says which event came later).
 fn beats(a_hlc: u64, a: &SyncEntry, b_hlc: u64, b: &SyncEntry) -> bool {
     if let (SyncEntry::LinkRecord(x), SyncEntry::LinkRecord(y)) = (a, b) {
         if x.revoked != y.revoked {
@@ -186,6 +222,11 @@ fn beats(a_hlc: u64, a: &SyncEntry, b_hlc: u64, b: &SyncEntry) -> bool {
         }
         if x.shared != y.shared {
             return x.shared;
+        }
+    }
+    if let (SyncEntry::ConversationEnd(x), SyncEntry::ConversationEnd(y)) = (a, b) {
+        if x.epoch != y.epoch {
+            return x.epoch > y.epoch;
         }
     }
     match a_hlc.cmp(&b_hlc) {
@@ -1108,6 +1149,161 @@ impl SyncedState {
         ids.into_iter().collect()
     }
 
+    // -----------------------------------------------------------------
+    // Conversation ends (ADR-0087 section 9).
+    // -----------------------------------------------------------------
+
+    /// The register to write now that this account's membership of
+    /// `conversation` has ended, or `None` when there is nothing to tell the
+    /// other devices. `epoch` is the MLS epoch the group froze at; `0` for a
+    /// channel. Put the register in a change set, fold it with
+    /// [`Self::apply_all`] (or the FFI's `applyFolderChanges`), send the same
+    /// change set.
+    ///
+    /// `None` means: the register already says ended at this epoch or later;
+    /// or it says joined at a later epoch, so this device is applying an old
+    /// end and its account has rejoined since; or this conversation is new to
+    /// the register and [`CONVERSATION_ENDS_MAX_CLIENT`] are held. In every
+    /// case the device still ends the conversation on itself.
+    ///
+    /// The stamp is raised above a held one, so a write at an equal epoch,
+    /// which is the channel case, always takes effect.
+    ///
+    /// # Errors
+    ///
+    /// [`super::entry::BoundsError::RefIdLength`].
+    pub fn compose_conversation_ended(
+        &self,
+        hlc: u64,
+        conversation: &ConversationRef,
+        epoch: u64,
+    ) -> Result<Option<Stamped<ConversationEnd>>, super::entry::BoundsError> {
+        conversation.validate()?;
+        let held = self.conversation_end(conversation);
+        let write = match &held {
+            None => self.conversation_end_count() < CONVERSATION_ENDS_MAX_CLIENT,
+            Some(h) => match h.value.state {
+                ConversationEndState::Ended => epoch > h.value.epoch,
+                ConversationEndState::Joined => epoch >= h.value.epoch,
+            },
+        };
+        Ok(write.then(|| {
+            Self::stamped_end(
+                hlc,
+                held.as_ref(),
+                conversation,
+                ConversationEndState::Ended,
+                epoch,
+            )
+        }))
+    }
+
+    /// The register to write now that this account has joined `conversation`,
+    /// or `None` when there is nothing to clear. `epoch` is the MLS epoch the
+    /// Welcome joined at; `0` for a channel.
+    ///
+    /// `None` means no end is held at or below this epoch: no register at
+    /// all, so a first join writes nothing and the state does not grow with
+    /// every group the person ever joined; or a join is already held; or the
+    /// held end is later than this join and stands.
+    ///
+    /// # Errors
+    ///
+    /// [`super::entry::BoundsError::RefIdLength`].
+    pub fn compose_conversation_joined(
+        &self,
+        hlc: u64,
+        conversation: &ConversationRef,
+        epoch: u64,
+    ) -> Result<Option<Stamped<ConversationEnd>>, super::entry::BoundsError> {
+        conversation.validate()?;
+        let held = self.conversation_end(conversation);
+        let write = held.as_ref().is_some_and(|h| match h.value.state {
+            ConversationEndState::Ended => epoch >= h.value.epoch,
+            ConversationEndState::Joined => epoch > h.value.epoch,
+        });
+        Ok(write.then(|| {
+            Self::stamped_end(
+                hlc,
+                held.as_ref(),
+                conversation,
+                ConversationEndState::Joined,
+                epoch,
+            )
+        }))
+    }
+
+    fn stamped_end(
+        hlc: u64,
+        held: Option<&Stamped<ConversationEnd>>,
+        conversation: &ConversationRef,
+        state: ConversationEndState,
+        epoch: u64,
+    ) -> Stamped<ConversationEnd> {
+        Stamped {
+            hlc: held.map_or(hlc, |h| hlc.max(h.hlc.saturating_add(1))),
+            value: ConversationEnd {
+                conversation: conversation.clone(),
+                state,
+                epoch,
+            },
+        }
+    }
+
+    /// The register held for a conversation, a "joined" included.
+    #[must_use]
+    pub fn conversation_end(
+        &self,
+        conversation: &ConversationRef,
+    ) -> Option<Stamped<ConversationEnd>> {
+        match self
+            .registers
+            .get(&RegisterKey::ConversationEnd(conversation.clone()))
+        {
+            Some(Held {
+                hlc,
+                entry: SyncEntry::ConversationEnd(e),
+            }) => Some(Stamped {
+                hlc: *hlc,
+                value: e.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Whether this account's membership of a conversation has ended. `false`
+    /// for one never ended and for one joined again since.
+    #[must_use]
+    pub fn is_conversation_ended(&self, conversation: &ConversationRef) -> bool {
+        self.conversation_end(conversation)
+            .is_some_and(|e| e.value.state == ConversationEndState::Ended)
+    }
+
+    /// Every conversation whose register says ended, by `(kind, id)`.
+    #[must_use]
+    pub fn ended_conversations(&self) -> Vec<Stamped<ConversationEnd>> {
+        self.registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::ConversationEnd(e) if e.state == ConversationEndState::Ended => {
+                    Some(Stamped {
+                        hlc: h.hlc,
+                        value: e.clone(),
+                    })
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// How many conversation-end registers are held, "joined" ones included.
+    fn conversation_end_count(&self) -> usize {
+        self.registers
+            .keys()
+            .filter(|k| matches!(k, RegisterKey::ConversationEnd(_)))
+            .count()
+    }
+
     /// The greatest stamp held, or 0. A client seeds its clock above it
     /// after a restore so its next write is newer than anything restored.
     #[must_use]
@@ -1121,7 +1317,7 @@ impl SyncedState {
 
     /// Encode for local persistence and for the backup payload.
     ///
-    /// Layout: `version(1) = 2 ‖ count(u32 BE) ‖ count × { hlc(u64 BE) ‖
+    /// Layout: `version(1) ‖ count(u32 BE) ‖ count × { hlc(u64 BE) ‖
     /// len(u32 BE) ‖ canonical entry bytes }`, in register order. Only
     /// entries the fold holds are written, so [`Self::from_bytes`] of the
     /// result is the same state.
@@ -1629,15 +1825,15 @@ mod tests {
         let mut s = SyncedState::new();
         s.apply(3, SyncEntry::FolderRemoved(fid(2))).ok();
         let mut old = s.to_bytes();
-        assert_eq!(old[0], 6);
-        for version in [1u8, 2, 3, 4, 5] {
+        assert_eq!(old[0], 7);
+        for version in [1u8, 2, 3, 4, 5, 6] {
             old[0] = version;
             assert_eq!(
                 SyncedState::from_bytes(&old),
                 Err(CodecError::UnknownVersion)
             );
         }
-        assert_eq!(SyncedState::new().to_bytes(), vec![6, 0, 0, 0, 0]);
+        assert_eq!(SyncedState::new().to_bytes(), vec![7, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -2172,7 +2368,7 @@ mod tests {
         assert_eq!(SyncedState::from_bytes(&bytes), Ok(s));
         assert_eq!(SyncedState::from_bytes(&[]), Err(CodecError::Truncated));
         assert_eq!(
-            SyncedState::from_bytes(&[7, 0, 0, 0, 0]),
+            SyncedState::from_bytes(&[0xFF, 0, 0, 0, 0]),
             Err(CodecError::UnknownVersion)
         );
         let mut trailing = bytes;
@@ -2322,8 +2518,12 @@ mod tests {
             (hlc.clone(), c.clone(), 0u64..2).prop_map(|(h, c, m)| (h, unsave(c, m))),
             // Link records: two links, uses, a revocation, so live writes
             // meet revocations on every stamp order.
-            (hlc, 0u8..2, 0u32..3, any::<bool>(), c)
+            (hlc.clone(), 0u8..2, 0u32..3, any::<bool>(), c.clone())
                 .prop_map(|(h, id, uses, revoked, label)| (h, link(id, uses, revoked, label))),
+            // Conversation ends: few conversations and epochs, so ends and
+            // joins meet on one epoch and on one stamp often.
+            (hlc, c, 0u64..3, any::<bool>())
+                .prop_map(|(h, c, epoch, ended)| (h, conversation_end(c, epoch, ended))),
         ]
     }
 
@@ -2349,6 +2549,275 @@ mod tests {
         let mut s = SyncedState::new();
         s.apply_all(entries.iter().cloned());
         s
+    }
+
+    fn end_value(c: u8, epoch: u64, ended: bool) -> ConversationEnd {
+        ConversationEnd {
+            conversation: cref(c),
+            state: if ended {
+                ConversationEndState::Ended
+            } else {
+                ConversationEndState::Joined
+            },
+            epoch,
+        }
+    }
+
+    fn conversation_end(c: u8, epoch: u64, ended: bool) -> SyncEntry {
+        SyncEntry::ConversationEnd(end_value(c, epoch, ended))
+    }
+
+    /// `n` distinct conversations, each ended at epoch 1.
+    fn with_ended_conversations(n: u32) -> SyncedState {
+        fold(
+            &(0..n)
+                .map(|i| {
+                    (
+                        1,
+                        SyncEntry::ConversationEnd(ConversationEnd {
+                            conversation: ConversationRef {
+                                kind: ConversationRefKind::Group,
+                                id: i.to_be_bytes().repeat(8),
+                            },
+                            state: ConversationEndState::Ended,
+                            epoch: 1,
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// The case that put the epoch in the register. A person is removed at
+    /// epoch 5 and added again at epoch 9, all while one device is offline.
+    /// That device comes back, applies the old removal, and only then writes
+    /// "ended", with the newest stamp of all. By stamps it would end the
+    /// conversation on every device that has rejoined.
+    #[test]
+    fn a_device_applying_an_old_removal_does_not_end_a_rejoined_conversation() {
+        let mut rejoined = fold(&[(10, conversation_end(1, 5, true))]);
+        let join = rejoined
+            .compose_conversation_joined(20, &cref(1), 9)
+            .unwrap()
+            .expect("an end is held, so the join writes");
+        assert_eq!(join.value.state, ConversationEndState::Joined);
+        rejoined.apply_all(vec![(
+            join.hlc,
+            SyncEntry::ConversationEnd(join.value.clone()),
+        )]);
+        assert!(!rejoined.is_conversation_ended(&cref(1)));
+
+        // The returning device has heard the join: it has nothing to tell.
+        assert_eq!(
+            rejoined.compose_conversation_ended(30, &cref(1), 5),
+            Ok(None)
+        );
+        // It has not heard it: its write arrives anyway, with a newer stamp.
+        let late = fold(&[(30, conversation_end(1, 5, true))]);
+        assert!(late.is_conversation_ended(&cref(1)));
+        let mut merged = rejoined.clone();
+        assert!(!merged.merge_from(&late));
+        assert_eq!(merged, rejoined);
+        assert!(!merged.is_conversation_ended(&cref(1)));
+        // And on the returning device the join wins too.
+        let mut there = late;
+        assert!(there.merge_from(&rejoined));
+        assert!(!there.is_conversation_ended(&cref(1)));
+    }
+
+    /// The other direction: a second removal is a real end whatever the
+    /// clocks say, and a device whose clock runs slow does not lose it.
+    #[test]
+    fn a_later_end_stands_against_a_newer_stamped_join() {
+        let s = fold(&[
+            (50, conversation_end(1, 9, false)),
+            (40, conversation_end(1, 12, true)),
+        ]);
+        assert!(s.is_conversation_ended(&cref(1)));
+        assert_eq!(
+            s.conversation_end(&cref(1)).map(|e| (e.hlc, e.value.epoch)),
+            Some((40, 12))
+        );
+        let written = s
+            .compose_conversation_joined(60, &cref(1), 14)
+            .unwrap()
+            .expect("a join after the end clears it");
+        assert_eq!(written.value.epoch, 14);
+        // A Welcome older than the end clears nothing.
+        assert_eq!(s.compose_conversation_joined(60, &cref(1), 11), Ok(None));
+    }
+
+    #[test]
+    fn writers_say_when_there_is_nothing_to_tell() {
+        let empty = SyncedState::new();
+        // A first join leaves no trace, so the state does not grow with
+        // every group the person ever joined.
+        assert_eq!(empty.compose_conversation_joined(1, &cref(1), 3), Ok(None));
+        let written = empty
+            .compose_conversation_ended(1, &cref(1), 3)
+            .unwrap()
+            .expect("the first end writes");
+        assert_eq!((written.hlc, written.value.epoch), (1, 3));
+
+        let s = fold(&[(5, conversation_end(1, 3, true))]);
+        // The same end from a second device of the account.
+        assert_eq!(s.compose_conversation_ended(9, &cref(1), 3), Ok(None));
+        assert_eq!(s.compose_conversation_ended(9, &cref(1), 2), Ok(None));
+        assert!(s
+            .compose_conversation_ended(9, &cref(1), 4)
+            .unwrap()
+            .is_some());
+
+        let s = fold(&[(5, conversation_end(1, 3, false))]);
+        assert_eq!(s.compose_conversation_joined(9, &cref(1), 3), Ok(None));
+
+        let no_id = ConversationRef {
+            kind: ConversationRefKind::Group,
+            id: vec![],
+        };
+        assert!(empty.compose_conversation_ended(1, &no_id, 0).is_err());
+        assert!(empty.compose_conversation_joined(1, &no_id, 0).is_err());
+    }
+
+    /// A channel has no epoch: its registers are ordered by stamps alone,
+    /// and a writer always lands above what it holds.
+    #[test]
+    fn a_channel_is_ordered_by_stamps_and_a_tie_keeps_the_conversation() {
+        let channel = ConversationRef {
+            kind: ConversationRefKind::Channel,
+            id: vec![9; 16],
+        };
+        let end = |ended: bool| {
+            SyncEntry::ConversationEnd(ConversationEnd {
+                conversation: channel.clone(),
+                state: if ended {
+                    ConversationEndState::Ended
+                } else {
+                    ConversationEndState::Joined
+                },
+                epoch: 0,
+            })
+        };
+        assert!(fold(&[(5, end(true)), (6, end(false))])
+            .conversation_end(&channel)
+            .is_some_and(|e| e.value.state == ConversationEndState::Joined));
+        assert!(fold(&[(7, end(true)), (6, end(false))]).is_conversation_ended(&channel));
+        // A complete tie, in either order.
+        assert!(!fold(&[(5, end(true)), (5, end(false))]).is_conversation_ended(&channel));
+        assert!(!fold(&[(5, end(false)), (5, end(true))]).is_conversation_ended(&channel));
+
+        // Re-subscribing on a device whose clock is behind still clears.
+        let s = fold(&[(50, end(true))]);
+        let join = s
+            .compose_conversation_joined(3, &channel, 0)
+            .unwrap()
+            .expect("a join clears the end");
+        assert_eq!(join.hlc, 51);
+        // And a later unsubscribe the same way.
+        let s = fold(&[(51, end(false))]);
+        let again = s
+            .compose_conversation_ended(3, &channel, 0)
+            .unwrap()
+            .expect("an end after a join writes");
+        assert_eq!(again.hlc, 52);
+    }
+
+    #[test]
+    fn conversation_end_reads() {
+        let s = fold(&[
+            (5, conversation_end(1, 3, true)),
+            (6, conversation_end(2, 4, false)),
+            (7, conversation_end(3, 2, true)),
+        ]);
+        assert!(s.is_conversation_ended(&cref(1)));
+        assert!(!s.is_conversation_ended(&cref(2)));
+        assert!(!s.is_conversation_ended(&cref(4)));
+        assert_eq!(
+            s.ended_conversations(),
+            vec![
+                Stamped {
+                    hlc: 5,
+                    value: end_value(1, 3, true),
+                },
+                Stamped {
+                    hlc: 7,
+                    value: end_value(3, 2, true),
+                },
+            ]
+        );
+        assert_eq!(s.max_hlc(), 7);
+    }
+
+    /// The register reaches every place a state travels: the snapshot a late
+    /// device gets, a restored backup, and the persisted bytes.
+    #[test]
+    fn a_conversation_end_travels_with_the_state() {
+        let s = fold(&[
+            (5, conversation_end(1, 3, true)),
+            (6, conversation_end(2, 4, false)),
+        ]);
+        let snap = s.snapshot();
+        assert_eq!(snap.folders.conversation_ends.len(), 2);
+        let mut late = SyncedState::new();
+        catch_up(&s, &mut late);
+        assert_eq!(late, s);
+
+        let restored = SyncedState::from_bytes(&s.to_bytes()).unwrap();
+        assert_eq!(restored, s);
+        assert!(
+            crate::fuzz_api::decode_synced_and_check(&s.to_bytes()),
+            "the fuzz oracle holds on a state with ends in it"
+        );
+        let mut other = fold(&[(9, conversation_end(4, 1, true))]);
+        assert!(other.merge_from(&restored));
+        assert!(other.is_conversation_ended(&cref(1)));
+        assert!(other.is_conversation_ended(&cref(4)));
+    }
+
+    /// `CONVERSATION_ENDS_MAX_CLIENT` is the writer's limit. At it a new
+    /// conversation writes nothing, a held one still does, and the fold
+    /// refuses nothing, so two devices over the limit together still converge.
+    #[test]
+    fn the_client_limit_stops_the_writer_and_never_the_fold() {
+        let limit = u32::try_from(CONVERSATION_ENDS_MAX_CLIENT).unwrap();
+        let below = with_ended_conversations(limit - 1);
+        let fresh = cref(0xEE);
+        assert!(below
+            .compose_conversation_ended(9, &fresh, 1)
+            .unwrap()
+            .is_some());
+
+        let at = with_ended_conversations(limit);
+        assert_eq!(at.compose_conversation_ended(9, &fresh, 1), Ok(None));
+        // A conversation already held is no new register.
+        let held = at.ended_conversations()[0].value.conversation.clone();
+        assert!(at
+            .compose_conversation_ended(9, &held, 2)
+            .unwrap()
+            .is_some());
+        assert!(at
+            .compose_conversation_joined(9, &held, 2)
+            .unwrap()
+            .is_some());
+
+        let mut over = at;
+        assert_eq!(
+            over.apply(9, conversation_end(0xEE, 1, true)),
+            Ok(ApplyOutcome::Applied)
+        );
+        assert_eq!(over.ended_conversations().len(), limit as usize + 1);
+        assert_eq!(SyncedState::from_bytes(&over.to_bytes()), Ok(over));
+    }
+
+    /// The size [`CONVERSATION_ENDS_MAX_CLIENT`]'s documentation states.
+    #[test]
+    fn a_conversation_end_is_56_bytes_at_rest() {
+        let empty = SyncedState::new().to_bytes().len();
+        assert_eq!(
+            with_ended_conversations(1).to_bytes().len() - empty,
+            56,
+            "hlc 8, length 4, tag 1, kind 1, id length 1, id 32, state 1, epoch 8"
+        );
     }
 
     proptest! {

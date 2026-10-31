@@ -333,6 +333,12 @@ public struct ChatScreen: View {
             // ADR-0052 — choosing Reply puts the keyboard on the composer.
             composerFocused = true
         }
+        // UX 9.1, 9.4 — the conversation left from under the screen. The route
+        // goes, with whatever was pushed over it.
+        .onChange(of: viewModel.conversationGone) { _, gone in
+            if gone { onBack() }
+        }
+        .modifier(EndDialogPresenter(viewModel: viewModel, active: !viewModel.conversationInfoOpen))
         // ADR-0052 decision 2 — a forward's attribution tapped elsewhere asked
         // this conversation to show the original: consumed once, on appear
         // (the screen was pushed for it) or on change (it was already up).
@@ -3480,12 +3486,8 @@ struct GroupInfoScreen: View {
             ) {
                 [.danger(l10n.t("chat.leave.confirm")) { viewModel.onLeaveGroup() }, .cancel()]
             }
-            // ADR-0045 UX §6.2.4 — the body is exact rather than sweeping, and
-            // the precision is load-bearing: the messages really are gone, and
-            // the dead MLS handle is not. `Group` exposes no delete, so the
-            // inactive group's state stays in the provider snapshot as inert
-            // bytes — inert in the strong sense (it cannot send, decrypt,
-            // export or process) but not nothing.
+            // ADR-0045 UX §6.2.4 — reached only by a device whose own leaf was
+            // retired (ADR-0087 section 9).
             .lakkoDialog(
                 isPresented: $deleteConfirmPresented,
                 title: deleteChatTitle,
@@ -3517,6 +3519,9 @@ struct GroupInfoScreen: View {
             }
             .onAppear { viewModel.groupInfoAppeared() }
             .onDisappear { viewModel.groupInfoDisappeared() }
+            // UX 9.1 — the dialog over whichever screen of the conversation is
+            // up; a cover cannot be presented from a screen under this one.
+            .modifier(EndDialogPresenter(viewModel: viewModel, active: viewModel.conversationInfoOpen))
     }
 
     /// A member's avatar, name and pending annotation. A member who is a
@@ -3786,5 +3791,32 @@ private struct ChatTitleView: View {
         .frame(height: Self.barHeight)
         .fixedSize()
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// UX 9.1 — "You are no longer in {name}.", over the conversation. One button,
+/// then Chats. Dismissing it any other way means the same.
+private struct EndDialogPresenter: ViewModifier {
+    @ObservedObject var viewModel: ChatViewModel
+    /// Whether this screen is the one on top.
+    let active: Bool
+
+    func body(content: Content) -> some View {
+        content.lakkoDialog(
+            item: Binding(
+                get: { active ? viewModel.endDialog : nil },
+                set: { if $0 == nil { viewModel.endDialogClosed() } })
+        ) { dialog in
+            LakkoDialogContent(
+                title: Localization.text("chat.ended.notice", texts: ["name": dialog.name]),
+                message: Localization.text("chat.ended.notice_body"),
+                detail: dialog.draft.map {
+                    LakkoDialogDetail(
+                        label: Localization.text("chat.ended.unsent_draft"),
+                        text: $0,
+                        copyTitle: Localization.text("common.copy"))
+                },
+                actions: [.primary(Localization.text("common.ok")) {}])
+        }
     }
 }

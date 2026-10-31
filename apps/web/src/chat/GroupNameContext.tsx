@@ -90,6 +90,8 @@ export interface GroupNameApi {
    *  (ADR-0051: a re-send never re-stamps). Idempotent; nothing happens when
    *  `from` holds no name or `to` already holds one at least as new. */
   carryOver(from: ActiveGroup, to: ActiveGroup): Promise<void>;
+  /** Drop a group's name (ADR-0087 section 9). */
+  forgetGroup(groupIdB64: string): Promise<void>;
   /** `groupIdB64` gained at least one member: schedule the re-send. */
   groupGrew(groupIdB64: string): void;
   /** This device's ADR-0022 role, read off the LIVE group now. */
@@ -280,6 +282,14 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
     stored(groupIdB64) {
       version();
       return store.get(groupIdB64);
+    },
+    async forgetGroup(groupIdB64) {
+      const account = accountId();
+      if (account === null) return;
+      await withRoutingRowLock(account, groupIdB64, async () => {
+        await opened;
+        await store.forget(account, groupIdB64);
+      });
     },
     async receive(entry, event) {
       const account = accountId();

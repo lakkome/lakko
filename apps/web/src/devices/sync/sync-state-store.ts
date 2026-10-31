@@ -146,6 +146,8 @@ function editToWire(e: StampedEdit): WireEdit {
       };
     case "saved-removed":
       return { t: e.t, h, r: refToWire(e.ref), m: e.messageId.toString() };
+    case "conversation-end":
+      return { t: e.t, h, r: refToWire(e.ref) };
   }
 }
 
@@ -213,6 +215,10 @@ function editFromWire(raw: unknown): StampedEdit | null {
       const messageId = bigOf(w.m);
       if (ref === null || messageId === null) return null;
       return { t: "saved-removed", hlc, ref, messageId };
+    }
+    case "conversation-end": {
+      const ref = refFromWire(w.r);
+      return ref === null ? null : { t: "conversation-end", hlc, ref };
     }
     default:
       return null;

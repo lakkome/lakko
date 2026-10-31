@@ -167,19 +167,10 @@ struct ChannelInfoSheet: View {
     /// the channel from the local list.
     private func stopFollowing() {
         // ADR-0060 section 3 — leave on the server too (the subscriber row,
-        // its seed envelopes and its member card). Signed by the subscriber
-        // key, so the keys are captured before they are forgotten; the local
-        // state goes whatever the network does (a failure is logged).
-        if let keys = state.subscriberKeysByChannel[channelId] {
-            let id = channelId
-            Task { await ChannelUnsubscribe.run(keys: keys, channelId: id) }
-        }
-        ChannelMemberCards.forgetUploads(channelId: channelId)
-        state.clearSubscriberKeys(channelId)
-        state.removeChannel(channelId)
-        // ADR-0078 section 9 — the channel's members hold this account's one
-        // `channel` key: the registration sees the channel gone and rotates it.
-        ReachCenter.shared.sync()
+        // its seed envelopes and its member card).
+        ChannelUnsubscribe.stopFollowing(state: state, channelId: channelId)
+        // ADR-0087 section 9 — and on the account's other devices.
+        state.onUnsubscribedHere?(channelId)
         onUnsubscribed()
     }
 }

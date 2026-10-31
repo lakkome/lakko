@@ -80,8 +80,7 @@ import { uiRules } from "../chat/ui-rules";
 import { foldChannelMeta, publishChannelMeta } from "../channels/channel-meta";
 import { ManagePanel } from "../channels/ManagePanel";
 import { MembersPanel } from "../channels/MembersPanel";
-import { forgetUploadedCard } from "../channels/member-cards";
-import { leaveChannelOnServer } from "../channels/unsubscribe";
+import { useMembershipEnd, type MembershipEndApi } from "../chat/MembershipEndContext";
 import { useOwnMemberCard } from "../channels/own-member-card";
 import { isHiddenPostDecode, PostCard, toPostDecode, type PostDecode } from "../channels/PostCard";
 import { PublishComposer } from "../channels/PublishComposer";
@@ -372,17 +371,21 @@ function PostList(props: {
 }
 
 /**
- * Stop following a channel on this device: leave it on the server (ADR-0060
- * section 3 - the signed `DELETE` removes the subscriber row, its seed
- * envelopes and its member card), then forget the reader keypair and the
- * seeds it recovered, and drop the channel from the local list.
+ * Stop following a channel: the end of a membership (ADR-0087 section 9),
+ * carried out by `MembershipEndContext.tsx` on every device of the account.
+ * It leaves the channel on the server (ADR-0060 section 3 - the signed
+ * `DELETE` removes the subscriber row, its seed envelopes and its member
+ * card), then forgets the reader keypair, the seeds and the posts.
  *
  * The local half happens whatever the server said: a request that never
  * arrived or was refused is logged, and the row it leaves behind goes with
- * the 90-day subscriber prune. The copy says what the person sees: the
- * channel leaves the list and this device stops reading it.
+ * the 90-day subscriber prune.
  */
-async function confirmStopFollowing(channelIdHex: string, name: string): Promise<boolean> {
+async function confirmStopFollowing(
+  channelIdHex: string,
+  name: string,
+  membershipEnd: MembershipEndApi,
+): Promise<boolean> {
   const ok = await requestConfirm({
     title:
       name.trim().length > 0
@@ -394,20 +397,7 @@ async function confirmStopFollowing(channelIdHex: string, name: string): Promise
     tone: "danger",
   });
   if (!ok) return false;
-  const keys = channelsState.subscriberKeysByChannel().get(channelIdHex);
-  if (keys !== undefined) {
-    const outcome = await leaveChannelOnServer(channelIdHex, keys);
-    forgetUploadedCard(channelIdHex, keys);
-    if (outcome.kind !== "left") {
-      // eslint-disable-next-line no-console
-      console.warn(
-        "[channels] leaving on the server failed; dropped locally",
-        outcome.kind === "refused" ? `${outcome.status} ${outcome.code}` : outcome.kind,
-      );
-    }
-  }
-  channelsActions.clearSubscriberKeys(channelIdHex);
-  channelsActions.removeChannel(channelIdHex);
+  await membershipEnd.endChannel(channelIdHex, name);
   return true;
 }
 
@@ -921,6 +911,7 @@ const ChannelView: Component = () => {
 };
 
 const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
+  const membershipEnd = useMembershipEnd();
   // Read once: constant for this instance (see `ChannelView`).
   const params = { id: untrack(() => props.id) } as const;
   const chats = useChats();
@@ -1132,7 +1123,7 @@ const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
                 // Leaving on the server is a round trip; the way back to the
                 // list is for a person still on this channel.
                 const here = screenAnchor(location);
-                void confirmStopFollowing(params.id, meta().name).then((done) => {
+                void confirmStopFollowing(params.id, meta().name, membershipEnd).then((done) => {
                   if (!done) return;
                   setInfoOpen(false);
                   if (here()) navigate(paths.channels);
@@ -1229,6 +1220,7 @@ const ChannelSubscribe: Component = () => {
 };
 
 const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
+  const membershipEnd = useMembershipEnd();
   // Read once: constant for this instance (see `ChannelView`).
   const params = { id: untrack(() => props.id) } as const;
   const location = useLocation<{ handle?: string }>();
@@ -1276,6 +1268,9 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
    *  existing row (an owner's, a co-publisher's) keeps its metadata. */
   function rememberSubscribed(): void {
     if (channelsState.channels().some((c) => c.id === params.id)) return;
+    // ADR-0087 section 9 - a channel this account left comes back; its other
+    // devices are told, or their register would take it away again.
+    void membershipEnd.noteChannelJoined(params.id);
     const handle = foundHandle();
     channelsActions.addChannel({
       id: params.id,
@@ -1525,7 +1520,7 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
             onManage={(): void => undefined}
             onUnsubscribe={(): void => {
               const here = screenAnchor(location);
-              void confirmStopFollowing(params.id, meta().name).then((done) => {
+              void confirmStopFollowing(params.id, meta().name, membershipEnd).then((done) => {
                 if (!done) return;
                 setInfoOpen(false);
                 if (here()) navigate(paths.channels);

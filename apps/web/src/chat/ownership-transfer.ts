@@ -606,6 +606,15 @@ export function rememberObservedOwner(
   }
 }
 
+/** Drop the owner remembered for one group (ADR-0087 section 9). Never throws. */
+export function clearLastObservedOwnerForGroup(accountIdB64: string, groupIdB64: string): void {
+  try {
+    globalThis.localStorage?.removeItem(ownerStoreKey(accountIdB64, groupIdB64));
+  } catch {
+    /* best-effort */
+  }
+}
+
 /** Drop every remembered owner for one account — `recover` / `forgetDevice`
  *  hygiene, the same discipline the commit outbox, the pending-request
  *  observations and the beacon observations all follow. */

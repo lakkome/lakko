@@ -1449,6 +1449,30 @@ private fun SessionRoot(
             me.lakko.app.reach.ReachManager.peek()?.setChannels(list.map { it.id }.toSet())
         }
     }
+    // ADR-0087 section 9.5 - this account left a channel on another device: it
+    // goes here too, with the same sentence a group's end shows.
+    LaunchedEffect(channelsState) {
+        me.lakko.app.chat.ConversationEndsMirror.registers.collect { heard ->
+            val ended = heard?.ends.orEmpty()
+            if (ended.none { it.channel }) return@collect
+            val handles = channelsState.channels.value
+            val leaving = me.lakko.app.channels.ChannelUnsubscribe.channelsToLeave(
+                ended = ended,
+                followed = channelsState.subscriberKeysByChannel.value.keys,
+                published = channelsState.keysByChannel.value.keys,
+            )
+            for (id in leaving) {
+                val handle = handles.firstOrNull { it.id.equals(id, ignoreCase = true) } ?: continue
+                me.lakko.app.channels.ChannelUnsubscribe.leave(
+                    channelsState,
+                    handle.id,
+                    channelsClient.baseUrl,
+                    tellDevices = false,
+                )
+                chatRepository.noteChannelEndHeard(handle.id, handle.sharedName.ifBlank { handle.localName })
+            }
+        }
+    }
     // Bind the channels state to the account once the identity secrets land:
     // load this account's persisted channel list + subscriber seeds, restore
     // the publisher MLS provider snapshot, and re-open the publisher keys of

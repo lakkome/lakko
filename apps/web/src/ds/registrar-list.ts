@@ -160,6 +160,19 @@ export function recordRegistrarListEntry(
   }
 }
 
+/** Forget one group's list (ADR-0087 section 9). */
+export function clearRegistrarList(
+  accountId: string,
+  groupIdB64: string,
+  storage: RegistrarListStorage | null = defaultStorage(),
+): void {
+  try {
+    storage?.removeItem?.(`${PREFIX}${accountId}/${groupIdB64}`);
+  } catch {
+    /* best effort */
+  }
+}
+
 /** Forget one account's lists (forget device). */
 export function clearRegistrarLists(
   accountId: string,

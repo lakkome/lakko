@@ -18,6 +18,10 @@
 //! anyone who knows the id can build one, so an active group is never touched
 //! and a refused join leaves the storage exactly as it found it.
 //!
+//! The one way an active group goes is `delete_after_ended_elsewhere`: the
+//! account's own devices said it ended, and the epoch of that end keeps the
+//! word off a group the person has since come back to.
+//!
 //! [`a_join_lands_once_the_evicted_rows_are_gone`] is a control: the same scene
 //! with the group's rows stripped from the provider first. It separates "the
 //! protocol cannot re-admit this person" from "the stored group is in the way".
@@ -751,6 +755,228 @@ fn delete_leaves_other_groups_alone() {
     other
         .create_application_message(&person, b"still fine")
         .expect("the other group works");
+}
+
+// ============================================================================
+// Group::delete_after_ended_elsewhere
+// ============================================================================
+
+/// The epoch of the end: what the group froze at on a device that applied the
+/// removal, which is the epoch alice is at right after sweeping it.
+fn remove_person_and_read_end(s: &mut Scene, person: &Identity) -> (Vec<u8>, u64) {
+    let removal = remove_person(s, person);
+    let end = s.alice_g.epoch();
+    (removal, end)
+}
+
+/// A device that never applied the commit, which is the device this entry
+/// point exists for: past the journal's retention it never can. Everything of
+/// the group goes, the private keys of an ordinary active member and a retained
+/// request among them, and a later Welcome is an ordinary join.
+#[test]
+fn a_device_that_never_applied_the_removal_deletes_on_the_register() {
+    let seed = [0xD7u8; 64];
+    let person = Identity::from_seed(&seed).expect("person");
+    let mut s = scene(0x0D, &person);
+    let group_id = s.alice_g.group_id();
+
+    let update = s.person_g.self_update(&person).expect("the person commits");
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &update)
+        .expect("alice applies");
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &update)
+        .expect("bob applies");
+    let stranger = Identity::from_seed(&[0xD8u8; 64]).expect("stranger");
+    let knock = stranger
+        .create_external_join_proposal(&group_id, s.person_g.epoch())
+        .expect("the stranger knocks");
+    s.person_g
+        .process_incoming_verifying_roles(&person, &knock)
+        .expect("the person retains the request");
+
+    let (_removal, end) = remove_person_and_read_end(&mut s, &person);
+    assert!(
+        s.person_g.is_active(),
+        "the commit never reached this device"
+    );
+    assert!(s.person_g.epoch() < end);
+    assert!(!rows_of(&person, &group_id).is_empty());
+
+    s.person_g
+        .delete_after_ended_elsewhere(&person, end)
+        .expect("deleted");
+    assert_eq!(rows_of(&person, &group_id), Vec::<Vec<u8>>::new());
+    assert!(Group::load(&person, &group_id).expect("load").is_none());
+    assert_eq!(labels(&person), ["KeyPackage", "SignatureKeyPair"]);
+
+    // Repeating it changes nothing, through this handle that is now stale.
+    let after = rows(&person);
+    s.person_g
+        .delete_after_ended_elsewhere(&person, end)
+        .expect("deleted again");
+    assert_eq!(rows(&person), after);
+
+    let (_commit, welcome) = add_person_back(&mut s, &person);
+    let mut rejoined = Group::join_from_welcome(&welcome, &person).expect("joins");
+    assert_back_in(&mut s, &person, &mut rejoined, "after the register");
+    let (restored, mut loaded) = relaunch(&person, &seed, &group_id);
+    assert_back_in(&mut s, &restored, &mut loaded, "after a relaunch");
+}
+
+/// The hole the epoch closes. The person is removed and added back, and a
+/// device of the account applies the old removal late and writes "ended" with
+/// the newest stamp. A device that has rejoined must not lose the group to it,
+/// through the rejoined handle or a stale one.
+#[test]
+fn a_stale_register_does_not_delete_a_rejoined_group() {
+    let person = Identity::from_seed(&[0xD9u8; 64]).expect("person");
+    let mut s = scene(0x0E, &person);
+    let group_id = s.alice_g.group_id();
+
+    let (removal, end) = remove_person_and_read_end(&mut s, &person);
+    s.person_g
+        .process_incoming_verifying_roles(&person, &removal)
+        .expect("the person applies its own removal");
+    let (_commit, welcome) = add_person_back(&mut s, &person);
+    let mut rejoined = Group::join_from_welcome(&welcome, &person).expect("joins");
+    assert!(rejoined.epoch() > end);
+
+    let before = rows(&person);
+    assert_still_active(
+        rejoined.delete_after_ended_elsewhere(&person, end).err(),
+        &group_id,
+    );
+    assert_eq!(rows(&person), before, "the rejoined group is untouched");
+    assert_still_active(
+        s.person_g.delete_after_ended_elsewhere(&person, end).err(),
+        &group_id,
+    );
+    assert_eq!(rows(&person), before, "and a stale handle cannot reach it");
+    assert_back_in(&mut s, &person, &mut rejoined, "stale register");
+}
+
+/// A group that is already ended goes whatever the register says: a device
+/// frozen at a later end than the one it hears about holds a dead group either
+/// way, and this must never strand it.
+#[test]
+fn an_ended_group_goes_at_any_epoch() {
+    let person = Identity::from_seed(&[0xDAu8; 64]).expect("person");
+    let mut s = scene(0x0F, &person);
+    let group_id = s.alice_g.group_id();
+
+    let (removal, end) = remove_person_and_read_end(&mut s, &person);
+    s.person_g
+        .process_incoming_verifying_roles(&person, &removal)
+        .expect("the person applies its own removal");
+    assert!(!s.person_g.is_active());
+
+    s.person_g
+        .delete_after_ended_elsewhere(&person, end - 1)
+        .expect("an older register still takes an ended group");
+    assert_eq!(rows_of(&person, &group_id), Vec::<Vec<u8>>::new());
+}
+
+/// A staged sweep goes with the group: the commit never went out, or its
+/// verdict no longer matters, and a group holding one is otherwise frozen.
+#[test]
+fn a_staged_sweep_goes_with_the_group() {
+    let person = Identity::from_seed(&[0xDBu8; 64]).expect("person");
+    let mut s = scene(0x10, &person);
+    let group_id = s.alice_g.group_id();
+
+    let target = leaf_of(&s.alice_g, &person);
+    let proposal = s
+        .alice_g
+        .propose_remove_member(&s.alice, target)
+        .expect("alice proposes");
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &proposal)
+        .expect("bob stores the proposal");
+    s.bob_g
+        .stage_pending_proposals(&s.bob)
+        .expect("bob stages")
+        .expect("the sweep carried the proposal");
+    assert!(s.bob_g.has_staged_sweep());
+    let end = s.bob_g.epoch() + 1;
+    let (bob, bob_g) = (&s.bob, &mut s.bob_g);
+    bob_g
+        .delete_after_ended_elsewhere(bob, end)
+        .expect("deleted");
+    assert_eq!(rows_of(&s.bob, &group_id), Vec::<Vec<u8>>::new());
+    assert_eq!(labels(&s.bob), ["KeyPackage", "SignatureKeyPair"]);
+}
+
+/// One group goes and the provider's other rows stay exactly as they were.
+#[test]
+fn deleting_on_the_register_leaves_other_groups_alone() {
+    let person = Identity::from_seed(&[0xDCu8; 64]).expect("person");
+    let mut s = scene(0x11, &person);
+    let mut other = Group::create(&person, GroupKind::Group).expect("another group");
+    let other_id = other.group_id();
+    let other_rows = rows_of(&person, &other_id);
+
+    let (_removal, end) = remove_person_and_read_end(&mut s, &person);
+    s.person_g
+        .delete_after_ended_elsewhere(&person, end)
+        .expect("deleted");
+
+    assert_eq!(rows_of(&person, &other_id), other_rows);
+    assert!(other.is_active());
+    other
+        .create_application_message(&person, b"still fine")
+        .expect("the other group works");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(6))]
+
+    /// Whatever rounds of removal and return came before, and whichever of
+    /// them the device applied, one rule holds: an active group above the
+    /// epoch of the end stays untouched; anything else goes, whole.
+    #[test]
+    fn a_register_takes_the_ended_group_and_never_a_later_one(
+        tag in any::<u8>(),
+        rounds in 0usize..3,
+        applied in any::<bool>(),
+        ended_at in -2i64..=2,
+    ) {
+        let person = Identity::from_seed(&[tag ^ 0xA5; 64]).expect("person");
+        let mut s = scene(tag, &person);
+        let group_id = s.alice_g.group_id();
+
+        for _ in 0..rounds {
+            let removal = remove_person(&mut s, &person);
+            s.person_g
+                .process_incoming_verifying_roles(&person, &removal)
+                .expect("the person applies its own removal");
+            let (_commit, welcome) = add_person_back(&mut s, &person);
+            s.person_g = Group::join_from_welcome(&welcome, &person).expect("joins");
+        }
+
+        let removal = remove_person(&mut s, &person);
+        if applied {
+            s.person_g
+                .process_incoming_verifying_roles(&person, &removal)
+                .expect("the person applies its own removal");
+        }
+        let held = s.person_g.epoch();
+        let active = s.person_g.is_active();
+
+        // A register at, above and below what this device holds.
+        let ended_epoch = held.saturating_add_signed(ended_at);
+        let before = rows(&person);
+        let outcome = s.person_g.delete_after_ended_elsewhere(&person, ended_epoch);
+        if active && held > ended_epoch {
+            assert_still_active(outcome.err(), &group_id);
+            prop_assert_eq!(rows(&person), before);
+            prop_assert!(s.person_g.is_active());
+        } else {
+            outcome.expect("deleted");
+            prop_assert_eq!(rows_of(&person, &group_id), Vec::<Vec<u8>>::new());
+            prop_assert!(Group::load(&person, &group_id).expect("load").is_none());
+        }
+    }
 }
 
 // ============================================================================

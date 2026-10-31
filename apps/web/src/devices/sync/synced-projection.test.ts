@@ -128,6 +128,81 @@ describe("buildFolderChangeSet into the fold", () => {
   });
 });
 
+describe("the end of a membership (ADR-0087 section 9)", () => {
+  /** Fold the register a compose returned, as `writeConversationEnd` does,
+   *  and return what the outbox's edit then sends. */
+  function write(s: wasm.SyncedState, register: wasm.ConversationEndRegister | undefined): RegisterEdit[] {
+    expect(register).toBeDefined();
+    const cs = new wasm.FolderChangeSet();
+    cs.addConversationEnd(register as wasm.ConversationEndRegister);
+    s.applyFolderChanges(cs);
+    cs.free();
+    return [{ t: "conversation-end", ref: G1 }];
+  }
+
+  /** What another device of the account folds from the same outbox entry. */
+  function send(from: wasm.SyncedState, to: wasm.SyncedState, edits: readonly RegisterEdit[]): void {
+    const cs = buildFolderChangeSet(wasm, stampEdits(edits, mint), (ref) =>
+      from.conversationEnd(ref.kind, ref.id),
+    );
+    expect(cs.registerCount).toBe(1);
+    to.applyFolderChanges(cs);
+    cs.free();
+  }
+
+  it("an end reaches the projection of the device that wrote it and of the one that heard it", () => {
+    const here = new wasm.SyncedState();
+    const there = new wasm.SyncedState();
+    send(here, there, write(here, here.composeConversationEnded(mint(), G1.kind, G1.id, 7n)));
+    for (const s of [here, there]) {
+      expect(projectSyncedState(s).endedConversations).toEqual([{ ref: G1, epoch: 7n }]);
+    }
+  });
+
+  it("a later join clears it on the other device too", () => {
+    const here = new wasm.SyncedState();
+    const there = new wasm.SyncedState();
+    send(here, there, write(here, here.composeConversationEnded(mint(), G1.kind, G1.id, 7n)));
+    send(here, there, write(here, here.composeConversationJoined(mint(), G1.kind, G1.id, 9n)));
+    expect(projectSyncedState(there).endedConversations).toEqual([]);
+  });
+
+  it("a stale end does not bury a join, whatever the stamps say", () => {
+    const rejoined = new wasm.SyncedState();
+    write(rejoined, rejoined.composeConversationEnded(mint(), G1.kind, G1.id, 7n));
+    write(rejoined, rejoined.composeConversationJoined(mint(), G1.kind, G1.id, 9n));
+    // A device offline across both applies the old removal now, with a newer
+    // stamp than either. The epoch is what decides.
+    const late = new wasm.SyncedState();
+    const register = late.composeConversationEnded(mint(), G1.kind, G1.id, 7n);
+    write(late, register);
+    late.mergeFrom(rejoined);
+    expect(projectSyncedState(late).endedConversations).toEqual([]);
+  });
+
+  it("nothing to tell is undefined: a first join writes no register", () => {
+    const s = new wasm.SyncedState();
+    expect(s.composeConversationJoined(mint(), G1.kind, G1.id, 3n)).toBeUndefined();
+    write(s, s.composeConversationEnded(mint(), G1.kind, G1.id, 7n));
+    expect(s.composeConversationEnded(mint(), G1.kind, G1.id, 7n)).toBeUndefined();
+  });
+
+  it("an outbox entry with no register held sends nothing", () => {
+    const cs = buildFolderChangeSet(wasm, stampEdits([{ t: "conversation-end", ref: G1 }], mint), () => undefined);
+    expect(cs.registerCount).toBe(0);
+    cs.free();
+  });
+
+  it("a channel writes epoch 0, and its stamp decides", () => {
+    const s = new wasm.SyncedState();
+    const channel: ConversationRef = FAR;
+    write(s, s.composeConversationEnded(mint(), channel.kind, channel.id, 0n));
+    expect(s.isConversationEnded(channel.kind, channel.id)).toBe(true);
+    write(s, s.composeConversationJoined(mint(), channel.kind, channel.id, 0n));
+    expect(s.isConversationEnded(channel.kind, channel.id)).toBe(false);
+  });
+});
+
 describe("mergeRestoredFold - a restore merges, never replaces (ADR-0058 5.2)", () => {
   it("keeps a backup's hand-added chat AND a local deletion marker", () => {
     const local = new wasm.SyncedState();

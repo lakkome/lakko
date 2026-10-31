@@ -51,10 +51,8 @@ import {
   base64UrlEncodeNoPad,
 } from "../auth/account-id";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
-import { deleteConversation } from "../chat/delete-chat";
+import { useMembershipEnd } from "../chat/MembershipEndContext";
 import { useLineage } from "../chat/use-lineage";
-import { heldSends, persistHeldSends } from "../chat/held-send-queue";
-import { usePins } from "../chat/PinContext";
 import { deleteChatConfirmation } from "../chat/delete-chat-confirm";
 import {
   loadLeaveRequestedAt,
@@ -147,7 +145,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   const auth = useAuth();
   const chats = useChats();
   const lineageView = useLineage();
-  const pins = usePins();
+  const membershipEnd = useMembershipEnd();
   const profiles = useProfiles();
   const navigate = useNavigate();
   // The Show wrapper above guarantees identitySecrets() is non-null on every
@@ -500,19 +498,14 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       // ADR-0073 R.5 — every group of the conversation, the head last.
       const view = lineageView.resolve(g.groupIdB64);
       const held = view?.held ?? [g];
-      await deleteConversation({
-        accountIdB64: s.account.accountId,
+      await membershipEnd.deleteConversation({
         segments: held.map((segment) => ({
           groupIdB64: segment.groupIdB64,
           groupIdHex: syncGroupIdHex(segment.group.groupId),
         })),
         headGroupIdB64: view?.head.groupIdB64 ?? g.groupIdB64,
-        chats,
-        afterSegment: (segment) => pins.forgetConversation(segment.groupIdB64),
+        conversationHex: view?.conversationHex ?? syncGroupIdHex(g.group.groupId),
       });
-      // Nothing held for a conversation that is gone is ever sent.
-      const conversationHex = view?.conversationHex ?? syncGroupIdHex(g.group.groupId);
-      if (heldSends.take(conversationHex).length > 0) void persistHeldSends(s.account.accountId);
       // `clearSelection` navigates and deselects; only for a person still on
       // THIS contact.
       if (stillOn()) clearSelection();

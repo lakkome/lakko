@@ -28,6 +28,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Check
@@ -363,6 +364,14 @@ public fun ChatListScreen(
                     query = query,
                     onQueryChange = { query = it },
                 )
+                // ADR-0087 UX 9.1 — "You are no longer in {name}.", once per
+                // device, one at a time. It waits here across a restart.
+                state.endNotices.firstOrNull()?.let { notice ->
+                    MembershipEndBanner(
+                        notice = notice,
+                        onClose = { repository.dismissEndNotice(notice.idHex) },
+                    )
+                }
                 // ADR-0050 / docs/ux/second-device.md section 2: one label while
                 // this device is still being admitted to the account's chats.
                 if (synchronizing) {
@@ -647,6 +656,36 @@ internal class RowHandlers(
 
 /** One tab's rows. [folder] is the tab (`null` = All chats). */
 @Composable
+private fun MembershipEndBanner(
+    notice: me.lakko.app.chat.MembershipEndNotice,
+    onClose: () -> Unit,
+) {
+    val fallback = t("chat.group.fallback_name")
+    androidx.compose.material3.Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+        ) {
+            Text(
+                text = me.lakko.app.chat.endNoticeLine(notice.name, fallback).text(),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onClose) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = t("common.close"),
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun ConversationList(
     rows: List<ConversationListRow>,
     folder: ChatFolder?,
@@ -928,6 +967,8 @@ internal fun rowPreview(
         ),
     )
     if (endedLine != null) return endedLine.renderWith(strings)
+    // ADR-0087 UX 9.4 — the row stays until the leave lands, and says so.
+    if (thread.leaveWaiting) return strings["chat.members.pending.waiting_leave"]
     val noMessages = strings["chats.row.no_messages"]
     if (last == null) return noMessages
     if (last.direction == Direction.System) {

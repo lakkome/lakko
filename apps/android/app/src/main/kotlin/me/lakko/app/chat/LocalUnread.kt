@@ -87,6 +87,11 @@ internal class LocalUnreadCounter {
         }
     }
 
+    /** Forget one group (ADR-0087 section 9). */
+    fun forget(groupIdHex: String) {
+        synchronized(lock) { entries.remove(groupIdHex) }
+    }
+
     /** Logout / forget device. */
     fun clear() {
         synchronized(lock) { entries.clear() }

@@ -87,7 +87,7 @@ public final class ChatRepository: ObservableObject {
     /// re-publish any commit that crashed mid-window. See
     /// ``persistCommitEntryThenSnapshotOrThrow(_:)`` +
     /// ``sweepPendingCommits(record:)``.
-    private let commitOutbox: CommitOutboxStore
+    let commitOutbox: CommitOutboxStore
 
     /// ADR-0042 — the opaque per-group push routing orchestrator. Owns the
     /// mint (owner-only) / receive / derive / subscribe-under-`push_gid`
@@ -124,6 +124,39 @@ public final class ChatRepository: ObservableObject {
     /// asked for it. Losing it costs the NARROWING, never the state — the
     /// fallback string is true either way.
     private let leaveRequestStore: LeaveRequestStore
+
+    /// ADR-0087 section 9 — the owed ends, the notices not yet closed and the
+    /// held Welcomes (``ChatRepository+MembershipEnd``).
+    let membershipEndStore: MembershipEndStore
+    /// The owed ends of this account, the store's record in memory: consulted
+    /// on every poll and for every row.
+    var owedEnds: [String: OwedMembershipEnd] = [:]
+    /// UX 9.1 — what the banner at the top of Chats shows.
+    public let membershipEndNotices = MembershipEndNoticeCenter()
+    /// The account's synced state. Wired by the composition root; `nil` in a
+    /// test that does not exercise it, and then step 2 waits.
+    weak var conversationEndSync: ConversationEndSync?
+    /// The subscription that feeds ``applyHeardEnds()``.
+    var conversationEndsWatch: AnyCancellable?
+    /// Whether the end may run now. A VoIP wake only records it: the wipe
+    /// waits for the app to be in front. Tests inject their own.
+    var membershipEndMayRun: @MainActor () -> Bool = { CommitterEnvelopeForeground.isOnScreen() }
+    /// An end was recorded for a group. The composition root points it at the
+    /// group call host: a call in that group ends now. `left`: the person
+    /// asked for it.
+    var onMembershipEndRecorded: (@MainActor (_ groupIdHex: String, _ left: Bool) -> Void)?
+    /// A channel ended on another device of this account. Wired by the
+    /// signed-in shell, which owns the channel list.
+    var onChannelEndedElsewhere: (@MainActor (_ channelIdHex: String) -> Void)?
+    /// A held Welcome landed. Wired by ``ContactsRepository``, for what it
+    /// does after any Welcome.
+    var onHeldWelcomeJoined: (@MainActor (_ groupIdHex: String) -> Void)?
+    /// Groups whose end is being carried out now.
+    var endsRunning: Set<String> = []
+    /// One pass over the held Welcomes at a time.
+    var heldWelcomesRunning = false
+    /// A pass was asked for while one ran.
+    var heldWelcomesRerun = false
 
     /// ADR-0045 S4b — when this device last emitted its own liveness beacon, per
     /// group. This device's OWN local clock, which is legitimate here and
@@ -683,6 +716,7 @@ public final class ChatRepository: ObservableObject {
         unappliedRequestStore: UnappliedRequestStore = UnappliedRequestStore(),
         lastObservedOwnerStore: LastObservedOwnerStore = LastObservedOwnerStore(),
         leaveRequestStore: LeaveRequestStore = LeaveRequestStore(),
+        membershipEndStore: MembershipEndStore = MembershipEndStore(),
         groupNameStore: GroupNameStore = GroupNameStore(),
         sharedPinStore: SharedPinStore = SharedPinStore(),
         personalPinStore: PersonalPinStore = PersonalPinStore(),
@@ -710,6 +744,7 @@ public final class ChatRepository: ObservableObject {
         self.unappliedRequestStore = unappliedRequestStore
         self.lastObservedOwnerStore = lastObservedOwnerStore
         self.leaveRequestStore = leaveRequestStore
+        self.membershipEndStore = membershipEndStore
         // SECURITY (nonce-reuse-on-crash) — wire the fail-closed MLS
         // ratchet persister into the ChatClient so EVERY application send
         // (chat / edit / delete / reaction / typing / read-receipt /
@@ -877,6 +912,10 @@ public final class ChatRepository: ObservableObject {
         // Ongoing group calls this device observed before the relaunch; records
         // past the max age are dropped on load.
         groupCalls = groupCallStore.load(accountIdB64: newAccountIdB64, nowMs: Self.nowMs())
+        // ADR-0087 section 9 — read before anything consults it.
+        owedEnds = Dictionary(
+            uniqueKeysWithValues: membershipEndStore.owed(accountIdB64: newAccountIdB64)
+                .map { ($0.groupIdHex, $0) })
 
         // Eagerly rebuild `Group` handles for every previously-
         // known group id (1.14f5). `restoreStorage` laid down
@@ -947,6 +986,9 @@ public final class ChatRepository: ObservableObject {
         // trigger, the held messages a restart left on disk, and one
         // continuity pass.
         installContinuity()
+        // ADR-0087 section 9 — the ends a restart left owed, and the stored
+        // groups this account is no longer in.
+        sweepMembershipEnds()
     }
 
     /// Clear the in-memory state for the current session. Keeps
@@ -1002,6 +1044,11 @@ public final class ChatRepository: ObservableObject {
         supersededTrigger = SupersededTrigger()
         supersededRunning.removeAll()
         committerEnvelopesInFlight.removeAll()
+        owedEnds.removeAll()
+        endsRunning.removeAll()
+        heldWelcomesRunning = false
+        heldWelcomesRerun = false
+        membershipEndNotices.replace([])
         // ADR-0045 — a new session re-establishes its own beacon cadence; a
         // carried-over stamp would suppress the first beacon of that session,
         // which the core deliberately makes immediate.
@@ -1664,14 +1711,18 @@ public final class ChatRepository: ObservableObject {
     /// Returns the joined group's hex id.
     ///
     /// Every attempt, success or failure, ends by requesting a KeyPackage
-    /// republish. Processing a Welcome deletes the private keys of the
-    /// KeyPackage it targets (OpenMLS keeps them only for a last-resort
-    /// KeyPackage, which Lakko never mints), and discovery holds one
-    /// KeyPackage per account — so without a fresh upload the directory
-    /// keeps handing out a KeyPackage this device can no longer open, and
-    /// the next person to add this user fails. A failed join republishes
-    /// too: whether the keys were consumed before the failure is not
-    /// observable from here, and a spare upload costs one bearer request.
+    /// republish: one published package is a last-resort package (ADR-0050
+    /// section 2.6) and a fresh one narrows how long it is used. Its private
+    /// keys survive a join, so a Welcome refused here can be tried again.
+    ///
+    /// ADR-0087 section 9, C-88 — a Welcome replaces an ended group under the
+    /// same id, and is refused with `MembershipGroupStillActive`, changing
+    /// nothing, for a group this device still holds as active. That refusal
+    /// is not a failure of the Welcome: the removal it answers may simply
+    /// still be in the journal, so the caller holds it
+    /// (``holdWelcomeForActiveGroup(groupIdHex:welcome:)``) instead of losing
+    /// it. When the replaced group's person was out, nothing of it carries;
+    /// when only this device's leaf was retired, the history does.
     public func joinGroupFromWelcome(welcomeBytes: Data) async throws -> String {
         defer { republishKeyPackage() }
         guard let identity = canonicalIdentity else {
@@ -1694,12 +1745,16 @@ public final class ChatRepository: ObservableObject {
         let groupId = try group.groupId()
         let groupIdHex = DsClient.pseudonymHex(groupId)
         let record = GroupRecord(group: group, groupId: groupId)
+        // ADR-0087 section 9 — what this Welcome replaced, if anything.
+        closeReplacedGroup(groupIdHex: groupIdHex, joined: record)
         // What the log holds for this group goes in with it: the persist below
         // writes the whole log, and a record registered empty would write this
         // group's history bundle away.
         if let waiting = waitingLogSlots.take(groupIdHex) { record.adoptHistory(waiting) }
         groups[groupIdHex] = record
         persistKnownGroupBestEffort(groupIdHex: groupIdHex)
+        // A later join clears a held end (rule 3: a first join writes nothing).
+        publishJoinedSoon(groupIdHex: groupIdHex)
         // ADR-0060 section 6 — a `/g/` request of ours was answered: its
         // single-use `reply` key goes.
         ReachCenter.shared.retireReplies(purpose: ReplyPurpose.groupJoin(groupId))
@@ -2684,7 +2739,12 @@ public final class ChatRepository: ObservableObject {
     /// its pre-batch value in the turn that immediately follows a poll — which
     /// is exactly where the rotation fires.
     func membershipStateNow(groupIdHex: String) -> MembershipState {
-        membershipState(
+        // ADR-0087 section 9 — an owed end stops everything that consults
+        // this, whether or not the commit was applied here.
+        if isEnding(groupIdHex: groupIdHex) {
+            return .ended(left: leaveRequestedAt(groupIdHex: groupIdHex) != nil)
+        }
+        return membershipState(
             isActive: isActive(groupIdHex: groupIdHex),
             leaveRequestedAtMs: leaveRequestedAt(groupIdHex: groupIdHex))
     }
@@ -2704,31 +2764,10 @@ public final class ChatRepository: ObservableObject {
     /// layered-defence posture `leaveGroupAffordance` and `exitBlock` already
     /// keep between them.
     ///
-    /// **What it removes:** this group's entry in the per-account message log
-    /// (a read-modify-write on a store that already exists — the log is keyed
-    /// `{ groupIdHex -> PersistedGroup }` internally, so no new store is
-    /// needed), its pending-request observations, its durable leave record, and
-    /// its rows in the live group map and the known-groups registry.
-    ///
-    /// The last-observed-owner memory is deliberately LEFT: that store has only
-    /// an account-wide wipe, and calling it here would erase every OTHER
-    /// group's memory and greet the user with a spurious "{name} made you the
-    /// owner" notice in a group nothing happened in. A row for a group that no
-    /// longer exists is inert, and on the one path where it could ever be read
-    /// again — a rejoin under the same group id — it holds exactly the right
-    /// answer.
-    ///
-    /// **What it does NOT remove, which is why the confirmation body is exact
-    /// rather than sweeping:** the inactive MLS group stays in the provider
-    /// snapshot as inert bytes. `Group` exposes no delete, so a `Group::delete`
-    /// is a real (small) core follow-up rather than something this rides free.
-    /// The remnant is inert in the strong sense — it cannot send, decrypt,
-    /// export or process anything — but it is not nothing.
-    ///
-    /// The push subscription is already gone by this point: the §6.2.8
-    /// teardown retires it at the moment of the eviction, not at the moment of
-    /// the delete, so a user who never presses this button still stops being
-    /// woken.
+    /// Since ADR-0087 section 9 a person who is out of a group has no such
+    /// control: the group goes by itself (``ChatRepository+MembershipEnd``).
+    /// What still reaches this is a one-to-one whose leaf was retired and a
+    /// group this device's leaf was retired from while the account stays.
     ///
     /// The REGISTRY rows go LAST, so a failure above leaves the chat reachable
     /// rather than orphaning a transcript behind a row the user can no longer
@@ -2756,42 +2795,60 @@ public final class ChatRepository: ObservableObject {
         return deleted
     }
 
+    /// How a group's MLS state goes (``removeGroupNow(groupIdHex:mls:)``).
+    enum MlsGroupDelete {
+        /// The commit that ended it was applied here. An active group is
+        /// refused: an older segment of a deleted chat stays inert.
+        case applied
+        /// ADR-0087 section 9 — this device heard of the end from its own
+        /// account's register at this epoch.
+        case endedElsewhere(epoch: UInt64)
+    }
+
     /// Remove ONE group and everything this device keeps for it. No gate:
-    /// the caller decided (``deleteChat(groupIdHex:)``).
+    /// the caller decided (``deleteChat(groupIdHex:)``). A provider that
+    /// refuses the delete leaves the row dropped all the same: the chat was
+    /// deleted, and the leftover state is inert.
     @discardableResult
     func removeGroupLocally(groupIdHex: String) -> Bool {
-        guard let accountIdB64 = currentAccountIdB64,
-              let record = groups[groupIdHex] else { return false }
-        let groupIdB64 = base64Encode(record.groupId)
-        // ADR-0073 R.6 — the claim state of a group that is gone from here.
-        groupClosedStore.drop(groupIdB64: groupIdB64)
-        // The transcript first: it is the only thing here that is irreplaceable,
-        // so if anything is going to fail it should fail before the row that
-        // makes the chat reachable is gone.
-        _ = messageLogStore.deleteGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
-        // Local bookkeeping for a group that no longer exists here. All three
-        // are best-effort by construction and none can fail the delete.
-        pendingRequestStore.prune(
-            accountIdB64: accountIdB64, groupIdB64: groupIdB64, liveKeys: [])
-        unappliedRequestStore.clearForGroup(
-            accountIdB64: accountIdB64, groupIdB64: groupIdB64)
-        pendingRequestStore.clearIntents(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
-        leaveRequestStore.clear(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
-        readWatermarkStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
-        readWatermarksByGroup.removeValue(forKey: groupIdHex)
-        // ADR-0052 decision 3 — the pins are wiped with the conversation, both
-        // scopes: a bookmark of a chat that no longer exists here points at
-        // nothing.
-        sharedPinStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
-        personalPinStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
-        // ADR-0059 section 6 — the lists members shared there and the switch.
-        sharedChannels.forgetGroup(groupIdHex: groupIdHex)
-        if groupCalls.removeValue(forKey: groupIdHex) != nil {
-            groupCallStore.save(accountIdB64: accountIdB64, records: groupCalls)
+        guard groups[groupIdHex] != nil else { return false }
+        do {
+            try removeGroupNow(groupIdHex: groupIdHex, mls: .applied)
+        } catch {
+            NSLog("chat delete: the MLS group stays in the provider: \(error)")
+            dropRegistryRows(groupIdHex: groupIdHex)
         }
-        // LAST, and in this order: the registry is what a relaunch rehydrates
-        // from, so dropping it after the live handle means a crash between the
-        // two leaves the chat present rather than half-gone.
+        return true
+    }
+
+    /// ADR-0087 section 9, step 4: wipe, then the MLS group, then the provider
+    /// snapshot, durably, and the registry rows LAST. Synchronous, so nothing
+    /// interleaves. Throws with the registry rows still there when the group
+    /// could not be deleted or persisted; the caller's owed record resumes it,
+    /// and every step here runs again harmlessly.
+    func removeGroupNow(groupIdHex: String, mls: MlsGroupDelete) throws {
+        guard let accountIdB64 = currentAccountIdB64 else { throw StaleBindingError() }
+        wipeGroupStores(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        if let record = groups[groupIdHex], let identity = canonicalIdentity {
+            switch mls {
+            case .applied:
+                do {
+                    try record.group.deleteLocally(identity: identity)
+                } catch FfiError.MembershipGroupStillActive {
+                    // An older segment of a conversation, still live.
+                }
+            case .endedElsewhere(let epoch):
+                try record.group.deleteAfterEndedElsewhere(identity: identity, endedEpoch: epoch)
+            }
+            try persistSnapshotDurableOrThrow()
+        }
+        dropRegistryRows(groupIdHex: groupIdHex)
+    }
+
+    /// LAST, and in this order: the registry is what a relaunch rehydrates
+    /// from, so dropping it after the live handle means a crash between the
+    /// two leaves the chat present rather than half-gone.
+    private func dropRegistryRows(groupIdHex: String) {
         groups.removeValue(forKey: groupIdHex)
         unreadMessageIds.removeValue(forKey: groupIdHex)
         // Nothing can poll this journal once the registry row is gone, so any
@@ -2799,11 +2856,96 @@ public final class ChatRepository: ObservableObject {
         // above has usually dropped them already; this covers a delete that
         // never polled after the eviction.
         chatClient.forgetOwnPublished(groupIdHex: groupIdHex)
-        knownGroupsStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        if let accountIdB64 = currentAccountIdB64 {
+            knownGroupsStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        }
         // A deleted chat is not carried in this device's backups either.
         dropRestoredKnownGroup(groupIdHex: groupIdHex)
         state = state.with(threads: buildThreadList())
-        return true
+    }
+
+    /// Everything this device keeps for one group, except the MLS group and
+    /// the registry rows. Best-effort by construction, and repeatable: an
+    /// owed end runs it again after a crash, and a Welcome that replaced an
+    /// ended group runs it with the new group not yet registered.
+    func wipeGroupStores(accountIdB64: String, groupIdHex: String) {
+        let groupIdB64 = groups[groupIdHex].map { base64Encode($0.groupId) }
+            ?? Self.hexToBytes(groupIdHex).map(base64Encode)
+        // The transcript first: it is the only thing here that is irreplaceable,
+        // so if anything is going to fail it should fail before the row that
+        // makes the chat reachable is gone.
+        groups[groupIdHex]?.forgetHistory()
+        _ = messageLogStore.deleteGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        _ = waitingLogSlots.take(groupIdHex)
+        if let groupIdB64 {
+            // ADR-0073 R.6 — the claim state of a group that is gone from here.
+            groupClosedStore.drop(groupIdB64: groupIdB64)
+            pendingRequestStore.prune(
+                accountIdB64: accountIdB64, groupIdB64: groupIdB64, liveKeys: [])
+            unappliedRequestStore.clearForGroup(
+                accountIdB64: accountIdB64, groupIdB64: groupIdB64)
+            pendingRequestStore.clearIntents(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
+            leaveRequestStore.clear(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
+            lastObservedOwnerStore.clear(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
+            beaconStore.prune(accountIdB64: accountIdB64, groupIdB64: groupIdB64, liveKeys: [])
+            // ADR-0040 — a commit of a group this device is out of has nowhere
+            // to go; a staged sweep went with the MLS group.
+            for entry in commitOutbox.loadUnacked(accountIdB64: accountIdB64, groupIdB64: groupIdB64) {
+                commitOutbox.deleteEntryBestEffort(accountIdB64: accountIdB64, id: entry.id)
+            }
+        }
+        readWatermarkStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        readWatermarksByGroup.removeValue(forKey: groupIdHex)
+        // ADR-0052 decision 3 — the pins are wiped with the conversation, both
+        // scopes: a bookmark of a chat that no longer exists here points at
+        // nothing.
+        sharedPinStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        personalPinStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        // ADR-0051 — the name; the notice holds its own copy.
+        groupNameStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        groupNameRevision &+= 1
+        // ADR-0059 section 6 — the lists members shared there and the switch.
+        sharedChannels.forgetGroup(groupIdHex: groupIdHex)
+        if groupCalls.removeValue(forKey: groupIdHex) != nil {
+            groupCallStore.save(accountIdB64: accountIdB64, records: groupCalls)
+        }
+        CallHistoryStore.shared.bind(accountIdB64: accountIdB64)
+        CallHistoryStore.shared.forget(conversationId: groupIdHex)
+        // ADR-0057 — this device's standing in the journal: a group it comes
+        // back to appoints it again.
+        registrarSeeds.forgetGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        // ADR-0060 section 3 — the grants members gave here.
+        ReachCenter.shared.forgetHeld(scopeHex: groupIdHex)
+        // ADR-0050 — which leaves left this group: a person added back is not
+        // a device someone removed.
+        DeviceReadmissionMemory.forgetGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        ProfileRequestStore().forgetGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        StateBundle.forgetKnownGroup(groupIdHex: groupIdHex, accountIdB64: accountIdB64)
+        // Decrypted media is cached by blob, not by group: all of it goes, and
+        // the rest is fetched again.
+        MediaSessionCache.shared.purge()
+        // ADR-0053 — the knock cursor.
+        UserDefaults.standard.removeObject(
+            forKey: "\(AccountLocalDataWipe.knockCursorPrefix)\(accountIdB64).\(groupIdHex)")
+        forgetGroupSessionState(groupIdHex: groupIdHex)
+    }
+
+    /// What this session keeps per group: a group this device comes back to
+    /// starts over, signers and claims included.
+    private func forgetGroupSessionState(groupIdHex: String) {
+        sweptGroupsThisSession.remove(groupIdHex)
+        claimedGroupsThisSession.remove(groupIdHex)
+        claimOnOpen.forget(journalIdHex: groupIdHex)
+        dsSigners.forget(journal: groupIdHex)
+        lastBeaconAtMs.removeValue(forKey: groupIdHex)
+        sweepRegistrationBackoff.removeValue(forKey: groupIdHex)
+        supersededTrigger.forget(groupIdHex: groupIdHex)
+        registrarSetsSent.removeValue(forKey: groupIdHex)
+        rootHandoverNotBefore.removeValue(forKey: groupIdHex)
+        rootHandoverLastSentAt.removeValue(forKey: groupIdHex)
+        rootTakeoverNotBefore.removeValue(forKey: groupIdHex)
+        rootProbeNotBefore.removeValue(forKey: groupIdHex)
+        claimIdentityCheckedAtMs.removeValue(forKey: groupIdHex)
     }
 
     /// ADR-0045 UX §6.2.3 — record that this device asked to leave.
@@ -2818,6 +2960,8 @@ public final class ChatRepository: ObservableObject {
             accountIdB64: accountIdB64,
             groupIdB64: base64Encode(record.groupId),
             atMs: Self.nowMs())
+        // UX 9.4 — the row now says it is waiting.
+        state = state.with(threads: buildThreadList())
     }
 
     /// Roster of the live MLS group for `groupIdHex` — `(leafIndex,
@@ -4554,6 +4698,9 @@ public final class ChatRepository: ObservableObject {
             // one `group` and `member` key: the registration sees the group
             // gone and rotates both, republishing in every remaining group.
             ReachCenter.shared.sync()
+            // ADR-0087 section 9 — the one seam: every applied commit comes
+            // through here (the poll's apply half and the sweep's tail).
+            endMembershipIfOut(groupIdHex: groupIdHex)
         }
         // ADR-0060 section 3 — a departed member held this account's `group`
         // and `member` keys for this group: rotate both (whatever this
@@ -4906,6 +5053,8 @@ public final class ChatRepository: ObservableObject {
     ) {
         guard let identity = canonicalIdentity else { return }
         guard let record = groups[groupIdHex] else { return }
+        // ADR-0087 section 9 — a batch fetched before an end was heard.
+        guard !isEnding(groupIdHex: groupIdHex) else { return }
         // G-38 — the cursor-moved guard. Another poll of this group applied a
         // batch while this one was parked on the network, so the rows in hand
         // start behind the live cursor. Drop them WITHOUT applying and WITHOUT
@@ -5519,6 +5668,7 @@ public final class ChatRepository: ObservableObject {
     /// failures are swallowed so one bad apple doesn't block the
     /// others.
     public func pollAllGroups(waitSecs: Int = 0) async {
+        resumeOwedEnds()
         let groupIds = Array(groups.keys)
         for groupIdHex in groupIds {
             do {
@@ -5535,6 +5685,7 @@ public final class ChatRepository: ObservableObject {
     /// how many groups it polled and how many answered, for the feed's
     /// "Couldn't check for new messages." rule (``FeedRefreshState``).
     func pollAllGroupsReporting() async -> FeedCheckTally {
+        resumeOwedEnds()
         let groupIds = Array(groups.keys)
         var tally = FeedCheckTally()
         for groupIdHex in groupIds {
@@ -6137,7 +6288,7 @@ public final class ChatRepository: ObservableObject {
     /// (``RestoredKnownGroupsStore``): this device joined the group, the user
     /// deleted the chat, or the local group ended. No-op when the id is not
     /// in the set.
-    private func dropRestoredKnownGroup(groupIdHex: String) {
+    func dropRestoredKnownGroup(groupIdHex: String) {
         guard let accountIdB64 = currentAccountIdB64 else { return }
         RestoredKnownGroupsStore.remove(
             accountIdB64: accountIdB64, groupIdHex: groupIdHex, defaults: restoredGroupsDefaults)
@@ -9324,6 +9475,9 @@ public final class ChatRepository: ObservableObject {
     func buildThreadList() -> [ChatThread] {
         conversationPlans().compactMap { plan -> ChatThread? in
             guard let head = groups[plan.headHex] else { return nil }
+            // ADR-0087 section 9 — the row leaves the moment the end is known,
+            // whatever step the end is at.
+            guard !plan.heldSegments.contains(where: { isEnding(groupIdHex: $0) }) else { return nil }
             let headAt = plan.heldSegments.firstIndex(of: plan.headHex) ?? 0
             let older = Array(plan.heldSegments.prefix(headAt))
             var history: [ChatMessage] = []
@@ -9341,7 +9495,8 @@ public final class ChatRepository: ObservableObject {
                 conversationIdHex: plan.conversationHex,
                 history: history,
                 historyGroupIdHexes: older,
-                segmentIndex: conversationLineage.segmentIndexOf(plan.headHex))
+                segmentIndex: conversationLineage.segmentIndexOf(plan.headHex),
+                leaveRequested: leaveRequestedAt(groupIdHex: plan.headHex) != nil)
             // Bundle v3 — what another device of this account wrote to the
             // person before this one-to-one existed, drawn as own waiting
             // rows until the real messages arrive. Display only: not in the
@@ -9460,6 +9615,9 @@ public struct ChatThread: Equatable {
     /// segments: what the cross-device read position carries past the first
     /// segment.
     public let segmentIndex: Int
+    /// UX 9.4 — this device asked to leave and the request has not landed.
+    /// The row stays and says `Waiting to leave.`
+    public let leaveRequested: Bool
 
     public init(
         groupIdHex: String,
@@ -9472,8 +9630,10 @@ public struct ChatThread: Equatable {
         conversationIdHex: String? = nil,
         historyGroupIdHexes: [String] = [],
         segmentIndex: Int = 0,
-        syncedThroughMessageId: Int64? = nil
+        syncedThroughMessageId: Int64? = nil,
+        leaveRequested: Bool = false
     ) {
+        self.leaveRequested = leaveRequested
         self.syncedThroughMessageId = syncedThroughMessageId
         self.conversationIdHex = conversationIdHex ?? groupIdHex
         self.historyGroupIdHexes = historyGroupIdHexes
@@ -9502,7 +9662,8 @@ extension ChatThread {
             conversationIdHex: conversationIdHex,
             historyGroupIdHexes: historyGroupIdHexes,
             segmentIndex: segmentIndex,
-            syncedThroughMessageId: syncedThroughMessageId)
+            syncedThroughMessageId: syncedThroughMessageId,
+            leaveRequested: leaveRequested)
     }
 }
 
@@ -10392,7 +10553,8 @@ final class GroupRecord {
         conversationIdHex: String? = nil,
         history: [ChatMessage] = [],
         historyGroupIdHexes: [String] = [],
-        segmentIndex: Int = 0
+        segmentIndex: Int = 0,
+        leaveRequested: Bool = false
     ) -> ChatThread {
         ChatThread(
             groupIdHex: DsClient.pseudonymHex(groupId),
@@ -10408,8 +10570,29 @@ final class GroupRecord {
             conversationIdHex: conversationIdHex,
             historyGroupIdHexes: historyGroupIdHexes,
             segmentIndex: segmentIndex,
-            syncedThroughMessageId: syncedThroughMessageId
+            syncedThroughMessageId: syncedThroughMessageId,
+            leaveRequested: leaveRequested
         )
+    }
+
+    /// Nothing of this record's history survives: it is about to be written
+    /// away, and a persist of the log must not bring it back.
+    func forgetHistory() {
+        messages = []
+        lastViewedMessageId = nil
+        feedSeen = []
+        syncedThroughMessageId = nil
+    }
+
+    /// ADR-0050 — this device's leaf was retired and it was re-admitted: the
+    /// Welcome replaced the group, and the history and the journal position
+    /// of the old record carry.
+    func adoptRetiredRecord(_ old: GroupRecord) {
+        messages = old.messages
+        lastViewedMessageId = old.lastViewedMessageId
+        feedSeen = old.feedSeen
+        syncedThroughMessageId = old.syncedThroughMessageId
+        advanceCursor(to: old.cursor)
     }
 
     /// `docs/ux/second-device.md` section 4, "Membership rows" — write `row`

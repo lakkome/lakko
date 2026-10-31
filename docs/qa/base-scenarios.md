@@ -35,6 +35,12 @@ ADR-0087. Add a scenario whenever a defect shows one was missing.
 16. Name, photo, roles, admins, ownership transfer.
 17. Add, remove, leave, and re-add the same person; the removed person loses the group
     and its history on every device; a re-added person is back and sees new messages.
+    Each of these, on every client: removed with the chat open and a draft in the
+    composer (the notice carries the draft and `Copy`); removed with the app closed;
+    removed, written to and re-added while the app is closed (the group comes back with
+    only what was written after the return, and the person can answer); a person with
+    two devices, one of them closed; leaving while no owner or admin is online
+    (`Waiting to leave.`, then the row goes); a fast send leaves an empty composer.
 18. Everything in 10 and 11 in a group, including a member who joined late.
 19. Group call: join, leave, camera, pin, a late joiner.
 20. Invite link and approval; a request to join, approved and rejected.

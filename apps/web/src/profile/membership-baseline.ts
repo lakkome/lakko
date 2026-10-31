@@ -119,6 +119,16 @@ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   return true;
 }
 
+/** Drop one group's baseline (ADR-0087 section 9): a re-add is a first
+ *  observation, not growth. Never throws. */
+export function clearMemberBaselineForGroup(accountIdB64: string, groupIdB64: string): void {
+  try {
+    globalThis.localStorage?.removeItem(storeKey(accountIdB64, groupIdB64));
+  } catch {
+    /* storage blocked: nothing was stored either */
+  }
+}
+
 /** Drop every member-baseline row of one account (Forget device, Delete account).
  *  Another account's rows on this browser are its own. Never throws. */
 export function clearMemberBaselinesForAccount(accountIdB64: string): void {

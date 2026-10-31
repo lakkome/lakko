@@ -605,6 +605,10 @@
       "text": "{name} ended the call for everyone",
       "comment": "Line on the ended-call screen when the person who started the call ended it for everyone; {name} is that person's name."
     },
+    "call.ended.no_longer_in_group": {
+      "text": "You are no longer in this group.",
+      "comment": "Line on the ended-call screen when the call ends because the reader has just stopped being a member of the group. Names nobody."
+    },
     "call.error.encryption_setup": {
       "text": "Could not set up call encryption, so the call did not start.",
       "comment": "Shown when the device could not derive the call's encryption key; the call is refused rather than started unencrypted.",
@@ -1479,7 +1483,7 @@
       "comment": "Channel info: how many subscribers this device has counted."
     },
     "channels.info.unsubscribe_sub": {
-      "text": "Takes the channel off your list and stops this device reading it. You can subscribe again later.",
+      "text": "Takes the channel off your list and removes its posts from all your devices. You can subscribe again later.",
       "comment": "Line under \"Stop following\": says exactly what happens (the publisher is not told).",
       "security_critical": true
     },
@@ -1898,8 +1902,8 @@
       "comment": "Card title and button in channel info for a subscriber, and the confirm button of the dialog."
     },
     "channels.unsubscribe.body": {
-      "text": "It leaves your list and this device stops reading it. You can subscribe again later.",
-      "comment": "Body of the stop-following confirmation: what unsubscribing does on this device.",
+      "text": "It leaves your list and its posts are removed from all your devices. You can subscribe again later.",
+      "comment": "Body of the stop-following confirmation: what unsubscribing does on every device of the person.",
       "security_critical": true
     },
     "channels.unsubscribe.title": {
@@ -2233,6 +2237,14 @@
       "text": "You are no longer a member of this group.",
       "comment": "Headline in the timeline once the reader is no longer in a group, whether they left or were removed. Names nobody."
     },
+    "chat.ended.notice": {
+      "text": "You are no longer in {name}.",
+      "comment": "Banner at the top of Chats, and title of the dialog over the conversation if it is open, when the reader's membership of a group ended and everything from it was removed. {name} is the group's name. Never says who removed them."
+    },
+    "chat.ended.notice_body": {
+      "text": "The group and its messages are gone from your devices.",
+      "comment": "Body of the dialog over a conversation the reader is no longer in, under the title with the group name."
+    },
     "chat.ended.unsent_draft": {
       "text": "Unsent draft",
       "comment": "Label above a message the reader had typed but not sent before their membership ended."
@@ -2474,8 +2486,8 @@
       "comment": "Button in group info that asks to leave the group."
     },
     "chat.leave.body": {
-      "text": "You will keep receiving messages until an owner or an admin applies your request. You will need a new invite to rejoin.",
-      "comment": "Body of the dialog confirming that the reader leaves a group. Leaving takes effect only when an owner or admin applies it.",
+      "text": "It leaves your list and its messages are removed from all your devices. You keep receiving messages until an owner or an admin applies your request.",
+      "comment": "Body of the dialog confirming that the reader leaves a group. Leaving takes effect only when an owner or admin applies it. \"It\" is the group.",
       "security_critical": true
     },
     "chat.leave.confirm": {
@@ -2653,7 +2665,7 @@
     },
     "chat.members.pending.waiting_leave": {
       "text": "Waiting to leave.",
-      "comment": "Next to the reader in the member list: they asked to leave and it has not been applied yet."
+      "comment": "Next to the reader in the member list: they asked to leave and it has not been applied yet. Also the second line of the group's row in Chats while the reader's own request to leave waits."
     },
     "chat.members.pending.waiting_removed": {
       "text": "Waiting to be removed.",

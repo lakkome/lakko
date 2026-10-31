@@ -126,6 +126,18 @@ registerAccountMemory("group-calls", (ids) => {
   setVersion(version() + 1);
 });
 
+/** Drop one chat's records, in memory and in this tab's session storage
+ *  (ADR-0087 section 9). */
+export function clearGroupCallsForGroup(accountId: string, groupIdB64: string): void {
+  records.delete(key(accountId, groupIdB64));
+  try {
+    globalThis.sessionStorage?.removeItem(storageKey(accountId, groupIdB64));
+  } catch {
+    /* storage blocked: nothing was stored either */
+  }
+  setVersion(version() + 1);
+}
+
 /** Forget device / Delete account: drop the account's records, in memory and
  *  in this tab's session storage. Another account's are left alone. */
 export function clearGroupCallsForAccount(accountId: string): void {

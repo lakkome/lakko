@@ -280,6 +280,7 @@ enum AccountLocalDataWipe {
             LastObservedOwnerStore().clearForAccount(accountIdB64: accountIdB64)
         }
         step("leave-requests") { LeaveRequestStore().clearForAccount(accountIdB64: accountIdB64) }
+        step("membership-ends") { MembershipEndStore().clear(accountIdB64: accountIdB64) }
         step("knock-cursors") {
             removeKeys(in: standard, withPrefix: knockCursorPrefix + accountIdB64 + ".")
         }

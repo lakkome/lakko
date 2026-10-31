@@ -49,6 +49,11 @@ export function isOwnPublished(groupIdB64: string, messageId: number): boolean {
   return published.get(groupIdB64)?.has(messageId) === true;
 }
 
+/** Forget every id of a group gone from this device (ADR-0087 section 9). */
+export function forgetOwnPublished(groupIdB64: string): void {
+  published.delete(groupIdB64);
+}
+
 /** Forget an id once the cursor has moved past it. */
 export function consumeOwnPublished(groupIdB64: string, messageId: number): void {
   const ids = published.get(groupIdB64);

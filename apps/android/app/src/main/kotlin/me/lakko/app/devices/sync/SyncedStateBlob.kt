@@ -10,9 +10,9 @@ package me.lakko.app.devices.sync
  * and, inside the account backup, the copy a restore merges. Both hold the
  * bytes of `SyncedState.toBytes()`, and the core refuses any encoding
  * version but the one it writes (`STATE_VERSION` in
- * `crates/lakko-sync/src/synced/state.rs`: 2 since the saved-message
- * register of ADR-0065; version 1 is refused, not migrated, because nothing
- * is deployed).
+ * `crates/lakko-sync/src/synced/state.rs`, 7 since the conversation-end
+ * register of ADR-0087 section 9; every older version is refused, not
+ * migrated, because nothing is deployed).
  *
  * So a blob the core refuses is "no synced state held": the reader carries
  * on with nothing, the device catches up from its other devices or starts
@@ -57,6 +57,27 @@ internal fun heldSyncedStateBytes(
     } catch (cause: Throwable) {
         onRefused(cause)
         null
+    }
+}
+
+/**
+ * The state a session starts from: what [stored] opens to, else a fresh one.
+ * A blob the core refuses (a version this build does not read) is reported to
+ * [onRefused] and is not a reason to stop a sign-in: the device starts clean,
+ * catches up from its other devices, and the next write replaces the file.
+ */
+internal fun <T> seedStateOrFresh(
+    stored: ByteArray?,
+    open: (ByteArray) -> T,
+    fresh: () -> T,
+    onRefused: (Throwable) -> Unit,
+): T {
+    if (stored == null) return fresh()
+    return try {
+        open(stored)
+    } catch (cause: Throwable) {
+        onRefused(cause)
+        fresh()
     }
 }
 

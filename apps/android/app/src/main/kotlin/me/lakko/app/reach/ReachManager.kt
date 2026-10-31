@@ -1340,6 +1340,21 @@ public class ReachManager internal constructor(
         }
     }
 
+    /** Forget the grants learned in the group [scopeHex] (ADR-0087 section 9).
+     *  The same person's grants learned elsewhere stay: a row names its
+     *  scope. */
+    public fun forgetHeldScope(scopeHex: String) {
+        val b = binding.get() ?: return
+        val scoped = scopeHex.lowercase()
+        scope.launch {
+            lock.withLock {
+                if (binding.get() !== b) return@withLock
+                doc = doc.copy(held = doc.held.filterNot { it.scopeHex == scoped })
+                store.save(b.accountIdB64, doc)
+            }
+        }
+    }
+
     /**
      * The grants held for the person known by [ownerKey]. SECRET.
      *

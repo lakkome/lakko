@@ -1679,6 +1679,9 @@ public class ContactsRepository(
                     // `joinGroupFromWelcome` republishes this device's
                     // KeyPackage after every attempt, success or failure.
                     var joinFailure: InboxError? = null
+                    // ADR-0087 section 9 — a Welcome that could not be kept
+                    // stays behind the cursor, or it is lost.
+                    var welcomeNotKept = false
                     val answeredBy = HashMap<String, String>()
                     for (welcome in welcomes) {
                         if (!bound.isCurrent) return@useClientWith
@@ -1704,6 +1707,16 @@ public class ContactsRepository(
                                 // to another of its devices lands here too and
                                 // fails to open: not a failure of this device.
                                 if (me.lakko.app.chat.isWelcomeForAnotherDevice(e)) continue
+                                // ADR-0087 section 9 — the core refused it for
+                                // a group this device still holds as active:
+                                // the removing commit may be behind it in the
+                                // journal. Kept, the journal is read, the join
+                                // is tried again; the cursor must not take it.
+                                val stillActive = me.lakko.app.chat.groupStillActiveHex(e)
+                                if (stillActive != null) {
+                                    if (!chatRepo.holdWelcome(stillActive, welcome.welcomeBytes)) welcomeNotKept = true
+                                    continue
+                                }
                                 // A dropped Welcome is a chat someone started
                                 // with this user that will never appear, so it
                                 // must not vanish silently. The detail goes to
@@ -1726,7 +1739,7 @@ public class ContactsRepository(
                     // belongs to the previous account's inbox. `clear()` already
                     // reset the state; do not land the rows or the cursor in it.
                     if (!bound.isCurrent || boundAccountB64 != accountB64) return@useClientWith
-                    if (!read.usesKeptCursor) {
+                    if (!read.usesKeptCursor && !welcomeNotKept) {
                         inboxMailboxStore?.advance(accountB64, currentKeyB64, result.cursor)
                     }
 

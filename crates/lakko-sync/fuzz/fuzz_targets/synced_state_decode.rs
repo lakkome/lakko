@@ -26,12 +26,16 @@
 //!   be held revoked after the fold.
 //! * `SyncedState::from_bytes` (ADR-0058): the persisted fold, which is also
 //!   what the backup payload carries, so a hostile storage tier chooses it.
+//!   Version 7 since the conversation-end register (ADR-0087 section 9),
+//!   whose tag, reference, state byte and epoch this decoder reads.
 //!
 //! The harness asserts none panics, that an accepted envelope is canonical
 //! (re-encodes to the identical bytes) and folds to exactly its own
 //! registers, that an accepted recovery-email or own-username envelope holds a
-//! valid value or the empty one and does not apply twice, and that an accepted state
-//! persists to bytes that read back as the same state.
+//! valid value or the empty one and does not apply twice, that an accepted state
+//! persists to bytes that read back as the same state, and that its
+//! conversation-end registers read back, travel in the snapshot and yield
+//! writes that take effect.
 
 #![no_main]
 

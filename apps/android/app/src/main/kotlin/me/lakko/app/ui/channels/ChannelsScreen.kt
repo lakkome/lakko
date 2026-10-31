@@ -1016,7 +1016,7 @@ private fun ChannelInfoSheet(
     /** Open the channel's member list (ADR-0060 section 3). */
     onOpenMembers: () -> Unit,
     onManage: () -> Unit,
-    /** Stop following on this device (`channels.info.unsubscribe_sub`). */
+    /** Stop following on every device of the person (`channels.info.unsubscribe_sub`). */
     onStopFollowing: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1410,6 +1410,8 @@ private fun SubscriberChannelView(
             if (!alreadyFollowing) {
                 registeredThisOpen[0] = true
                 client.subscribe(channelId, pubHex)
+                // ADR-0087 section 9.5 - back on a channel this account left.
+                me.lakko.app.channels.ChannelUnsubscribe.noteFollowing(channelId)
             }
 
             if (state.subscribedSeeds(channelId).isNotEmpty()) {

@@ -120,6 +120,11 @@ public class ChatClient(
         ownPublished = OwnEchoRegistry()
     }
 
+    /** [forgetOwnEchoes] for one journal (ADR-0087 section 9). */
+    public fun forgetOwnEchoesOf(groupIdHex: String) {
+        ownPublished.forgetGroup(groupIdHex)
+    }
+
     /** Rows registered as own echoes in the CURRENT session's registry and
      *  not polled back yet. Diagnostics and tests only. */
     internal val outstandingOwnEchoes: Int get() = ownPublished.size

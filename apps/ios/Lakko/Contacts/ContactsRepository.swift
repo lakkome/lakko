@@ -143,6 +143,11 @@ public final class ContactsRepository: ObservableObject {
             chatRepository?.owedAnswerAck = { [weak self] messageId, groupIdHex in
                 await self?.ackOwedAnswer(requestMessageId: messageId, groupIdHex: groupIdHex)
             }
+            // ADR-0087 section 9 — a held Welcome that landed is a Welcome.
+            chatRepository?.onHeldWelcomeJoined = { [weak self] groupIdHex in
+                self?.noteAnsweredByWelcome(groupIdHex: groupIdHex)
+                self?.handOverJoinedPendingContacts()
+            }
         }
     }
 
@@ -677,7 +682,19 @@ public final class ContactsRepository: ObservableObject {
                             // them goes out now, in order.
                             handOverJoinedPendingContacts()
                         } catch {
-                            NSLog("contacts inbox: an account-mailbox Welcome did not open as a chat (expected for a co-publisher Welcome): \(error)")
+                            // ADR-0087 section 9 — a Welcome for a group this
+                            // device still holds as active: the removal it
+                            // answers may still be in that group's journal.
+                            // The cursor moves past this row, so it is kept.
+                            if let held = MembershipEndRules.stillActiveGroupIdHex(error) {
+                                chatRepository.holdWelcomeForActiveGroup(
+                                    groupIdHex: held, welcome: welcomeBytes)
+                                Task { @MainActor [weak chatRepository] in
+                                    await chatRepository?.resolveHeldWelcomes()
+                                }
+                            } else {
+                                NSLog("contacts inbox: an account-mailbox Welcome did not open as a chat (expected for a co-publisher Welcome): \(error)")
+                            }
                         }
                     }
                     continue

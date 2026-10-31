@@ -5740,6 +5740,21 @@ OpenMLS keeps it). `Group::delete` follows the same line: it deletes only a
 group whose STORED state is ended, so an ended handle held across a rejoin
 cannot delete the group that replaced it.
 
+**The one delete of an active group (amended 2026-10-31,
+[ADR-0087](../adr/0087-group-and-channel-handles-and-privacy.md) section 9).**
+`Group::delete_after_ended_elsewhere(identity, ended_epoch)` is for a device that
+heard of an end from a `conversation_ended` register in its own account's synced
+state and so holds the group active, the commit still ahead of it in the journal,
+or gone past the 30-day retention. It deletes the stored group unless that group
+is active at an epoch above `ended_epoch`, which is refused with
+`GroupStillActive` and changes nothing: the device came back after that end, under
+the same id at a later epoch. A group that is not active goes at any epoch. The
+core cannot see the register, so the caller's obligation is the rule: call it
+holding the register, passing the register's epoch, and never on a refused
+Delivery Service read. The register reaches a device only over its own DeviceGroup,
+so whoever can trigger this is a device of the account, which already holds every
+key this deletes.
+
 **Why it is indexed.** A Welcome authenticates a group, not the group this
 device means: it proves that some group of that id invited this device, and
 anyone who knows the id can build one that passes every admission check. Before
@@ -5752,13 +5767,14 @@ KeyPackage a way to overwrite a live conversation.
 
 **Where it is enforced.** `crates/lakko-mls/src/group.rs`: `join_admitted` (the
 decision, last, after `admit_welcome`, the expected-id check and the binding
-check), `Group::delete`, and
+check), `Group::delete`, `Group::delete_after_ended_elsewhere`, and
 `delete_stored_group`, which also removes what `MlsGroup::delete` leaves: the
 epoch key pairs an eviction keeps filed under the epoch before the one the group
 reports, the queued-proposal rows `openmls_memory_storage` 0.5.0 never removes,
 and the ADR-0027 retained-requests row. `RefusalReason::GroupStillActive`
 (disposition `DoNotRetry`) and `Error::GroupStillActive { group_id }`. FFI:
-`Group.deleteLocally` on UniFFI and wasm; `FfiError::MembershipGroupStillActive`
+`Group.deleteLocally` and `Group.deleteAfterEndedElsewhere` on UniFFI and wasm;
+`FfiError::MembershipGroupStillActive`
 appended last, whose message is exactly the group id in lower-case hex, because a
 `flat_error` carries no field; on wasm `err.refusalReason ===
 "groupStillActive"` and `err.refusalGroupId`, a `Uint8Array`. The NSE surface has
@@ -5767,7 +5783,8 @@ no join and no delete, so it gains only an arm in its error mapping. Pinned by
 `a_forged_welcome_never_overwrites_a_live_chat` in `group.rs` (the forgery that
 passes every admission check), and by the entry-point tests in `device_group.rs`
 and `publisher_group.rs`. Host-tested 2026-10-31; no client calls
-`deleteLocally` or handles the refusal yet, not walked live, not deployed.
+`deleteLocally` or `deleteAfterEndedElsewhere` or handles the refusal yet, not
+walked live, not deployed.
 
 **What this does NOT do.**
 

@@ -172,6 +172,18 @@ export function removedDevices(accountIdB64: string, groupIdB64: string): Set<st
   return new Set(loadRemoved(accountIdB64)[groupIdB64] ?? []);
 }
 
+/** Drop one group's removed leaves (ADR-0087 section 9). */
+export function clearRemovedDevicesForGroup(accountIdB64: string, groupIdB64: string): void {
+  try {
+    const all = loadRemoved(accountIdB64);
+    if (!(groupIdB64 in all)) return;
+    delete all[groupIdB64];
+    localStorage.setItem(removedKey(accountIdB64), JSON.stringify(all));
+  } catch {
+    /* nothing to clear */
+  }
+}
+
 export function clearRemovedDevicesForAccount(accountIdB64: string): void {
   try {
     localStorage.removeItem(removedKey(accountIdB64));

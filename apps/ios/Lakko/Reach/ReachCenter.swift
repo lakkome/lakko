@@ -1076,6 +1076,19 @@ public final class ReachCenter: ObservableObject {
         return withdrew
     }
 
+    /// ADR-0087 section 9 — forget every grant learned in one group or channel
+    /// this account is no longer in. A grant held from the same person in
+    /// another scope stays.
+    public func forgetHeld(scopeHex: String) {
+        var changed = false
+        for (person, held) in record.held where held.contains(where: { $0.scopeHex == scopeHex }) {
+            let kept = held.filter { $0.scopeHex != scopeHex }
+            record.held[person] = kept.isEmpty ? nil : kept
+            changed = true
+        }
+        if changed { persist() }
+    }
+
     /// Every key (base64) of the person `keyB64` belongs to, `keyB64` itself
     /// when it does not decode.
     private func personKeysB64(_ keyB64: String) -> [String] {

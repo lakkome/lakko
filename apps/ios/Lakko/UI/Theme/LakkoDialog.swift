@@ -48,11 +48,20 @@ struct LakkoDialogField {
     let text: Binding<String>
 }
 
+/// Text the person may want to keep: shown selectable under the message, with
+/// a button that copies it.
+struct LakkoDialogDetail {
+    let label: String
+    let text: String
+    let copyTitle: String
+}
+
 /// What a dialog shows.
 struct LakkoDialogContent {
     let title: String
     var message: String?
     var field: LakkoDialogField?
+    var detail: LakkoDialogDetail?
     let actions: [LakkoDialogAction]
 }
 
@@ -142,6 +151,25 @@ struct LakkoStandardDialog: View {
                     .background(Color.lakkoSurfaceSunken)
                     .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.control))
                     .onAppear { fieldFocused = true }
+            }
+            if let detail = content.detail {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(detail.label)
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                    ScrollView {
+                        Text(detail.text)
+                            .font(.subheadline)
+                            .foregroundStyle(Color.lakkoText)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 160)
+                    Button(detail.copyTitle) { UIPasteboard.general.string = detail.text }
+                        .font(.footnote.weight(.medium))
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                }
             }
             actions
                 .padding(.top, 4)

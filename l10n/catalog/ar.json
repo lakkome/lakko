@@ -578,6 +578,10 @@
       "text": "أنهى {name} المكالمة للجميع",
       "status": "machine"
     },
+    "call.ended.no_longer_in_group": {
+      "text": "لم تعد في هذه المجموعة.",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "تعذّر إعداد تشفير المكالمة، لذلك لم تبدأ المكالمة.",
       "status": "machine"
@@ -1363,7 +1367,7 @@
       "status": "machine"
     },
     "channels.info.unsubscribe_sub": {
-      "text": "يزيل القناة من قائمتك ويوقف قراءتها على هذا الجهاز. يمكنك الاشتراك مجددًا لاحقًا.",
+      "text": "تزيل القناة من قائمتك وتحذف منشوراتها من كل أجهزتك. يمكنك الاشتراك مجددًا لاحقًا.",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1775,7 +1779,7 @@
       "status": "machine"
     },
     "channels.unsubscribe.body": {
-      "text": "تُزال من قائمتك ويتوقف هذا الجهاز عن قراءتها. يمكنك الاشتراك مجددًا لاحقًا.",
+      "text": "ستختفي من قائمتك وستُحذف منشوراتها من كل أجهزتك. يمكنك الاشتراك مجددًا لاحقًا.",
       "status": "machine"
     },
     "channels.unsubscribe.title": {
@@ -2090,6 +2094,14 @@
       "text": "لم تعد عضوًا في هذه المجموعة.",
       "status": "machine"
     },
+    "chat.ended.notice": {
+      "text": "لم تعد في {name}.",
+      "status": "machine"
+    },
+    "chat.ended.notice_body": {
+      "text": "أُزيلت المجموعة ورسائلها من أجهزتك.",
+      "status": "machine"
+    },
     "chat.ended.unsent_draft": {
       "text": "مسودة غير مرسلة",
       "status": "machine"
@@ -2323,7 +2335,7 @@
       "status": "machine"
     },
     "chat.leave.body": {
-      "text": "ستستمر في تلقي الرسائل إلى أن يطبّق المالك أو أحد المشرفين طلبك. ستحتاج إلى دعوة جديدة للانضمام مجددًا.",
+      "text": "ستختفي من قائمتك وستُحذف رسائلها من كل أجهزتك. ستستمر في تلقي الرسائل إلى أن يطبّق المالك أو أحد المشرفين طلبك.",
       "status": "machine"
     },
     "chat.leave.confirm": {

@@ -28,7 +28,9 @@
 //!   conversation-lineage registers (ADR-0073), the account's recovery
 //!   email register (ADR-0075) and its own-username register (ADR-0076),
 //!   each carried between devices by its own
-//!   DeviceGroup service envelope.
+//!   DeviceGroup service envelope, plus the saved-message register
+//!   (ADR-0065) and the conversation-end register (ADR-0087), which ride
+//!   the same change set as a folder edit.
 //!
 //! ## Why no character-level CRDT
 //!
@@ -85,7 +87,8 @@ pub mod fuzz_api {
     use crate::synced::{
         compose_lineage_envelope, compose_link_record_envelope, compose_own_username_envelope,
         compose_recovery_email_envelope, decode_lineage_envelope, decode_link_record_envelope,
-        decode_own_username_envelope, decode_recovery_email_envelope,
+        decode_own_username_envelope, decode_recovery_email_envelope, ApplyOutcome, BoundsError,
+        ConversationEnd, Stamped, SyncEntry,
     };
     use crate::{EditChain, EditOp, Hlc, HybridLogicalClock, SyncedState};
 
@@ -109,9 +112,10 @@ pub mod fuzz_api {
     ///   that every revoked record it carries is held revoked.
     /// * [`SyncedState::from_bytes`] — reached from local persistence and
     ///   from the backup payload a storage tier serves. Whatever decodes
-    ///   must persist to bytes that read back as the same state, and its
+    ///   must persist to bytes that read back as the same state, its
     ///   recovery email and own-username registers must be valid and travel
-    ///   by their envelopes.
+    ///   by their envelopes, and its conversation-end registers must read
+    ///   back, travel in the snapshot, and yield writes that take effect.
     ///
     /// None may panic. Returns `false` when a property is violated.
     #[must_use]
@@ -195,6 +199,9 @@ pub mod fuzz_api {
         if SyncedState::from_bytes(&state.to_bytes()).as_ref() != Ok(&state) {
             return false;
         }
+        if !conversation_ends_hold(&state) {
+            return false;
+        }
         let mut rebuilt = SyncedState::new();
         for envelope in state.lineage_envelopes() {
             if rebuilt.apply_lineage_envelope(&envelope).is_err() {
@@ -226,6 +233,35 @@ pub mod fuzz_api {
             && !state
                 .own_username_register()
                 .is_some_and(|r| r.value.validate().is_err())
+    }
+
+    /// The conversation-end registers of a persisted state (ADR-0087 section
+    /// 9): what the reads list is what the state holds, the snapshot carries
+    /// every one, and a register a writer composes takes effect, which is
+    /// what lets a client read `None` as "nothing to tell".
+    fn conversation_ends_hold(state: &SyncedState) -> bool {
+        // `Ok(None)` is an answer too; a refused reference is the failure.
+        let takes_effect = |composed: Result<Option<Stamped<ConversationEnd>>, BoundsError>| {
+            composed.is_ok_and(|register| {
+                register.map_or(true, |r| {
+                    state
+                        .clone()
+                        .apply(r.hlc, SyncEntry::ConversationEnd(r.value))
+                        == Ok(ApplyOutcome::Applied)
+                })
+            })
+        };
+        let mut late = SyncedState::new();
+        late.apply_all(state.snapshot().stamped_entries());
+        state.ended_conversations().iter().all(|e| {
+            let conversation = &e.value.conversation;
+            let raised = e.value.epoch.saturating_add(1);
+            state.is_conversation_ended(conversation)
+                && late.is_conversation_ended(conversation)
+                && e.value.validate().is_ok()
+                && takes_effect(state.compose_conversation_ended(0, conversation, raised))
+                && takes_effect(state.compose_conversation_joined(0, conversation, raised))
+        })
     }
 
     /// Upper bound on decoded events — caps allocation so a short

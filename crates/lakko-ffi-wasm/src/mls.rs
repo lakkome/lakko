@@ -1949,6 +1949,31 @@ impl Group {
             .map_err(MlsFailure::into_js)
     }
 
+    /// Delete this group's state on the word of this account's other devices,
+    /// without having applied the commit that ended it (ADR-0087 section 9,
+    /// C-88). The one way a device offline past the journal's retention stops
+    /// holding a group.
+    ///
+    /// **Call this only holding a `conversationEnded` register from the
+    /// account's own synced state, and pass that register's `epoch`.** The core
+    /// cannot see the register: called on anything else, this deletes a live
+    /// membership. Never on a refused Delivery Service read.
+    ///
+    /// Throws a `groupStillActive` refusal (`err.refusalGroupId`), changing
+    /// nothing, when the stored group is active at an epoch above
+    /// `endedEpoch`: this device came back after that end, so it answers with
+    /// a `joined` register. A group that is not active goes at any epoch.
+    /// Repeating it changes nothing. Persist the snapshot afterwards.
+    #[wasm_bindgen(js_name = deleteAfterEndedElsewhere)]
+    pub fn delete_after_ended_elsewhere(
+        &self,
+        identity: &Identity,
+        ended_epoch: u64,
+    ) -> Result<(), JsValue> {
+        self.delete_after_ended_elsewhere_core(identity, ended_epoch)
+            .map_err(MlsFailure::into_js)
+    }
+
     /// Local leaf index of the calling identity.
     #[wasm_bindgen(getter, js_name = ownLeafIndex)]
     pub fn own_leaf_index(&self) -> Result<u32, JsValue> {
@@ -2205,6 +2230,17 @@ impl Group {
     /// Core of [`Self::delete_locally`].
     fn delete_locally_core(&self, identity: &Identity) -> Result<(), MlsFailure> {
         Ok(self.locked()?.delete(&identity.inner)?)
+    }
+
+    /// Core of [`Self::delete_after_ended_elsewhere`].
+    fn delete_after_ended_elsewhere_core(
+        &self,
+        identity: &Identity,
+        ended_epoch: u64,
+    ) -> Result<(), MlsFailure> {
+        Ok(self
+            .locked()?
+            .delete_after_ended_elsewhere(&identity.inner, ended_epoch)?)
     }
 
     /// Core of [`Self::has_staged_sweep`].
@@ -5978,11 +6014,33 @@ mod tests {
 
         let f = group.delete_locally_core(&alice).unwrap_err();
         assert_eq!(f.reason, Some(lakko_mls::RefusalReason::GroupStillActive));
-        assert_eq!(f.group_id, Some(group_id));
+        assert_eq!(f.group_id.as_ref(), Some(&group_id));
         assert_eq!(
             f.reason.map(lakko_mls::RefusalReason::code),
             Some("groupStillActive")
         );
+
+        // A register older than the group this device holds is refused the
+        // same way, and one at its epoch takes it.
+        let epoch = group.locked().unwrap().epoch();
+        let group_later = Group::new(&alice, GroupKind::Group).unwrap();
+        let later_id = group_later.locked().unwrap().group_id();
+        group_later
+            .locked()
+            .unwrap()
+            .self_update(&alice.inner)
+            .expect("a commit moves the group on");
+        let f = group_later
+            .delete_after_ended_elsewhere_core(&alice, epoch)
+            .unwrap_err();
+        assert_eq!(f.reason, Some(lakko_mls::RefusalReason::GroupStillActive));
+        assert_eq!(f.group_id.as_ref(), Some(&later_id));
+        group
+            .delete_after_ended_elsewhere_core(&alice, epoch)
+            .expect("the register takes the group it names");
+        assert!(lakko_mls::Group::load(&alice.inner, &group_id)
+            .unwrap()
+            .is_none());
 
         let f = MlsFailure::from(lakko_mls::Error::Codec("bad wire".into()));
         assert_eq!(f.group_id, None, "only this refusal names a group");

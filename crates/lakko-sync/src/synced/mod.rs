@@ -28,6 +28,16 @@
 //! snapshot. [`SAVED_MAX_CLIENT`] and [`SAVED_MAX_PER_CHANGE_SET`] are
 //! client-side limits, not decode bounds.
 //!
+//! ## Conversation ends
+//!
+//! One register per conversation an end has reached, saying the account's
+//! membership ended or that it joined again (ADR-0087 section 9), with the MLS
+//! epoch of that event. It rides in [`entry::FolderChanges::conversation_ends`]
+//! as the saved register does. It is how a device that cannot apply the
+//! commit, offline past the journal's retention, hears of an end.
+//! [`CONVERSATION_ENDS_MAX_CLIENT`] is a client-side limit, not a decode
+//! bound. See [`state`] for the order and for why a register is never dropped.
+//!
 //! - [`entry`] — the register types, their bounds and their canonical
 //!   encoding (the tie-break and the persistence element).
 //! - [`lineage`] — the envelope the conversation-lineage register
@@ -64,6 +74,10 @@ pub use entry::{
     FOLDER_NAME_MAX_BYTES, FOLDER_NAME_MAX_CHARS, FOLDER_ORDER_MAX, FOLDER_PINS_MAX,
     INCLUDE_CHANNELS, INCLUDE_GROUPS, INCLUDE_ONE_TO_ONE, KNOWN_BITS, LINEAGE_GROUP_ID_MAX_LEN,
     RECOVERY_EMAIL_MAX_LEN, RECOVERY_EMAIL_MIN_LEN, SNAPSHOT_MAX_PARTS,
+};
+pub use entry::{
+    ConversationEnd, ConversationEndState, CONVERSATION_ENDED, CONVERSATION_ENDS_MAX_CLIENT,
+    CONVERSATION_JOINED,
 };
 pub use entry::{OwnUsernameEntry, OWN_USERNAME_MAX_LEN};
 pub use lineage::{

@@ -738,6 +738,13 @@ public final class JournalClaimOnOpen {
     /// not the owner).
     public func isSettled(journalIdHex: String) -> Bool { settled[journalIdHex] != nil }
 
+    /// Forget one journal this device is no longer in (ADR-0087 section 9).
+    public func forget(journalIdHex: String) {
+        settled[journalIdHex] = nil
+        failedAtMs[journalIdHex] = nil
+        inflight[journalIdHex] = nil
+    }
+
     /// Forget everything (a logout / account switch starts a new session).
     public func reset() {
         settled.removeAll()
@@ -986,6 +993,22 @@ public final class RegistrarSeedStore {
         } else {
             defaults.set(owed.sorted(), forKey: Self.owedPrefix + accountIdB64)
         }
+    }
+
+    /// Forget one journal this account is no longer in (ADR-0087 section 9):
+    /// its seed, delivered record, known registrar keys, owed handover,
+    /// root-held marker and pending root seed. A group this device comes back
+    /// to appoints it again.
+    public func forgetGroup(accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        let suffix = accountIdB64 + " " + groupIdHex
+        defaults.removeObject(forKey: Self.seedPrefix + suffix)
+        defaults.removeObject(forKey: Self.ledgerPrefix + suffix)
+        defaults.removeObject(forKey: Self.pendingRootPrefix + suffix)
+        defaults.removeObject(forKey: Self.knownPrefix + accountIdB64 + " " + groupIdHex.lowercased())
+        clearRootHeld(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        clearHandoverOwed(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
     }
 
     /// Wipe every seed, delivered record, known registrar key, owed handover,

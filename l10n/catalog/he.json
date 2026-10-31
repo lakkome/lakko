@@ -578,6 +578,10 @@
       "text": "השיחה הסתיימה לכולם על ידי {name}",
       "status": "machine"
     },
+    "call.ended.no_longer_in_group": {
+      "text": "אתם כבר לא בקבוצה הזו.",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "לא ניתן היה להגדיר את ההצפנה של השיחה, ולכן השיחה לא התחילה.",
       "status": "machine"
@@ -1363,7 +1367,7 @@
       "status": "machine"
     },
     "channels.info.unsubscribe_sub": {
-      "text": "הערוץ יוסר מהרשימה שלכם והמכשיר הזה יפסיק לקרוא אותו. אפשר להירשם שוב מאוחר יותר.",
+      "text": "מסיר את הערוץ מהרשימה שלכם ומוחק את הפוסטים שלו מכל המכשירים שלכם. אפשר להירשם שוב מאוחר יותר.",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1775,7 +1779,7 @@
       "status": "machine"
     },
     "channels.unsubscribe.body": {
-      "text": "הערוץ יוסר מהרשימה שלכם והמכשיר הזה יפסיק לקרוא אותו. אפשר להירשם שוב מאוחר יותר.",
+      "text": "הערוץ יוסר מהרשימה שלכם והפוסטים שלו יימחקו מכל המכשירים שלכם. אפשר להירשם שוב מאוחר יותר.",
       "status": "machine"
     },
     "channels.unsubscribe.title": {
@@ -2090,6 +2094,14 @@
       "text": "אתם כבר לא חברים בקבוצה הזו.",
       "status": "machine"
     },
+    "chat.ended.notice": {
+      "text": "אתם כבר לא חברים ב-{name}.",
+      "status": "machine"
+    },
+    "chat.ended.notice_body": {
+      "text": "הקבוצה וההודעות שלה נמחקו מהמכשירים שלכם.",
+      "status": "machine"
+    },
     "chat.ended.unsent_draft": {
       "text": "טיוטה שלא נשלחה",
       "status": "machine"
@@ -2323,7 +2335,7 @@
       "status": "machine"
     },
     "chat.leave.body": {
-      "text": "תמשיכו לקבל הודעות עד שהבעלים או אחד המנהלים יחילו את הבקשה שלכם. כדי להצטרף שוב תצטרכו הזמנה חדשה.",
+      "text": "הקבוצה תוסר מהרשימה שלכם וההודעות שלה יימחקו מכל המכשירים שלכם. תמשיכו לקבל הודעות עד שהבעלים או אחד המנהלים יחילו את הבקשה שלכם.",
       "status": "machine"
     },
     "chat.leave.confirm": {

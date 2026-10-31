@@ -441,7 +441,9 @@ import {
 } from "../chat/membership-ended";
 import { removeMemberConfirmation } from "../chat/remove-member-confirm";
 import { deleteChatConfirmation } from "../chat/delete-chat-confirm";
-import { deleteConversation } from "../chat/delete-chat";
+import { useMembershipEnd } from "../chat/MembershipEndContext";
+import { MembershipEndDialog } from "../chat/MembershipEndNotices";
+import { chatViewKey, groupIdOfViewKey, type EndNotice } from "../chat/membership-end";
 import { leaveGroupConfirmation } from "../chat/leave-group-confirm";
 import { namedActionKey, pendingConfirm, requestConfirm } from "../ui/confirm-dialog";
 import { joinList, t } from "../l10n";
@@ -579,11 +581,38 @@ export default function Chat(props: { backTo?: string }): JSX.Element {
   // is the conversation's current group; the view is keyed on that group, so
   // a conversation that moves to a successor remounts onto it in place.
   const lineageView = useLineage();
+  const membershipEnd = useMembershipEnd();
   const entry = (): ActiveGroup | undefined => {
     const id = groupIdB64();
     if (id === null) return undefined;
-    return lineageView.resolve(id)?.head ?? chats.get(id);
+    const held = lineageView.resolve(id)?.head ?? chats.get(id);
+    // ADR-0087 section 9 - a conversation ending is gone from here the moment
+    // this device learns of it, however long the stores take: the view closes
+    // (and with it its poll, its beacon and its timers).
+    return held !== undefined && membershipEnd.isEnding(held.groupIdB64) ? undefined : held;
   };
+  /** The view's key: the group, and which time this device joined it. A
+   *  Welcome replacing the group under the same id is a new conversation to
+   *  the view; an ADR-0040 reset replaces the entry and is not. */
+  const viewKey = (): string | null => {
+    const e = entry();
+    return e === undefined ? null : chatViewKey(e);
+  };
+  const leave = (): void => navigate(props.backTo ?? paths.home);
+  const noticeHere = (): EndNotice | undefined => {
+    const id = groupIdB64();
+    return id === null ? undefined : membershipEnd.noticeForRoute(id);
+  };
+  const leavingHere = (): boolean => {
+    const id = groupIdB64();
+    return id !== null && membershipEnd.leftHere(id);
+  };
+  // `docs/ux/group-and-channel-privacy.md` section 9.4 - the person asked for
+  // it: when it lands the row goes, with no notice, and so does this view.
+  createEffect(() => {
+    const id = groupIdB64();
+    if (id !== null && membershipEnd.leftHere(id)) untrack(leave);
+  });
 
   // Identity gate — the chat needs a fresh export key in
   // memory to derive Identity for processIncoming /
@@ -607,13 +636,31 @@ export default function Chat(props: { backTo?: string }): JSX.Element {
             an unkeyed view would carry one chat's timeline, cursor and receive
             loop into the next. The id, not the entry object, is the key — the
             registry replaces the entry on an ADR-0040 persist-abort reset, which
-            must NOT remount the view. */}
+            must NOT remount the view. The join generation is in the key: a
+            Welcome replacing the group must. */}
         <Show
-          when={entry()?.groupIdB64 ?? null}
+          when={viewKey()}
           keyed
-          fallback={<GroupNotFound />}
+          fallback={
+            <Show
+              when={noticeHere()}
+              keyed
+              fallback={<Show when={groupIdB64() === null || !leavingHere()}><GroupNotFound /></Show>}
+            >
+              {(notice) => (
+                <MembershipEndDialog
+                  notice={notice}
+                  onDone={() => {
+                    membershipEnd.dismissNotice(notice.key);
+                    leave();
+                  }}
+                />
+              )}
+            </Show>
+          }
         >
-          {(id) => {
+          {(key) => {
+            const id = groupIdOfViewKey(key);
             // Navigating away clears the route param before this Show
             // disposes the view, so for a moment `entry()` is undefined while
             // the view's effects and its receive loop still read
@@ -630,7 +677,7 @@ export default function Chat(props: { backTo?: string }): JSX.Element {
               <ChatView
                 entry={stableEntry()}
                 requireIdentity={requireIdentity}
-                onLeave={() => navigate(props.backTo ?? paths.home)}
+                onLeave={leave}
               />
             );
           }}
@@ -684,6 +731,7 @@ function ChatView(props: {
   // (`chat/receive-coordinator.ts`): one shared journal cursor per group, who
   // polls it, and the events it applied while this view was not mounted.
   const receive = useBackgroundReceive();
+  const membershipEnd = useMembershipEnd();
   // Claimed synchronously, before the first effect: from here on the
   // background sweep leaves this group to this view's own long poll.
   const releaseForeground = receive.coordinator.claimForeground(props.entry.groupIdB64);
@@ -1269,6 +1317,9 @@ function ChatView(props: {
   let pendingPersistTimer: ReturnType<typeof setTimeout> | null = null;
   const PERSIST_DEBOUNCE_MS = 500;
   const [input, setInput] = createSignal("");
+  // ADR-0087 section 9.1 - what the composer holds when the conversation ends
+  // here is shown once, in the dialog.
+  onCleanup(membershipEnd.registerOpenDraft(props.entry.groupIdB64, input));
   const [busy, setBusy] = createSignal(false);
   // ADR-0061 — held as how to render them, so a line already on screen
   // follows a language switch.
@@ -1678,8 +1729,13 @@ function ChatView(props: {
   const DRAFT_DEBOUNCE_MS = 500;
   createEffect(() => {
     const text = input();
+    // Cleared first: a message sent within the debounce leaves the composer
+    // where the last write left it, and the timer would save what was sent.
+    if (draftBroadcastTimer !== null) {
+      clearTimeout(draftBroadcastTimer);
+      draftBroadcastTimer = null;
+    }
     if (text === lastBroadcastDraft) return;
-    if (draftBroadcastTimer !== null) clearTimeout(draftBroadcastTimer);
     draftBroadcastTimer = setTimeout(() => {
       draftBroadcastTimer = null;
       lastBroadcastDraft = text;
@@ -2673,6 +2729,7 @@ function ChatView(props: {
       // role table takes the direct path and evicts us in the same call.
       // Fail-safe when absent — the fallback string is true either way.
       noteOwnLeaveRequested();
+      membershipEnd.noteLeaveRequested();
       // UX section 2 — read from the group, never from which path committed:
       // no notice once this device is out, else the request notice, which
       // clears by itself when the departure lands.
@@ -3049,10 +3106,11 @@ function ChatView(props: {
    * Reachable only once the membership has ended (the exit block's `ended`
    * arm), so this never removes a live conversation.
    *
-   * What is removed, what is deliberately NOT (the inert MLS remnant in the
-   * provider snapshot), and why the push subscription is already gone by
-   * this point are all stated once, on `chat/delete-chat.ts`. This function
-   * owns only the confirmation and the busy / error state around it.
+   * Since ADR-0087 section 9 a group goes by itself when the account is out
+   * of it, so this is reached only by a device whose own leaf was retired
+   * while the account stays. What is removed, and why the push subscription
+   * is already gone by this point, are stated once on `chat/delete-chat.ts`.
+   * This function owns only the confirmation and the busy / error state.
    */
   async function onDeleteChat(): Promise<void> {
     const s = auth.state();
@@ -3084,19 +3142,14 @@ function ChatView(props: {
       // ADR-0073 R.5 — a conversation is every group of its lineage this
       // device holds; the open group (the head) goes last.
       const held = lineageView.resolve(props.entry.groupIdB64)?.held ?? [props.entry];
-      await deleteConversation({
-        accountIdB64: s.account.accountId,
+      await membershipEnd.deleteConversation({
         segments: held.map((g) => ({
           groupIdB64: g.groupIdB64,
           groupIdHex: hexOf(g.group.groupId),
         })),
         headGroupIdB64: props.entry.groupIdB64,
-        chats,
-        // ADR-0052 decision 3 — the pins are wiped with the conversation.
-        afterSegment: (segment) => pins.forgetConversation(segment.groupIdB64),
+        conversationHex: conversationHex(),
       });
-      // Nothing held for a conversation that is gone is ever sent.
-      if (heldSends.take(conversationHex()).length > 0) void persistHeldSends(s.account.accountId);
       // Only when the person is still here. The delete takes a while, and one
       // who already went to another screen must not be sent back to the list.
       if (onThisScreen()) props.onLeave();
@@ -4301,6 +4354,9 @@ function ChatView(props: {
           return deviceKey === null ? null : loadMessageLog(account, deviceKey);
         },
       });
+      // ADR-0087 section 9 — the batch that ended this conversation: nothing
+      // it carried may land in a store behind the wipe. The view closes.
+      if (membershipEnd.isEnding(props.entry.groupIdB64)) return "membership-ended";
       // docs/ux/second-device.md section 4 — the people this batch added and
       // removed go on its last commit row, judged on the roster right after
       // the apply, before anything else can move it.

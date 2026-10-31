@@ -917,6 +917,69 @@ impl Group {
     /// [`Error::GroupStillActive`] when the stored group is active, and nothing
     /// changes; [`Error::Group`] on a storage failure.
     pub fn delete(&mut self, identity: &Identity) -> Result<()> {
+        self.delete_stored(identity, MlsGroup::is_active)
+    }
+
+    /// Delete this group's state on the word of this account's other devices,
+    /// without having applied the commit that ended it (ADR-0087 section 9,
+    /// C-88).
+    ///
+    /// [`Self::delete`] refuses an active group, and a device that hears of an
+    /// end from a `conversation_ended` register holds an active group: the
+    /// commit is still ahead of it in the journal, and past the journal's
+    /// 30-day retention it never arrives. This is the one way such a device
+    /// stops holding the group.
+    ///
+    /// **The caller holds a `conversation_ended` register from its own
+    /// account's synced state, and `ended_epoch` is that register's epoch.**
+    /// Nothing else may call this: the core cannot see the register, and a
+    /// caller that reaches here on anything else deletes a live membership.
+    /// The DeviceGroup carrying the register is what authenticates it, so what
+    /// this rests on is that the account's own devices do not lie to each
+    /// other. A server cannot reach this: a refused read is not a register.
+    ///
+    /// **`ended_epoch` is what keeps a stale register off a rejoined group.**
+    /// A Welcome stores the group under the same id at a later epoch, so an
+    /// active group ABOVE the epoch of the end is one this device came back
+    /// to, and it is refused like a live group is by [`Self::delete`], with
+    /// nothing changed. Such a device holds a later truth than the register:
+    /// the caller answers with a `joined` register. An active group at or
+    /// below `ended_epoch` is the one that ended. A group that is not active
+    /// is deleted at any epoch, exactly as [`Self::delete`] would.
+    ///
+    /// Judged on what is STORED, like [`Self::delete`], so a stale handle
+    /// cannot take a group that replaced it. Repeating it changes nothing. The
+    /// same rows go as for [`Self::delete`], a staged sweep's with them: a
+    /// commit this device had staged is dropped, its verdict moot, and the
+    /// caller drops the matching ADR-0040 outbox entry. It says nothing to
+    /// anyone and leaves no trace in the group: the leaf stays in the tree
+    /// until a commit removes it, and the people left never hear of this. The
+    /// KeyPackage bundle stays, for the reason [`Self::delete`] gives.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::GroupStillActive`] when the stored group is active at an epoch
+    /// above `ended_epoch`, and nothing changes; [`Error::Group`] on a storage
+    /// failure.
+    pub fn delete_after_ended_elsewhere(
+        &mut self,
+        identity: &Identity,
+        ended_epoch: u64,
+    ) -> Result<()> {
+        self.delete_stored(identity, |stored| {
+            stored.is_active() && stored.epoch().as_u64() > ended_epoch
+        })
+    }
+
+    /// The body of both deletes: the stored group goes unless `keep` says it
+    /// stays, in which case the answer is [`Error::GroupStillActive`] and
+    /// nothing changes. With no stored group only the retained requests of
+    /// this handle remain to clear.
+    fn delete_stored(
+        &mut self,
+        identity: &Identity,
+        keep: impl FnOnce(&MlsGroup) -> bool,
+    ) -> Result<()> {
         let group_id = self.group_id();
         let stored = MlsGroup::load(identity.provider.storage(), self.inner.group_id())
             .map_err(|e| Error::Group(format!("load stored group: {e:?}")))?;
@@ -924,7 +987,7 @@ impl Group {
             self.pending_external_joins.clear();
             return Self::drop_pending_external_joins_row(identity, &group_id);
         };
-        if stored.is_active() {
+        if keep(&stored) {
             return Err(Error::GroupStillActive { group_id });
         }
         delete_stored_group(identity, &mut stored)?;

@@ -578,6 +578,10 @@
       "text": "{name} finalizó la llamada para todos",
       "status": "machine"
     },
+    "call.ended.no_longer_in_group": {
+      "text": "Ya no estás en este grupo.",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "No se pudo configurar el cifrado de la llamada, así que la llamada no se inició.",
       "status": "machine"
@@ -1363,7 +1367,7 @@
       "status": "machine"
     },
     "channels.info.unsubscribe_sub": {
-      "text": "Quita el canal de tu lista y este dispositivo deja de leerlo. Puedes volver a suscribirte más tarde.",
+      "text": "Quita el canal de tu lista y elimina sus publicaciones de todos tus dispositivos. Podrás suscribirte de nuevo más adelante.",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1775,7 +1779,7 @@
       "status": "machine"
     },
     "channels.unsubscribe.body": {
-      "text": "Sale de tu lista y este dispositivo deja de leerlo. Puedes volver a suscribirte más tarde.",
+      "text": "Saldrá de tu lista y sus publicaciones se eliminarán de todos tus dispositivos. Podrás suscribirte de nuevo más adelante.",
       "status": "machine"
     },
     "channels.unsubscribe.title": {
@@ -2090,6 +2094,14 @@
       "text": "Ya no eres miembro de este grupo.",
       "status": "machine"
     },
+    "chat.ended.notice": {
+      "text": "Ya no estás en {name}.",
+      "status": "machine"
+    },
+    "chat.ended.notice_body": {
+      "text": "El grupo y sus mensajes ya no están en tus dispositivos.",
+      "status": "machine"
+    },
     "chat.ended.unsent_draft": {
       "text": "Borrador sin enviar",
       "status": "machine"
@@ -2323,7 +2335,7 @@
       "status": "machine"
     },
     "chat.leave.body": {
-      "text": "Seguirás recibiendo mensajes hasta que el propietario o un administrador aplique tu solicitud. Necesitarás una nueva invitación para volver a unirte.",
+      "text": "Saldrá de tu lista y sus mensajes se eliminarán de todos tus dispositivos. Seguirás recibiendo mensajes hasta que el propietario o un administrador aplique tu solicitud.",
       "status": "machine"
     },
     "chat.leave.confirm": {

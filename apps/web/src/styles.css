@@ -3288,6 +3288,42 @@ input.lk-sas-code {
   background: var(--accent-soft);
   color: var(--accent);
 }
+/* "You are no longer in {name}." (group-and-channel-privacy UX 9.1). */
+.lk-end-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 12px;
+}
+.lk-end-dialog {
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  color: var(--surface-fg);
+  box-shadow: var(--shadow-1);
+  padding: 0;
+  width: min(28rem, calc(100vw - 2rem));
+}
+.lk-end-dialog-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+}
+.lk-end-dialog-draft {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.lk-end-dialog-text {
+  margin: 0;
+  max-height: 40vh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
 /* "A device was added to your account" (identity-recovery UX 17.5). */
 .lk-device-added {
   display: flex;

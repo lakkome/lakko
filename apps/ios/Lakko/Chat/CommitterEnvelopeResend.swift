@@ -80,4 +80,9 @@ enum CommitterEnvelopeForeground {
     @MainActor static func isActive() -> Bool {
         UIApplication.shared.applicationState == .active
     }
+
+    /// The app is on screen or about to be: `.inactive` covers a launch.
+    @MainActor static func isOnScreen() -> Bool {
+        UIApplication.shared.applicationState != .background
+    }
 }

@@ -47,6 +47,13 @@ export class ReceiveCoordinator<E> {
   private readonly listeners = new Set<() => void>();
   private readonly pollRequests = new Map<string, () => void>();
 
+  /** Forget a group gone from this device: its cursor and what was held for
+   *  a view that will never attach. */
+  forget(groupId: string): void {
+    this.cursors.delete(groupId);
+    this.buffers.delete(groupId);
+  }
+
   // ----- cursor ---------------------------------------------------------
 
   /** The furthest cursor either path has recorded for `groupId`, or

@@ -641,6 +641,9 @@ internal interface LastObservedOwnerStore {
      *  reading. */
     fun save(accountIdB64: String, groupIdHex: String, ownerKeyB64: String)
 
+    /** Forget one group (ADR-0087 section 9). */
+    fun clear(accountIdB64: String, groupIdHex: String) = Unit
+
     /** Drop every remembered owner for one account — `recover` /
      *  `forgetDevice` hygiene, the same discipline the commit outbox, the
      *  pending-request observations and the beacon observations all follow. */
@@ -688,6 +691,16 @@ internal class SharedPrefsLastObservedOwnerStore(context: Context) : LastObserve
                 prefs().edit().putString(rowKey(accountIdB64, groupIdHex), ownerKeyB64).apply()
             } catch (_: Throwable) {
                 // best-effort — losing it costs one notice
+            }
+        }
+    }
+
+    override fun clear(accountIdB64: String, groupIdHex: String) {
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                prefs().edit().remove(rowKey(accountIdB64, groupIdHex)).apply()
+            } catch (_: Throwable) {
+                // best-effort — a stale reading costs one notice
             }
         }
     }

@@ -218,6 +218,10 @@ public object AccountLocalWipe {
             me.lakko.app.chat.SharedPrefsLastObservedOwnerStore(ctx).clearForAccount(acct)
         },
         Step("leave-records") { ctx, acct -> me.lakko.app.chat.SharedPrefsLeaveRecordStore(ctx).clearForAccount(acct) },
+        // ADR-0087 section 9 - an end still owed or its notice, and a Welcome
+        // kept for a group this device still held.
+        Step("membership-ends") { ctx, acct -> me.lakko.app.chat.SharedPrefsMembershipEndStore(ctx).clearForAccount(acct) },
+        Step("held-welcomes") { ctx, acct -> me.lakko.app.chat.SharedPrefsHeldWelcomeStore(ctx).clearForAccount(acct) },
         Step("journal-ownership") { ctx, acct ->
             me.lakko.app.ds.EncryptedJournalOwnershipStore(ctx).clearForAccount(acct)
         },

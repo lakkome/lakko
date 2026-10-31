@@ -194,7 +194,12 @@ export type RegisterEdit =
     }
   /** Remove a message from saved (a tombstone; saving it again brings it
    *  back). */
-  | { readonly t: "saved-removed"; readonly ref: ConversationRef; readonly messageId: bigint };
+  | { readonly t: "saved-removed"; readonly ref: ConversationRef; readonly messageId: bigint }
+  /** ADR-0087 section 9 — send the register held for this conversation. It
+   *  was folded when it was written; what the outbox names is the
+   *  conversation, and the sender reads the register then, so a later change
+   *  of it goes out instead of a stale one. */
+  | { readonly t: "conversation-end"; readonly ref: ConversationRef };
 
 /** A register edit with its own HLC stamp. */
 export type StampedEdit = RegisterEdit & { readonly hlc: bigint };

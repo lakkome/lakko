@@ -612,6 +612,13 @@ public final class LastObservedOwnerStore {
             ownerKeyB64, forKey: storeKey(accountIdB64: accountIdB64, groupIdB64: groupIdB64))
     }
 
+    /// Forget the owner of one group this device is no longer in (ADR-0087
+    /// section 9): a re-add is a first observation.
+    public func clear(accountIdB64: String, groupIdB64: String) {
+        defaults.removeObject(
+            forKey: storeKey(accountIdB64: accountIdB64, groupIdB64: groupIdB64))
+    }
+
     /// Drop every remembered owner for one account — `recover` / `forgetDevice`
     /// hygiene, the same discipline the commit outbox, the pending-request
     /// observations and the beacon observations all follow.

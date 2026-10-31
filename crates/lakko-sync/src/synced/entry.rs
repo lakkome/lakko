@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The registers the account's devices keep in step (ADR-0058), and the
-//! saved-message register ADR-0065 section 4 adds to them.
+//! The registers the account's devices keep in step (ADR-0058), the
+//! saved-message register ADR-0065 section 4 adds to them, and the
+//! conversation-end register of ADR-0087 section 9.
 //!
 //! Plain Rust types, owned here so the fold, its tests and the persistence
 //! codec need no protobuf. `lakko-mls` converts the DeviceGroup proto into
@@ -82,6 +83,36 @@ pub const SAVED_MAX_CLIENT: usize = 2000;
 /// which owns the wire encoding); a larger selection goes out as several
 /// change sets.
 pub const SAVED_MAX_PER_CHANGE_SET: usize = 32;
+
+/// How many conversation-end registers a client writes for one account
+/// (ADR-0087 section 9).
+///
+/// A **client-side creation limit**, chosen, not measured, and **not a decode
+/// bound**: [`super::SyncedState::compose_conversation_ended`] writes nothing
+/// for a new conversation once this many registers are held, and the fold
+/// accepts any number, because two devices that each recorded ends while
+/// offline can legitimately exceed it together.
+///
+/// What it bounds: a register is 56 bytes in the persisted state, so 4096 is
+/// about 230 KiB in every persist and every backup, and it keeps the
+/// snapshot within its 64 parts of 1024 registers, past which no catch-up can
+/// be sent at all.
+///
+/// What happens at it: the device still ends the conversation and wipes it.
+/// It only stops telling the account's other devices through the register, so
+/// those learn it by applying the commit themselves, and one that was offline
+/// past the journal's retention keeps that conversation until it hears some
+/// other way.
+pub const CONVERSATION_ENDS_MAX_CLIENT: usize = 4096;
+
+/// `ConversationEnd` state on the wire and in the canonical encoding: this
+/// account's membership ended.
+pub const CONVERSATION_ENDED: u8 = 1;
+/// `ConversationEnd` state on the wire and in the canonical encoding: this
+/// account joined after an end. Greater than [`CONVERSATION_ENDED`] on
+/// purpose: on a complete tie the larger canonical bytes win, and a tie must
+/// not delete a conversation.
+pub const CONVERSATION_JOINED: u8 = 2;
 
 /// `SavedMessage` state on the wire and in the canonical encoding: saved.
 pub const SAVED_STATE_PRESENT: u8 = 1;
@@ -224,6 +255,10 @@ pub enum BoundsError {
     /// A link record's revocation seed was not 32 bytes.
     #[error("link record revocation seed length is out of bounds")]
     LinkRecordRevocationSeedLength,
+    /// A conversation-end register named a state this build does not know
+    /// (including the unspecified `0`).
+    #[error("unknown conversation end state")]
+    UnknownConversationEndState,
 }
 
 /// Which kind of conversation a [`ConversationRef`] names.
@@ -843,6 +878,75 @@ impl SavedMessage {
     }
 }
 
+/// What a conversation-end register says about one conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationEndState {
+    /// No device of this account is left in the conversation.
+    Ended,
+    /// The account joined again after an end.
+    Joined,
+}
+
+impl ConversationEndState {
+    /// The state number on the wire and in the canonical encoding.
+    #[must_use]
+    pub const fn to_wire(self) -> u8 {
+        match self {
+            Self::Ended => CONVERSATION_ENDED,
+            Self::Joined => CONVERSATION_JOINED,
+        }
+    }
+
+    /// Read a wire number; `0` (unspecified) and anything unknown refused.
+    ///
+    /// # Errors
+    ///
+    /// [`BoundsError::UnknownConversationEndState`].
+    pub const fn from_wire(v: i64) -> Result<Self, BoundsError> {
+        match v {
+            1 => Ok(Self::Ended),
+            2 => Ok(Self::Joined),
+            _ => Err(BoundsError::UnknownConversationEndState),
+        }
+    }
+}
+
+/// One conversation-end register (ADR-0087 section 9): how this account's
+/// membership of a conversation stands, for the account's own devices.
+///
+/// One register per conversation, written only once an end has happened.
+/// `epoch` is what makes a late write harmless. A group keeps its id across a
+/// removal and a re-add and its MLS epoch only ever rises, so the epoch orders
+/// an end and a join with no clock at all, and a device that was offline and
+/// applies an old removal now cannot end the group its account has rejoined
+/// since. See [`super::SyncedState`] for the order.
+///
+/// `epoch` is the MLS epoch of the group: for an end, the epoch the group
+/// froze at on the device that saw it, which is the epoch of the commit that
+/// removed the account's last leaf; for a join, the epoch the Welcome joined
+/// at. A channel subscription has no epoch and passes `0`, so a channel's
+/// registers are ordered by their stamps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationEnd {
+    /// The conversation.
+    pub conversation: ConversationRef,
+    /// Ended, or joined again.
+    pub state: ConversationEndState,
+    /// The MLS epoch of the end or the join; `0` for a channel.
+    pub epoch: u64,
+}
+
+impl ConversationEnd {
+    /// Check the conversation reference.
+    ///
+    /// # Errors
+    ///
+    /// [`BoundsError::RefIdLength`].
+    pub fn validate(&self) -> Result<(), BoundsError> {
+        self.conversation.validate()
+    }
+}
+
 /// One register value of any kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncEntry {
@@ -874,6 +978,9 @@ pub enum SyncEntry {
     Saved(SavedMessage),
     /// One of the account's invite links (ADR-0079 section 4).
     LinkRecord(super::link_record::LinkRecordEntry),
+    /// How the account's membership of a conversation stands (ADR-0087
+    /// section 9). Appended last.
+    ConversationEnd(ConversationEnd),
 }
 
 /// Which register an entry writes.
@@ -908,8 +1015,11 @@ pub enum RegisterKey {
     OwnUsername,
     /// The saved register of this message in this conversation.
     Saved(ConversationRef, u64),
-    /// The link-record register of this link id (ADR-0079). Appended last.
+    /// The link-record register of this link id (ADR-0079).
     LinkRecord([u8; super::link_record::LINK_RECORD_ID_LEN]),
+    /// The conversation-end register of this conversation (ADR-0087 section
+    /// 9). Appended last.
+    ConversationEnd(ConversationRef),
 }
 
 impl RegisterKey {
@@ -940,6 +1050,7 @@ const TAG_LINEAGE: u8 = 11;
 const TAG_RECOVERY_EMAIL: u8 = 12;
 const TAG_OWN_USERNAME: u8 = 13;
 const TAG_LINK_RECORD: u8 = 14;
+const TAG_CONVERSATION_END: u8 = 15;
 
 impl SyncEntry {
     /// The register this entry writes.
@@ -960,6 +1071,7 @@ impl SyncEntry {
             Self::OwnUsername(_) => RegisterKey::OwnUsername,
             Self::Saved(m) => RegisterKey::Saved(m.conversation.clone(), m.message_id),
             Self::LinkRecord(r) => RegisterKey::LinkRecord(r.link_id),
+            Self::ConversationEnd(e) => RegisterKey::ConversationEnd(e.conversation.clone()),
         }
     }
 
@@ -984,6 +1096,7 @@ impl SyncEntry {
             Self::OwnUsername(u) => u.validate(),
             Self::Saved(m) => m.validate(),
             Self::LinkRecord(r) => r.validate(),
+            Self::ConversationEnd(e) => e.validate(),
             Self::FolderRemoved(_)
             | Self::Flags(_)
             | Self::ReadCursor(_)
@@ -1080,6 +1193,12 @@ impl SyncEntry {
             Self::LinkRecord(r) => {
                 out.push(TAG_LINK_RECORD);
                 r.encode_body(&mut out);
+            },
+            Self::ConversationEnd(e) => {
+                out.push(TAG_CONVERSATION_END);
+                put_ref(&mut out, &e.conversation);
+                out.push(e.state.to_wire());
+                out.extend_from_slice(&e.epoch.to_be_bytes());
             },
             // The key (reference, message id) comes first and the state
             // byte directly after it, so on an exact stamp tie the two
@@ -1221,6 +1340,16 @@ impl SyncEntry {
             TAG_LINK_RECORD => {
                 Self::LinkRecord(super::link_record::LinkRecordEntry::take_body(&mut cur)?)
             },
+            TAG_CONVERSATION_END => {
+                let conversation = take_ref(&mut cur)?;
+                let state = ConversationEndState::from_wire(i64::from(take_u8(&mut cur)?))?;
+                let epoch = take_u64(&mut cur)?;
+                Self::ConversationEnd(ConversationEnd {
+                    conversation,
+                    state,
+                    epoch,
+                })
+            },
             _ => return Err(CodecError::UnknownTag),
         };
         if !cur.is_empty() {
@@ -1263,9 +1392,10 @@ pub enum CodecError {
 /// A live edit: only the registers that changed, each with its own stamp.
 ///
 /// Named for the chat folders it was built to carry (ADR-0058); since
-/// ADR-0065 section 4 it also carries saved-message registers, so one Save
-/// or Remove travels exactly like a folder edit and a snapshot's
-/// [`StateSnapshot::folders`] hands a late device the saved list.
+/// ADR-0065 section 4 it also carries saved-message registers, and since
+/// ADR-0087 section 9 conversation-end registers, so each travels exactly like
+/// a folder edit and a snapshot's [`StateSnapshot::folders`] hands them to a
+/// late device.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FolderChanges {
     /// Meta registers.
@@ -1280,6 +1410,8 @@ pub struct FolderChanges {
     pub order: Option<Stamped<FolderOrder>>,
     /// Saved-message registers (ADR-0065 section 4): saves and removals.
     pub saved: Vec<Stamped<SavedMessage>>,
+    /// Conversation-end registers (ADR-0087 section 9).
+    pub conversation_ends: Vec<Stamped<ConversationEnd>>,
 }
 
 /// A value with the hybrid-logical-clock stamp it was written at.
@@ -1301,6 +1433,7 @@ impl FolderChanges {
             + self.removed.len()
             + usize::from(self.order.is_some())
             + self.saved.len()
+            + self.conversation_ends.len()
     }
 
     /// `true` when nothing is carried.
@@ -1355,12 +1488,17 @@ impl FolderChanges {
                 .iter()
                 .map(|s| (s.hlc, SyncEntry::Saved(s.value.clone()))),
         );
+        out.extend(
+            self.conversation_ends
+                .iter()
+                .map(|s| (s.hlc, SyncEntry::ConversationEnd(s.value.clone()))),
+        );
         out
     }
 
-    /// Add one stamped folder or saved-message entry to the matching list.
-    /// Returns `false` (and adds nothing) for an entry of one of the four
-    /// older kinds, or for a second order.
+    /// Add one stamped folder, saved-message or conversation-end entry to the
+    /// matching list. Returns `false` (and adds nothing) for an entry of one
+    /// of the four older kinds, or for a second order.
     pub fn push(&mut self, hlc: u64, entry: SyncEntry) -> bool {
         match entry {
             SyncEntry::FolderMeta(value) => self.metas.push(Stamped { hlc, value }),
@@ -1374,6 +1512,9 @@ impl FolderChanges {
                 self.order = Some(Stamped { hlc, value });
             },
             SyncEntry::Saved(value) => self.saved.push(Stamped { hlc, value }),
+            SyncEntry::ConversationEnd(value) => {
+                self.conversation_ends.push(Stamped { hlc, value });
+            },
             _ => return false,
         }
         true
@@ -1670,6 +1811,47 @@ mod tests {
                 blob_ids: blob_ids.to_vec(),
             },
         }
+    }
+
+    #[test]
+    fn a_conversation_end_round_trips_and_a_bad_one_is_refused() {
+        let e = SyncEntry::ConversationEnd(ConversationEnd {
+            conversation: sref(),
+            state: ConversationEndState::Joined,
+            epoch: u64::MAX,
+        });
+        let bytes = e.canonical_bytes();
+        assert_eq!(SyncEntry::from_canonical_bytes(&bytes), Ok(e.clone()));
+
+        let state_at = bytes.len() - 9;
+        let mut unknown = bytes.clone();
+        unknown[state_at] = 3;
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&unknown),
+            Err(CodecError::Bounds(BoundsError::UnknownConversationEndState))
+        );
+        unknown[state_at] = 0;
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&unknown),
+            Err(CodecError::Bounds(BoundsError::UnknownConversationEndState))
+        );
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&trailing),
+            Err(CodecError::Trailing)
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&bytes[..bytes.len() - 1]),
+            Err(CodecError::Truncated)
+        );
+
+        // It rides a change set, counted with every other register.
+        let mut c = FolderChanges::default();
+        assert!(c.push(7, e));
+        assert_eq!(c.register_count(), 1);
+        assert_eq!(c.stamped_entries().len(), 1);
+        assert_eq!(c.validate(), Ok(()));
     }
 
     /// `saved(..)` with one field of the value rewritten.

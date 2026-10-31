@@ -68,6 +68,13 @@ public class OwnEchoRegistry {
     public fun consume(groupIdHex: String, messageId: Long): Boolean =
         entries.remove(Key(groupIdHex, messageId))
 
+    /** Forget one journal's rows: the group is gone from this device, and a
+     *  Welcome may bring its id back with other rows under the same numbers
+     *  (ADR-0087 section 9). */
+    public fun forgetGroup(groupIdHex: String) {
+        synchronized(entries) { entries.removeAll { it.groupIdHex == groupIdHex } }
+    }
+
     /** How many registrations are outstanding. Diagnostics and tests only. */
     public val size: Int get() = entries.size
 

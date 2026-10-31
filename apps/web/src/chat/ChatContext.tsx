@@ -48,8 +48,8 @@
  *   * `add(...)` upserts (same `groupIdB64` replaces the prior
  *     entry — useful when a Welcome arrives after a reload and
  *     the in-memory replacement should win).
- *   * `remove(groupIdB64)` is a deliberate user gesture (Phase
- *     1.16e6+ adds `Group::leave` plumbing).
+ *   * `remove(groupIdB64)` is the last step of a group leaving this
+ *     device (`membership-end-runtime.ts`, `delete-chat.ts`).
  *   * `clear()` is called from `AuthProvider.logout` /
  *     `forgetDevice` so per-account state never bleeds across
  *     sessions.
@@ -94,6 +94,13 @@ export interface ActiveGroup {
   /** ms since epoch — used to display "active for N minutes"
    *  and to pick a stable initial sort order. */
   readonly createdAtMs: number;
+  /** ADR-0087 section 9 — how many times a Welcome replaced this group on
+   *  this device. The chat view is keyed on it: a person added back has a new
+   *  conversation under the same id, and nothing the old view held (rows, a
+   *  cursor, a frozen roster) is that conversation's. An ADR-0040 persist
+   *  reset replaces the entry too and keeps the generation: there the view
+   *  must stay mounted. */
+  readonly joinGeneration: number;
 }
 
 /** Public surface of the chat context. */
@@ -139,7 +146,12 @@ export interface ChatApi {
   /** Insert (or replace) a group in the registry. The
    *  `groupIdB64` field is computed from the live
    *  `group.groupId` accessor. */
-  add(input: Omit<ActiveGroup, "groupIdB64" | "createdAtMs">): ActiveGroup;
+  add(
+    input: Omit<ActiveGroup, "groupIdB64" | "createdAtMs" | "joinGeneration"> & {
+      /** A Welcome replaced the group held under this id. */
+      readonly rejoined?: boolean;
+    },
+  ): ActiveGroup;
   /** Drop a group from the registry. No-op when missing. */
   remove(groupIdB64: string): void;
   /** Replace the canonical Identity. Frees the previous
@@ -354,11 +366,13 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
     },
     add(input) {
       const groupIdB64 = base64Encode(input.group.groupId);
+      const held = groups().find((g) => g.groupIdB64 === groupIdB64)?.joinGeneration ?? 0;
       const entry: ActiveGroup = {
         groupIdB64,
         label: input.label,
         group: input.group,
         createdAtMs: Date.now(),
+        joinGeneration: input.rejoined === true ? held + 1 : held,
       };
       // Upsert by groupIdB64 — a duplicate Welcome on the same
       // group should reuse the slot rather than pile up.

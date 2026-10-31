@@ -175,6 +175,30 @@ public final class ChatViewModel: ObservableObject {
         messageActionsState(membership) == .available
     }
 
+    // MARK: - ADR-0087 section 9 — the conversation goes
+
+    /// UX 9.1 — the dialog over the open conversation. `draft`: what the
+    /// composer held, shown selectable, since it has nowhere else to go.
+    public struct EndDialog: Equatable, Identifiable {
+        public let name: String
+        public let draft: String?
+        public var id: String { name }
+    }
+
+    /// Set once when the group went from under an open conversation.
+    @Published public var endDialog: EndDialog?
+    /// The conversation is gone and nothing is left to say: back to Chats.
+    @Published public private(set) var conversationGone = false
+    /// A thread was seen, so its absence is an end and not a chat not yet
+    /// loaded.
+    private var sawThread = false
+    /// The end of this conversation was answered here.
+    private var endAnswered = false
+    /// `Delete this chat` is running: the screen goes through its own path.
+    private var deletingChat = false
+    /// No more draft writes: the conversation's draft register was cleared.
+    private var draftClosed = false
+
     /// §6.2.8 — which one-shot teardown steps have already been claimed. A
     /// `Set` on the `@MainActor` view model rather than a lock, because
     /// ``claimTeardownSteps(_:alreadyRun:)`` takes what it hands out in the same
@@ -436,6 +460,8 @@ public final class ChatViewModel: ObservableObject {
                 // ask the group to introduce itself (the core's rule decides,
                 // at most once a day per group; nothing is sent otherwise).
                 requestProfilesIfDue()
+                // UX 9.1 — the group went while another screen was on top.
+                noteConversationEnd(threadPresent: threadKnown)
             } else {
                 // Left the thread — stop advertising that we're typing.
                 stopTyping()
@@ -2208,8 +2234,11 @@ public final class ChatViewModel: ObservableObject {
     }
 
     private func scheduleDraftBroadcast(text: String, groupIdBytes: Data) {
-        if text == lastBroadcastDraft { return }
+        // Cancelled first: a message sent within the debounce leaves the
+        // composer where the last write left it, and the pending write would
+        // save what was sent.
         draftBroadcastWork?.cancel()
+        if draftClosed || text == lastBroadcastDraft { return }
         let work = DispatchWorkItem { [weak self] in
             guard let self = self,
                   let sync = self.deviceGroupSync else { return }
@@ -2276,6 +2305,9 @@ public final class ChatViewModel: ObservableObject {
         // the one place that sees every path into the terminal state. It is a
         // cheap synchronous read of a boolean the core already maintains.
         refreshMembership()
+        // ADR-0087 section 9 — the thread leaves the state the moment an end
+        // is recorded.
+        noteConversationEnd(threadPresent: thread != nil)
         // ADR-0027 (G-3) — a poll may have retained a fresh external-join
         // request; refresh the pending list live while the members sheet is
         // open (cheap in-memory read of the group's retained set).
@@ -2285,6 +2317,42 @@ public final class ChatViewModel: ObservableObject {
                 !membershipHasEnded && repository.sawUnkeptExternalJoin(groupIdHex: groupIdHex)
             refreshJoinAttributions()
         }
+    }
+
+    /// UX 9.1, 9.4 — the conversation left from under this screen. Answered
+    /// only while the person is looking at it: otherwise the banner tells them,
+    /// and this runs again if they come back to the route.
+    private func noteConversationEnd(threadPresent: Bool) {
+        if threadPresent {
+            sawThread = true
+            endAnswered = false
+            conversationGone = false
+            draftClosed = false
+            return
+        }
+        // No thread alone is not an end: a lineage that arrived can move the
+        // conversation under another id while the group stays held.
+        guard sawThread, !endAnswered, !deletingChat,
+              !repository.hasGroup(groupIdHex: groupIdHex) || repository.isEnding(groupIdHex: groupIdHex),
+              screenVisible || conversationInfoOpen else { return }
+        endAnswered = true
+        draftBroadcastWork?.cancel()
+        draftClosed = true
+        let held = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keptDraft = held.isEmpty ? nil : draft
+        draft = ""
+        if let notice = repository.claimEndNotice(groupIdHex: groupIdHex) {
+            endDialog = EndDialog(name: notice.name, draft: keptDraft)
+        } else {
+            // The person left: the row goes with no notice.
+            conversationGone = true
+        }
+    }
+
+    /// `OK` on the dialog: back to Chats.
+    public func endDialogClosed() {
+        endDialog = nil
+        conversationGone = true
     }
 
     // MARK: - ADR-0045 UX §6.2 — detecting the end, and tearing down after it
@@ -2316,6 +2384,12 @@ public final class ChatViewModel: ObservableObject {
             shown: leaveNoticeShown, membershipEnded: membershipHasEnded) {
             membershipNotice = nil
             leaveNoticeShown = false
+        }
+        // A retired leaf came back (ADR-0050): the group is live again, and
+        // a later end must find its teardown owed, not already claimed.
+        if !membershipHasEnded, !teardownClaimed.isEmpty {
+            teardownClaimed = []
+            if screenVisible { startBeaconTicker() }
         }
         let owed = claimTeardownSteps(membership, alreadyRun: &teardownClaimed)
         guard !owed.isEmpty else { return }
@@ -2358,6 +2432,8 @@ public final class ChatViewModel: ObservableObject {
     /// this method is past it.
     func onDeleteChat() -> Bool {
         membershipError = nil
+        deletingChat = true
+        defer { deletingChat = false }
         let deleted = repository.deleteChat(groupIdHex: groupIdHex)
         if !deleted {
             // Only reachable if the gate went stale between draw and tap.

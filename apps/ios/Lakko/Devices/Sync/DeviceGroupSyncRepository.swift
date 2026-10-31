@@ -79,6 +79,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// continues which conversation. Read through ``ConversationLineage``.
     @Published public private(set) var lineage: [LineageEntry] = []
 
+    /// ADR-0087 section 9 — the conversations this account's membership of
+    /// ended (the fold's reading: a later `joined` takes one off the list).
+    @Published public private(set) var endedConversations: [ConversationEndRegister] = []
+
     /// ADR-0075 (amended 2026-10-13) — the account's recovery email address,
     /// as this account's devices keep it: one register of the synced state,
     /// so it is on disk under the device key, with the sibling devices and in
@@ -452,6 +456,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         let savedList = SavedMessages.ordered((try? s.saved()) ?? [])
         if savedList != saved { saved = savedList }
         if lineageList != lineage { lineage = lineageList }
+        let ends = (try? s.endedConversations()) ?? []
+        if ends != endedConversations { endedConversations = ends }
         let address = (try? s.recoveryEmail()).flatMap { $0 }
         if address != recoveryEmail { recoveryEmail = address }
         let name = (try? s.ownUsername()).flatMap { $0 }
@@ -604,6 +610,113 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 metas: [], members: [], pins: [], removed: [], order: nil, saved: chunk))
             start += size
         }
+    }
+
+    // MARK: - ADR-0087 section 9: the end of a membership
+
+    /// Step 2. A `nil` compose means there is nothing to tell the other
+    /// devices (past the client limit, or the register already says so), and
+    /// that never stops the wipe. A publish that failed is the state's pending
+    /// re-send, as for every other write. A device removed from the account
+    /// has nobody to tell.
+    public func publishConversationEnded(
+        _ conversation: FolderConversationRef, epoch: UInt64
+    ) async -> Bool {
+        if deviceRemoved { return true }
+        guard ready else { return false }
+        do {
+            guard let register = try syncedState.composeConversationEnded(
+                hlc: Hlc.mint(), conversation: conversation, epoch: epoch) else { return true }
+            try await writeConversationEnds([register])
+            return true
+        } catch {
+            NSLog("conversation end not written: %@", error.localizedDescription)
+            return false
+        }
+    }
+
+    /// Rule 3 — a join clears an end this state holds; a first join writes
+    /// nothing. A device that could not write this now answers the register
+    /// when it next reads it (rule 4).
+    public func publishConversationJoined(
+        _ conversation: FolderConversationRef, epoch: UInt64
+    ) async {
+        guard ready, !deviceRemoved else { return }
+        do {
+            guard let register = try syncedState.composeConversationJoined(
+                hlc: Hlc.mint(), conversation: conversation, epoch: epoch) else { return }
+            try await writeConversationEnds([register])
+        } catch {
+            NSLog("conversation join not written: %@", error.localizedDescription)
+        }
+    }
+
+    private func writeConversationEnds(_ registers: [ConversationEndRegister]) async throws {
+        try await applyFolderChanges(FolderChangeSet(
+            metas: [], members: [], pins: [], removed: [], order: nil,
+            saved: [], conversationEnds: registers))
+    }
+
+    /// Clear what the synced state holds of `conversations`, through each
+    /// register's own tombstone, and only where something is held: a device
+    /// that hears the end after the device that wiped first writes nothing.
+    /// Profile rows are not tied to a group and stay.
+    public func clearConversation(_ conversations: [FolderConversationRef]) async -> Bool {
+        if deviceRemoved { return true }
+        guard ready else { return false }
+        do {
+            for conversation in conversations {
+                let id = conversation.id
+                let key = groupIdHex(id)
+                if let draft = drafts[key], !draft.text.isEmpty {
+                    try await setDraft(groupId: id, text: "")
+                }
+                if flags[key].map({ $0.pinned || $0.muted || $0.archived || $0.unreadOverride }) == true {
+                    try await setFlags(
+                        groupId: id, pinned: false, muted: false, archived: false, unreadOverride: false)
+                }
+                if let cursor = readCursors[key], !cursor.upToMessageId.isEmpty {
+                    try await setReadCursor(groupId: id, upToMessageId: Data(), readAtMs: 0)
+                }
+            }
+            let ids = Set(conversations.map(\.id))
+            if let order, order.groupIds.contains(where: { ids.contains($0) }) {
+                try await setOrder(groupIds: order.groupIds.filter { !ids.contains($0) })
+            }
+            let changes = Self.conversationClearChanges(
+                folders: folders, conversations: ids, hlc: Hlc.mint())
+            try await applyFolderChanges(changes)
+            try await applySaved(try saved
+                .filter { ids.contains($0.conversation.id) }
+                .map { try composeSavedRemoval(
+                    hlc: Hlc.mint(), conversation: $0.conversation, messageId: $0.messageId) })
+            return true
+        } catch {
+            NSLog("conversation registers not cleared: %@", error.localizedDescription)
+            return false
+        }
+    }
+
+    /// The folder edit that takes `conversations` out of every folder: the
+    /// hand-added and hand-excluded registers back to `none`, and the pins.
+    /// A folder that matches by kind stops showing it with the row itself.
+    nonisolated static func conversationClearChanges(
+        folders: [FolderView], conversations ids: Set<Data>, hlc: UInt64
+    ) -> FolderChangeSet {
+        var members: [FolderMemberRegister] = []
+        var pins: [FolderPinsRegister] = []
+        for folder in folders {
+            for ref in (folder.included + folder.excluded) where ids.contains(ref.id) {
+                members.append(FolderMemberRegister(
+                    hlc: hlc, folderId: folder.folderId, conversation: ref, state: .none))
+            }
+            if folder.pinned.contains(where: { ids.contains($0.id) }) {
+                pins.append(FolderPinsRegister(
+                    hlc: hlc, folderId: folder.folderId,
+                    pinned: folder.pinned.filter { !ids.contains($0.id) }))
+            }
+        }
+        return FolderChangeSet(metas: [], members: members, pins: pins, removed: [], order: nil)
     }
 
     /// Blob ids of every saved message's files (for the keep tick).
@@ -2259,3 +2372,5 @@ enum DeviceGroupSyncError: Error {
     /// No ready handle (not bootstrapped, reloading, or this device removed).
     case notReady
 }
+
+extension DeviceGroupSyncRepository: ConversationEndSync {}

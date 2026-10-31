@@ -61,6 +61,17 @@ public fun ContinuityRow.withMoved(oldGroupHex: String, nowMs: Long, oneToOne: B
     }
 }
 
+/** Nothing of [groupHex] stays (ADR-0087 section 9): a group added to again
+ *  under the same id has moved nowhere. */
+public fun ContinuityRow.withoutGroup(groupHex: String): ContinuityRow = copy(
+    moved = moved - groupHex,
+    resent = resent - groupHex,
+    swapping = swapping - groupHex,
+    pushRetired = pushRetired - groupHex,
+    movedOneToOne = movedOneToOne - groupHex,
+    resendCursor = resendCursor - groupHex,
+)
+
 /** The re-send of [oldGroupHex] ran to its end: its cursor is spent. */
 public fun ContinuityRow.withResent(oldGroupHex: String): ContinuityRow =
     if (oldGroupHex in resent && !resendCursor.containsKey(oldGroupHex)) {
