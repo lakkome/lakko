@@ -100,6 +100,9 @@ pub async fn handle(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
             tokio::time::sleep(Duration::from_millis(ms)).await;
             plain(StatusCode::OK, "ok")
         }
+        (&Method::POST, "/__probe/body") => {
+            plain(StatusCode::OK, &request.body().len().to_string())
+        }
         (&Method::POST, "/__probe/report") => {
             let body = String::from_utf8_lossy(request.body());
             info!(t = format!("{:.1}", elapsed()), report = %body, "probe");

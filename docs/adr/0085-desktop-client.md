@@ -520,8 +520,24 @@ requests through it, no failure, journal writes among them, then against the
 stack with the real pin: it armed over DoH and the server took 121 tunnels in
 two minutes (119 REALITY, 2 Shadowsocks), one per request.
 
-**Not done:** no call has been placed through the tunnel, so the exit criterion
-of S4 is half met. Nothing here ran on Windows or Linux. WebTransport has no
+**Group call through the tunnel (2026-10-31, macOS debug build, the setting on,
+against the test stack):** the desktop app and a second account in a group
+call. During the call the app's process held TCP connections to the server on
+the REALITY port 8444 and on no other port, while the SFU forwarded audio and
+video between both peers over UDP with no loss reported in the sampled seconds.
+Sound and picture as a person perceives them are not recorded here.
+
+**Found in the same run:** every voice and video message failed with
+`blob-hash-mismatch`. WebKit hands a `Blob` request body to a custom scheme as a
+stream, and wry reads it empty: on the macOS probe page a `Blob` arrived as 0
+bytes through XHR and through `fetch`, at 64 KiB and 3 MiB, and the same size as
+bytes arrived whole. The upload now sends bytes. The probe page keeps this
+measurement. Separately, a media bubble's cleanup read a parent getter that throws
+during teardown, which stopped the route change: the chats would not switch until
+the app restarted. The cleanups now release the last key they saw.
+
+**Not done:** a message sent through the tunnel against the stack (only through a
+local proxy so far). Nothing here ran on Windows or Linux. WebTransport has no
 listener configured; MASQUE stays unfit for this (ADR-0026).
 
 **Found running it:** through the tunnel every client reaches the server from

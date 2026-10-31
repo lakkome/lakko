@@ -93,6 +93,32 @@ checks.apiProxyHealth = await attempt(async () => {
 out.textContent = JSON.stringify(checks, null, 2);
 await report({ kind: "checks", checks });
 
+// What each request body shape brings through the app scheme: WebKit hands a
+// Blob over as a stream, and the scheme handler reads only what is ready.
+const sizes = [64 * 1024, 3 * 1024 * 1024];
+const sendXhr = (body) =>
+  new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/__probe/body");
+    xhr.onload = () => resolve(xhr.responseText);
+    xhr.onerror = () => resolve("error");
+    xhr.send(body);
+  });
+const sendFetch = (body) =>
+  fetch("/__probe/body", { method: "POST", body }).then((r) => r.text());
+for (const size of sizes) {
+  const bytes = new Uint8Array(size);
+  const shapes = {
+    xhrBlob: () => sendXhr(new Blob([bytes])),
+    xhrBytes: () => sendXhr(bytes.slice()),
+    fetchBlob: () => sendFetch(new Blob([bytes])),
+    fetchBytes: () => sendFetch(bytes.slice()),
+  };
+  for (const [shape, send] of Object.entries(shapes)) {
+    await report({ kind: "body", shape, sent: size, arrived: await send() });
+  }
+}
+
 document.addEventListener("visibilitychange", () =>
   report({ kind: "visibility", hidden: document.hidden, state: document.visibilityState, t: Date.now() }));
 
