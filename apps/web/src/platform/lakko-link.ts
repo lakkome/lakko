@@ -5,11 +5,10 @@
  * Lakko links outside the browser (ADR-0085 section 5, `docs/ux/desktop.md`
  * section 7).
  *
- * The `https` link is `/<kind>/<ledger id>#<secret>`. The `lakko://` form
- * carries the secret only where the OS hands the URL over privately: macOS
- * delivers it as an event, while Windows and Linux start the app with it on a
- * command line other processes can read. There the page copies the whole link
- * and the person pastes it into the app.
+ * The `https` link is `/<kind>/<ledger id>#<secret>`, and the `lakko://` form
+ * carries the same parts. Where the OS hands the `https` link to the app itself
+ * the page has nothing to do; everywhere else the page opens the `lakko://`
+ * form.
  */
 
 export type LinkKind = "i" | "c" | "g";
@@ -46,20 +45,17 @@ export function appPathOf(link: LakkoLink): string {
   return `/${link.kind}/${link.id}#${link.secret}`;
 }
 
-/** What "Open in the app" does on a page showing `link`. */
-export function openInAppAction(
-  link: LakkoLink,
-  mac: boolean,
-): { readonly url: string; readonly copyFirst: boolean } {
-  const bare = `lakko://${link.kind}/${link.id}`;
-  return mac ? { url: `${bare}#${link.secret}`, copyFirst: false } : { url: bare, copyFirst: true };
+/** The address "Open in the app" opens on a page showing `link`. */
+export function openInAppUrl(link: LakkoLink): string {
+  return `lakko://${link.kind}/${link.id}#${link.secret}`;
 }
 
 /**
- * Whether the page tries the app by itself, once, when it opens. Only where
- * the whole link can travel (macOS), and only in browsers that stay quiet with
- * no app installed: Safari answers with its own "address is invalid" message,
- * so there, as in any browser not named here, the button stays the only way.
+ * Whether the page tries the app by itself, once, when it opens. Only on
+ * macOS, and only in the browsers measured to stay quiet with no app installed:
+ * Safari answers with its own "address is invalid" message, and nothing was
+ * measured on Windows or Linux, so there, as in any browser not named here, the
+ * button is the way in.
  */
 export function opensAppByItself(userAgent: string, mac: boolean): boolean {
   return mac && /\b(?:Chrome|Firefox)\//.test(userAgent);

@@ -222,26 +222,30 @@ app.
 
 ## 7. Links from outside
 
-- The invite, call-link and group-invite pages on `lakko.me` gain an **Open
-  in the app** button beside what they show today. It opens the desktop app
-  (through its `lakko://` scheme). On macOS the app opens on the same screen
-  the web would show. On Windows and Linux the page copies the link, says
-  "Link copied. Paste it in the app.", and the app opens the Open a link dialog
-  for it (ADR-0085 section 5). Phones and tablets are not offered the button.
-- On macOS in Chrome and Firefox the page also tries the app by itself, once
-  per link, when it opens, as a meeting link does: the browser asks whether to
-  open Lakko. Safari is left out, as is any browser not named here: with no app
+A link is clicked, never copied. A person gets it in a message, in another
+messenger or anywhere else, clicks it, and lands on the screen it opens.
+
+- **Where the OS hands the link to the app, it does.** A signed macOS app claims
+  `https://lakko.me` as a Universal Link and a packaged Windows app as a URI
+  handler, so a click opens the app with no page in between. Both need the
+  packaged, signed build (ADR-0085 S5). Linux has no such mechanism.
+- **Everywhere else the click opens the page in the browser**, and the invite,
+  call-link and group-invite pages offer **Open in the app** under the card. It
+  opens the desktop app on the same screen, through the `lakko://` scheme, with
+  the whole link. Phones and tablets are not offered the button.
+- On macOS in Chrome and Firefox the page also tries the app by itself, once per
+  link, when it opens, as a meeting link does: the browser asks whether to open
+  Lakko. Safari is left out, as is any browser not named here: with no app
   installed it answers with its own "address is invalid" message, so there the
-  button is the only way. Windows and Linux stay on the button too, since
-  copying the link needs a press.
-- A page cannot tell whether the app opened. With no app installed the web page
-  keeps working as today; pressing the button in Safari shows that browser's
+  button is the way in. Windows and Linux stay on the button too: nothing was
+  measured there.
+- A page cannot tell whether the app is installed or opened. With no app the web
+  page keeps working as today; pressing the button in Safari shows that browser's
   message and nothing else.
-- Nobody is asked to bring a link into the app by hand: a link is opened by
-  clicking it. There is no "Open a link" item in any menu (maintainer,
-  2026-11-01). A link in a message opens its screen in place, and any other link
-  in a message opens in the system's default browser
-  ([`message-links.md`](message-links.md)).
+- Nobody is asked to bring a link into the app by hand: there is no "Open a link"
+  item and no dialog to paste into (maintainer, 2026-11-01). A link in a message
+  opens its screen in place, and any other link in a message opens in the system's
+  default browser ([`message-links.md`](message-links.md)).
 
 ## 8. Updates
 
@@ -305,7 +309,7 @@ window was hidden; otherwise it reads "New message".
 The decisions this spec depended on are recorded in ADR-0085 section 9
 (2026-10-16): a computer without hardware key storage keeps the keys in the
 operating system's software store and shows nothing different (1.1 applies
-only when there is no store at all); links use `lakko://` plus "Open a link"
+only when there is no store at all); links use `lakko://`
 (section 7); updates are verified with TUF (section 8).
 
 ## 12. Not in this spec

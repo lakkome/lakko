@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { appPathOf, mayHaveDesktopApp, openInAppAction, opensAppByItself, parseLakkoLink } from "./lakko-link";
+import { appPathOf, mayHaveDesktopApp, openInAppUrl, opensAppByItself, parseLakkoLink } from "./lakko-link";
 
 const ORIGIN = "https://lakko.me";
 const ID = "AbCd_-12";
@@ -39,17 +39,9 @@ describe("appPathOf", () => {
   });
 });
 
-describe("openInAppAction", () => {
-  const link = { kind: "c", id: ID, secret: SECRET } as const;
-
-  it("carries the secret in the URL only on macOS", () => {
-    expect(openInAppAction(link, true)).toEqual({ url: `lakko://c/${ID}#${SECRET}`, copyFirst: false });
-  });
-
-  it("keeps the secret off a command line elsewhere", () => {
-    const action = openInAppAction(link, false);
-    expect(action).toEqual({ url: `lakko://c/${ID}`, copyFirst: true });
-    expect(action.url).not.toContain(SECRET);
+describe("openInAppUrl", () => {
+  it("carries the whole link", () => {
+    expect(openInAppUrl({ kind: "c", id: ID, secret: SECRET })).toBe(`lakko://c/${ID}#${SECRET}`);
   });
 });
 
@@ -65,7 +57,7 @@ describe("opensAppByItself", () => {
     expect(opensAppByItself(`${mac} Version/26.6.2 Safari/605.1.15`, true)).toBe(false);
   });
 
-  it("never tries where the secret cannot travel in the link", () => {
+  it("leaves Windows and Linux to the button: nothing was measured there", () => {
     expect(opensAppByItself(`${mac} Chrome/156.0.0.0 Safari/537.36`, false)).toBe(false);
   });
 });

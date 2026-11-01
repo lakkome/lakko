@@ -76,7 +76,7 @@ fn main() {
         link::from_args(app, &args);
     }));
     let built = builder
-        .manage(link::Held::default())
+        .manage(link::Held::new(config.api_origin.origin().ascii_serialization()))
         .plugin(tauri_plugin_dialog::init())
         .enable_macos_default_menu(false)
         .register_asynchronous_uri_scheme_protocol(APP_SCHEME, move |ctx, request, responder| {
@@ -196,7 +196,7 @@ fn main() {
         #[cfg(target_os = "macos")]
         RunEvent::Opened { urls } => {
             for url in urls {
-                link::arrived(app, url.as_str(), link::Delivery::Private);
+                link::arrived(app, url.as_str());
             }
         },
         RunEvent::Exit => info!("exit"),

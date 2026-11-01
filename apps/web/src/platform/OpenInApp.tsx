@@ -9,11 +9,11 @@
  * tell which happened.
  */
 import { useLocation } from "@solidjs/router";
-import { createEffect, createMemo, createSignal, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, Show, type JSX } from "solid-js";
 
 import { t } from "../l10n";
 import { publicOrigin } from "./index";
-import { mayHaveDesktopApp, openInAppAction, opensAppByItself, parseLakkoLink } from "./lakko-link";
+import { mayHaveDesktopApp, openInAppUrl, opensAppByItself, parseLakkoLink } from "./lakko-link";
 import { isMacPlatform } from "./shortcuts";
 
 /** Links this page already tried by itself: going back to one asks no more.
@@ -34,7 +34,6 @@ function launch(url: string): void {
 
 export function OpenInApp(): JSX.Element {
   const location = useLocation();
-  const [copied, setCopied] = createSignal(false);
   const link = createMemo(() =>
     parseLakkoLink(`${publicOrigin()}${location.pathname}${location.hash}`, publicOrigin()),
   );
@@ -43,39 +42,24 @@ export function OpenInApp(): JSX.Element {
   createEffect(() => {
     const current = link();
     if (current === null || !offered) return;
-    const mac = isMacPlatform();
-    if (!opensAppByItself(navigator.userAgent, mac)) return;
+    if (!opensAppByItself(navigator.userAgent, isMacPlatform())) return;
     const key = `${current.kind}/${current.id}`;
     if (triedByItself.has(key)) return;
     triedByItself.add(key);
-    launch(openInAppAction(current, mac).url);
+    launch(openInAppUrl(current));
   });
 
-  const open = async (): Promise<void> => {
+  const open = (): void => {
     const current = link();
-    if (current === null) return;
-    const action = openInAppAction(current, isMacPlatform());
-    if (action.copyFirst) {
-      try {
-        await navigator.clipboard.writeText(`${publicOrigin()}${location.pathname}${location.hash}`);
-        setCopied(true);
-      } catch {
-        // Nothing copied: the app still opens, and the person can copy the
-        // address bar.
-      }
-    }
-    launch(action.url);
+    if (current !== null) launch(openInAppUrl(current));
   };
 
   return (
     <Show when={offered && link() !== null}>
       <div class="lk-open-in-app">
-        <button type="button" class="primary" onClick={() => void open()}>
+        <button type="button" class="primary" onClick={open}>
           {t("open_in_app.button")}
         </button>
-        <Show when={copied()}>
-          <p class="lk-row-sub" role="status">{t("open_in_app.copied")}</p>
-        </Show>
       </div>
     </Show>
   );

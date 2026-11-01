@@ -33,7 +33,6 @@ import { Show, type Component } from "solid-js";
 import { isDesktop } from "./platform";
 import { DesktopBridge } from "./platform/DesktopBridge";
 import { OpenInApp } from "./platform/OpenInApp";
-import { OpenLinkDialog } from "./platform/OpenLinkDialog";
 import { MemoryRouter, type RouteSectionProps } from "@solidjs/router";
 import { originHistory } from "./routes/origin-history";
 import { AuthProvider } from "./auth/AuthContext";
@@ -102,7 +101,6 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
      */}
     <Show when={isDesktop()} fallback={<OpenInApp />}>
       <DesktopBridge />
-      <OpenLinkDialog />
     </Show>
     {props.children}
     <CallHostView />

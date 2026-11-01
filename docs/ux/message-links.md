@@ -59,8 +59,9 @@ coloured like any other. Lakko never fetches it.
 
 A link that arrives in another messenger, a mail or anywhere else opens the
 page in the browser, and the page offers the desktop app when one may be
-installed (`desktop.md` section 7). A phone opens the app itself through its
-universal link or app link.
+installed, or the OS opens the app with no page in between once the desktop app
+is signed and packaged (`desktop.md` section 7). A phone opens the app itself
+through its universal link or app link.
 
 ## 5. Cross-platform shape
 

@@ -309,12 +309,11 @@ export async function saveFileOnHost(bytes: Uint8Array, name: string): Promise<b
   return true;
 }
 
-/** A `lakko://` link the OS handed over. `secret` is `null` where the OS
- *  cannot carry it privately: the person pastes the link then. */
+/** A link the OS handed over, whole. */
 export interface HostLink {
   readonly kind: "i" | "c" | "g";
   readonly id: string;
-  readonly secret: string | null;
+  readonly secret: string;
 }
 
 /** The link waiting at the host, once. `null` when there is none. */
@@ -324,8 +323,9 @@ export async function takeHostLink(): Promise<HostLink | null> {
     const res = await fetch(`${HOST_APP_PATH}/take-link`, { method: "POST" });
     if (res.status !== 200) return null;
     const v = (await res.json()) as { kind?: unknown; id?: unknown; secret?: unknown };
-    if ((v.kind !== "i" && v.kind !== "c" && v.kind !== "g") || typeof v.id !== "string") return null;
-    return { kind: v.kind, id: v.id, secret: typeof v.secret === "string" ? v.secret : null };
+    if (v.kind !== "i" && v.kind !== "c" && v.kind !== "g") return null;
+    if (typeof v.id !== "string" || typeof v.secret !== "string") return null;
+    return { kind: v.kind, id: v.id, secret: v.secret };
   } catch {
     return null;
   }

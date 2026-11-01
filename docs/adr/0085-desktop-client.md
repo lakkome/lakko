@@ -211,26 +211,32 @@ never keeps MLS state.
 - The app registers the `lakko://` scheme on all three OSes (decision 9.3).
   A link handed over by the OS at launch or while running is passed to the
   page, which shows the screen it shows on the web for the matching
-  `https://lakko.me/i/`, `/c/` or `/g/` link. The web invite pages gain "Open
+  `https://lakko.me/i/`, `/c/` or `/g/` link. The web invite pages offer "Open
   in the app", which follows the `lakko://` form. On macOS in Chrome and Firefox
   the page also tries it by itself, once per link (maintainer, 2026-10-31),
   because people follow the `https` link and should land in the app as they do
   in a meeting link. Safari does not: measured 2026-10-31, with no handler for
   the scheme it shows "Safari cannot open the page because the address is
   invalid". Chrome and Firefox kept the page working through a scripted link
-  click with no handler. The in-app "Open a link" item was removed on
-  2026-11-01 (maintainer): nobody copies a link to open it, a link is clicked.
-  Links in messages are live ([`message-links.md`](../ux/message-links.md)), and
-  the host gained `POST open-url` for the system's default browser.
-- **The link secret never rides a command line.** On Windows and Linux the OS
-  starts the app with the URL as an argument, readable by the user's other
-  processes. Settled in S5 (maintainer, 2026-10-31): macOS hands a link over as
-  an event, so there "Open in the app" sends the whole link and the screen opens
-  at once. On Windows and Linux the page copies the whole link and opens
-  `lakko://<kind>/<id>`; the host drops anything after `#` that arrives on a
-  command line, and the app asks the person to paste. The app never reads the
-  clipboard itself: the page cannot tell it the copy succeeded, and macOS warns
-  about a program reading the clipboard.
+  click with no handler.
+- **A link is clicked, never copied (maintainer, 2026-11-01; replaces the rule
+  of 2026-10-31 that the secret never rides a command line).** Where the OS can
+  hand the `https` link to the app, it does: a Universal Link on macOS, a
+  packaged app's URI handler on Windows. The host accepts this deployment's
+  `https` link as it accepts `lakko://`, and tao delivers a Universal Link through
+  the same event; what it takes is S5's signed, packaged build. Where the OS
+  cannot (Linux, and every unpackaged build), the whole `lakko://` link travels.
+  On Windows and Linux that is a command line: a second start lives for
+  milliseconds, but the process the link started keeps it in its arguments for as
+  long as it runs, readable by the user's other processes and, on Linux with the
+  default `/proc`, by other local users. Accepted: the link reached the person
+  through some other messenger and sits in the browser's history, and it admits
+  nobody by itself. Re-executing the first process without the argument was
+  rejected: it cannot be run here, and a race on the single-instance lock would
+  leave a click with no app. The "Open a link" item and its paste dialog are
+  removed. Links in messages are live
+  ([`message-links.md`](../ux/message-links.md)), and the host gained `POST
+  open-url` for the system's default browser.
 
 ### 6. Calls
 
@@ -290,9 +296,11 @@ when the person taps "Restart to update", never during a call.
    *on a desktop computer without hardware key storage the device key is
    protected by the operating system's software key store; a machine with no
    key store at all is refused.* No UI says which case a computer is in.
-3. **Links: the `lakko://` scheme on all three OSes plus "Open a link"
-   inside the app** (section 5). Claiming `https://lakko.me` links is left for
-   later: on Windows it needs a packaged (MSIX) app.
+3. **Links: the `lakko://` scheme on all three OSes, and `https://lakko.me`
+   claimed where the OS allows** (section 5, amended 2026-11-01). Claiming it
+   needs S5: the macOS `com.apple.developer.associated-domains` entitlement with
+   the desktop app id in `apple-app-site-association`, and on Windows a packaged
+   app with a `uap3:AppUriHandler` and `windows-app-web-link` on the site.
 4. **Updates: `lakko-tuf` from the first version** (section 7). Chosen over
    Tauri's updater for threshold signing, key rotation and protection against
    rollback and freeze; the cost accepted is writing the fetch and the

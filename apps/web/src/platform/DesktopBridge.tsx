@@ -47,7 +47,6 @@ import {
 } from "./host";
 import { isDesktop } from "./index";
 import { appPathOf } from "./lakko-link";
-import { setOpenLinkReason } from "./open-link-state";
 import {
   conversationListMounted,
   isMacPlatform,
@@ -199,9 +198,7 @@ export function DesktopBridge(): JSX.Element {
     const offSettings = onHostEvent("open-settings", () => navigate(paths.settings));
     const openArrivedLink = async (): Promise<void> => {
       const link = await takeHostLink();
-      if (link === null) return;
-      if (link.secret === null) setOpenLinkReason("copied");
-      else navigate(appPathOf({ kind: link.kind, id: link.id, secret: link.secret }));
+      if (link !== null) navigate(appPathOf(link));
     };
     const offLink = onHostEvent("link-arrived", () => void openArrivedLink());
     // A link that started the app arrived before this page existed.

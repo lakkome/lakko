@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! `lakko://` links from the OS (ADR-0085 section 5).
+//! Links from the OS (ADR-0085 section 5, `docs/ux/desktop.md` section 7).
 //!
-//! macOS delivers a link as an event, so it may carry the secret after `#`.
-//! Windows and Linux start the app with it as an argument other processes can
-//! read, so a link from there is taken as the kind and the ledger id alone,
-//! whatever it held, and the person pastes the whole link into the app.
+//! A link arrives as `lakko://<kind>/<id>#<secret>`, from the invite page, or
+//! as this deployment's own `https` link, where the OS hands those to the app
+//! (a Universal Link on macOS, a packaged app's URI handler on Windows). On
+//! macOS it is an event. On Windows and Linux it is a command line, which the
+//! user's other processes can read: the link came through some other
+//! messenger and sits in the browser's history, so nobody pastes it by hand to
+//! keep it off one (maintainer, 2026-11-01).
 //!
 //! The link waits in [`Held`] until the page takes it: at a cold start the
 //! page does not exist yet, and the secret stays out of a script string.
@@ -32,59 +35,66 @@ fn is_link_text(s: &str, len: usize) -> bool {
 }
 
 /// The newest link no page has taken yet.
-#[derive(Default)]
-pub struct Held(Mutex<Option<Value>>);
+pub struct Held {
+    link: Mutex<Option<Value>>,
+    /// This deployment's origin: the one `https` origin a link may name.
+    origin: String,
+}
 
 impl Held {
+    pub fn new(origin: String) -> Self {
+        Self {
+            link: Mutex::new(None),
+            origin,
+        }
+    }
+
     fn put(&self, link: Value) {
-        if let Ok(mut held) = self.0.lock() {
+        if let Ok(mut held) = self.link.lock() {
             *held = Some(link);
         }
     }
 
     /// Hand the link over, once.
     pub fn take(&self) -> Option<Value> {
-        self.0.lock().ok().and_then(|mut held| held.take())
+        self.link.lock().ok().and_then(|mut held| held.take())
     }
 }
 
-/// How a link reached this process.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Delivery {
-    /// As an OS event, which no other process can read.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    Private,
-    /// On a command line.
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
-    CommandLine,
-}
-
-/// What the page is told about `raw`, or `None` when it is no Lakko link.
-fn parse(raw: &str, delivery: Delivery) -> Option<Value> {
-    let url = Url::parse(raw).ok()?;
-    if url.scheme() != "lakko" || url.query().is_some() {
+/// The kind and the ledger id of `url`, by its form.
+fn kind_and_id<'u>(url: &'u Url, origin: &str) -> Option<(&'u str, &'u str)> {
+    if url.scheme() == "lakko" {
+        return Some((url.host_str()?, url.path().strip_prefix('/')?));
+    }
+    if url.origin().ascii_serialization() != origin {
         return None;
     }
-    let kind = url.host_str().filter(|k| matches!(*k, "i" | "c" | "g"))?;
-    let id = url
-        .path()
-        .strip_prefix('/')
-        .filter(|id| is_link_text(id, ID_CHARS))?;
-    let secret = match delivery {
-        Delivery::Private => url.fragment().filter(|s| is_link_text(s, SECRET_CHARS)),
-        Delivery::CommandLine => None,
-    };
+    url.path().strip_prefix('/')?.split_once('/')
+}
+
+/// What the page is told about `raw`, or `None` when it is no whole Lakko
+/// link. Every link carries its secret: without it no screen can open.
+fn parse(raw: &str, origin: &str) -> Option<Value> {
+    let url = Url::parse(raw).ok()?;
+    if url.query().is_some() {
+        return None;
+    }
+    let (kind, id) = kind_and_id(&url, origin)?;
+    if !matches!(kind, "i" | "c" | "g") || !is_link_text(id, ID_CHARS) {
+        return None;
+    }
+    let secret = url.fragment().filter(|s| is_link_text(s, SECRET_CHARS))?;
     Some(json!({ "kind": kind, "id": id, "secret": secret }))
 }
 
 /// Keep `raw` for the page and bring the window up.
-pub fn arrived<R: Runtime>(app: &AppHandle<R>, raw: &str, delivery: Delivery) {
-    let Some(link) = parse(raw, delivery) else {
-        warn!("refused a link that is not a Lakko link");
-        return;
-    };
+pub fn arrived<R: Runtime>(app: &AppHandle<R>, raw: &str) {
     let Some(held) = app.try_state::<Held>() else {
         warn!("no place to hold a link");
+        return;
+    };
+    let Some(link) = parse(raw, &held.origin) else {
+        warn!("refused a link that is not a Lakko link");
         return;
     };
     info!(
@@ -96,25 +106,38 @@ pub fn arrived<R: Runtime>(app: &AppHandle<R>, raw: &str, delivery: Delivery) {
     notify_page(app, "link-arrived");
 }
 
-/// The first `lakko://` argument of a command line.
+/// The first link among command-line arguments.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn link_arg<'a>(args: &'a [String], origin: &str) -> Option<&'a str> {
+    let own = format!("{origin}/");
+    args.iter()
+        .map(String::as_str)
+        .find(|a| a.starts_with("lakko://") || a.starts_with(&own))
+}
+
+/// Take a link off a command line.
 #[cfg(not(target_os = "macos"))]
 pub fn from_args<R: Runtime>(app: &AppHandle<R>, args: &[String]) {
-    if let Some(raw) = args.iter().find(|a| a.starts_with("lakko://")) {
-        arrived(app, raw, Delivery::CommandLine);
+    let Some(held) = app.try_state::<Held>() else {
+        return;
+    };
+    if let Some(raw) = link_arg(args, &held.origin) {
+        arrived(app, raw);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, Delivery, Held};
+    use super::{link_arg, parse, Held};
     use serde_json::json;
 
     const ID: &str = "AbCd_-12";
     const SECRET: &str = "0123456789abcdef";
+    const ORIGIN: &str = "https://lakko.me";
 
     #[test]
     fn a_held_link_is_taken_once_and_the_newest_wins() {
-        let held = Held::default();
+        let held = Held::new(ORIGIN.to_owned());
         assert_eq!(held.take(), None);
         held.put(json!({ "id": "first" }));
         held.put(json!({ "id": "second" }));
@@ -123,44 +146,81 @@ mod tests {
     }
 
     #[test]
-    fn a_private_delivery_keeps_the_secret() {
-        let raw = format!("lakko://g/{ID}#{SECRET}");
+    fn a_lakko_link_keeps_its_secret() {
         assert_eq!(
-            parse(&raw, Delivery::Private),
+            parse(&format!("lakko://g/{ID}#{SECRET}"), ORIGIN),
             Some(json!({ "kind": "g", "id": ID, "secret": SECRET }))
         );
     }
 
     #[test]
-    fn a_command_line_never_carries_the_secret_onward() {
-        let raw = format!("lakko://i/{ID}#{SECRET}");
+    fn this_deployments_https_link_is_the_same_link() {
         assert_eq!(
-            parse(&raw, Delivery::CommandLine),
-            Some(json!({ "kind": "i", "id": ID, "secret": null }))
+            parse(&format!("{ORIGIN}/i/{ID}#{SECRET}"), ORIGIN),
+            Some(json!({ "kind": "i", "id": ID, "secret": SECRET }))
         );
+    }
+
+    #[test]
+    fn another_hosts_https_link_is_refused() {
+        for raw in [
+            format!("https://evil.example/i/{ID}#{SECRET}"),
+            format!("http://lakko.me/i/{ID}#{SECRET}"),
+            format!("https://lakko.me.evil.example/i/{ID}#{SECRET}"),
+            format!("https://lakko.me@evil.example/i/{ID}#{SECRET}"),
+        ] {
+            assert_eq!(parse(&raw, ORIGIN), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_link_with_no_usable_secret_is_refused() {
+        for raw in [
+            format!("lakko://i/{ID}"),
+            format!("lakko://c/{ID}#<script>"),
+            format!("{ORIGIN}/g/{ID}"),
+        ] {
+            assert_eq!(parse(&raw, ORIGIN), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_command_line_gives_up_its_link_and_nothing_else() {
+        let args = |list: &[&str]| list.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
+        let lakko = format!("lakko://i/{ID}#{SECRET}");
+        let https = format!("{ORIGIN}/g/{ID}#{SECRET}");
+        assert_eq!(
+            link_arg(&args(&["lakko-desktop", "--hidden", &lakko]), ORIGIN),
+            Some(lakko.as_str())
+        );
+        assert_eq!(
+            link_arg(&args(&["lakko-desktop", &https]), ORIGIN),
+            Some(https.as_str())
+        );
+        assert_eq!(
+            link_arg(
+                &args(&["lakko-desktop", "https://lakko.me.evil.example/g/x"]),
+                ORIGIN
+            ),
+            None
+        );
+        assert_eq!(link_arg(&args(&["lakko-desktop"]), ORIGIN), None);
     }
 
     #[test]
     fn anything_else_is_refused() {
         for raw in [
             "https://lakko.me/i/AbCd_-12",
-            "lakko://x/AbCd_-12",
-            "lakko://i/short",
-            "lakko://i/AbCd_-12/more",
-            "lakko://i/AbCd_-12?next=https://evil.example",
+            "https://lakko.me/settings",
+            "https://lakko.me/i/AbCd_-12/more#0123456789abcdef",
+            "lakko://x/AbCd_-12#0123456789abcdef",
+            "lakko://i/short#0123456789abcdef",
+            "lakko://i/AbCd_-12/more#0123456789abcdef",
+            "lakko://i/AbCd_-12?next=https://evil.example#0123456789abcdef",
             "lakko://settings",
             "not a url",
         ] {
-            assert_eq!(parse(raw, Delivery::Private), None, "{raw}");
+            assert_eq!(parse(raw, ORIGIN), None, "{raw}");
         }
-    }
-
-    #[test]
-    fn a_malformed_secret_is_dropped_not_passed_on() {
-        let raw = format!("lakko://c/{ID}#<script>");
-        assert_eq!(
-            parse(&raw, Delivery::Private),
-            Some(json!({ "kind": "c", "id": ID, "secret": null }))
-        );
     }
 }

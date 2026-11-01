@@ -3394,10 +3394,6 @@
       "text": "Oluştur",
       "status": "machine"
     },
-    "chats.create.open_link": {
-      "text": "Bağlantı aç",
-      "status": "machine"
-    },
     "chats.empty.action": {
       "text": "Başlat",
       "status": "machine"
@@ -6540,30 +6536,6 @@
     },
     "open_in_app.button": {
       "text": "Uygulamada aç",
-      "status": "machine"
-    },
-    "open_in_app.copied": {
-      "text": "Bağlantı kopyalandı. Uygulamaya yapıştırın.",
-      "status": "machine"
-    },
-    "open_link.field": {
-      "text": "Bağlantı",
-      "status": "machine"
-    },
-    "open_link.hint": {
-      "text": "Bir Lakko davet, arama veya grup bağlantısı yapıştırın.",
-      "status": "machine"
-    },
-    "open_link.hint_copied": {
-      "text": "Sayfa bu bağlantıyı kopyaladı. Açmak için buraya yapıştırın.",
-      "status": "machine"
-    },
-    "open_link.not_lakko": {
-      "text": "Bu bir Lakko bağlantısı değil. Kontrol edip yeniden deneyin.",
-      "status": "machine"
-    },
-    "open_link.open": {
-      "text": "Aç",
       "status": "machine"
     },
     "proof.add_device.help": {
