@@ -38,10 +38,11 @@ import me.lakko.app.auth.sessionRefusalOf
  *   2. on a plain `401` refreshes once and retries the request once, with
  *      the new token (only when the body can be sent again: no body, or
  *      bytes already in memory);
- *   3. on `401 key-generation-superseded`, from the first send or the
- *      retry, reports it to the provider - the account's keys were reset
- *      elsewhere and the device signs out (contract section 7) - and hands
- *      the response back unchanged;
+ *   3. on `401 key-generation-superseded` to the token the provider still
+ *      holds, from the first send or the retry, reports it to the provider -
+ *      the account's keys were reset elsewhere and the device signs out
+ *      (contract section 7) - and hands the response back unchanged; the
+ *      same answer to a token already replaced goes on to step 2;
  *   4. on `401 device-revoked` (ADR-0074: this device was removed from the
  *      account) reports that instead, the same way; and on discovery's
  *      `403 device-revoked`, which proves nothing, refreshes at auth so
@@ -75,8 +76,13 @@ public class SessionBearerEngine(
         val (body, firstAgain) = drainBody(first)
         when (sessionRefusalOf(first.statusCode.value, errorCodeOf(String(body, Charsets.UTF_8)))) {
             SessionRefusal.KeysReset -> {
-                SessionTokens.reportSuperseded()
-                return firstAgain
+                // An answer to a token this device has since replaced says
+                // nothing about the one it holds: this device's own key
+                // rotation looks exactly like this. The held token decides.
+                if (provider.peek()?.accessToken == token) {
+                    SessionTokens.reportSuperseded(token)
+                    return firstAgain
+                }
             }
             SessionRefusal.DeviceRevoked -> {
                 SessionTokens.reportDeviceRevoked()
@@ -90,7 +96,7 @@ public class SessionBearerEngine(
         if (second.statusCode != HttpStatusCode.Unauthorized) return second
         val (secondBody, secondAgain) = drainBody(second)
         when (sessionRefusalOf(second.statusCode.value, errorCodeOf(String(secondBody, Charsets.UTF_8)))) {
-            SessionRefusal.KeysReset -> SessionTokens.reportSuperseded()
+            SessionRefusal.KeysReset -> SessionTokens.reportSuperseded(retryToken)
             SessionRefusal.DeviceRevoked -> SessionTokens.reportDeviceRevoked()
             SessionRefusal.RefreshInvalid, SessionRefusal.Unauthorized, null -> Unit
         }

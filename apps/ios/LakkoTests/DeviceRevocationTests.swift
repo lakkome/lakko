@@ -238,6 +238,33 @@ final class DeviceRevocationTests: XCTestCase {
         XCTAssertEqual(provider.current?.deviceIdB64, deviceA.base64EncodedString())
     }
 
+    /// This device's own key rotation: the request left with the old token,
+    /// the new pair was installed, and the refusal arrived after that.
+    func testALateSupersededAnswerToAReplacedTokenGoesOutAgainAndWipesNothing() async throws {
+        let provider = SessionTokenProvider()
+        provider.nowMs = { 1_000_000 }
+        let fired = Counter()
+        provider.onSuperseded = { _ in fired.bump("superseded") }
+        provider.install(.fixture(access: "tok"), accountIdB64: "acct")
+        var request = URLRequest(url: URL(string: "https://lakko.test/auth/device/requests")!)
+        request.setValue("Bearer tok", forHTTPHeaderField: "Authorization")
+        let sends = Counter()
+        let (_, response) = try await provider.perform(request) { sent in
+            sends.bump(sent.value(forHTTPHeaderField: "Authorization") ?? "")
+            if sends.names.count == 1 {
+                provider.install(.fixture(access: "tok-new"), accountIdB64: "acct")
+                return (Data(#"{"error":"key-generation-superseded"}"#.utf8),
+                        HTTPURLResponse(url: sent.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!)
+            }
+            return (Data("{}".utf8),
+                    HTTPURLResponse(url: sent.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(sends.names, ["Bearer tok", "Bearer tok-new"])
+        XCTAssertEqual(fired.names, [])
+        XCTAssertFalse(provider.isSuperseded)
+    }
+
     func testDeviceRevokedFromAnotherServiceAsksAuthInsteadOfWiping() async throws {
         let provider = SessionTokenProvider()
         provider.nowMs = { 1_000_000 }

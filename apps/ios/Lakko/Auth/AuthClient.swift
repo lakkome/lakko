@@ -1755,9 +1755,9 @@ public struct TotpRecoverResult: Equatable {
 /// Result of ``AuthClient/resetAccountKeys(sessionToken:freshGrant:seed:newSignaturePubkey:)``
 /// (ADR-0073 section 2).
 public struct KeyResetResult: Equatable {
-    /// The 177-byte `KeyResetAttestation`, verified by the client against the
+    /// The 145-byte `KeyResetAttestation`, verified by the client against the
     /// pinned attest key before it is carried to discovery and the DS.
-    public static let attestationLength = 177
+    public static let attestationLength = 145
 
     /// The raw attestation bytes.
     public let attestation: Data

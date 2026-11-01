@@ -27,7 +27,7 @@ class KeyResetTest {
         }
     }
 
-    private val attestation = ByteArray(177) { (it * 3).toByte() }
+    private val attestation = ByteArray(145) { (it * 3).toByte() }
     private val pubkey = ByteArray(32) { 9 }
 
     private fun owed(discovery: Boolean = false, deviceGroup: Boolean = false) = KeyResetOwed(
@@ -145,5 +145,13 @@ class KeyResetTest {
         val storage = MapStorage()
         storage.rows["key-reset-v1:a"] = "{not json"
         assertNull(KeyResetOwedStore(storage).load("a"))
+    }
+
+    @Test
+    fun `the attestation length is the one the server sends`() {
+        // ADR-0078 phase 6 took the journal id out of the attestation. A client
+        // that still expects the longer form refuses a reset the server has
+        // already done, and the device then wipes itself.
+        assertEquals(145, AuthClient.KEY_RESET_ATTESTATION_LEN)
     }
 }

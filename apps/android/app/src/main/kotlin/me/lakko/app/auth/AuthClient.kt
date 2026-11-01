@@ -2080,7 +2080,7 @@ public class AuthClient(
         private const val PUBKEY_LEN: Int = 32
 
         /** The fixed layout of the ADR-0073 key-reset attestation. */
-        public const val KEY_RESET_ATTESTATION_LEN: Int = 177
+        public const val KEY_RESET_ATTESTATION_LEN: Int = 145
         /** A supersession proof is this many bytes (ADR-0016). */
         public const val SUPERSESSION_PROOF_LEN: Int = 145
         /** `rotate/finish` revokes at most this many devices. */
@@ -2283,7 +2283,7 @@ public data class DeviceAuthorizeRedeemResult(
  * identity replace the old one, and the pair this device continues with.
  */
 public class KeyResetResult(
-    /** The raw 177-byte `KeyResetAttestation`, verified by the caller
+    /** The raw 145-byte `KeyResetAttestation`, verified by the caller
      *  against the pinned attest key before any use. */
     public val attestation: ByteArray,
     /** The generation the reset moved the account to. */

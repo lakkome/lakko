@@ -59,6 +59,15 @@ final class KeyResetLandingTests: XCTestCase {
 
 // MARK: - The token rules (section 3.3)
 
+final class KeyResetAttestationLengthTests: XCTestCase {
+    /// ADR-0078 phase 6 took the journal id out of the attestation. A client
+    /// that still expects the longer form refuses a reset the server has
+    /// already done, and the device then wipes itself.
+    func testTheLengthIsTheOneTheServerSends() {
+        XCTAssertEqual(KeyResetResult.attestationLength, 145)
+    }
+}
+
 final class SessionTokenRuleTests: XCTestCase {
 
     private let now: Int64 = 1_000_000
@@ -228,7 +237,7 @@ final class SessionTokenProviderTests: XCTestCase {
         let third = await p.refresh()
         XCTAssertEqual(third, .superseded)
         XCTAssertEqual(calls(), 1)
-        p.noteSuperseded()
+        p.noteSuperseded(refused: nil)
         lock.lock(); defer { lock.unlock() }
         XCTAssertEqual(fired, ["acct"], "fired once")
     }
@@ -359,7 +368,7 @@ final class KeyResetPublishTests: XCTestCase {
 
     private var record: KeyResetPublishRecord {
         KeyResetPublishRecord(
-            attestation: Data(repeating: 1, count: 177), keyGeneration: 2, signedAtMs: 1_000,
+            attestation: Data(repeating: 1, count: 145), keyGeneration: 2, signedAtMs: 1_000,
             newSignaturePubkey: Data(repeating: 2, count: 32))
     }
 

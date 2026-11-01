@@ -372,7 +372,7 @@ final class AccountLocalDataWipeTests: XCTestCase {
         // attestation, and the phrase-owed marker.
         RecoveryMarkers().markPublishOwed(
             KeyResetPublishRecord(
-                attestation: Data(repeating: 0xA7, count: 177), keyGeneration: 2, signedAtMs: 1,
+                attestation: Data(repeating: 0xA7, count: 145), keyGeneration: 2, signedAtMs: 1,
                 newSignaturePubkey: Data(repeating: 0x0A, count: 32)),
             accountIdB64: x)
         RecoveryMarkers().markPhraseOwed(accountIdB64: x)

@@ -520,7 +520,7 @@ data class KeyRotateFinishRequest(
  *  issued at the new generation (the caller's old pair is superseded). */
 @Serializable
 data class KeyResetFinishResponse(
-    /** base64url (no padding) of the signed 177-byte `KeyResetAttestation`. */
+    /** base64url (no padding) of the signed 145-byte `KeyResetAttestation`. */
     val key_reset_attest_b64: String,
     val key_generation: Long,
     val session_token: String,

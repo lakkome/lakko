@@ -15,18 +15,29 @@ ADR-0087. Add a scenario whenever a defect shows one was missing.
 2. Set a name and a photo; both reach a contact and a group.
 3. Change the username; a contact still reaches the person.
 4. Lose the device: recover with another device, a passkey, the phrase.
+4a. Save a recovery phrase on a fresh account, on every client: the words appear, the
+    three-word check passes, the account stays signed in after a relaunch, and the
+    device that did it is not asked "It was me". Then a chat works in both directions on
+    the new keys, and a device that lost everything restores from those 12 words.
+4b. Reset account keys, on every client, on a device with no keys: the new phrase
+    appears only after the publish, `Try again` finishes an interrupted publish, and
+    every other device of the account ends on the signed-out screen.
 
 ## Contacts
 5. Find a person by @username and by name; send a request; accept; decline; ask again.
-6. Invite link: open it signed in, signed out, offline inviter, dead link.
+6. Invite link: open it signed in, signed out, offline inviter, dead link. Dead means
+   expired, revoked and used up; each reads as dead before the person signs up.
 7. Remove a contact, then find and add them again, from each side.
 8. Who can find me: each setting, and what a searcher sees under it.
 9. One person is one row in every list and every search.
 
 ## One-to-one
-10. Text, reply, forward, edit, delete, react, pin, read state, typing.
+10. Text, reply, forward, edit, delete, react, pin, read state, typing. Fast typing keeps
+    every letter; a hardware keyboard works in the composer and in every dialog.
 11. Photo, file, voice message, video note, GIF, both ways, on every pair.
 12. Call and video call: ring, answer, decline, miss, hang up, app closed, screen share.
+    Each right after a message was sent in that chat. A first video call with the camera
+    prompt on screen. Ending a call leaves the app responsive at once.
 13. A message sent while the other side is offline arrives; push wakes a closed app.
 
 ## Groups
@@ -42,7 +53,8 @@ ADR-0087. Add a scenario whenever a defect shows one was missing.
     two devices, one of them closed; leaving while no owner or admin is online
     (`Waiting to leave.`, then the row goes); a fast send leaves an empty composer.
 18. Everything in 10 and 11 in a group, including a member who joined late.
-19. Group call: join, leave, camera, pin, a late joiner.
+19. Group call: join, leave, camera, pin, a late joiner. A picture from each client's
+    camera reaches a tile on the other two; the tile is not dark.
 20. Invite link and approval; a request to join, approved and rejected.
 21. Public and private group: found or not found, join by request or by invitation. (design)
 

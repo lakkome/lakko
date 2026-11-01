@@ -41,7 +41,7 @@ import me.lakko.app.ds.DsHttpError
 /** What a reset still owes, persisted per account until both steps landed. */
 @Serializable
 public class KeyResetOwed(
-    /** Standard base64 of the raw 177-byte attestation. */
+    /** Standard base64 of the raw 145-byte attestation. */
     public val attestationB64: String,
     /** The generation the reset moved the account to. */
     public val keyGeneration: Long,

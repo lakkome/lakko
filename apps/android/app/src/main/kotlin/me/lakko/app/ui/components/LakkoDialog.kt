@@ -199,8 +199,10 @@ public fun LakkoDialog(
             }
         }
         // Initial focus on Cancel, for a keyboard; a touch screen shows no
-        // focus ring and is left alone.
-        LaunchedEffect(cancel, keyboardMode) {
+        // focus ring and is left alone. Once, on opening: the first key pressed
+        // in a text field turns keyboard mode on, and keyed on that it took the
+        // focus out of the field, so the rest of the typing went nowhere.
+        LaunchedEffect(Unit) {
             if (cancel != null && keyboardMode) runCatching { cancelFocus.requestFocus() }
         }
     }

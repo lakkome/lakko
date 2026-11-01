@@ -122,9 +122,8 @@ suites); **not walked live**, no passkey ceremony executed; the
   password-reset states and upsert `KIND_RECOVERY`; delete `passkey_vaults`,
   then `webauthn_credentials`, then `webauthn_states` + `webauthn_action_grants`;
   delete `device_grants` + `device_requests`; mint the `lakko-attest`
-  **key-reset attestation** (177 bytes: `account_ref` = a one-way
-  BLAKE3-derive-key of the account id, the DeviceGroup journal id, `g`, the
-  new pubkey, `signed_at`; the shared attest key, its own domain); issue the
+  **key-reset attestation** (145 bytes: `account_ref` = a one-way
+  BLAKE3-derive-key of the account id, `g`, the new pubkey, `signed_at`; the shared attest key, its own domain); issue the
   caller a fresh pair at `g`. **Kept:** the password envelope and the TOTP
   secret (ADR-0073 open question 1). **No ADR-0014 action grant**, even with a
   passkey on the account. Limits: `Scope::RecoveryReplace` (10 per hour) on

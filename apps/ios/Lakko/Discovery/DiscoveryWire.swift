@@ -158,7 +158,7 @@ public struct IdentityUploadRequest: Codable, Equatable {
     /// server-side, never stripping a still-valid stored value). Opaque to the
     /// server — verified operator-side + by the peer on a first observation.
     public let genesisAttest: String?
-    /// ADR-0073 section 4.1: standard base64 of the 177-byte key-reset
+    /// ADR-0073 section 4.1: standard base64 of the 145-byte key-reset
     /// attestation `POST /account/keys/reset/finish` minted, carried on the
     /// upload that installs the reset identity. Discovery verifies it under
     /// its pinned attest key, requires a generation strictly above the

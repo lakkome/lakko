@@ -16,6 +16,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -24,6 +25,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CoroutineScope
@@ -131,6 +133,7 @@ class ComposerUiTest {
     @Composable
     private fun ComposerUnderTest(
         draft: String,
+        draftRevision: Int = 0,
         replyStrip: me.lakko.app.chat.ReplyArmed? = null,
     ) {
         MaterialTheme {
@@ -144,6 +147,7 @@ class ComposerUiTest {
                         onEmojiInserted = {},
                         onOpenPicker = { pickerOpens += 1 },
                         draft = draft,
+                        draftRevision = draftRevision,
                         sending = false,
                         sendError = null,
                         pendingAttachments = emptyList<AttachmentRef>(),
@@ -162,6 +166,33 @@ class ComposerUiTest {
                 }
             }
         }
+    }
+
+    // ----- The field follows outside edits, never its own late echo -------
+
+    @Test
+    fun aDraftThatArrivesLateDoesNotPutOlderTextOverWhatWasTyped() {
+        var draft by mutableStateOf("")
+        compose.setContent { ComposerUnderTest(draft = draft) }
+        val field = compose.onNode(hasSetTextAction())
+        field.performTextReplacement("abcd")
+        compose.waitForIdle()
+        // The view model's state is behind by a keystroke: this is its echo of
+        // "abc", arriving after "abcd" was typed.
+        draft = "abc"
+        compose.waitForIdle()
+        field.assert(hasText("abcd"))
+    }
+
+    @Test
+    fun aClearedDraftAfterSendClearsTheField() {
+        var draft by mutableStateOf("hello")
+        var revision by mutableStateOf(0)
+        compose.setContent { ComposerUnderTest(draft = draft, draftRevision = revision) }
+        draft = ""
+        revision = 1
+        compose.waitForIdle()
+        compose.onNode(hasSetTextAction()).assert(!hasText("hello"))
     }
 
     // ----- ADR-0052 / message-actions §3.1: the reply strip ---------------
@@ -302,7 +333,7 @@ class ComposerUiTest {
     @Test
     fun theFieldGrowsWithTheDraft() {
         var draft by mutableStateOf("one line")
-        compose.setContent { ComposerUnderTest(draft = draft) }
+        compose.setContent { ComposerUnderTest(draft = draft, draftRevision = draft.length) }
 
         val oneLine = fieldHeight()
         assertTrue("the field measured nothing at all", oneLine > 0)
@@ -321,7 +352,7 @@ class ComposerUiTest {
         // matters: without it a long message eats the timeline it is a reply
         // to, and on a short phone it eats the keyboard as well.
         var draft by mutableStateOf(lines(5))
-        compose.setContent { ComposerUnderTest(draft = draft) }
+        compose.setContent { ComposerUnderTest(draft = draft, draftRevision = draft.length) }
 
         val atCap = fieldHeight()
 

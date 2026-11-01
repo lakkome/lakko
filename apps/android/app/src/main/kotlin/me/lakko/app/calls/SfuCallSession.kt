@@ -634,11 +634,10 @@ class SfuCallSession(
      *  camera's copies (they have their `mid`s once the local description is
      *  set, which building the offer did). */
     private fun sendOffer(connection: WebRtcPeerConnection, sdp: String) {
-        signaling?.sendSdpOffer(
-            sdp,
-            connection.cameraCopyMids(CameraCopyKind.LIGHT),
-            connection.cameraCopyMids(CameraCopyKind.MIDDLE),
-        )
+        val lightMids = connection.cameraCopyMids(CameraCopyKind.LIGHT)
+        val middleMids = connection.cameraCopyMids(CameraCopyKind.MIDDLE)
+        android.util.Log.i(MEDIA_LOG_TAG, "call offer names light=$lightMids middle=$middleMids")
+        signaling?.sendSdpOffer(sdp, lightMids, middleMids)
     }
 
     /**

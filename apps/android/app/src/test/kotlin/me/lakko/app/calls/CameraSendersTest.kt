@@ -265,4 +265,19 @@ class CameraSendersTest {
         assertNull(senderCodecName(listOf(null, "VP8")))
         assertNull(senderCodecName(listOf("", "VP8")))
     }
+
+    @Test
+    fun anOfferOnHeldTransceiversNeverAsksForTheList() {
+        // Asking disposes the held ones: the offer then names no light or
+        // middle line, and every sender of the group call stops working.
+        val used = offerTransceivers(listOf("main", "light")) {
+            throw AssertionError("the transceiver list must not be asked for")
+        }
+        assertEquals(listOf("main", "light"), used)
+    }
+
+    @Test
+    fun anOfferWithNothingHeldUsesTheList() {
+        assertEquals(listOf("audio"), offerTransceivers(emptyList<String>()) { listOf("audio") })
+    }
 }

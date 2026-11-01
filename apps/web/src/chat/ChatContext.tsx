@@ -150,6 +150,9 @@ export interface ChatApi {
     input: Omit<ActiveGroup, "groupIdB64" | "createdAtMs" | "joinGeneration"> & {
       /** A Welcome replaced the group held under this id. */
       readonly rejoined?: boolean;
+      /** Loaded from this device's store, so not made now. With no message
+       *  to go by it must not read as the newest thing in the list. */
+      readonly restored?: boolean;
     },
   ): ActiveGroup;
   /** Drop a group from the registry. No-op when missing. */
@@ -371,7 +374,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
         groupIdB64,
         label: input.label,
         group: input.group,
-        createdAtMs: Date.now(),
+        createdAtMs: input.restored === true ? 0 : Date.now(),
         joinGeneration: input.rejoined === true ? held + 1 : held,
       };
       // Upsert by groupIdB64 — a duplicate Welcome on the same

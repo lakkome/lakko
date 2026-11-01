@@ -8644,6 +8644,13 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
                 }
             }
             let res = peer.accept_offer(&offer_sdp);
+            if let Err(e) = &res {
+                tracing::warn!(
+                    peer = %peer.id().log_tag(),
+                    error = %e,
+                    "media: peer's own offer refused"
+                );
+            }
             // The offer's m-lines exist now and none of the new ones has
             // been announced yet (str0m announces a track at the next
             // poll), so this is the moment a declared light track is

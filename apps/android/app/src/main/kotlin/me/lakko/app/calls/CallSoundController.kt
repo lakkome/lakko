@@ -9,6 +9,10 @@ import android.media.AudioManager
 import android.media.MediaPlayer
 import android.media.SoundPool
 import android.util.Log
+import java.util.concurrent.Executor
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import me.lakko.app.R
 
 /**
@@ -50,15 +54,20 @@ import me.lakko.app.R
  *
  * ## Thread safety
  *
- * [SoundPool] and [MediaPlayer] are not strictly thread-safe.
- * The public surface is annotated for main-thread use; the
- * Compose UI invokes it from its main dispatcher. Off-main
- * callers should marshal explicitly.
+ * The public surface is called from the main thread, and nothing
+ * on it may block that thread: preparing a [MediaPlayer] waits on
+ * the media service, which held the main thread long enough for the
+ * system's "isn't responding" dialog during a call. Every
+ * [MediaPlayer] call therefore runs in order on [worker].
  */
-public class CallSoundController(
+public class CallSoundController internal constructor(
     context: Context,
-    private val volume: Float = 1.0f,
+    private val volume: Float,
+    private val worker: Executor,
 ) {
+
+    public constructor(context: Context, volume: Float = 1.0f) :
+        this(context, volume, newWorker())
 
     /**
      * Pinned set of cue names. Same identifiers as the web
@@ -141,6 +150,10 @@ public class CallSoundController(
             Log.w(TAG, "startLoop on non-looping cue $name")
             return
         }
+        onWorker { startLoopNow(name) }
+    }
+
+    private fun startLoopNow(name: SoundName) {
         loopPlayers[name]?.let { existing ->
             if (existing.isPlaying) return
             existing.start()
@@ -165,22 +178,20 @@ public class CallSoundController(
         loopPlayers[name] = player
     }
 
-    /** Stop [name]'s loop, rewinding so a subsequent
-     *  [startLoop] begins cleanly at the burst boundary. */
+    /** Stop [name]'s loop; a subsequent [startLoop] builds a fresh
+     *  player, so it begins cleanly at the burst boundary. */
     public fun stopLoop(name: SoundName) {
-        loopPlayers[name]?.let { player ->
+        onWorker { stopLoopNow(name) }
+    }
+
+    private fun stopLoopNow(name: SoundName) {
+        loopPlayers.remove(name)?.let { player ->
             try {
                 if (player.isPlaying) player.stop()
-                player.reset()
-                appCtx.resources.openRawResourceFd(name.rawId).use { afd ->
-                    player.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
-                }
-                player.setVolume(volume, volume)
-                player.isLooping = true
-                player.prepare()
-            } catch (e: Exception) {
-                Log.w(TAG, "stopLoop($name) reset failed", e)
+            } catch (e: IllegalStateException) {
+                Log.w(TAG, "stopLoop($name) failed", e)
             }
+            player.release()
         }
     }
 
@@ -188,9 +199,7 @@ public class CallSoundController(
      *  `endCall()` / `Activity.onPause()`. */
     public fun stopAll() {
         soundPool.autoPause()
-        for ((_, player) in loopPlayers) {
-            if (player.isPlaying) player.stop()
-        }
+        onWorker { SoundName.values().forEach { stopLoopNow(it) } }
     }
 
     /** Release every native resource. Call from `onCleared()`
@@ -199,11 +208,17 @@ public class CallSoundController(
     public fun release() {
         stopAll()
         soundPool.release()
-        for ((_, player) in loopPlayers) {
-            player.release()
-        }
-        loopPlayers.clear()
         sampleIds.clear()
+        (worker as? ExecutorService)?.shutdown()
+    }
+
+    /** A cue that arrives after [release] has nothing left to play. */
+    private fun onWorker(work: () -> Unit) {
+        try {
+            worker.execute(work)
+        } catch (e: RejectedExecutionException) {
+            Log.w(TAG, "call sound after release", e)
+        }
     }
 
     private fun audioAttributes(): AudioAttributes =
@@ -220,6 +235,9 @@ public class CallSoundController(
     private companion object {
         private const val TAG: String = "CallSoundController"
         private const val MAX_STREAMS: Int = 4
+
+        private fun newWorker(): ExecutorService =
+            Executors.newSingleThreadExecutor { work -> Thread(work, "lakko-call-sounds") }
 
         // Reference-only assertion that AudioManager exists
         // on the runtime; if Android ever splits audio out of

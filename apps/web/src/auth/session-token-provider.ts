@@ -37,7 +37,7 @@
  * modules: the refresh transport and the persistence are injected by
  * `AuthContext`, which also subscribes to the events.
  */
-import { bearerRefusal, errorCodeOf, refreshRefusal } from "./session-401";
+import { bearerRefusal, CODE_KEY_GENERATION_SUPERSEDED, errorCodeOf, refreshRefusal } from "./session-401";
 import { tokenDecision, type SessionPair } from "./session-pair";
 
 /** What the refresh transport answers. A network failure throws. */
@@ -320,8 +320,22 @@ export class SessionTokenProvider {
     });
     if (verdict === "pass" || verdict === "report") return first;
     if (verdict === "superseded") {
-      this.reportSuperseded();
-      return first;
+      // An answer to a token this device has since replaced says nothing
+      // about the one it holds: this device's own key rotation looks exactly
+      // like this. The held token decides.
+      const held = this.peek();
+      if (held === null || held === live) {
+        this.reportSuperseded();
+        return first;
+      }
+      const again = await send(held);
+      if (
+        again.status === 401 &&
+        errorCodeOf(await peekBody(again)) === CODE_KEY_GENERATION_SUPERSEDED
+      ) {
+        this.reportSuperseded();
+      }
+      return again;
     }
     if (verdict === "device-revoked") {
       this.reportDeviceRevoked();

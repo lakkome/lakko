@@ -392,7 +392,7 @@ class AccountLocalWipeTest {
         me.lakko.app.auth.KeyResetOwedStore.onDevice(context).save(
             acct,
             me.lakko.app.auth.KeyResetOwed(
-                attestationB64 = java.util.Base64.getEncoder().encodeToString(ByteArray(177)),
+                attestationB64 = java.util.Base64.getEncoder().encodeToString(ByteArray(145)),
                 keyGeneration = 2L,
                 signedAtMs = 1L,
                 newSignaturePubkeyB64 = java.util.Base64.getEncoder().encodeToString(ByteArray(32)),

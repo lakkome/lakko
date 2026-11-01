@@ -64,7 +64,7 @@ public struct KeyRotationRecord: Codable, Equatable {
     public var newSignaturePubkey: Data?
     /// The 145-byte supersession proof (a public artefact).
     public var supersessionProof: Data?
-    /// The 177-byte attestation of `rotate/finish`. `nil` when the answer was
+    /// The 145-byte attestation of `rotate/finish`. `nil` when the answer was
     /// lost and the commit was learned by adoption: the owed steps then run
     /// without it.
     public var attestation: Data?

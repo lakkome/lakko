@@ -1474,7 +1474,7 @@ public class DiscoveryClient(
         supersessionProofB64: String? = null,
         leafAuth: ByteArray? = null,
         genesisAttest: ByteArray? = null,
-        /** ADR-0073: the raw 177-byte key-reset attestation of a reset's
+        /** ADR-0073: the raw 145-byte key-reset attestation of a reset's
          *  publish; `null` for every other upload. The server refuses an
          *  unattested, unproven key change (`409
          *  identity-change-needs-attestation`), so a changed key is never
@@ -1505,7 +1505,7 @@ public class DiscoveryClient(
                 // ADR-0036 — standard-alphabet base64 (mirrors `leaf_auth`;
                 // the discovery upload decodes it with the STANDARD engine).
                 genesis_attest = genesisAttest?.let { base64Encode(it) },
-                // ADR-0073 - standard base64 of the 177 bytes, like the two
+                // ADR-0073 - standard base64 of the 145 bytes, like the two
                 // sidecars above (re-encoded from the server's base64url).
                 key_reset_attest = keyResetAttest?.let { base64Encode(it) },
             ),

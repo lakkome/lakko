@@ -127,11 +127,13 @@ public class SessionTokenProvider(
      * A bearer route of auth or discovery (not the refresh route) answered
      * `key-generation-superseded`: the same consequence as the refresh
      * refusal, reported once per installed session. A no-op when nothing is
-     * installed or the session was already refused.
+     * installed, the session was already refused, or [refused] is not the
+     * token held now: a late answer to a replaced token says nothing about
+     * the session, and acting on it wipes a device that just rotated its keys.
      */
-    public fun reportSupersededFromBearerRoute() {
+    public fun reportSupersededFromBearerRoute(refused: String) {
         val inst = installed ?: return
-        if (inst.refused) return
+        if (inst.refused || inst.pair.accessToken != refused) return
         inst.refused = true
         inst.onRefusal(SessionRefusal.KeysReset)
     }
@@ -199,12 +201,16 @@ public class SessionTokenProvider(
             val inst = installed ?: return@withLock null
             if (inst.pair.accessToken != staleAccess) return@withLock inst.pair
             if (inst.refused) return@withLock null
+            val sent = inst.pair
             val fresh = try {
                 refreshCount += 1
-                refresher.refresh(inst.pair.refreshToken)
+                refresher.refresh(sent.refreshToken)
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (err: AuthHttpError) {
+                // [update] replaced the pair while this was out: the refusal
+                // is of the old pair, not of the session.
+                if (inst.pair !== sent) return@withLock inst.pair
                 when (sessionRefusalOf(err.status, err.code)) {
                     SessionRefusal.KeysReset -> {
                         log("session refresh refused: the account keys were reset elsewhere")
@@ -258,9 +264,10 @@ public object SessionTokens {
 
     /** Report a `key-generation-superseded` seen on a bearer route of auth
      *  or discovery (not on the refresh route): the same consequence as the
-     *  refresh refusal, reported once. */
-    public fun reportSuperseded() {
-        provider?.reportSupersededFromBearerRoute()
+     *  refresh refusal, reported once. [refused] is the token the answer
+     *  was to. */
+    public fun reportSuperseded(refused: String) {
+        provider?.reportSupersededFromBearerRoute(refused)
     }
 
     /** Report a `401 device-revoked` seen on a bearer route of auth. */

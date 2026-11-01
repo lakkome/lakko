@@ -188,6 +188,37 @@ class SessionBearerEngineTest {
     }
 
     @Test
+    fun `a late superseded answer to a replaced token goes out again and wipes nothing`() = runTest {
+        // This device's own key rotation: the request left with the old token,
+        // the new pair was installed, and the refusal arrived after that.
+        install(pair(1))
+        var sends = 0
+        val mock = MockEngine { request ->
+            seenBearers += request.headers[HttpHeaders.Authorization]
+            sends += 1
+            if (sends == 1) {
+                provider.update(pair(2))
+                respond(
+                    """{"error":"key-generation-superseded"}""",
+                    HttpStatusCode.Unauthorized,
+                    headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+            } else {
+                respond("{}", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+            }
+        }
+        HttpClient(SessionBearerEngine(mock)).use { http ->
+            val response = http.get("https://api.test/auth/device/requests") {
+                header(HttpHeaders.Authorization, "Bearer ${pair(1).accessToken}")
+            }
+            assertEquals(HttpStatusCode.OK, response.status)
+        }
+        assertEquals(listOf("Bearer ${pair(1).accessToken}", "Bearer ${pair(2).accessToken}"), seenBearers)
+        assertTrue(refusals.isEmpty())
+        assertEquals(0, refresher.calls)
+    }
+
+    @Test
     fun `a superseded answer to the retry is reported too`() = runTest {
         install(pair(1))
         refresher.answer = { pair(2) }

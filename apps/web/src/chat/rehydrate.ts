@@ -243,6 +243,7 @@ export async function rehydrateMlsState(
     chats.add({
       label: restoredGroupLabel(names, groupIdB64),
       group,
+      restored: true,
     });
 
     // ADR-0042 legacy-sweep — provision opaque push routing for every

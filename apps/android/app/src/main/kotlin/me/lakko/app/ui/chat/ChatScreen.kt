@@ -1191,6 +1191,7 @@ public fun ChatScreen(
                 onEmojiInserted = { pendingEmojiInsert = null },
                 onOpenPicker = { picker = PickerRequest(PickerMode.COMPOSER, null) },
                 draft = state.draft,
+                draftRevision = state.draftRevision,
                 sending = state.sending,
                 sendError = state.sendError,
                 pendingAttachments = state.pendingAttachments,
@@ -2746,6 +2747,8 @@ internal fun Composer(
     onEmojiInserted: () -> Unit,
     onOpenPicker: () -> Unit,
     draft: String,
+    /** Moves when something other than the person's typing changed [draft]. */
+    draftRevision: Int = 0,
     sending: Boolean,
     sendError: UiText?,
     pendingAttachments: List<AttachmentRef>,
@@ -2771,14 +2774,14 @@ internal fun Composer(
     // this mirrors it and follows an external change (a cleared draft after
     // Send) without losing the caret on the user's own edits.
     //
-    // Only a CHANGE of `draft` resets the field — the same rule the `String`
-    // overload of the text field applies internally. Comparing against the
-    // field's own text instead would reset it to a stale draft whenever the
-    // view model's state lags one keystroke behind, dropping what was typed.
+    // Only [draftRevision] resets the field. The draft itself reaches this
+    // screen late while the person types, so treating a change of it as an
+    // outside edit put an older text back over what was just typed and the
+    // letters after it were lost.
     var field by remember { mutableStateOf(TextFieldValue(draft, TextRange(draft.length))) }
-    var lastDraft by remember { mutableStateOf(draft) }
-    if (draft != lastDraft) {
-        lastDraft = draft
+    var lastRevision by remember { mutableStateOf(draftRevision) }
+    if (draftRevision != lastRevision) {
+        lastRevision = draftRevision
         if (field.text != draft) field = TextFieldValue(draft, TextRange(draft.length))
     }
     LaunchedEffect(emojiInsert) {
@@ -2901,8 +2904,9 @@ internal fun Composer(
                 OutlinedTextField(
                     value = field,
                     onValueChange = { next ->
+                        val changed = next.text != field.text
                         field = next
-                        if (next.text != draft) onDraftChange(next.text)
+                        if (changed) onDraftChange(next.text)
                     },
                     placeholder = { Text(t("chat.composer.placeholder")) },
                     singleLine = false,

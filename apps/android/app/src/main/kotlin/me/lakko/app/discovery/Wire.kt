@@ -249,7 +249,7 @@ data class IdentityUploadRequest(
      *  attest flag defaults OFF, so the leaf still appends). Preserved across
      *  non-rotation re-uploads server-side via `COALESCE`, like [leaf_auth]. */
     val genesis_attest: String? = null,
-    /** ADR-0073: base64 of the optional 177-byte key-reset attestation auth
+    /** ADR-0073: base64 of the optional 145-byte key-reset attestation auth
      *  minted in `POST /account/keys/reset/finish`. Required for a key
      *  change that carries no supersession proof; the server verifies it
      *  under the pinned attest key, requires a strictly greater generation

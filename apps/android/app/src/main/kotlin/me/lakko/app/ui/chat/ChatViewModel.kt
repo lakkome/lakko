@@ -531,7 +531,12 @@ public class ChatViewModel(
         // screen rebuilt on the conversation's successor starts with it
         // ([me.lakko.app.chat.ComposerCarry]). Seeded here, before the
         // collector below reports the composer's text back.
-        composer.update { it.copy(draft = me.lakko.app.chat.composerSeed(it.draft, repo.unsentComposerText(groupIdHex))) }
+        composer.update {
+            it.copy(
+                draft = me.lakko.app.chat.composerSeed(it.draft, repo.unsentComposerText(groupIdHex)),
+                draftRevision = it.draftRevision + 1,
+            )
+        }
         viewModelScope.launch {
             composer.collect { composerState ->
                 repo.noteComposerText(groupIdHex, composerState.draft)
@@ -2753,7 +2758,7 @@ public class ChatViewModel(
                 if (didSeedDraft) return@collect
                 val incoming = drafts[groupIdHex] ?: return@collect
                 if (composer.value.draft.isEmpty()) {
-                    composer.update { it.copy(draft = incoming.text) }
+                    composer.update { it.copy(draft = incoming.text, draftRevision = it.draftRevision + 1) }
                 }
                 didSeedDraft = true
             }
@@ -2991,6 +2996,7 @@ public class ChatViewModel(
             groupIdHex = groupIdHex,
             messages = thread?.messages ?: emptyList(),
             draft = composer.draft,
+            draftRevision = composer.draftRevision,
             sending = composer.sending,
             sendError = composer.sendError,
             pendingAttachments = composer.pendingAttachments,
@@ -3093,6 +3099,7 @@ public class ChatViewModel(
                 sending = true,
                 sendError = null,
                 draft = "",
+                draftRevision = it.draftRevision + 1,
                 pendingAttachments = emptyList(),
                 pendingPreviews = emptyMap(),
             )
@@ -3696,6 +3703,10 @@ public class ChatViewModel(
      *  data lives in [ChatRepository]. */
     private data class ComposerState(
         val draft: String = "",
+        /** Moves when something other than the person's typing changed
+         *  [draft]. The field follows this and never the draft's own
+         *  changes, which reach it late while the person types. */
+        val draftRevision: Int = 0,
         val sending: Boolean = false,
         val sendError: UiText? = null,
         /** Phase 1.19c4 — attachments staged in the composer.
@@ -3735,6 +3746,8 @@ public data class ChatScreenUiState(
     val groupIdHex: String,
     val messages: List<ChatMessage>,
     val draft: String,
+    /** See `ComposerState.draftRevision`. */
+    val draftRevision: Int = 0,
     val sending: Boolean,
     val sendError: UiText?,
     /** 1.19c4 — staged attachments below the text composer. */

@@ -9618,13 +9618,14 @@ public class ChatRepository(
             // still learns of a reset within the interval. An accepted reset
             // re-pins there; its answer is read back from the stores it
             // writes.
-            contactIdentityCheck?.let { check ->
+            val identityCheck = contactIdentityCheck?.let { check ->
                 try {
                     check(id, candidate.rosterKeyB64)
                 } catch (cause: kotlinx.coroutines.CancellationException) {
                     throw cause
                 } catch (_: Throwable) {
                     // best-effort
+                    null
                 }
             }
             val pin = try {
@@ -9644,6 +9645,13 @@ public class ChatRepository(
                     null
                 },
             )
+            if (standing == DeviceReadmission.LookupStanding.SKIP) {
+                android.util.Log.i(
+                    "ChatRepository",
+                    "ADR-0050 re-admission: a member is not followed: check=$identityCheck " +
+                        "pinned=${pin != null} chain=${chain?.size}",
+                )
+            }
             when (standing) {
                 DeviceReadmission.LookupStanding.SKIP -> continue
                 DeviceReadmission.LookupStanding.SAME_PERSON -> {
@@ -9710,6 +9718,11 @@ public class ChatRepository(
         if (supersededKeys().isNotEmpty()) {
             scheduleResetRepair(groupIdHex)
         }
+        android.util.Log.i(
+            "ChatRepository",
+            "ADR-0050 re-admission check: candidates=${candidates.size} followed=${lookups.size - 1} " +
+                "unreadable=${accounts.count { it.devices == null }} admit=${plan.admit.size} retire=${plan.retire.size}",
+        )
         if (plan.admit.isEmpty() && plan.retire.isEmpty()) return
         var proposed = 0
         for (d in plan.admit) {
@@ -14419,6 +14432,15 @@ public data class Reaction(
 
 public enum class Direction { Outgoing, Incoming, System }
 
+/**
+ * An identity no row of [messages] holds: negative, and below every [ChatMessage.rowId]
+ * there, sent rows included. A sent row keeps its local id as its identity, so counting
+ * below `messageId` hands a call row the id of the message before it, and two rows with
+ * one key bring the timeline down.
+ */
+internal fun nextLocalRowId(messages: List<ChatMessage>): Long =
+    minOf(0L, messages.minOfOrNull { it.rowId } ?: 0L) - 1
+
 /** Internal per-group record holding the live MLS handle +
  *  the timeline mutations the StateFlow surfaces.
  *
@@ -14544,7 +14566,7 @@ private class GroupRecord(
      * field for a row that has not landed yet - a call row and an unsent
      * message both live down here.
      */
-    fun nextLocalId(): Long = minOf(0L, messages.minOfOrNull { it.rowId } ?: 0L) - 1
+    fun nextLocalId(): Long = nextLocalRowId(messages)
 
     /**
      * Put a message the user just wrote into the conversation, before it has
@@ -15175,10 +15197,9 @@ private class GroupRecord(
      */
     fun appendCallRow(entry: me.lakko.app.calls.CallTranscriptEntry, createdAt: String) {
         synchronized(messages) {
-            val lowest = messages.minOfOrNull { it.messageId } ?: 0L
             messages.add(
                 ChatMessage(
-                    messageId = minOf(0L, lowest) - 1L,
+                    messageId = nextLocalId(),
                     direction = Direction.System,
                     text = me.lakko.app.calls.callRowText(entry),
                     createdAt = createdAt,
@@ -15204,10 +15225,9 @@ private class GroupRecord(
 
     fun appendLocalSystemRow(text: me.lakko.app.l10n.UiText) {
         synchronized(messages) {
-            val lowest = messages.minOfOrNull { it.messageId } ?: 0L
             messages.add(
                 ChatMessage(
-                    messageId = minOf(0L, lowest) - 1L,
+                    messageId = nextLocalId(),
                     direction = Direction.System,
                     text = text.render(),
                     createdAt = java.time.Instant.now().toString(),

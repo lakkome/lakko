@@ -688,7 +688,7 @@ public final class DiscoveryClient {
     /// non-genesis re-publish (absence is `COALESCE`-preserved server-side).
     ///
     /// ADR-0073 section 4.1: `keyResetAttest`, when non-`nil`, is the RAW
-    /// 177-byte key-reset attestation of the reset that installs THIS key;
+    /// 145-byte key-reset attestation of the reset that installs THIS key;
     /// standard-base64 encoded into `IdentityUploadRequest.keyResetAttest`.
     /// The refusals discovery answers are typed by
     /// ``IdentityUploadRefusal/of(_:)``.
