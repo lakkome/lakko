@@ -686,24 +686,8 @@
       "text": "تماس‌هایی که می‌گیرید و دریافت می‌کنید اینجا نمایش داده می‌شوند.",
       "status": "machine"
     },
-    "call.history.join_by_link": {
-      "text": "پیوستن با پیوند",
-      "status": "machine"
-    },
-    "call.history.join_invalid": {
-      "text": "این شبیه پیوند تماس نیست. کل پیوند را جای‌گذاری کنید و دوباره تلاش کنید.",
-      "status": "machine"
-    },
     "call.history.new_call": {
       "text": "تماس جدید",
-      "status": "machine"
-    },
-    "call.history.paste_hint": {
-      "text": "کسی که تماس را ساخته، پیوند را به اشتراک می‌گذارد.",
-      "status": "machine"
-    },
-    "call.history.paste_label": {
-      "text": "پیوند تماس را جای‌گذاری کنید",
       "status": "machine"
     },
     "call.history.unknown_conversation": {

@@ -686,24 +686,8 @@
       "text": "Aquí aparecen las llamadas que haces y recibes.",
       "status": "machine"
     },
-    "call.history.join_by_link": {
-      "text": "Unirse con un enlace",
-      "status": "machine"
-    },
-    "call.history.join_invalid": {
-      "text": "Eso no parece un enlace de llamada. Pega el enlace completo e inténtalo de nuevo.",
-      "status": "machine"
-    },
     "call.history.new_call": {
       "text": "Nueva llamada",
-      "status": "machine"
-    },
-    "call.history.paste_hint": {
-      "text": "Quien creó la llamada comparte el enlace.",
-      "status": "machine"
-    },
-    "call.history.paste_label": {
-      "text": "Pega un enlace de llamada",
       "status": "machine"
     },
     "call.history.unknown_conversation": {

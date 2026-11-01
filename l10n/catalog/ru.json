@@ -686,24 +686,8 @@
       "text": "Здесь появятся ваши входящие и исходящие звонки.",
       "status": "machine"
     },
-    "call.history.join_by_link": {
-      "text": "Присоединиться по ссылке",
-      "status": "machine"
-    },
-    "call.history.join_invalid": {
-      "text": "Это не похоже на ссылку на звонок. Вставьте ссылку целиком и попробуйте ещё раз.",
-      "status": "machine"
-    },
     "call.history.new_call": {
       "text": "Новый звонок",
-      "status": "machine"
-    },
-    "call.history.paste_hint": {
-      "text": "Ссылкой делится тот, кто создал звонок.",
-      "status": "machine"
-    },
-    "call.history.paste_label": {
-      "text": "Вставьте ссылку на звонок",
       "status": "machine"
     },
     "call.history.unknown_conversation": {

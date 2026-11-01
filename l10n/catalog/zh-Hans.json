@@ -686,24 +686,8 @@
       "text": "你拨打和接听的通话会显示在这里。",
       "status": "machine"
     },
-    "call.history.join_by_link": {
-      "text": "通过链接加入",
-      "status": "machine"
-    },
-    "call.history.join_invalid": {
-      "text": "这看起来不是通话链接。请粘贴完整链接后重试。",
-      "status": "machine"
-    },
     "call.history.new_call": {
       "text": "新通话",
-      "status": "machine"
-    },
-    "call.history.paste_hint": {
-      "text": "发起通话的人会分享链接。",
-      "status": "machine"
-    },
-    "call.history.paste_label": {
-      "text": "粘贴通话链接",
       "status": "machine"
     },
     "call.history.unknown_conversation": {

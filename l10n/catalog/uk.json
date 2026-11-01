@@ -686,24 +686,8 @@
       "text": "Тут з’являться ваші вхідні й вихідні дзвінки.",
       "status": "machine"
     },
-    "call.history.join_by_link": {
-      "text": "Приєднатися за посиланням",
-      "status": "machine"
-    },
-    "call.history.join_invalid": {
-      "text": "Це не схоже на посилання на дзвінок. Вставте посилання повністю й спробуйте ще раз.",
-      "status": "machine"
-    },
     "call.history.new_call": {
       "text": "Новий дзвінок",
-      "status": "machine"
-    },
-    "call.history.paste_hint": {
-      "text": "Посиланням ділиться той, хто створив дзвінок.",
-      "status": "machine"
-    },
-    "call.history.paste_label": {
-      "text": "Вставте посилання на дзвінок",
       "status": "machine"
     },
     "call.history.unknown_conversation": {

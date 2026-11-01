@@ -686,24 +686,8 @@
       "text": "आप जो कॉल करते हैं और जो कॉल आपको आती हैं, वे यहाँ दिखती हैं।",
       "status": "machine"
     },
-    "call.history.join_by_link": {
-      "text": "लिंक से शामिल हों",
-      "status": "machine"
-    },
-    "call.history.join_invalid": {
-      "text": "यह कॉल लिंक जैसा नहीं दिखता। पूरा लिंक पेस्ट करें और फिर से कोशिश करें।",
-      "status": "machine"
-    },
     "call.history.new_call": {
       "text": "नई कॉल",
-      "status": "machine"
-    },
-    "call.history.paste_hint": {
-      "text": "कॉल बनाने वाला व्यक्ति लिंक शेयर करता है।",
-      "status": "machine"
-    },
-    "call.history.paste_label": {
-      "text": "कॉल लिंक पेस्ट करें",
       "status": "machine"
     },
     "call.history.unknown_conversation": {

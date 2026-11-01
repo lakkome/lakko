@@ -686,24 +686,8 @@
       "text": "Yaptığınız ve aldığınız aramalar burada görünür.",
       "status": "machine"
     },
-    "call.history.join_by_link": {
-      "text": "Bağlantıyla katıl",
-      "status": "machine"
-    },
-    "call.history.join_invalid": {
-      "text": "Bu bir arama bağlantısına benzemiyor. Bağlantının tamamını yapıştırıp tekrar deneyin.",
-      "status": "machine"
-    },
     "call.history.new_call": {
       "text": "Yeni arama",
-      "status": "machine"
-    },
-    "call.history.paste_hint": {
-      "text": "Aramayı oluşturan kişi bağlantıyı paylaşır.",
-      "status": "machine"
-    },
-    "call.history.paste_label": {
-      "text": "Bir arama bağlantısı yapıştırın",
       "status": "machine"
     },
     "call.history.unknown_conversation": {

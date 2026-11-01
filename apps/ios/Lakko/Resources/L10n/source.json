@@ -715,25 +715,9 @@
       "text": "Calls you make and receive appear here.",
       "comment": "Second line of the empty call history, under 'No calls yet'."
     },
-    "call.history.join_by_link": {
-      "text": "Join by link",
-      "comment": "Button on the Calls screen that opens a field to paste a call link."
-    },
-    "call.history.join_invalid": {
-      "text": "That does not look like a call link. Paste the whole link and try again.",
-      "comment": "Error under the call-link field on the Calls screen when the text is not a call link."
-    },
     "call.history.new_call": {
       "text": "New call",
       "comment": "Button on the Calls screen that starts a new group video call."
-    },
-    "call.history.paste_hint": {
-      "text": "The person who created the call shares the link.",
-      "comment": "Hint under the field where a call link is pasted to join a call."
-    },
-    "call.history.paste_label": {
-      "text": "Paste a call link",
-      "comment": "Label of the field on the Calls screen where a call link is pasted."
     },
     "call.history.unknown_conversation": {
       "text": "Unknown",

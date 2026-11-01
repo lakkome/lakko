@@ -25,7 +25,7 @@
  * action.
  */
 
-import { createMemo, createSignal, For, Show, type JSX } from "solid-js";
+import { createMemo, For, Show, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
@@ -37,7 +37,6 @@ import {
 } from "../calls/call-history";
 import { callRowLabel } from "../calls/call-log";
 import { useCallLog } from "../calls/CallLogContext";
-import { callLinkTarget } from "../calls/call-link-slug";
 import { newCallId, newCallStart } from "../calls/new-call";
 import { useCallHost } from "../calls/CallHostContext";
 import { useChats } from "../chat/ChatContext";
@@ -102,10 +101,6 @@ export default function Calls(): JSX.Element {
     return memberKeysB64.find((k) => k !== ownB64);
   };
 
-  /** The pasted link, while "Join by link" is open. */
-  const [joinOpen, setJoinOpen] = createSignal(false);
-  const [joinInput, setJoinInput] = createSignal("");
-  const [joinError, setJoinError] = createLiveText();
   /** Why `New call` could not start, or `null`. */
   const [startError, setStartError] = createLiveText();
 
@@ -136,18 +131,6 @@ export default function Calls(): JSX.Element {
       ),
     );
     if (outcome.kind === "busy" || outcome.kind === "failed") setStartError(outcome.message);
-  }
-
-  /** Open a link somebody sent that did not open by itself. */
-  function joinByLink(e: SubmitEvent): void {
-    e.preventDefault();
-    const target = callLinkTarget(joinInput());
-    if (target === null) {
-      setJoinError(() => t("call.history.join_invalid"));
-      return;
-    }
-    setJoinError(null);
-    navigate(`${paths.joinCall(target.slug)}${target.hash}`);
   }
 
   /** The row opens the conversation; the button places the call. Two
@@ -184,21 +167,6 @@ export default function Calls(): JSX.Element {
       <div class="lk-pane-head">
         <h1>{t("nav.calls")}</h1>
         <div class="lk-actions">
-          {/* Section 2: `Join by link` stays but is not given the weight of a
-              main action — a quiet button beside the accent one, not a second
-              primary and not a panel of its own. */}
-          <button
-            type="button"
-            class="ghost"
-            onClick={() => {
-              setJoinOpen(!joinOpen());
-              setJoinError(null);
-            }}
-            aria-expanded={joinOpen()}
-          >
-            <Icon name="link" size={16} />
-            {t("call.history.join_by_link")}
-          </button>
           <button type="button" class="primary" onClick={() => void newCall()}>
             <Icon name="video" size={16} />
             {t("call.history.new_call")}
@@ -208,40 +176,6 @@ export default function Calls(): JSX.Element {
       <div class="lk-pane-body">
         <Show when={startError()}>
           {(message) => <div class="form-error">{message()}</div>}
-        </Show>
-        <Show when={joinOpen()}>
-          <form onSubmit={joinByLink} style={{ padding: "4px 8px 12px" }}>
-            <label style={{ display: "block" }}>
-              <span>{t("call.history.paste_label")}</span>
-              <input
-                type="text"
-                value={joinInput()}
-                onInput={(e) => {
-                  setJoinInput(e.currentTarget.value);
-                  setJoinError(null);
-                }}
-                placeholder="https://lakko.me/c/…"
-                style={{ width: "100%", "margin-top": "0.25rem" }}
-              />
-            </label>
-            <Show when={joinError()}>
-              {(message) => <div class="form-error">{message()}</div>}
-            </Show>
-            <div class="lk-actions" style={{ "margin-top": "8px" }}>
-              <button type="submit">{t("common.open")}</button>
-              <button
-                type="button"
-                class="ghost"
-                onClick={() => {
-                  setJoinOpen(false);
-                  setJoinInput("");
-                  setJoinError(null);
-                }}
-              >
-                {t("common.cancel")}
-              </button>
-            </div>
-          </form>
         </Show>
         <Show
           when={auth.state().kind === "session" && days().length > 0}

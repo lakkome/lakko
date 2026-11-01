@@ -37,7 +37,7 @@ at line 115, was that "Calls has no history, only a create-link panel" - so
 the destination held nothing worth a tab. That was true of what existed. It
 was never an argument that call history should not exist, and the design
 system's own information architecture (`design-system.md` section 4) kept
-**Calls: recent calls, "Create call link", join by link** as destination 4
+**Calls: recent calls, "Create call link"** as destination 4
 throughout. The two documents disagreed and the code followed the wrong one.
 
 ## 1. Destinations
@@ -49,7 +49,7 @@ Five, in this order, identical on the three clients:
    person picks or writes, plus channel suggestions. Specified in
    [`feed.md`](feed.md) (added 2026-09-28; this list read "Four" before).
 3. **Contacts** - accepted contacts, incoming requests, add by username.
-4. **Calls** - recent calls, newest first. Create a call link, join by link.
+4. **Calls** - recent calls, newest first. Create a call link.
 5. **Settings** - unchanged.
 
 Gone as destinations: **Groups** and **Channels**. Both remain as *kinds* of
@@ -276,8 +276,7 @@ and the hit areas must not overlap.
 - **Default** - the list.
 - **Empty**: "No calls yet" and the action below.
 - The screen carries ONE action, **New call**, which starts a group video
-  call and lands the person in it, plus **Join by link** for a link that did
-  not open by itself. [`call-links.md`](call-links.md) owns that decision and
+  call and lands the person in it. [`call-links.md`](call-links.md) owns that decision and
   the reasoning; what matters here is that the destination named after the
   act performs the act, which it did not when this section was first written
   - it offered only two ways to handle a LINK, so placing a call meant

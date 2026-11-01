@@ -2329,10 +2329,6 @@ private fun SessionRoot(
                                 )
                             }
                         },
-                        // ADR-0032 — a pasted call link opens the same `/c/`
-                        // landing a tapped link does; AppRoot presents it over
-                        // the session.
-                        onOpenCallLink = { slug -> inviteIntake.publishCallJoin(slug) },
                         identitySecrets = { authRepository.identitySecrets.value },
                     )
                 }

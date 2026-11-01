@@ -73,9 +73,9 @@ asked first: no media choice, no participants, no name. A person who wanted
 to call one specific contact has a faster route from the conversation or the
 contact, which is why this button does not try to be that route.
 
-`Join by link` stays, for a link someone has sent that did not open by
-itself. It is not the destination's main action and is not given the weight
-of one.
+`Join by link` was removed on 2026-11-01 (maintainer): a link is clicked, never
+pasted. A call link opens from a message, from another app or from the page in
+the browser ([`message-links.md`](message-links.md)).
 
 **Per platform** — the action's idiom: web a button in the header, Android a
 FAB or a header action, iOS a toolbar button. What must be true everywhere is

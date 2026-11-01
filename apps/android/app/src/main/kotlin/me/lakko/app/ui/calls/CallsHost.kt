@@ -3,11 +3,6 @@
 
 package me.lakko.app.ui.calls
 
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -19,7 +14,6 @@ import kotlinx.coroutines.launch
 import me.lakko.app.auth.IdentitySecrets
 import me.lakko.app.calls.AppCallHost
 import me.lakko.app.calls.NEW_CALL_SIGNED_OUT_MESSAGE
-import me.lakko.app.calls.callInviteSlugFromInput
 import me.lakko.app.calls.newCallStartMessage
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.l10n.t
@@ -48,8 +42,6 @@ public fun CallsHost(
     repository: ChatRepository,
     onOpenConversation: (groupIdHex: String) -> Unit,
     onCallBack: (groupIdHex: String, video: Boolean) -> Unit,
-    /** Open a pasted `/c/` call link's landing. */
-    onOpenCallLink: (slug: String) -> Unit,
     /** The signed-in session, read at the moment a call is started. */
     identitySecrets: () -> IdentitySecrets?,
     modifier: Modifier = Modifier,
@@ -59,19 +51,8 @@ public fun CallsHost(
     // whose camera was refused proceeds with audio only; the gate reports
     // which, and the call is started either way.
     val permissions = rememberCallPermissionGate()
-    var joinOpen by remember { mutableStateOf(false) }
     var starting by remember { mutableStateOf(false) }
     var startMessage by remember { mutableStateOf<me.lakko.app.l10n.UiText?>(null) }
-
-    if (joinOpen) {
-        JoinByLinkDialog(
-            onDismiss = { joinOpen = false },
-            onJoin = { slug ->
-                joinOpen = false
-                onOpenCallLink(slug)
-            },
-        )
-    }
 
     startMessage?.let { message ->
         LakkoDialog(
@@ -118,44 +99,6 @@ public fun CallsHost(
                 }
             }
         },
-        onJoinByLink = { joinOpen = true },
         modifier = modifier,
-    )
-}
-
-/**
- * Paste a call link and open it.
- *
- * The parsing is [callInviteSlugFromInput], which is pure and tested; this only
- * reports the one thing it can say no about. The link is not validated here —
- * that happens on the landing screen, which is where a bad link has somewhere
- * to be reported.
- */
-@Composable
-private fun JoinByLinkDialog(onDismiss: () -> Unit, onJoin: (slug: String) -> Unit) {
-    var input by remember { mutableStateOf("") }
-    val slug = remember(input) { callInviteSlugFromInput(input) }
-    LakkoDialog(
-        onDismissRequest = onDismiss,
-        title = t("call.history.join_by_link"),
-        confirm = LakkoDialogAction(t("chat.call.join_short"), enabled = slug != null) { slug?.let(onJoin) },
-        content = {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = { input = it },
-                    label = { Text(t("call.history.paste_label")) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (input.isNotBlank() && slug == null) {
-                    Text(
-                        text = t("call.history.join_invalid"),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            }
-        },
     )
 }

@@ -26,9 +26,9 @@ class CallInviteMessageTest {
 
     @Test
     fun `the join target is what the app's own link handling takes`() {
-        // The same one-string form a tapped or a pasted `/c/` link arrives as.
+        // The same one-string form a tapped `/c/` link arrives as.
         val target = callInviteOf("$origin/c/abc#def", origin)
-        assertEquals(callInviteSlugFromInput("$origin/c/abc#def"), target?.argument)
+        assertEquals("abc#def", target?.argument)
     }
 
     @Test

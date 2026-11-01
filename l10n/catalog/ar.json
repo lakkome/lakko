@@ -686,24 +686,8 @@
       "text": "تظهر هنا المكالمات التي تجريها وتتلقاها.",
       "status": "machine"
     },
-    "call.history.join_by_link": {
-      "text": "الانضمام برابط",
-      "status": "machine"
-    },
-    "call.history.join_invalid": {
-      "text": "لا يبدو هذا رابط مكالمة. الصق الرابط كاملًا وحاول مجددًا.",
-      "status": "machine"
-    },
     "call.history.new_call": {
       "text": "مكالمة جديدة",
-      "status": "machine"
-    },
-    "call.history.paste_hint": {
-      "text": "يشارك الشخص الذي أنشأ المكالمة الرابط.",
-      "status": "machine"
-    },
-    "call.history.paste_label": {
-      "text": "الصق رابط مكالمة",
       "status": "machine"
     },
     "call.history.unknown_conversation": {

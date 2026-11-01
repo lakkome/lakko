@@ -1630,8 +1630,7 @@ private struct SessionRoot: View, Equatable {
                     },
                     onCallBack: { groupIdHex, kind, video in
                         callBack(groupIdHex: groupIdHex, kind: kind, video: video)
-                    },
-                    onOpenLink: { inviteIntake.handle($0) }
+                    }
                 )
                 // Calls placed before the index existed live only in their
                 // conversations. Filled once per account, so this screen never

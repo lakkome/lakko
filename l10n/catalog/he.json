@@ -686,24 +686,8 @@
       "text": "השיחות שאתם מבצעים ומקבלים יופיעו כאן.",
       "status": "machine"
     },
-    "call.history.join_by_link": {
-      "text": "הצטרפות בקישור",
-      "status": "machine"
-    },
-    "call.history.join_invalid": {
-      "text": "זה לא נראה כמו קישור לשיחה. הדביקו את הקישור המלא ונסו שוב.",
-      "status": "machine"
-    },
     "call.history.new_call": {
       "text": "שיחה חדשה",
-      "status": "machine"
-    },
-    "call.history.paste_hint": {
-      "text": "מי שיצר את השיחה משתף את הקישור.",
-      "status": "machine"
-    },
-    "call.history.paste_label": {
-      "text": "הדביקו קישור לשיחה",
       "status": "machine"
     },
     "call.history.unknown_conversation": {
