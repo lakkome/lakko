@@ -1403,7 +1403,7 @@ pub(crate) async fn finish(
     //    The generation and the identity key. No anchor is captured for the
     //    key this displaces.
     sqlx::query(
-        "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1), \
+        "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1), phrase_in_vault = 0, \
          identity_pubkey = ? WHERE id = ?",
     )
     .bind(&input.new_signature_pubkey[..])

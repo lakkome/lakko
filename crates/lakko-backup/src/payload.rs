@@ -31,9 +31,11 @@
 //! u32be        synced_state_length
 //! [..]         synced_state_length bytes: `lakko_sync::SyncedState::to_bytes`
 //!              (empty = no synced state held)
+//! u8           own_predecessors_count (<= MAX_OWN_PREDECESSORS)
+//! [..]         own_predecessors_count × { [64 bytes] seed, u64be adopted_at_ms }
 //! ```
 //!
-//! Nothing may follow the synced state: trailing bytes are refused.
+//! Nothing may follow the own predecessors: trailing bytes are refused.
 //!
 //! Each [`AcceptedContactRecord`]:
 //!
@@ -90,12 +92,42 @@ use crate::error::{BackupError, Result};
 
 /// The payload schema version: the only one emitted and the only one
 /// accepted. v6 carries no MLS state: it is v5 without the per-group and
-/// whole-storage snapshot fields.
-pub const PAYLOAD_VERSION: u8 = 6;
+/// whole-storage snapshot fields. v7 adds the own predecessors (ADR-0074
+/// section 3.7).
+pub const PAYLOAD_VERSION: u8 = 7;
 
 /// Account-id length (UUIDv7 raw, mirrors
 /// `lakko_contacts::ACCOUNT_ID_LEN`).
 const ACCOUNT_ID_LEN: usize = 16;
+
+/// Length of an own predecessor's phrase seed.
+pub const PREDECESSOR_SEED_LEN: usize = 64;
+
+/// Most own predecessors a backup carries: the pairing state bundle's bound.
+pub const MAX_OWN_PREDECESSORS: usize = 8;
+
+/// One key the account rotated away from (ADR-0074 section 3.7).
+///
+/// `seed` opens the conversations: Stage A keeps every conversation leaf
+/// under the oldest key, so a device restored from the newest phrase needs
+/// this to mint a binding any conversation knows. The record lives inside the
+/// backup, sealed under that phrase, whose holder already outranks it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OwnPredecessor {
+    /// The predecessor's 64-byte phrase seed.
+    pub seed: [u8; PREDECESSOR_SEED_LEN],
+    /// When this account adopted the key that replaced it, unix millis.
+    pub adopted_at_ms: u64,
+}
+
+impl core::fmt::Debug for OwnPredecessor {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OwnPredecessor")
+            .field("seed", &"<redacted>")
+            .field("adopted_at_ms", &self.adopted_at_ms)
+            .finish()
+    }
+}
 
 /// Identity signing-seed length (Ed25519 seed, mirrors
 /// `lakko_crypto::signing::SECRET_KEY_LEN`).
@@ -169,6 +201,9 @@ pub struct BackupPayload {
     /// `SyncedState::from_bytes` over it, so a payload carrying a state the
     /// fold would refuse is refused whole.
     pub synced_state: Vec<u8>,
+    /// The account's own predecessors, oldest first, at most
+    /// [`MAX_OWN_PREDECESSORS`]. Empty for an account that never rotated.
+    pub own_predecessors: Vec<OwnPredecessor>,
 }
 
 impl BackupPayload {
@@ -195,7 +230,9 @@ impl BackupPayload {
                 + 4
                 + (self.known_group_ids.len() * 36)
                 + 4
-                + self.synced_state.len(),
+                + self.synced_state.len()
+                + 1
+                + self.own_predecessors.len() * (PREDECESSOR_SEED_LEN + 8),
         );
 
         out.push(PAYLOAD_VERSION);
@@ -246,6 +283,22 @@ impl BackupPayload {
         })?;
         out.extend_from_slice(&state_len.to_be_bytes());
         out.extend_from_slice(&self.synced_state);
+
+        // ADR-0074 section 3.7: the keys the conversations still name.
+        let predecessor_count = u8::try_from(self.own_predecessors.len())
+            .ok()
+            .filter(|count| usize::from(*count) <= MAX_OWN_PREDECESSORS)
+            .ok_or_else(|| {
+                BackupError::InvalidPayload(format!(
+                    "own_predecessors count {} exceeds {MAX_OWN_PREDECESSORS}",
+                    self.own_predecessors.len(),
+                ))
+            })?;
+        out.push(predecessor_count);
+        for predecessor in &self.own_predecessors {
+            out.extend_from_slice(&predecessor.seed);
+            out.extend_from_slice(&predecessor.adopted_at_ms.to_be_bytes());
+        }
 
         Ok(out)
     }
@@ -322,6 +375,27 @@ impl BackupPayload {
         let synced_state = take_n(&mut cur, state_len)?.to_vec();
         check_synced_state(&synced_state)?;
 
+        let predecessor_count = usize::from(take_u8(&mut cur)?);
+        if predecessor_count > MAX_OWN_PREDECESSORS {
+            return Err(BackupError::InvalidPayload(format!(
+                "own_predecessors count {predecessor_count} exceeds {MAX_OWN_PREDECESSORS}",
+            )));
+        }
+        let mut own_predecessors = Vec::with_capacity(predecessor_count);
+        for _ in 0..predecessor_count {
+            let mut seed = [0u8; PREDECESSOR_SEED_LEN];
+            seed.copy_from_slice(take_n(&mut cur, PREDECESSOR_SEED_LEN)?);
+            let adopted_at_ms = u64::from_be_bytes(
+                take_n(&mut cur, 8)?
+                    .try_into()
+                    .expect("take_n(8) length pinned"),
+            );
+            own_predecessors.push(OwnPredecessor {
+                seed,
+                adopted_at_ms,
+            });
+        }
+
         if !cur.is_empty() {
             return Err(BackupError::InvalidPayload(format!(
                 "{} trailing bytes after payload tail",
@@ -336,6 +410,7 @@ impl BackupPayload {
             accepted_contacts,
             known_group_ids,
             synced_state,
+            own_predecessors,
         })
     }
 }
@@ -474,6 +549,7 @@ mod tests {
             ],
             known_group_ids: vec![vec![7u8; 32], vec![9u8; 32]],
             synced_state: Vec::new(),
+            own_predecessors: Vec::new(),
         }
     }
 
@@ -537,16 +613,72 @@ mod tests {
     }
 
     #[test]
-    fn the_payload_version_is_six() {
-        assert_eq!(PAYLOAD_VERSION, 6);
-        assert_eq!(sample_payload().encode().unwrap()[0], 6);
+    fn the_own_predecessors_round_trip_oldest_first() {
+        let mut payload = sample_payload();
+        payload.own_predecessors = vec![
+            OwnPredecessor {
+                seed: [1; PREDECESSOR_SEED_LEN],
+                adopted_at_ms: 10,
+            },
+            OwnPredecessor {
+                seed: [2; PREDECESSOR_SEED_LEN],
+                adopted_at_ms: 20,
+            },
+        ];
+        let decoded = BackupPayload::decode(&payload.encode().unwrap()).unwrap();
+        assert_eq!(decoded.own_predecessors, payload.own_predecessors);
     }
 
     #[test]
-    fn the_v6_wire_layout_is_pinned() {
+    fn a_predecessor_seed_never_reaches_a_debug_line() {
+        let predecessor = OwnPredecessor {
+            seed: [0xAB; PREDECESSOR_SEED_LEN],
+            adopted_at_ms: 10,
+        };
+        assert!(!format!("{predecessor:?}").contains("171"));
+    }
+
+    #[test]
+    fn more_predecessors_than_the_bound_are_refused_both_ways() {
+        let mut payload = sample_payload();
+        payload.own_predecessors = vec![
+            OwnPredecessor {
+                seed: [1; PREDECESSOR_SEED_LEN],
+                adopted_at_ms: 0,
+            };
+            MAX_OWN_PREDECESSORS + 1
+        ];
+        assert!(payload.encode().is_err());
+
+        payload.own_predecessors.truncate(MAX_OWN_PREDECESSORS);
+        let mut wire = payload.encode().unwrap();
+        let count_at = wire.len() - MAX_OWN_PREDECESSORS * (PREDECESSOR_SEED_LEN + 8) - 1;
+        wire[count_at] = u8::try_from(MAX_OWN_PREDECESSORS + 1).unwrap();
+        assert!(BackupPayload::decode(&wire).is_err());
+    }
+
+    #[test]
+    fn a_truncated_predecessor_is_refused() {
+        let mut payload = sample_payload();
+        payload.own_predecessors = vec![OwnPredecessor {
+            seed: [1; PREDECESSOR_SEED_LEN],
+            adopted_at_ms: 0,
+        }];
+        let wire = payload.encode().unwrap();
+        assert!(BackupPayload::decode(&wire[..wire.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn the_payload_version_is_seven() {
+        assert_eq!(PAYLOAD_VERSION, 7);
+        assert_eq!(sample_payload().encode().unwrap()[0], 7);
+    }
+
+    #[test]
+    fn the_v7_wire_layout_is_pinned() {
         // One contact with an account id, one 3-byte group id, no synced
-        // state: every field of the layout appears once, in order, and
-        // nothing sits between the contacts and the group ids.
+        // state, one predecessor: every field of the layout appears once, in
+        // order, and nothing sits between the contacts and the group ids.
         let payload = BackupPayload {
             account_id: [0xA1; ACCOUNT_ID_LEN],
             created_at_ms: 0x0102_0304_0506_0708,
@@ -559,8 +691,12 @@ mod tests {
             }],
             known_group_ids: vec![vec![7, 8, 9]],
             synced_state: Vec::new(),
+            own_predecessors: vec![OwnPredecessor {
+                seed: [0x77; PREDECESSOR_SEED_LEN],
+                adopted_at_ms: 0x1112_1314_1516_1718,
+            }],
         };
-        let mut expected = vec![6u8];
+        let mut expected = vec![7u8];
         expected.extend_from_slice(&[0xA1; ACCOUNT_ID_LEN]);
         expected.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
         expected.extend_from_slice(&[0x42; SEED_LEN]);
@@ -575,6 +711,9 @@ mod tests {
         expected.extend_from_slice(&[0, 0, 0, 3]);
         expected.extend_from_slice(&[7, 8, 9]);
         expected.extend_from_slice(&[0, 0, 0, 0]);
+        expected.push(1);
+        expected.extend_from_slice(&[0x77; PREDECESSOR_SEED_LEN]);
+        expected.extend_from_slice(&[0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18]);
         assert_eq!(payload.encode().unwrap(), expected);
         assert_eq!(BackupPayload::decode(&expected).unwrap(), payload);
     }
@@ -742,6 +881,7 @@ mod tests {
             accepted_contacts: vec![],
             known_group_ids: Vec::new(),
             synced_state: Vec::new(),
+            own_predecessors: Vec::new(),
         };
         let wire = payload.encode().unwrap();
         let decoded = BackupPayload::decode(&wire).unwrap();
@@ -785,6 +925,7 @@ mod tests {
             }],
             known_group_ids: Vec::new(),
             synced_state: Vec::new(),
+            own_predecessors: Vec::new(),
         };
         let err = payload.encode().unwrap_err();
         assert!(matches!(err, BackupError::InvalidPayload(_)));
@@ -804,6 +945,7 @@ mod tests {
             }],
             known_group_ids: Vec::new(),
             synced_state: Vec::new(),
+            own_predecessors: Vec::new(),
         };
         let wire = payload.encode().unwrap();
         let decoded = BackupPayload::decode(&wire).unwrap();

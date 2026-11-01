@@ -27,6 +27,26 @@ const alice: AcceptedContact = {
 };
 
 describe("adoptOneToOnePeer", () => {
+  // ADR-0074 section 3.7: a person met after a rotation asks with their
+  // newest key while the conversation is under the key their leaves are bound
+  // to. Seen as two rows of one person on iOS on 2026-11-01.
+  it("adds no second row for the conversation key of a person", () => {
+    const { groupIdB64: _, ...noChat } = alice;
+    const got = adoptOneToOnePeer(
+      [noChat],
+      { signatureKey: BOB, groupIdB64: GROUP, nowMs: NOW },
+      () => true,
+    );
+    expect(got).toEqual([{ ...noChat, groupIdB64: GROUP, previousSignaturePubkeysB64: [BOB] }]);
+  });
+
+  it("leaves a row that knows the conversation key alone", () => {
+    const held = { ...alice, previousSignaturePubkeysB64: [BOB] };
+    expect(
+      adoptOneToOnePeer([held], { signatureKey: BOB, groupIdB64: GROUP, nowMs: NOW }, () => true),
+    ).toBeNull();
+  });
+
   it("adds a row keyed on the peer's key when no contact has it", () => {
     const got = adoptOneToOnePeer([alice], {
       signatureKey: BOB,

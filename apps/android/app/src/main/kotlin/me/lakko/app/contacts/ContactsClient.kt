@@ -34,6 +34,7 @@ import uniffi.lakko_ffi_uniffi.FfiLinkAnswer
 import uniffi.lakko_ffi_uniffi.FfiReachGrant
 import uniffi.lakko_ffi_uniffi.composeContactAck
 import uniffi.lakko_ffi_uniffi.composeContactRequest
+import uniffi.lakko_ffi_uniffi.verifyConversationLink
 import uniffi.lakko_ffi_uniffi.verifySupersession
 
 /**
@@ -126,8 +127,10 @@ public class ContactsClient(
      * ADR-0074 section 3.5 - told once the gate re-pinned an account to a
      * key a supersession proof authorised: `(accountIdB64, oldKeyB64,
      * newKeyB64)`, standard base64. The old key is then that account's
-     * proven predecessor ([ProvenPredecessors]). Never called for a change
-     * the gate refused, and never for a first observation.
+     * proven predecessor ([ProvenPredecessors]). Also told, on any fetch that
+     * passed the gate, the key a conversation link names (ADR-0074 section
+     * 3.7), which is a first observation's only proven step. Never called for
+     * a change the gate refused.
      */
     private val onProvenRotation: (String, String, String) -> Unit = { _, _, _ -> },
     /**
@@ -172,6 +175,12 @@ public class ContactsClient(
     /** ADR-0078 - the binding check and sealing of mailbox rows; a test
      *  injects a fake (the host JVM loads no native library). */
     private val mailboxCrypto: MailboxCrypto = NativeMailboxCrypto,
+    /** ADR-0074 section 3.7 - the 32-byte conversation key a link names when
+     *  it verifies against the trusted key; throws otherwise. The default is
+     *  the native core; a test injects it. */
+    private val conversationLinkCheck: (link: ByteArray, trustedKey: ByteArray) -> ByteArray = { link, trustedKey ->
+        verifyConversationLink(link, trustedKey)
+    },
 ) : AutoCloseable {
 
     override fun close() {
@@ -397,6 +406,36 @@ public class ContactsClient(
             oldPin,
             bundle.supersession_proof,
         )
+        recordConversationLink(accountId, bundle)
+    }
+
+    /**
+     * ADR-0074 section 3.7 - the gate passed and [bundle] carries a
+     * conversation link: the key the account's conversations stay under is a
+     * proven predecessor of the key served, for a contact first met after the
+     * rotation too (its pin holds no older key a supersession proof could be
+     * checked against). Only when the served key is what the gate left
+     * trusted, the pin or else the verified binding. A link that does not
+     * verify is ignored and refuses nothing. A reset does not come here: it
+     * ended the account's predecessors, and a key change that came with a
+     * reset carries no link.
+     */
+    private fun recordConversationLink(accountId: ByteArray, bundle: IdentityFetchResponse) {
+        val linkB64 = bundle.conversation_link?.takeIf { it.isNotEmpty() } ?: return
+        val accountIdB64 = base64Encode(accountId)
+        val fetchedKeyB64 = bundle.signature_pubkey
+        val trustedKeyB64 = pinStore.readPin(accountIdB64)?.pinnedSignaturePubkeyB64
+            ?: verifiedBindings.read(ownerAccountIdB64, accountIdB64)?.keyB64
+        if (trustedKeyB64 != fetchedKeyB64) return
+        try {
+            val conversationKey = conversationLinkCheck(base64Decode(linkB64), base64Decode(fetchedKeyB64))
+            onProvenRotation(accountIdB64, base64Encode(conversationKey), fetchedKeyB64)
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            // A refused link changes nothing, so neither may its log line:
+            // `android.util.Log` is not mocked on the host JVM.
+            runCatching { Log.w("lakko-contacts", "a conversation link was not accepted: ${cause.javaClass.simpleName}") }
+        }
     }
 
     /**

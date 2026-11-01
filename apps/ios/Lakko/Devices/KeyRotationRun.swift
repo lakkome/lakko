@@ -875,8 +875,10 @@ public final class KeyRotationRunner: ObservableObject {
         return await finishOwed(record, session: adopted)
     }
 
-    /// "Save a recovery phrase" (ADR-0075 section 3, UX 19.5): the same
-    /// rotation with no device removed, committed with `phrase_saved: true`.
+    /// "Save a recovery phrase" for a phrase that was ever in an email vault
+    /// (ADR-0075 section 3, UX 19.5; any other phrase is saved without a key
+    /// change, ``SavePhraseFlow``): the same rotation with no device removed,
+    /// committed with `phrase_saved: true`.
     /// The account gets new keys and new words; the other devices are kept
     /// and adopt them; the email vault of the old phrase is deleted by the
     /// commit. The caller obtained the fresh proof first.
@@ -1255,10 +1257,7 @@ extension KeyRotationRunner.Ports {
                     phraseSaved: true)
             },
             phraseWasSaved: { [weak auth] accountIdB64 in
-                auth?.protectionStore.setPhraseSaved(true, accountIdB64: accountIdB64)
-                auth?.protectionStore.markOwnAction(
-                    .phraseSaved, atMs: Int64(Date().timeIntervalSince1970 * 1000), accountIdB64: accountIdB64)
-                auth?.onProtectionChanged?()
+                auth?.notePhraseSaved(accountIdB64: accountIdB64)
             },
             phraseProtected: { [weak auth] accountIdB64 in
                 auth?.protectionStore.phraseSaved(accountIdB64: accountIdB64) ?? false

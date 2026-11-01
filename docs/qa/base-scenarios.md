@@ -17,11 +17,15 @@ ADR-0087. Add a scenario whenever a defect shows one was missing.
 4. Lose the device: recover with another device, a passkey, the phrase.
 4a. Save a recovery phrase on a fresh account, on every client: the words appear, the
     three-word check passes, the account stays signed in after a relaunch, and the
-    device that did it is not asked "It was me". Then a chat works in both directions on
-    the new keys, and a device that lost everything restores from those 12 words.
+    device that did it is not asked "It was me". Then a chat works in both directions,
+    and a device that lost everything restores from those 12 words.
 4b. Reset account keys, on every client, on a device with no keys: the new phrase
     appears only after the publish, `Try again` finishes an interrupted publish, and
     every other device of the account ends on the signed-out screen.
+4c. An account with an email vault saves a phrase, which changes its keys. Then, on
+    every client in both roles: someone new adds them, one contact row on each side, a
+    chat both ways; they forget the device and restore from the 12 words; the chat comes
+    back by itself and works both ways.
 
 ## Contacts
 5. Find a person by @username and by name; send a request; accept; decline; ask again.

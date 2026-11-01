@@ -695,6 +695,24 @@ data class RecoveryEmailStatusResponse(
     val totp: Boolean = false,
 )
 
+/** `GET /account/phrase` (bearer, ADR-0075 section 3 as amended 2026-11-01).
+ *  Answered on a server that sends no mail too. Both fields are required: a
+ *  body without them is a failure, never a guessed path. */
+@Serializable
+data class AccountPhraseResponse(
+    /** The owner saved a recovery phrase. */
+    val saved: Boolean,
+    /** The current phrase was ever sealed in an email vault: saving it takes
+     *  a key rotation. */
+    val rotation_needed: Boolean,
+)
+
+/** `POST /account/phrase/saved` (bearer + fresh-auth grant). */
+@Serializable
+data class PhraseSavedRequest(
+    val fresh_grant: String,
+)
+
 /** `POST /recovery-email/enrol/start` (bearer). The address is sent as typed
  *  and kept nowhere on this device. */
 @Serializable

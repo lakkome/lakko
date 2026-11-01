@@ -183,6 +183,25 @@ final class ContactRemovalTests: XCTestCase {
         XCTAssertEqual(rows[0].request.fromAccountId, Data(repeating: 0xA1, count: 16))
     }
 
+    func testAnAcceptAfterTheConversationKeyWasAdoptedLeavesOneRow() {
+        let rows = ContactsRepository.accepting(
+            request(7, byte: 0xB2), into: [adopted(byte: 0xA1, group: "g1")], groupIdHex: "g1",
+            samePerson: { _, _ in true })
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].request.messageId, 7)
+        XCTAssertEqual(rows[0].request.fromPubkey, Data(repeating: 0xB2, count: 32))
+        XCTAssertEqual(rows[0].previousKeysB64, [base64Encode(Data(repeating: 0xA1, count: 32))])
+    }
+
+    func testTwoRowsUnderTwoKeysOfOnePersonBecomeOne() {
+        let rows = ContactsRepository.reconciled(
+            accepted: [contact(7, byte: 0xB2), adopted(byte: 0xA1, group: "g1")], pending: [],
+            samePerson: { _, _ in true })
+        XCTAssertEqual(rows.accepted.count, 1)
+        XCTAssertEqual(rows.accepted[0].request.messageId, 7)
+        XCTAssertEqual(rows.accepted[0].groupIdHex, "g1")
+    }
+
     func testARequestWhoseContactExistsIsGone() {
         let other = request(8, byte: 0xB2)
         let rows = ContactsRepository.reconciled(

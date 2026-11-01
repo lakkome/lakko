@@ -12,6 +12,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import me.lakko.app.contacts.AcceptedContactsStore
 import uniffi.lakko_ffi_uniffi.BackupContactRecord
+import uniffi.lakko_ffi_uniffi.BackupOwnPredecessor
 
 /**
  * Runs the automatic backup: watches for changes worth keeping, and flushes
@@ -60,6 +61,8 @@ public class AutoBackupDriver internal constructor(
         /** The held groups plus the restored ones not joined yet. */
         val knownGroupIdsHex: List<String>,
         val syncedState: ByteArray?,
+        /** ADR-0074 section 3.7 - the account's own predecessors. */
+        val ownPredecessors: List<BackupOwnPredecessor> = emptyList(),
     )
 
     /**
@@ -82,6 +85,10 @@ public class AutoBackupDriver internal constructor(
          *  runtime holds none; carried in the backup so a restore with no
          *  other device alive gets the folders and flags back. */
         val syncedState: () -> ByteArray? = { null },
+        /** ADR-0074 section 3.7 — the account's own predecessors, oldest
+         *  first, read at upload time. A read that throws fails the upload
+         *  rather than leaving them out of the backup. */
+        val ownPredecessors: (String) -> List<BackupOwnPredecessor> = { emptyList() },
     )
 
     public enum class Outcome { CLEAN, THROTTLED, NOT_READY, UPLOADED, FAILED }
@@ -163,7 +170,9 @@ public class AutoBackupDriver internal constructor(
             )
         }
 
+        val predecessors = ArrayList<BackupOwnPredecessor>()
         val result = try {
+            predecessors += inputs.ownPredecessors(accountIdB64)
             uploader.upload(
                 UploadRequest(
                     context = applicationContext,
@@ -176,6 +185,7 @@ public class AutoBackupDriver internal constructor(
                     // upload always carries the set it was marked dirty for.
                     knownGroupIdsHex = groups,
                     syncedState = inputs.syncedState(),
+                    ownPredecessors = predecessors,
                 ),
             )
         } catch (cancel: kotlinx.coroutines.CancellationException) {
@@ -183,6 +193,8 @@ public class AutoBackupDriver internal constructor(
         } catch (cause: Throwable) {
             Log.w(TAG, "upload threw", cause)
             return Outcome.FAILED
+        } finally {
+            predecessors.forEach { it.seed.fill(0) }
         }
         if (result !is UploadResult.Uploaded) {
             // A cache miss is the ordinary state for a device that joined by
@@ -230,6 +242,7 @@ internal object CachedPhraseUploader : AutoBackupDriver.Uploader {
                 contacts = request.contacts,
                 knownGroupIdsHex = request.knownGroupIdsHex,
                 syncedState = request.syncedState,
+                ownPredecessors = request.ownPredecessors,
             )
         } finally {
             client.close()

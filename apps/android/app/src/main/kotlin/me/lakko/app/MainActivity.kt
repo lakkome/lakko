@@ -1646,6 +1646,9 @@ private fun SessionRoot(
                     // ADR-0058 section 5.2 — the folded synced state (folders,
                     // pins, mutes, archive, read cursors, drafts, order).
                     syncedState = { deviceGroupSync.currentSyncedStateBytes() },
+                    // ADR-0074 section 3.7 — the keys the conversations stay
+                    // under, for a device restored from the phrase.
+                    ownPredecessors = { accountIdB64 -> authRepository.backupOwnPredecessors(accountIdB64) },
                 ),
             )
             driver.start()

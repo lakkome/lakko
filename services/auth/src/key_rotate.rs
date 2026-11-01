@@ -360,7 +360,7 @@ pub(crate) async fn finish(
 
     // 3. The generation and the identity key, in one statement.
     let bumped = sqlx::query(
-        "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1), \
+        "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1), phrase_in_vault = 0, \
          identity_pubkey = ? WHERE id = ?",
     )
     .bind(&new_signature_pubkey[..])

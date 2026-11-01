@@ -29,7 +29,7 @@
 use lakko_attest::BackupHeadError;
 use lakko_backup::{
     open as inner_open, payload::AcceptedContactRecord, seal as inner_seal, BackupBlob,
-    BackupPayload,
+    BackupPayload, OwnPredecessor, PREDECESSOR_SEED_LEN,
 };
 use lakko_crypto::signing::VerifyingKey;
 use wasm_bindgen::prelude::*;
@@ -196,6 +196,11 @@ pub fn build_backup_payload(
     // ADR-0058: `SyncedState.toBytes()`, or omitted / empty when none is
     // held. Optional, so a five-argument call is valid.
     synced_state: Option<Vec<u8>>,
+    // ADR-0074 section 3.7: the keys the conversations still name, oldest
+    // first, flat-concatenated 64-byte seeds, with one adoption time each.
+    // Omitted for an account that never rotated.
+    own_predecessor_seeds: Option<Vec<u8>>,
+    own_predecessor_adopted_at_ms: Option<Vec<u64>>,
 ) -> Result<Vec<u8>, JsError> {
     if account_id.len() != 16 {
         return Err(JsError::new("account_id must be 16 bytes"));
@@ -219,6 +224,26 @@ pub fn build_backup_payload(
         ));
     }
 
+    let predecessor_seeds = own_predecessor_seeds.unwrap_or_default();
+    let predecessor_times = own_predecessor_adopted_at_ms.unwrap_or_default();
+    if predecessor_seeds.len() != predecessor_times.len() * PREDECESSOR_SEED_LEN {
+        return Err(JsError::new(
+            "own predecessors must be one 64-byte seed per adoption time",
+        ));
+    }
+    let own_predecessors = predecessor_seeds
+        .chunks_exact(PREDECESSOR_SEED_LEN)
+        .zip(predecessor_times)
+        .map(|(seed, adopted_at_ms)| {
+            let mut bytes = [0u8; PREDECESSOR_SEED_LEN];
+            bytes.copy_from_slice(seed);
+            OwnPredecessor {
+                seed: bytes,
+                adopted_at_ms,
+            }
+        })
+        .collect();
+
     let payload = BackupPayload {
         account_id: acct,
         created_at_ms,
@@ -229,6 +254,7 @@ pub fn build_backup_payload(
             .map(<[u8]>::to_vec)
             .collect(),
         synced_state: synced_state.unwrap_or_default(),
+        own_predecessors,
     };
     payload.encode().map_err(err_to_js)
 }
@@ -294,6 +320,29 @@ impl ParsedBackupPayload {
     #[wasm_bindgen(getter, js_name = syncedState)]
     pub fn synced_state(&self) -> Vec<u8> {
         self.inner.synced_state.clone()
+    }
+
+    /// The account's own predecessor seeds, oldest first, flat-concatenated
+    /// 64-byte seeds (ADR-0074 section 3.7). Empty for an account that never
+    /// rotated. Never log them.
+    #[wasm_bindgen(getter, js_name = ownPredecessorSeeds)]
+    pub fn own_predecessor_seeds(&self) -> Vec<u8> {
+        self.inner
+            .own_predecessors
+            .iter()
+            .flat_map(|p| p.seed)
+            .collect()
+    }
+
+    /// When the account adopted the key that replaced each predecessor, unix
+    /// millis, in the order of `ownPredecessorSeeds`.
+    #[wasm_bindgen(getter, js_name = ownPredecessorAdoptedAtMs)]
+    pub fn own_predecessor_adopted_at_ms(&self) -> Vec<u64> {
+        self.inner
+            .own_predecessors
+            .iter()
+            .map(|p| p.adopted_at_ms)
+            .collect()
     }
 }
 
@@ -691,8 +740,17 @@ mod tests {
         let account_id = vec![0xA1u8; 16];
         let seed = vec![0x42u8; 32];
         let contacts = vec![sample_contact()];
-        let wire = build_backup_payload(&account_id, 1_700_000_000_000, &seed, contacts, &[], None)
-            .unwrap();
+        let wire = build_backup_payload(
+            &account_id,
+            1_700_000_000_000,
+            &seed,
+            contacts,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
         assert_eq!(parsed.account_id(), account_id);
         assert_eq!(parsed.created_at_ms(), 1_700_000_000_000);
@@ -719,9 +777,17 @@ mod tests {
         let without_id = sample_contact();
         let account_id = vec![0xA1u8; 16];
         let seed = vec![0x42u8; 32];
-        let wire =
-            build_backup_payload(&account_id, 1, &seed, vec![with_id, without_id], &[], None)
-                .unwrap();
+        let wire = build_backup_payload(
+            &account_id,
+            1,
+            &seed,
+            vec![with_id, without_id],
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
         let recovered = parsed.contacts();
         assert_eq!(recovered.len(), 2);
@@ -744,7 +810,8 @@ mod tests {
         let account_id = vec![0xCDu8; 16];
         let seed = vec![0x77u8; 32];
         let contacts = vec![sample_contact()];
-        let payload = build_backup_payload(&account_id, 99, &seed, contacts, &[], None).unwrap();
+        let payload =
+            build_backup_payload(&account_id, 99, &seed, contacts, &[], None, None, None).unwrap();
         let envelope = seal_backup(phrase, &payload).unwrap();
         let opened = open_backup(phrase, &envelope).unwrap();
         let parsed = parse_backup_payload(&opened).unwrap();
@@ -767,6 +834,8 @@ mod tests {
             vec![sample_contact()],
             &ids,
             Some(state.clone()),
+            None,
+            None,
         )
         .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
@@ -776,9 +845,10 @@ mod tests {
     }
 
     #[test]
-    fn the_built_payload_is_wire_v6() {
-        let wire = build_backup_payload(&[0u8; 16], 0, &[0u8; 32], vec![], &[], None).unwrap();
-        assert_eq!(wire[0], 6);
+    fn the_built_payload_is_wire_v7() {
+        let wire =
+            build_backup_payload(&[0u8; 16], 0, &[0u8; 32], vec![], &[], None, None, None).unwrap();
+        assert_eq!(wire[0], 7);
         assert_eq!(wire[0], lakko_backup::PAYLOAD_VERSION);
     }
 

@@ -317,6 +317,36 @@ final class OneToOneIsAContactTests: XCTestCase {
             createdAt: "2026-09-26T12:00:00Z"))
     }
 
+    // ADR-0074 section 3.7: a person met after a rotation asks with their
+    // newest key while the conversation is under the key their leaves are
+    // bound to. Seen as two rows of one person on 2026-11-01.
+
+    func testTheConversationKeyOfAPersonAddsNoSecondRow() {
+        let next = ContactsRepository.adopting(
+            [row(anna, groupIdHex: nil, displayName: "Anna W.")],
+            signatureKey: bob, accountId: nil, groupIdHex: "abcd", nowMs: 5,
+            createdAt: "2026-09-26T12:00:00Z", samePerson: { _, _ in true })
+        XCTAssertEqual(next?.map(\.request.fromPubkey), [anna], "the row stays under the key it holds")
+        XCTAssertEqual(next?.first?.groupIdHex, "abcd")
+        XCTAssertEqual(next?.first?.displayName, "Anna W.")
+        XCTAssertEqual(next?.first?.previousKeysB64, [base64Encode(bob)])
+    }
+
+    func testARowThatKnowsTheConversationKeyIsLeftAlone() {
+        var held = row(anna, groupIdHex: "abcd")
+        held.previousKeysB64 = [base64Encode(bob)]
+        XCTAssertNil(ContactsRepository.adopting(
+            [held], signatureKey: bob, accountId: nil, groupIdHex: "ffff", nowMs: 5,
+            createdAt: "2026-09-26T12:00:00Z", samePerson: { _, _ in true }))
+    }
+
+    func testTwoKeysNothingProvedAreTwoPeople() {
+        let next = ContactsRepository.adopting(
+            [row(anna, groupIdHex: "abcd")], signatureKey: bob, accountId: nil, groupIdHex: "ffff",
+            nowMs: 5, createdAt: "2026-09-26T12:00:00Z")
+        XCTAssertEqual(next?.map(\.request.fromPubkey), [anna, bob])
+    }
+
     func testOtherRowsSurviveUntouched() {
         let next = ContactsRepository.adopting(
             [row(bob, groupIdHex: "b0b0", displayName: "Bob")],

@@ -29,7 +29,7 @@ use lakko_attest::{
 use lakko_backup::{
     frame_backup_blob as inner_frame_backup_blob, open as inner_open,
     parse_backup_blob as inner_parse_backup_blob, payload::AcceptedContactRecord,
-    seal as inner_seal, BackupBlob, BackupError, BackupPayload, HeadFrameError,
+    seal as inner_seal, BackupBlob, BackupError, BackupPayload, HeadFrameError, OwnPredecessor,
 };
 use lakko_crypto::signing::VerifyingKey;
 
@@ -75,6 +75,15 @@ impl From<BackupHeadError> for FfiError {
 
 /// One row in the accepted-contacts list inside a backup
 /// payload. Public bytes only — no secret material.
+/// One key the account rotated away from (ADR-0074 section 3.7).
+#[derive(uniffi::Record, Clone)]
+pub struct BackupOwnPredecessor {
+    /// The predecessor's 64-byte phrase seed. Never log it.
+    pub seed: Vec<u8>,
+    /// When the account adopted the key that replaced it, unix millis.
+    pub adopted_at_ms: u64,
+}
+
 #[derive(uniffi::Record, Clone)]
 pub struct BackupContactRecord {
     /// Raw 32-byte Ed25519 verifying key.
@@ -113,6 +122,11 @@ pub struct ParsedBackupPayload {
     /// The ADR-0058 folded synced state, as `SyncedState.toBytes()` wrote
     /// it; restore with `SyncedState.fromBytes(...)`. Empty = none held.
     pub synced_state: Vec<u8>,
+    /// The account's own predecessors, oldest first (ADR-0074 section 3.7).
+    /// A restored device stores them where a kept device does, and mints its
+    /// conversation binding under the first. Empty for an account that never
+    /// rotated.
+    pub own_predecessors: Vec<BackupOwnPredecessor>,
 }
 
 // ============================================================================
@@ -132,7 +146,7 @@ pub struct ParsedBackupPayload {
 ///   `ed25519_seed` (≠ 32), wrong-length contact pubkey
 ///   (must be 32 bytes each), over-cap display name, an over-long
 ///   `group_id`, or a `synced_state` the fold refuses.
-#[uniffi::export(default(synced_state = None))]
+#[uniffi::export(default(synced_state = None, own_predecessors = None))]
 pub fn build_backup_payload(
     account_id: Vec<u8>,
     created_at_ms: u64,
@@ -145,6 +159,9 @@ pub fn build_backup_payload(
     // ADR-0058: `SyncedState.toBytes()`, or `None` / empty when none is
     // held. Defaults to `None`, so a five-argument call is valid.
     synced_state: Option<Vec<u8>>,
+    // ADR-0074 section 3.7: the keys the conversations still name, oldest
+    // first. `None` / empty for an account that never rotated.
+    own_predecessors: Option<Vec<BackupOwnPredecessor>>,
 ) -> Result<Vec<u8>, FfiError> {
     if account_id.len() != 16 {
         return Err(FfiError::Backup("account_id must be 16 bytes".into()));
@@ -216,6 +233,22 @@ pub fn build_backup_payload(
         }
     }
 
+    let own_predecessors = own_predecessors
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| {
+            let seed = p
+                .seed
+                .as_slice()
+                .try_into()
+                .map_err(|_| FfiError::Backup("a predecessor seed must be 64 bytes".into()))?;
+            Ok(OwnPredecessor {
+                seed,
+                adopted_at_ms: p.adopted_at_ms,
+            })
+        })
+        .collect::<Result<Vec<_>, FfiError>>()?;
+
     let payload = BackupPayload {
         account_id: acct,
         created_at_ms,
@@ -223,6 +256,7 @@ pub fn build_backup_payload(
         accepted_contacts,
         known_group_ids,
         synced_state: synced_state.unwrap_or_default(),
+        own_predecessors,
     };
     Ok(payload.encode()?)
 }
@@ -255,6 +289,14 @@ pub fn parse_backup_payload(wire: Vec<u8>) -> Result<ParsedBackupPayload, FfiErr
         accepted_contacts,
         known_group_ids: inner.known_group_ids,
         synced_state: inner.synced_state,
+        own_predecessors: inner
+            .own_predecessors
+            .iter()
+            .map(|p| BackupOwnPredecessor {
+                seed: p.seed.to_vec(),
+                adopted_at_ms: p.adopted_at_ms,
+            })
+            .collect(),
     })
 }
 
@@ -554,6 +596,7 @@ mod tests {
             vec![with_id, sample_contact()],
             Vec::new(),
             None,
+            None,
         )
         .expect("build");
         let parsed = parse_backup_payload(wire).expect("parse");
@@ -580,6 +623,7 @@ mod tests {
             vec![bad],
             Vec::new(),
             None,
+            None,
         );
         assert!(err.is_err(), "an 8-byte account_id must be rejected");
     }
@@ -595,6 +639,7 @@ mod tests {
             seed.clone(),
             contacts,
             Vec::new(),
+            None,
             None,
         )
         .expect("build");
@@ -630,6 +675,7 @@ mod tests {
             contacts,
             Vec::new(),
             None,
+            None,
         )
         .expect("build");
         let envelope = seal_backup(phrase.clone(), payload).expect("seal");
@@ -641,9 +687,16 @@ mod tests {
 
     #[test]
     fn wrong_phrase_rejected() {
-        let payload =
-            build_backup_payload(vec![0u8; 16], 0, vec![0u8; 32], vec![], Vec::new(), None)
-                .expect("build");
+        let payload = build_backup_payload(
+            vec![0u8; 16],
+            0,
+            vec![0u8; 32],
+            vec![],
+            Vec::new(),
+            None,
+            None,
+        )
+        .expect("build");
         let envelope = seal_backup(b"right".to_vec(), payload).expect("seal");
         let err = open_backup(b"wrong".to_vec(), envelope).expect_err("wrong phrase");
         match err {
@@ -658,8 +711,16 @@ mod tests {
         // restored device knows which conversations exist before a member
         // has admitted it.
         let ids = vec![vec![0x11u8; 32], vec![0x22u8; 32]];
-        let wire = build_backup_payload(vec![0u8; 16], 0, vec![0u8; 32], vec![], ids.clone(), None)
-            .expect("build");
+        let wire = build_backup_payload(
+            vec![0u8; 16],
+            0,
+            vec![0u8; 32],
+            vec![],
+            ids.clone(),
+            None,
+            None,
+        )
+        .expect("build");
         let parsed = parse_backup_payload(wire).expect("parse");
         assert_eq!(parsed.known_group_ids, ids);
     }
@@ -675,6 +736,7 @@ mod tests {
             vec![sample_contact()],
             ids.clone(),
             Some(state.clone()),
+            None,
         )
         .expect("build");
         let parsed = parse_backup_payload(wire).expect("parse");
@@ -684,10 +746,18 @@ mod tests {
     }
 
     #[test]
-    fn the_built_payload_is_wire_v6_and_a_v5_payload_is_refused() {
-        let wire = build_backup_payload(vec![0u8; 16], 0, vec![0u8; 32], vec![], Vec::new(), None)
-            .expect("build");
-        assert_eq!(wire[0], 6);
+    fn the_built_payload_is_wire_v7_and_a_v5_payload_is_refused() {
+        let wire = build_backup_payload(
+            vec![0u8; 16],
+            0,
+            vec![0u8; 32],
+            vec![],
+            Vec::new(),
+            None,
+            None,
+        )
+        .expect("build");
+        assert_eq!(wire[0], 7);
         assert_eq!(wire[0], lakko_backup::PAYLOAD_VERSION);
 
         // The retired v5 layout for the same empty payload: two extra
@@ -720,6 +790,7 @@ mod tests {
             vec![],
             vec![vec![0u8; lakko_backup::payload::MAX_GROUP_ID_LEN + 1]],
             None,
+            None,
         )
         .expect_err("over-long group id accepted");
         assert!(format!("{err}").contains("group_id length"));
@@ -727,8 +798,16 @@ mod tests {
 
     #[test]
     fn wrong_length_account_id_rejected() {
-        let err = build_backup_payload(vec![0u8; 8], 0, vec![0u8; 32], vec![], Vec::new(), None)
-            .expect_err("wrong len");
+        let err = build_backup_payload(
+            vec![0u8; 8],
+            0,
+            vec![0u8; 32],
+            vec![],
+            Vec::new(),
+            None,
+            None,
+        )
+        .expect_err("wrong len");
         match err {
             FfiError::Backup(msg) => assert!(msg.contains("16 bytes")),
             other => panic!("expected Backup variant, got {other:?}"),

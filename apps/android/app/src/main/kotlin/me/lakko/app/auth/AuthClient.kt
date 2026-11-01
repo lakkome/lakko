@@ -1442,6 +1442,29 @@ public class AuthClient(
     }
 
     /**
+     * `GET /account/phrase` (bearer, ADR-0075 section 3 as amended
+     * 2026-11-01): whether saving a recovery phrase takes a key rotation.
+     * Unlike [recoveryEmailStatus] it works on a server that sends no mail.
+     */
+    public suspend fun accountPhraseStatus(sessionToken: String): AccountPhraseStatus {
+        requireSession(sessionToken)
+        val res: AccountPhraseResponse = doRequest(HttpMethod.Get, "/account/phrase") {
+            header(HttpHeaders.Authorization, "Bearer $sessionToken")
+        }
+        return AccountPhraseStatus(saved = res.saved, rotationNeeded = res.rotation_needed)
+    }
+
+    /**
+     * `POST /account/phrase/saved` (bearer + fresh-auth grant): the account
+     * is phrase-protected and its keys stay. `204`; `403 fresh-auth-required`;
+     * `409 phrase-save-needs-rotation`. Idempotent.
+     */
+    public suspend fun markPhraseSaved(sessionToken: String, freshGrant: String) {
+        requireSession(sessionToken)
+        postNoContent("/account/phrase/saved", sessionToken, PhraseSavedRequest(fresh_grant = freshGrant))
+    }
+
+    /**
      * `POST /recovery-email/enrol/start` (bearer + fresh-auth grant): mail a
      * code to [address] and get the salt the vault is sealed with.
      *

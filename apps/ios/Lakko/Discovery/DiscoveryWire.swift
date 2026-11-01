@@ -166,6 +166,12 @@ public struct IdentityUploadRequest: Codable, Equatable {
     /// same transaction. `nil` on every other upload; an unattested,
     /// unproven key CHANGE is refused (`409 identity-change-needs-attestation`).
     public let keyResetAttest: String?
+    /// ADR-0074 section 3.7: standard base64 of the 201-byte two-way
+    /// conversation link a rotation mints (signed by the key the
+    /// conversations are bound to and by this key). Opaque to the server,
+    /// which keeps it across a same-key re-upload and clears it on a key
+    /// change that carries none. `nil` on every upload but a rotation's.
+    public let conversationLink: String?
 
     public init(
         accountId: String,
@@ -174,7 +180,8 @@ public struct IdentityUploadRequest: Codable, Equatable {
         supersessionProof: String? = nil,
         leafAuth: String? = nil,
         genesisAttest: String? = nil,
-        keyResetAttest: String? = nil
+        keyResetAttest: String? = nil,
+        conversationLink: String? = nil
     ) {
         self.accountId = accountId
         self.signaturePubkey = signaturePubkey
@@ -183,6 +190,7 @@ public struct IdentityUploadRequest: Codable, Equatable {
         self.leafAuth = leafAuth
         self.genesisAttest = genesisAttest
         self.keyResetAttest = keyResetAttest
+        self.conversationLink = conversationLink
     }
 
     enum CodingKeys: String, CodingKey {
@@ -193,6 +201,7 @@ public struct IdentityUploadRequest: Codable, Equatable {
         case leafAuth = "leaf_auth"
         case genesisAttest = "genesis_attest"
         case keyResetAttest = "key_reset_attest"
+        case conversationLink = "conversation_link"
     }
 }
 
@@ -226,19 +235,26 @@ public struct IdentityFetchResponse: Codable, Equatable {
     /// longer binds the fetched key, and that path carries a supersession
     /// proof instead.
     public let keyResetAttest: String?
+    /// ADR-0074 section 3.7: standard base64 of the conversation link of the
+    /// account's newest rotation, absent when it never rotated (or reset
+    /// since). Verified locally against the key the gate left trusted
+    /// (`verifyConversationLink`); one that does not verify is ignored.
+    public let conversationLink: String?
 
     public init(
         signaturePubkey: String,
         x25519Pubkey: String,
         supersessionProof: String? = nil,
         keyGeneration: UInt64 = 1,
-        keyResetAttest: String? = nil
+        keyResetAttest: String? = nil,
+        conversationLink: String? = nil
     ) {
         self.signaturePubkey = signaturePubkey
         self.x25519Pubkey = x25519Pubkey
         self.supersessionProof = supersessionProof
         self.keyGeneration = keyGeneration
         self.keyResetAttest = keyResetAttest
+        self.conversationLink = conversationLink
     }
 
     public init(from decoder: Decoder) throws {
@@ -248,6 +264,7 @@ public struct IdentityFetchResponse: Codable, Equatable {
         supersessionProof = try c.decodeIfPresent(String.self, forKey: .supersessionProof)
         keyGeneration = try c.decodeIfPresent(UInt64.self, forKey: .keyGeneration) ?? 1
         keyResetAttest = try c.decodeIfPresent(String.self, forKey: .keyResetAttest)
+        conversationLink = try c.decodeIfPresent(String.self, forKey: .conversationLink)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -256,6 +273,7 @@ public struct IdentityFetchResponse: Codable, Equatable {
         case supersessionProof = "supersession_proof"
         case keyGeneration = "key_generation"
         case keyResetAttest = "key_reset_attest"
+        case conversationLink = "conversation_link"
     }
 }
 

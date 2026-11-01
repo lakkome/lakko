@@ -466,6 +466,12 @@ extension DeviceReadmission {
     /// current key or one a reset retired), else from the member's own
     /// profile. The id is a CLAIM in the second case; what it is worth is
     /// decided by ``lookupStanding(rosterKeyB64:pin:proven:binding:)``.
+    ///
+    /// A contact row answers to every key of its person: pass the retired
+    /// keys and the proven chain together (``keysARowAnswersTo(contactKeyB64:previousKeysB64:proven:)``).
+    /// A contact first met after a rotation holds the newest key on its row
+    /// while the roster names the oldest, and only the proven chain joins them
+    /// (ADR-0074 section 3.7).
     public static func readmissionCandidates(
         rosterPersonKeysB64: [String],
         ownPersonKeyB64: String,
@@ -485,6 +491,18 @@ extension DeviceReadmission {
             out.append(LookupCandidate(rosterKeyB64: rosterKeyB64, accountId: accountId))
         }
         return out
+    }
+
+    /// The keys besides its own a contact row is matched on: the ones a reset
+    /// retired (kept on the row) and its proven predecessors. Each once.
+    public static func keysARowAnswersTo(
+        contactKeyB64: String, previousKeysB64: [String], proven: ProvenPredecessors
+    ) -> [String] {
+        var keys = previousKeysB64
+        for key in proven.predecessors(of: contactKeyB64) where !keys.contains(key) {
+            keys.append(key)
+        }
+        return keys
     }
 
     public enum LookupStanding: Equatable {

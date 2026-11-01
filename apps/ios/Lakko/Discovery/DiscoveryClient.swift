@@ -692,6 +692,10 @@ public final class DiscoveryClient {
     /// standard-base64 encoded into `IdentityUploadRequest.keyResetAttest`.
     /// The refusals discovery answers are typed by
     /// ``IdentityUploadRefusal/of(_:)``.
+    ///
+    /// ADR-0074 section 3.7: `conversationLink`, when non-`nil`, is the RAW
+    /// 201-byte link a rotation mints. A key change that carries none clears
+    /// the stored one.
     public func uploadIdentityBundle(
         accountId: Data,
         signaturePubkey: Data,
@@ -699,7 +703,8 @@ public final class DiscoveryClient {
         supersessionProofB64: String? = nil,
         leafAuth: Data? = nil,
         genesisAttest: Data? = nil,
-        keyResetAttest: Data? = nil
+        keyResetAttest: Data? = nil,
+        conversationLink: Data? = nil
     ) async throws {
         guard accountId.count == Self.accountIdLength else {
             throw DiscoveryClientError.argument(
@@ -725,7 +730,8 @@ public final class DiscoveryClient {
                 supersessionProof: supersessionProofB64,
                 leafAuth: leafAuth.map { base64Encode($0) },
                 genesisAttest: genesisAttest.map { base64Encode($0) },
-                keyResetAttest: keyResetAttest.map { base64Encode($0) }
+                keyResetAttest: keyResetAttest.map { base64Encode($0) },
+                conversationLink: conversationLink.map { base64Encode($0) }
             )
         )
         guard resp.ok else {

@@ -24,15 +24,24 @@ public object SessionIdentities {
      * Build this device's bound conversation identity for [accountIdB64].
      *
      * Reuses the persisted binding so its `issued_at` stays stable; mints and
-     * persists a new one when none is stored or the stored one no longer
-     * verifies (the account key was re-minted). Returns `null` when the device
-     * seed cannot be read or created, in which case the caller falls back to an
-     * unbound account-key identity (the pre-ADR-0050 behaviour).
+     * persists a new one under [account] (the conversation identity: the
+     * OLDEST own predecessor after a rotation) when none is stored, the stored
+     * one no longer verifies, or [bindingVerdict] says so. Returns `null` when
+     * the device seed cannot be read or created, in which case the caller
+     * falls back to an unbound account-key identity (the pre-ADR-0050
+     * behaviour).
+     *
+     * @param currentKey the key the account publishes now.
+     * @param predecessorKeys the own predecessor keys, oldest first.
+     * @param holdsConversations whether this device is in any conversation.
      */
     public fun deviceIdentity(
         context: Context,
         accountIdB64: String,
         account: Identity,
+        currentKey: ByteArray,
+        predecessorKeys: List<ByteArray>,
+        holdsConversations: Boolean,
         nowUnixSecs: Long = System.currentTimeMillis() / 1_000L,
     ): Identity? {
         val seed = try {
@@ -54,17 +63,34 @@ public object SessionIdentities {
                     // account key, so after a reset of the account keys the
                     // stored one still verifies (the old key signed it) but
                     // names an account key that is no longer the account's.
-                    // Re-mint under the current account key rather than
-                    // publish a KeyPackage bound to the old generation.
-                    val boundTo = rebuilt.accountPublicKey()
-                    if (boundTo != null && boundTo.contentEquals(account.signaturePublicKey())) {
-                        return rebuilt
-                    }
-                    rebuilt.close()
-                    android.util.Log.w(
-                        "SessionIdentities",
-                        "stored device binding names another account key (keys reset), re-minting",
+                    // Re-mint rather than publish a KeyPackage bound to the
+                    // old generation. ADR-0074 part 3 — a rotation is not a
+                    // reset: a binding under the account's own earlier key
+                    // stays, and one under the current key is minted again
+                    // only while this device holds no conversation.
+                    val verdict = bindingVerdict(
+                        boundKey = rebuilt.accountPublicKey(),
+                        currentKey = currentKey,
+                        predecessorKeys = predecessorKeys,
+                        holdsConversations = holdsConversations,
                     )
+                    when (verdict) {
+                        BindingVerdict.Keep -> return rebuilt
+                        BindingVerdict.KeepUnderCurrentKey -> {
+                            android.util.Log.i(
+                                "SessionIdentities",
+                                "device binding names the current account key and this device holds conversations; kept",
+                            )
+                            return rebuilt
+                        }
+                        BindingVerdict.Remint, BindingVerdict.Mint -> {
+                            rebuilt.close()
+                            android.util.Log.w(
+                                "SessionIdentities",
+                                "stored device binding is not under the conversation key ($verdict), re-minting",
+                            )
+                        }
+                    }
                 } catch (cause: Throwable) {
                     android.util.Log.w(
                         "SessionIdentities",

@@ -1480,6 +1480,9 @@ public class DiscoveryClient(
          *  identity-change-needs-attestation`), so a changed key is never
          *  uploaded without it. */
         keyResetAttest: ByteArray? = null,
+        /** ADR-0074 section 3.7: the raw 201-byte conversation link of a
+         *  rotation's publish; `null` for every other upload. */
+        conversationLink: ByteArray? = null,
     ) {
         if (accountId.size != ACCOUNT_ID_LEN) {
             throw DiscoveryClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
@@ -1508,6 +1511,7 @@ public class DiscoveryClient(
                 // ADR-0073 - standard base64 of the 145 bytes, like the two
                 // sidecars above (re-encoded from the server's base64url).
                 key_reset_attest = keyResetAttest?.let { base64Encode(it) },
+                conversation_link = conversationLink?.let { base64Encode(it) },
             ),
         )
         if (!resp.ok) {

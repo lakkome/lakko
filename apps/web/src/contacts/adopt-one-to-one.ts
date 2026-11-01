@@ -57,12 +57,16 @@ export interface OneToOnePeer {
 export function adoptOneToOnePeer(
   accepted: readonly AcceptedContact[],
   peer: OneToOnePeer,
+  samePerson: (a: string, b: string) => boolean = (a, b) => a === b,
 ): AcceptedContact[] | null {
   const accountIdHex =
     peer.accountIdHex !== undefined && peer.accountIdHex !== null && peer.accountIdHex.length > 0
       ? peer.accountIdHex
       : undefined;
-  const at = accepted.findIndex((c) => c.signaturePubkeyB64 === peer.signatureKey);
+  // ADR-0074 section 3.7: a contact met after a rotation has their row under
+  // the key they asked with and the conversation under the key their leaves
+  // are bound to. One person, one row.
+  const at = accepted.findIndex((c) => samePerson(c.signaturePubkeyB64, peer.signatureKey));
   // ADR-0073 R.5: an older one-to-one group with a contact's OLD keys is
   // still that contact's conversation. The row was re-keyed to the new key
   // at the re-pin and remembers the old one; a row for the old key would be
@@ -84,13 +88,17 @@ export function adoptOneToOnePeer(
     return [...accepted, row];
   }
   const existing = accepted[at] as AcceptedContact;
+  const aliases = existing.previousSignaturePubkeysB64 ?? [];
+  const needsAlias =
+    existing.signaturePubkeyB64 !== peer.signatureKey && !aliases.includes(peer.signatureKey);
   const needsGroup = existing.groupIdB64 === undefined || existing.groupIdB64.length === 0;
   const needsAccount =
     accountIdHex !== undefined &&
     (existing.accountIdHex === undefined || existing.accountIdHex.length === 0);
-  if (!needsGroup && !needsAccount) return null;
+  if (!needsGroup && !needsAccount && !needsAlias) return null;
   const completed: AcceptedContact = {
     ...existing,
+    ...(needsAlias ? { previousSignaturePubkeysB64: [...aliases, peer.signatureKey] } : {}),
     ...(needsGroup ? { groupIdB64: peer.groupIdB64 } : {}),
     ...(needsAccount ? { accountIdHex } : {}),
   };

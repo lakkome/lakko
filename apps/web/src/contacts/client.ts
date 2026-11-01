@@ -80,11 +80,13 @@ import { contactRequestGate, requestTargetAfterFetch } from "./request-target";
 import { resetVerdict, type AttestCheck, type LogCheck } from "./reset-verdict";
 import { notifyResetAccepted } from "./reset-events";
 import {
+  accountKeysOfBinding,
   dropVerifiedBinding,
   memberHeldKey,
   readVerifiedBinding,
   recordVerifiedBinding,
 } from "./verified-binding";
+import { carryBindingConversationKey, recordConversationLink } from "./conversation-link";
 import { fetchDeviceAttestKey } from "../auth/device-attest-key";
 import { provenSuccessorWith } from "./proven-successor";
 import { pendingAfterArrival } from "./inbox-store";
@@ -1720,6 +1722,7 @@ export class ContactsClient {
         throw new IdentityCheckInconclusive(base64Encode(accountId));
       }
       // Accepted and re-pinned: gate 2 below already ran inside the verdict.
+      await this.recordBundleConversationLink(accountId, bundle);
       return;
     }
 
@@ -1737,6 +1740,27 @@ export class ContactsClient {
       oldPin,
       bundle.supersession_proof,
     );
+    await this.recordBundleConversationLink(accountId, bundle);
+  }
+
+  /**
+   * ADR-0074 section 3.7 - the gate has passed: a two-way conversation link
+   * in the bundle records the key the person's conversations are bound to as
+   * a proven predecessor of the key the gate left trusted. A link that does
+   * not verify is ignored; it never refuses the identity.
+   */
+  private async recordBundleConversationLink(
+    accountId: Uint8Array,
+    bundle: IdentityFetchResponse,
+  ): Promise<void> {
+    if (bundle.conversation_link === undefined || bundle.conversation_link.length === 0) return;
+    const wasm = await loadWasm();
+    recordConversationLink({
+      accountIdB64: base64Encode(accountId),
+      fetchedKeyB64: bundle.signature_pubkey,
+      linkB64: bundle.conversation_link,
+      verify: (link, key) => wasm.verifyConversationLink(link, key),
+    });
   }
 
   /**
@@ -2025,6 +2049,7 @@ export class ContactsClient {
       log,
     });
     if (verdict.kind !== "accepted") return verdict;
+    const heldConversationKey = readVerifiedBinding(accountIdB64)?.conversationKeyB64;
     const written = acceptReset({
       accountIdB64,
       heldKeyB64,
@@ -2033,6 +2058,7 @@ export class ContactsClient {
       keyGeneration: verdict.keyGeneration,
       signedAtMs: verdict.signedAtMs,
       nowMs: Date.now(),
+      ...(heldConversationKey !== undefined ? { heldPredecessorsB64: [heldConversationKey] } : {}),
     });
     if (written === "stale" || written === "no-account") {
       return { kind: "refused", why: "unconfirmed" };
@@ -2224,6 +2250,7 @@ export class ContactsClient {
         setPin(accountIdB64, fetchedPubkeyB64, 0, undefined, {
           keyGeneration: existing.acceptedKeyGeneration ?? bundle.key_generation,
         });
+        carryBindingConversationKey(accountIdB64, binding);
         dropVerifiedBinding(accountIdB64);
       } else if (existing.acceptedKeyGeneration === undefined) {
         setPin(accountIdB64, fetchedPubkeyB64, existing.rotationMarker, undefined, {
@@ -2312,6 +2339,7 @@ export class ContactsClient {
           ? { keyGeneration: existing.acceptedKeyGeneration }
           : {}),
       });
+      carryBindingConversationKey(accountIdB64, binding);
       dropVerifiedBinding(accountIdB64);
     }
     const result = setPin(accountIdB64, fetchedPubkeyB64, proofExpiresAt, undefined, {
@@ -3450,12 +3478,15 @@ export class ContactsClient {
   ): Promise<D[]> {
     const wasm = await loadWasm();
     const accountIdB64 = base64Encode(accountId);
-    const keys = accountKeysOf(accountIdB64);
+    // The pin's chain, else the verified binding's: a conversation key a link
+    // proved sits on the binding of an account this device never pinned.
+    const binding = readVerifiedBinding(accountIdB64);
+    const keys = accountKeysOf(accountIdB64) ?? accountKeysOfBinding(binding);
     const superseded = loadSupersededKeys();
     const accepted =
       expectedKeyB64 !== null
         ? acceptableBoundKeys(expectedKeyB64, keys, superseded)
-        : trustedBoundKeys(keys, readVerifiedBinding(accountIdB64)?.keyB64, superseded);
+        : trustedBoundKeys(keys, binding?.keyB64, superseded);
     return devicesBoundTo(devices, accepted, (d) => {
       try {
         const bound = wasm.keyPackageAccountKey(d.keyPackage);

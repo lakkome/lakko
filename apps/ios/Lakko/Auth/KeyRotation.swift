@@ -137,6 +137,32 @@ public enum OwnAccountKeys {
         predecessorSeeds.first ?? currentSeed
     }
 
+    /// ADR-0074 section 3.7 — the two-way conversation link a rotation
+    /// uploads: signed by the key the conversations are bound to (the OLDEST
+    /// own predecessor, the key just left on a first rotation) and by the
+    /// current key. It is what lets a contact first met after the rotation,
+    /// who pinned only the current key, follow this person to the key their
+    /// roster names; a supersession proof cannot, being signed by the old key
+    /// alone.
+    ///
+    /// `nil` when the account holds no predecessor, or the two are one key:
+    /// a link from a key to itself says nothing. The seeds are the 64-byte
+    /// phrase seeds; a seed is never logged.
+    public static func conversationLink(
+        currentSeed: Data, predecessorSeeds: [Data], issuedAtUnixSecs: Int64
+    ) -> Data? {
+        guard let oldest = predecessorSeeds.first, oldest != currentSeed else { return nil }
+        do {
+            return try signConversationLink(
+                conversationEd25519Seed: try Identity.fromSeed(seed: oldest).ed25519Seed(),
+                currentEd25519Seed: try Identity.fromSeed(seed: currentSeed).ed25519Seed(),
+                issuedAtUnixSecs: issuedAtUnixSecs)
+        } catch {
+            NSLog("ADR-0074: the conversation link could not be signed")
+            return nil
+        }
+    }
+
     /// What to do with a device's stored conversation binding.
     public enum BindingVerdict: Equatable {
         /// The binding is this account's and is kept.

@@ -8,6 +8,7 @@ import android.util.Log
 import me.lakko.app.storage.StorageClient
 import uniffi.lakko_ffi_uniffi.BackupContactRecord
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.BackupOwnPredecessor
 import uniffi.lakko_ffi_uniffi.ParsedBackupPayload
 import uniffi.lakko_ffi_uniffi.backupEnvelopeHash
 import uniffi.lakko_ffi_uniffi.buildBackupPayload
@@ -86,6 +87,9 @@ public class BackupClient(
         knownGroupIdsHex: List<String> = emptyList(),
         /** ADR-0058 section 5.2 — the folded synced state's bytes, or `null`. */
         syncedState: ByteArray? = null,
+        /** ADR-0074 section 3.7 — the account's own predecessors, oldest
+         *  first. The caller owns the seeds and zeroes them. */
+        ownPredecessors: List<BackupOwnPredecessor> = emptyList(),
     ) {
         val createdAtMs = System.currentTimeMillis().toULong()
         val payload = buildBackupPayload(
@@ -98,6 +102,7 @@ public class BackupClient(
             // envelope.
             knownGroupIds = knownGroupIdsHex.mapNotNull(::groupIdBytesOrNull),
             syncedState = syncedState?.takeIf { it.isNotEmpty() },
+            ownPredecessors = ownPredecessors.takeIf { it.isNotEmpty() },
         )
         val envelope = sealBackup(phrase = phraseBytes, payloadBytes = payload)
         // ADR-0037: mint the auth-signed head, frame `TAG ‖ head ‖ envelope`,
@@ -156,6 +161,7 @@ public class BackupClient(
         contacts: List<BackupContactRecord> = emptyList(),
         knownGroupIdsHex: List<String> = emptyList(),
         syncedState: ByteArray? = null,
+        ownPredecessors: List<BackupOwnPredecessor> = emptyList(),
     ): UploadResult {
         val cached = PhraseStore.getPhrase(context, accountIdB64)
             ?: return UploadResult.CacheMiss
@@ -170,6 +176,7 @@ public class BackupClient(
                 accountIdB64 = accountIdB64,
                 knownGroupIdsHex = knownGroupIdsHex,
                 syncedState = syncedState,
+                ownPredecessors = ownPredecessors,
             )
             return UploadResult.Uploaded
         } catch (cause: Throwable) {
@@ -343,6 +350,14 @@ public fun ed25519SeedFromIdentitySeed(identitySeed: ByteArray): ByteArray {
  * Lakko mints 32-byte ids; anything else names no conversation, so carrying it
  * would only put a name nobody can act on into the backup.
  */
+/**
+ * ADR-0074 section 3.7: the account's own predecessors as a backup carries
+ * them, oldest first, each with the time the account adopted its successor.
+ * Fresh copies of the seeds: the caller zeroes them and [rows] alike.
+ */
+internal fun ownPredecessorsForBackup(rows: List<me.lakko.app.auth.OwnPredecessor>): List<BackupOwnPredecessor> =
+    rows.map { BackupOwnPredecessor(seed = it.phraseSeed.copyOf(), adoptedAtMs = it.supersededAtMs.toULong()) }
+
 internal fun groupIdBytesOrNull(hex: String): ByteArray? {
     if (hex.length != 64) return null
     val out = ByteArray(32)

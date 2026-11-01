@@ -70,10 +70,18 @@ const MAX_LEAF_AUTH_LEN: usize = 200;
 const MAX_GENESIS_ATTEST_LEN: usize = 256;
 
 /// A fetched `identity_bundles` row: `(signature_pubkey, x25519_pubkey,
-/// supersession_proof?, key_generation, key_reset_attest?)` — the proof
-/// column is nullable (G-4, ADR-0016); the generation and the nullable
-/// key-reset attestation are ADR-0073's.
-type IdentityBundleRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, u64, Option<Vec<u8>>);
+/// supersession_proof?, key_generation, key_reset_attest?,
+/// conversation_link?)` — the proof column is nullable (G-4, ADR-0016); the
+/// generation and the nullable key-reset attestation are ADR-0073's, the
+/// nullable link ADR-0074 section 3.7's.
+type IdentityBundleRow = (
+    Vec<u8>,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    u64,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+);
 
 fn decode_fixed<const N: usize>(
     b64: &str,
@@ -118,6 +126,34 @@ fn decode_optional_proof(b64: Option<&str>) -> Result<Option<Vec<u8>>, (StatusCo
         return Err((
             StatusCode::BAD_REQUEST,
             format!("supersession_proof exceeds {MAX_SUPERSESSION_PROOF_LEN} bytes"),
+        ));
+    }
+    Ok(Some(bytes))
+}
+
+/// Most bytes a stored conversation link may take. The link is 201 bytes;
+/// this is the column's bound, and discovery never parses what it stores.
+const MAX_CONVERSATION_LINK_LEN: usize = 256;
+
+/// Decode the optional two-way conversation link (ADR-0074 section 3.7).
+/// Opaque: base64 and a length cap, nothing else. A peer verifies it against
+/// the key it pinned, so a malicious writer can only make it useless.
+fn decode_optional_conversation_link(
+    b64: Option<&str>,
+) -> Result<Option<Vec<u8>>, (StatusCode, String)> {
+    let Some(b64) = b64 else {
+        return Ok(None);
+    };
+    let bytes = B64.decode(b64).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid conversation_link base64: {e}"),
+        )
+    })?;
+    if bytes.len() > MAX_CONVERSATION_LINK_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("conversation_link exceeds {MAX_CONVERSATION_LINK_LEN} bytes"),
         ));
     }
     Ok(Some(bytes))
@@ -233,6 +269,11 @@ pub(crate) struct UploadRequest {
     /// re-upload it is ignored. Absent on a routine upload.
     #[serde(default)]
     pub(crate) key_reset_attest: Option<String>,
+    /// ADR-0074 section 3.7: standard base64 of the two-way conversation
+    /// link of an account that rotated. Stored opaque. Absent keeps what the
+    /// row holds on a same-key upload, and clears it on a key change.
+    #[serde(default)]
+    pub(crate) conversation_link: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -274,6 +315,8 @@ pub(crate) async fn upload(
     // rotation supplies a fresh proof that replaces it, and the proof
     // self-expires via its own 14-day window regardless.
     let supersession_proof = decode_optional_proof(payload.supersession_proof.as_deref())?;
+    let conversation_link =
+        decode_optional_conversation_link(payload.conversation_link.as_deref())?;
 
     // G-30 #2 (ADR-0019): decode the optional leaf authorisation (opaque to
     // discovery). Mirrors `supersession_proof`: `None` PRESERVES any stored
@@ -335,6 +378,7 @@ pub(crate) async fn upload(
             key_reset_attest: key_reset_attest
                 .as_ref()
                 .map(|(claims, bytes)| (claims.key_generation, bytes.as_slice())),
+            conversation_link: conversation_link.as_deref(),
         },
         leaf_auth.as_deref(),
         genesis_attest.as_deref(),
@@ -469,6 +513,9 @@ pub(crate) struct Evidence<'a> {
     /// ADR-0073: `(key_generation, wire bytes)` of a verified key-reset
     /// attestation naming this account and the uploaded key.
     pub(crate) key_reset_attest: Option<(u64, &'a [u8])>,
+    /// ADR-0074 section 3.7: the opaque two-way conversation link. Stored, not
+    /// judged: it decides nothing about the upload.
+    pub(crate) conversation_link: Option<&'a [u8]>,
 }
 
 impl Evidence<'_> {
@@ -739,8 +786,9 @@ async fn try_apply_identity_once(
             sqlx::query(
                 "INSERT INTO identity_bundles \
                     (account_id, signature_pubkey, x25519_pubkey, supersession_proof, \
-                     leaf_auth, genesis_attest, key_generation, key_reset_attest) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                     leaf_auth, genesis_attest, key_generation, key_reset_attest, \
+                     conversation_link) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(account_id)
             .bind(signature_pubkey)
@@ -751,6 +799,7 @@ async fn try_apply_identity_once(
             // Genesis is generation 1 (ADR-0073 section 1).
             .bind(attested.map_or(1u64, |(g, _)| g))
             .bind(attested.map(|(_, bytes)| bytes))
+            .bind(evidence.conversation_link)
             .execute(&mut *tx)
             .await?;
             if attested.is_some() {
@@ -839,7 +888,8 @@ async fn try_apply_identity_once(
                     key_generation              = COALESCE(?, key_generation), \
                     key_reset_attest            = COALESCE(?, key_reset_attest), \
                     previous_signature_pubkey   = COALESCE(?, previous_signature_pubkey), \
-                    last_unproven_key_change_at = IF(?, NOW(3), last_unproven_key_change_at) \
+                    last_unproven_key_change_at = IF(?, NOW(3), last_unproven_key_change_at), \
+                    conversation_link           = IF(?, ?, COALESCE(?, conversation_link)) \
                  WHERE account_id = ?",
             )
             .bind(signature_pubkey)
@@ -851,6 +901,11 @@ async fn try_apply_identity_once(
             .bind(attestation_bytes)
             .bind(new_previous)
             .bind(bump_marker_i)
+            // A key change replaces the link, and clears it when none came:
+            // a link names the key it was minted for.
+            .bind(i64::from(key_changed))
+            .bind(evidence.conversation_link)
+            .bind(evidence.conversation_link)
             .bind(account_id)
             .execute(&mut *tx)
             .await?;
@@ -1256,6 +1311,11 @@ pub(crate) struct FetchResponse {
     /// attested key, and that case carries a supersession proof instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) key_reset_attest: Option<String>,
+    /// ADR-0074 section 3.7: standard base64 of the stored two-way
+    /// conversation link, omitted when the account holds none. An opaque
+    /// pass-through; the peer verifies it against the key it pinned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) conversation_link: Option<String>,
 }
 
 /// `GET /discovery/identity/{account_id_b64url}` — fetch.
@@ -1290,7 +1350,7 @@ pub(crate) async fn fetch(
 
     let row: Option<IdentityBundleRow> = sqlx::query_as(
         "SELECT signature_pubkey, x25519_pubkey, supersession_proof, key_generation, \
-                key_reset_attest \
+                key_reset_attest, conversation_link \
          FROM identity_bundles WHERE account_id = ?",
     )
     .bind(&bytes[..])
@@ -1304,7 +1364,7 @@ pub(crate) async fn fetch(
         )
     })?;
 
-    let (sig, x25519, proof, key_generation, key_reset_attest) = row.ok_or((
+    let (sig, x25519, proof, key_generation, key_reset_attest, conversation_link) = row.ok_or((
         StatusCode::NOT_FOUND,
         "identity bundle not found".to_string(),
     ))?;
@@ -1332,6 +1392,8 @@ pub(crate) async fn fetch(
         key_generation,
         // The same opaque pass-through (ADR-0073 R.3).
         key_reset_attest: key_reset_attest.map(|a| B64.encode(&a)),
+        // The same opaque pass-through (ADR-0074 section 3.7).
+        conversation_link: conversation_link.map(|l| B64.encode(&l)),
     }))
 }
 
@@ -1437,6 +1499,105 @@ mod tests {
     }
 
     #[test]
+    fn decode_optional_conversation_link_handles_absent_present_and_oversized() {
+        assert_eq!(decode_optional_conversation_link(None).unwrap(), None);
+        let link = B64.encode([7u8; 201]);
+        assert_eq!(
+            decode_optional_conversation_link(Some(&link)).unwrap(),
+            Some(vec![7u8; 201])
+        );
+        let oversized = B64.encode([7u8; MAX_CONVERSATION_LINK_LEN + 1]);
+        assert!(decode_optional_conversation_link(Some(&oversized)).is_err());
+        assert!(decode_optional_conversation_link(Some("not base64!")).is_err());
+    }
+
+    #[tokio::test]
+    async fn conversation_link_is_kept_by_a_same_key_upload_and_replaced_by_a_key_change() {
+        use sqlx::mysql::MySqlPoolOptions;
+
+        const COOLDOWN: i64 = 3600;
+        async fn stored_link(pool: &sqlx::MySqlPool, acct: &[u8]) -> Option<Vec<u8>> {
+            sqlx::query_scalar(
+                "SELECT conversation_link FROM identity_bundles WHERE account_id = ?",
+            )
+            .bind(acct)
+            .fetch_one(pool)
+            .await
+            .expect("read conversation_link")
+        }
+        let evidence = |link: Option<&'static [u8]>| Evidence {
+            supersession_proof: None,
+            key_reset_attest: None,
+            conversation_link: link,
+        };
+
+        let Ok(url) = std::env::var("LAKKO_DISCOVERY_TEST_DATABASE_URL") else {
+            eprintln!(
+                "skipping conversation_link_is_kept: LAKKO_DISCOVERY_TEST_DATABASE_URL unset"
+            );
+            return;
+        };
+        let pool = MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect test DB");
+        crate::anon_token_route_tests::migrate_once(&pool).await;
+
+        let acct = [0xB1u8; ACCOUNT_ID_LEN];
+        let key1 = [0x11u8; SIGNATURE_PUBKEY_LEN];
+        let key2 = [0x22u8; SIGNATURE_PUBKEY_LEN];
+        let x25519 = [0x33u8; X25519_PUBKEY_LEN];
+        let self_sig = [0x44u8; 64];
+        let reset_att = [0x77u8; 177];
+        const LINK: &[u8] = &[0x5Au8; 201];
+
+        sqlx::query("DELETE FROM identity_bundles WHERE account_id = ?")
+            .bind(&acct[..])
+            .execute(&pool)
+            .await
+            .expect("clear pre-existing row");
+
+        for (link, expected) in [(Some(LINK), Some(LINK)), (None, Some(LINK))] {
+            try_apply_identity_once(
+                &pool,
+                COOLDOWN,
+                &acct,
+                &key1,
+                &x25519,
+                evidence(link),
+                Some(&self_sig),
+                None,
+                1,
+            )
+            .await
+            .unwrap_or_else(|_| panic!("same-key upload"));
+            assert_eq!(stored_link(&pool, &acct).await.as_deref(), expected);
+        }
+
+        // A key change that brings no link leaves none: a link names the key
+        // it was minted for.
+        try_apply_identity_once(
+            &pool,
+            COOLDOWN,
+            &acct,
+            &key2,
+            &x25519,
+            Evidence {
+                supersession_proof: None,
+                key_reset_attest: Some((2, &reset_att)),
+                conversation_link: None,
+            },
+            Some(&self_sig),
+            None,
+            2,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("attested key change"));
+        assert_eq!(stored_link(&pool, &acct).await, None);
+    }
+
+    #[test]
     fn decode_optional_genesis_attest_handles_absent_present_and_oversized() {
         // Absent -> None (the upsert then PRESERVES any stored genesis_attest).
         assert!(decode_optional_genesis_attest(None).unwrap().is_none());
@@ -1504,6 +1665,7 @@ mod tests {
         const NO_EVIDENCE: Evidence<'static> = Evidence {
             supersession_proof: None,
             key_reset_attest: None,
+            conversation_link: None,
         };
 
         // Read the stored genesis_attest back (nullable column -> Option).
@@ -1603,6 +1765,7 @@ mod tests {
             Evidence {
                 supersession_proof: None,
                 key_reset_attest: Some((2, &reset_att)),
+                conversation_link: None,
             },
             Some(&self_sig),
             Some(&att2),

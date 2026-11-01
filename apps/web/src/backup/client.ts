@@ -60,6 +60,12 @@ import {
   upsertAccepted,
   type AcceptedContact,
 } from "../contacts/local-store";
+import {
+  accountKeyHexOfSeed,
+  boundedOwnPredecessors,
+  collectOwnPredecessors,
+  type CarriedOwnPredecessor,
+} from "../devices/state-bundle";
 import { getPhrase } from "./phrase-store";
 import { mintBackupHead } from "./head-mint";
 import { evaluateRestoreBlob } from "./head-restore";
@@ -68,6 +74,8 @@ import type { BackupContact as WasmBackupContact } from "../../wasm/lakko_ffi_wa
 
 /** Canonical account_id length (UUIDv7) the backup format round-trips. */
 const ACCOUNT_ID_BYTES = 16;
+/** The account seed of an own predecessor, as `Identity.fromSeed` takes it. */
+const ACCOUNT_SEED_BYTES = 64;
 
 /**
  * Decode a `AcceptedContact.accountIdHex` (32 hex chars) into the 16-byte
@@ -118,6 +126,10 @@ export type RestoreResult =
        *  `SyncedState.toBytes()` wrote it; empty when none was held. The
        *  restore seeds the sync runtime from it before its first poll. */
       readonly syncedState: Uint8Array;
+      /** ADR-0074 section 3.7: the account's own predecessors, oldest first,
+       *  with their adoption times; empty for an account that never rotated.
+       *  The seeds go where a kept device holds them. Never log them. */
+      readonly ownPredecessors: readonly CarriedOwnPredecessor[];
     }
   | { readonly kind: "no-backup" }
   | { readonly kind: "wrong-phrase-or-tampered" }
@@ -248,6 +260,7 @@ export class BackupClient {
         ed25519Seed,
         phraseBytes,
         knownGroupIds,
+        deviceKey,
       );
       // ADR-0037: mint the auth-signed head, frame `TAG ‖ head ‖ envelope`,
       // and PUT the framed blob. Soft-fail — a mint failure writes the legacy
@@ -471,6 +484,10 @@ export class BackupClient {
       acceptedContacts,
       knownGroupIds: splitGroupIds(parsed.knownGroupIds),
       syncedState: parsed.syncedState,
+      ownPredecessors: splitOwnPredecessors(
+        parsed.ownPredecessorSeeds,
+        parsed.ownPredecessorAdoptedAtMs,
+      ),
     };
   }
 
@@ -485,6 +502,7 @@ export class BackupClient {
     ed25519Seed: Uint8Array,
     phraseBytes: Uint8Array,
     knownGroupIds: readonly string[],
+    deviceKey: DeviceCipher | undefined,
   ): Promise<Uint8Array> {
     const wasm = await loadWasm();
 
@@ -519,21 +537,71 @@ export class BackupClient {
     const flatGroupIds = new Uint8Array(idBytes.length * GROUP_ID_LEN);
     idBytes.forEach((b, i) => flatGroupIds.set(b, i * GROUP_ID_LEN));
 
-    const payload = wasm.buildBackupPayload(
-      accountId,
-      BigInt(Date.now()),
-      ed25519Seed,
-      contacts,
-      // Payload v6: no MLS snapshot argument. The position it held now takes
-      // the group ids, and both are `Uint8Array`, so this list is positional
-      // by hand.
-      flatGroupIds,
-      // ADR-0058 section 5.2 — the folded synced state, so a restore with no
-      // other device alive still gets its pins, drafts and folders back.
-      currentSyncedStateBytes() ?? undefined,
-    );
-    return wasm.sealBackup(phraseBytes, payload);
+    // ADR-0074 section 3.7: the keys the conversations still name. A row that
+    // cannot be read fails this upload: a blob without them would replace one
+    // that has them, and a device restored from it would hold a key no
+    // conversation knows.
+    const own =
+      deviceKey === undefined
+        ? []
+        : boundedOwnPredecessors(
+            await collectOwnPredecessors(base64Encode(accountId), deviceKey, (seed) =>
+              accountKeyHexOfSeed(wasm, seed),
+            ),
+          );
+    const { seeds, adoptedAtMs } = flattenOwnPredecessors(own);
+    try {
+      const payload = wasm.buildBackupPayload(
+        accountId,
+        BigInt(Date.now()),
+        ed25519Seed,
+        contacts,
+        // Payload v6: no MLS snapshot argument. The position it held now takes
+        // the group ids, and both are `Uint8Array`, so this list is positional
+        // by hand.
+        flatGroupIds,
+        // ADR-0058 section 5.2 — the folded synced state, so a restore with no
+        // other device alive still gets its pins, drafts and folders back.
+        currentSyncedStateBytes() ?? undefined,
+        own.length === 0 ? undefined : seeds,
+        own.length === 0 ? undefined : adoptedAtMs,
+      );
+      return wasm.sealBackup(phraseBytes, payload);
+    } finally {
+      seeds.fill(0);
+    }
   }
+}
+
+/** The wire form of the own predecessors: flat 64-byte seeds, one adoption
+ *  time each. The caller zeroes `seeds`. */
+export function flattenOwnPredecessors(own: readonly CarriedOwnPredecessor[]): {
+  readonly seeds: Uint8Array;
+  readonly adoptedAtMs: BigUint64Array;
+} {
+  const seeds = new Uint8Array(own.length * ACCOUNT_SEED_BYTES);
+  const adoptedAtMs = new BigUint64Array(own.length);
+  own.forEach((p, i) => {
+    const seed = base64Decode(p.seedB64);
+    seeds.set(seed, i * ACCOUNT_SEED_BYTES);
+    seed.fill(0);
+    adoptedAtMs[i] = BigInt(Math.max(0, Math.floor(p.adoptedAtMs)));
+  });
+  return { seeds, adoptedAtMs };
+}
+
+/** {@link flattenOwnPredecessors} reversed. Zeroes `flatSeeds`. */
+export function splitOwnPredecessors(
+  flatSeeds: Uint8Array,
+  adoptedAtMs: ArrayLike<bigint>,
+): CarriedOwnPredecessor[] {
+  const out: CarriedOwnPredecessor[] = [];
+  for (let i = 0; i < adoptedAtMs.length; i += 1) {
+    const seed = flatSeeds.subarray(i * ACCOUNT_SEED_BYTES, (i + 1) * ACCOUNT_SEED_BYTES);
+    out.push({ seedB64: base64Encode(seed), adoptedAtMs: Number(adoptedAtMs[i] ?? 0n) });
+  }
+  flatSeeds.fill(0);
+  return out;
 }
 
 /** Convenience: upsert each contact from a restore result into

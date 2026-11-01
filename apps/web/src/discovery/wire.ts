@@ -117,6 +117,11 @@ export interface IdentityUploadRequest {
    *  stores it and deletes every KeyPackage row of the account in the same
    *  transaction. Omitted on a routine upload. */
   key_reset_attest?: string;
+  /** ADR-0074 section 3.7: standard base64 of the two-way conversation link
+   *  of an account that rotated (`signConversationLink`). Stored opaque.
+   *  Omitted on a same-key upload (the row keeps what it holds); a key change
+   *  that carries none clears it. */
+  conversation_link?: string;
 }
 
 /** Response body of `POST /discovery/identity`. */
@@ -145,6 +150,11 @@ export interface IdentityFetchResponse {
    *  PROVEN rotation it no longer binds the published key, and that path
    *  carries a supersession proof instead. */
   key_reset_attest?: string;
+  /** ADR-0074 section 3.7: standard base64 of the two-way conversation link;
+   *  absent for an account that holds none. Discovery passes it through
+   *  unparsed; a peer verifies it against the key its gate left trusted
+   *  (`contacts/conversation-link.ts`). */
+  conversation_link?: string;
 }
 
 // ----------------------------------------------------------------------------

@@ -5485,6 +5485,50 @@ pub fn verify_supersession(
     Ok(new.to_vec())
 }
 
+/// Sign a two-way conversation link (ADR-0074 section 3.7): both keys state
+/// that the account's conversations are bound to the first and the directory
+/// publishes the second. Pass each identity's `ed25519_seed`. Returns the
+/// 201-byte link to upload with the identity bundle.
+///
+/// # Errors
+///
+/// [`FfiError::Identity`] when a seed is not 32 bytes or the two are one key.
+#[uniffi::export]
+pub fn sign_conversation_link(
+    conversation_ed25519_seed: Vec<u8>,
+    current_ed25519_seed: Vec<u8>,
+    issued_at_unix_secs: i64,
+) -> Result<Vec<u8>, FfiError> {
+    let conversation = signing_key_from_seed(&conversation_ed25519_seed)?;
+    let current = signing_key_from_seed(&current_ed25519_seed)?;
+    lakko_transparency::ConversationLink::sign(&conversation, &current, issued_at_unix_secs)
+        .map(|link| link.to_vec())
+        .map_err(|e| FfiError::Identity(format!("conversation link: {e}")))
+}
+
+/// Verify a conversation link against the key the caller left pinned for the
+/// account and return the 32-byte conversation key it names, which the caller
+/// records as a proven predecessor of that pin.
+///
+/// # Errors
+///
+/// [`FfiError::Identity`] when `trusted_current_key` is not 32 bytes, or the
+/// link is malformed, names another current key, or either signature does not
+/// verify. A caller ignores a refused link: it changes nothing.
+#[uniffi::export]
+pub fn verify_conversation_link(
+    link: Vec<u8>,
+    trusted_current_key: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let current: [u8; 32] = trusted_current_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Identity("trusted current key must be 32 bytes".into()))?;
+    lakko_transparency::verify_conversation_link(&link, &current)
+        .map(|key| key.to_vec())
+        .map_err(|e| FfiError::Identity(format!("conversation link: {e}")))
+}
+
 /// Verify a complete identity-rotation chain against the KT log (G-30 #2,
 /// ADR-0019). Unlike [`verify_supersession`] — which checks only the bundle's
 /// standalone proof against the local pin — this anchors the rotation to the

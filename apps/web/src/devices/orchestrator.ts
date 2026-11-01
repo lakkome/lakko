@@ -22,7 +22,7 @@
  * acknowledged transaction (scan happens, ack happens, done).
  */
 import { resendServiceEnvelopes } from "../reach/service-envelope-outbox";
-import { loadWasm, type Wasm } from "../wasm";
+import { loadWasm } from "../wasm";
 import type {
   DeviceGroup as WasmDeviceGroup,
   Identity as WasmIdentity,
@@ -71,6 +71,7 @@ import { applyCarriedExtras, collectCarriedExtras } from "./carried-state-io";
 import {
   STATE_EXPORTER_KEY_LENGTH,
   STATE_EXPORTER_LABEL,
+  accountKeyHexOfSeed,
   applyOwnPredecessors,
   applyStateBundle,
   buildStateBundle,
@@ -412,18 +413,6 @@ export async function prepareJoinFlow(args: {
       }
     },
   };
-}
-
-/** The lower-case hex account signature key of a 64-byte account seed. */
-function accountKeyHexOfSeed(wasm: Wasm, seed: Uint8Array): string {
-  const identity = wasm.Identity.fromSeed(seed);
-  try {
-    let out = "";
-    for (const byte of identity.signaturePublicKey) out += byte.toString(16).padStart(2, "0");
-    return out;
-  } finally {
-    identity.free();
-  }
 }
 
 /** ADR-0074 — store a bundle's own predecessors under the device key. Best

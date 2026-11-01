@@ -524,6 +524,73 @@ public class OwnPredecessorStore(private val storage: SealedBlobStorage) {
 }
 
 /**
+ * ADR-0074 section 3.7: the conversation link of a rotation, signed by the
+ * OLDEST own predecessor in [rows] (the key every conversation leaf stays
+ * under, the key just left on a first rotation) and by [currentSeed]. `null`
+ * when the account holds no predecessor. [ed25519Of] and [sign] are the
+ * native core's; both Ed25519 seeds are zeroed here.
+ */
+public fun conversationLinkOf(
+    rows: List<OwnPredecessor>,
+    currentSeed: ByteArray,
+    nowSecs: Long,
+    ed25519Of: (ByteArray) -> ByteArray,
+    sign: (ByteArray, ByteArray, Long) -> ByteArray,
+): ByteArray? {
+    val oldest = rows.firstOrNull() ?: return null
+    val conversationEd = ed25519Of(oldest.phraseSeed)
+    val currentEd = ed25519Of(currentSeed)
+    return try {
+        sign(conversationEd, currentEd, nowSecs)
+    } finally {
+        conversationEd.fill(0)
+        currentEd.fill(0)
+    }
+}
+
+/** What to do with a device's stored conversation binding (ADR-0074 part 3). */
+public enum class BindingVerdict {
+    /** The binding is this account's and is kept. */
+    Keep,
+
+    /** No usable binding, or one naming a key that is not this account's:
+     *  mint one under the conversation key. */
+    Mint,
+
+    /** The binding names the CURRENT key although the account has
+     *  predecessors (it was minted before a pairing bundle or a backup
+     *  brought them) and this device holds no conversation yet: mint it again
+     *  under the conversation key, before any KeyPackage naming the current
+     *  key admits this device anywhere. */
+    Remint,
+
+    /** The same, but this device already holds conversations whose leaves
+     *  carry the current-key binding: it is kept, since a new mint would
+     *  split the device between two account keys. Such a device is not
+     *  admitted to the account's older conversations. */
+    KeepUnderCurrentKey,
+}
+
+/**
+ * The rule over a stored binding. [boundKey] is the account key it names
+ * (`null` when there is none or it did not verify), [predecessorKeys] the own
+ * predecessor keys, oldest first. Mirror of the iOS
+ * `OwnAccountKeys.bindingVerdict`.
+ */
+public fun bindingVerdict(
+    boundKey: ByteArray?,
+    currentKey: ByteArray,
+    predecessorKeys: List<ByteArray>,
+    holdsConversations: Boolean,
+): BindingVerdict {
+    if (boundKey == null) return BindingVerdict.Mint
+    if (predecessorKeys.any { it.contentEquals(boundKey) }) return BindingVerdict.Keep
+    if (!boundKey.contentEquals(currentKey)) return BindingVerdict.Mint
+    if (predecessorKeys.isEmpty()) return BindingVerdict.Keep
+    return if (holdsConversations) BindingVerdict.KeepUnderCurrentKey else BindingVerdict.Remint
+}
+
+/**
  * The 64-byte seed of the account identity the conversation leaves that
  * exist are bound to (ADR-0074 section 3.1, Stage A): the EARLIEST own
  * predecessor after a rotation, else [currentSeed]. Everything that speaks

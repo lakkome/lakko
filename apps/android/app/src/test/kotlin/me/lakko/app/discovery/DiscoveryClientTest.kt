@@ -278,6 +278,50 @@ class DiscoveryClientTest {
     }
 
     @Test
+    fun `a rotation's upload carries the conversation link as standard base64`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        val link = ByteArray(201) { 0xFB.toByte() }
+        client(
+            responses = listOf(
+                HttpStatusCode.OK to """{"ok":true}""",
+                HttpStatusCode.OK to """{"ok":true}""",
+            ),
+            captured = captured,
+        ).use { client ->
+            client.uploadIdentityBundle(
+                accountId = ByteArray(16),
+                signaturePubkey = ByteArray(32),
+                x25519Pubkey = ByteArray(32),
+                conversationLink = link,
+            )
+            client.uploadIdentityBundle(
+                accountId = ByteArray(16),
+                signaturePubkey = ByteArray(32),
+                x25519Pubkey = ByteArray(32),
+            )
+        }
+        assertEquals(
+            java.util.Base64.getEncoder().encodeToString(link),
+            captured[0].body!!["conversation_link"]!!.jsonPrimitive.content,
+        )
+        // Any other upload names none.
+        assertTrue(captured[1].body!!["conversation_link"].let { it == null || it is kotlinx.serialization.json.JsonNull })
+    }
+
+    @Test
+    fun `identityFetch reads the conversation link when the bundle has one`() = runTest {
+        client(
+            responses = listOf(
+                HttpStatusCode.OK to """{"signature_pubkey":"SIG","x25519_pubkey":"X25","conversation_link":"TElOSw=="}""",
+                HttpStatusCode.OK to """{"signature_pubkey":"SIG","x25519_pubkey":"X25"}""",
+            ),
+        ).use { client ->
+            assertEquals("TElOSw==", client.identityFetch(ByteArray(16))!!.conversation_link)
+            assertEquals(null, client.identityFetch(ByteArray(16))!!.conversation_link)
+        }
+    }
+
+    @Test
     fun `identityFetch folds 404 into null`() = runTest {
         client(
             responses = listOf(HttpStatusCode.NotFound to ""),

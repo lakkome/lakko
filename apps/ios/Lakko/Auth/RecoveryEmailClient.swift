@@ -225,6 +225,44 @@ struct EmailRemovedResponse: Codable, Equatable {
     let removed: Bool?
 }
 
+/// `GET /account/phrase` (ADR-0075 section 3, amended 2026-11-01): which way
+/// "Save a recovery phrase" goes. Answered on a server with no mail set up too,
+/// where `GET /recovery-email` is a `503`.
+public struct AccountPhraseStatus: Codable, Equatable, Sendable {
+    /// The owner saved a recovery phrase.
+    public let saved: Bool
+    /// The current phrase was ever sealed in an email vault: saving one takes
+    /// a key rotation.
+    public let rotationNeeded: Bool
+
+    public init(saved: Bool, rotationNeeded: Bool) {
+        self.saved = saved
+        self.rotationNeeded = rotationNeeded
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case saved
+        case rotationNeeded = "rotation_needed"
+    }
+}
+
+/// Reads the answer of `POST /account/phrase/saved`.
+enum PhraseSaveRefusal {
+
+    /// The body code of the refusal.
+    static let needsRotationCode = "phrase-save-needs-rotation"
+
+    /// `409 {"error":"phrase-save-needs-rotation"}`: the phrase was sealed in
+    /// an email vault since this device last read `GET /account/phrase`.
+    static func needsRotation(_ error: Error) -> Bool {
+        guard case .http(let status, _, let body) = error as? AuthClientError, status == 409 else {
+            return false
+        }
+        let json = (try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any]
+        return json?["error"] as? String == needsRotationCode
+    }
+}
+
 struct AccountNoticeWire: Codable, Equatable {
     let id: UInt64
     let kind: String
@@ -464,6 +502,27 @@ public extension AuthClient {
         let _: EmailRemovedResponse = try await send(
             method: "DELETE", endpoint: "/recovery-email",
             body: FreshGrantRequest(freshGrant: freshGrant), bearer: sessionToken)
+    }
+
+    /// `GET /account/phrase` (bearer).
+    func accountPhraseStatus(sessionToken: String) async throws -> AccountPhraseStatus {
+        var request = URLRequest(url: try buildURL(endpoint: "/account/phrase"))
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
+        return try await execute(endpoint: "/account/phrase", request: request)
+    }
+
+    /// `POST /account/phrase/saved` (bearer + fresh-auth grant) -> `204`. The
+    /// owner saved a phrase no email vault ever held; no key changes.
+    /// Idempotent. Refused `409 phrase-save-needs-rotation`
+    /// (``PhraseSaveRefusal``) and `403 fresh-auth-required`.
+    func markPhraseSaved(sessionToken: String, freshGrant: String) async throws {
+        var request = URLRequest(url: try buildURL(endpoint: "/account/phrase/saved"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONEncoder().encode(FreshGrantRequest(freshGrant: freshGrant))
+        try await executeNoContent(endpoint: "/account/phrase/saved", request: request)
     }
 
     /// `GET /account/notices?after=<id>` or `?since_ms=<unix ms>` (bearer):

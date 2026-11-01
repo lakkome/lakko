@@ -2999,6 +2999,74 @@ public class AuthRepository(
     }
 
     /**
+     * "Save a recovery phrase" (UX 19.5): `GET /account/phrase` and which way
+     * the screen goes ([phraseSavePath]). Asked before any word is shown; a
+     * failure throws and no path is guessed.
+     */
+    public suspend fun phraseSavePath(): PhraseSavePath {
+        val accountIdB64 = signedInAccountIdB64()
+            ?: throw AuthClientArgError("not signed in", me.lakko.app.l10n.UiText("common.error.session_not_ready"))
+        val token = sessionTokenProvider.current()
+            ?: throw AuthClientArgError("not signed in", me.lakko.app.l10n.UiText("common.error.session_not_ready"))
+        val status = authClientFactory().use { it.accountPhraseStatus(token) }
+        return withContext(Dispatchers.IO) {
+            val owed = rotationOwedStore.load(accountIdB64)
+            me.lakko.app.auth.phraseSavePath(
+                rotationNeeded = status.rotationNeeded,
+                holdsPhrase = devicePhrase() != null,
+                rotationInFlight = owed != null && !me.lakko.app.devices.rotationCanBeAbandoned(owed),
+            )
+        }
+    }
+
+    /**
+     * The last step of "Save a recovery phrase" with the keys kept: tell the
+     * server, under the live proof. Marked as this device's own first, as a
+     * rotation's is, so the acting device is not asked "It was me".
+     */
+    public suspend fun savePhraseKeepingKeys(): PhraseSavedOutcome {
+        val accountIdB64 = signedInAccountIdB64() ?: return PhraseSavedOutcome.Failed
+        val outcome = me.lakko.app.auth.savePhraseKeepingKeys(
+            object : PhraseKeptPorts {
+                override fun freshGrant(): String? = this@AuthRepository.freshGrant()
+
+                override fun markOwnAction() =
+                    noticeStore.markOwn(accountIdB64, AccountNoticeKind.PhraseSaved, System.currentTimeMillis())
+
+                override suspend fun markSaved(freshGrant: String) {
+                    val token = sessionTokenProvider.current()
+                        ?: throw AuthClientArgError("not signed in")
+                    authClientFactory().use { it.markPhraseSaved(token, freshGrant) }
+                }
+
+                override fun storeSaved() {
+                    protectionStore.setPhraseSaved(accountIdB64, true)
+                    mutableRecoveryEmail.value = mutableRecoveryEmail.value?.copy(vault = false, phraseSaved = true)
+                }
+            },
+        )
+        when (outcome) {
+            // An earlier attempt on the rotation path that never reached the
+            // server is finished with: its sealed new entropy goes too.
+            PhraseSavedOutcome.Saved -> dropUnstartedPhraseRotation(accountIdB64)
+            PhraseSavedOutcome.ProofRequired -> dropFreshProof()
+            PhraseSavedOutcome.NeedsRotation, PhraseSavedOutcome.Failed -> Unit
+        }
+        return outcome
+    }
+
+    private fun dropUnstartedPhraseRotation(accountIdB64: String) {
+        try {
+            val owed = rotationOwedStore.load(accountIdB64) ?: return
+            if (!owed.phraseSaved || !me.lakko.app.devices.rotationCanBeAbandoned(owed)) return
+            rotationOwedStore.clear(accountIdB64)
+            rotationDiscardPrepared()
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "unstarted rotation not dropped: ${cause.javaClass.simpleName}")
+        }
+    }
+
+    /**
      * `POST /recovery-email/enrol/start` for the signed-in account: mail a
      * code to [address]. The address is passed through and kept nowhere.
      *
@@ -6529,6 +6597,21 @@ public class AuthRepository(
         } ?: secrets.accountIdentitySeed.copyOf()
     }
 
+    /**
+     * ADR-0074 section 3.7: this account's own predecessors as a backup
+     * carries them, oldest first; the caller zeroes each seed. Unlike
+     * [ownPredecessors] a read that throws is passed on: a backup uploaded
+     * without them would cut a restored device off from every conversation.
+     */
+    public fun backupOwnPredecessors(accountIdB64: String): List<uniffi.lakko_ffi_uniffi.BackupOwnPredecessor> {
+        val rows = ownPredecessorStore.load(accountIdB64)
+        return try {
+            me.lakko.app.backup.ownPredecessorsForBackup(rows)
+        } finally {
+            rows.forEach { it.zero() }
+        }
+    }
+
     /** This account's own previous identities (seeds included), earliest
      *  first; the caller zeroes each. Empty when it never rotated. */
     public fun ownPredecessors(): List<OwnPredecessor> {
@@ -6791,11 +6874,23 @@ public class AuthRepository(
                             )
                         }
                     }
+                    // ADR-0074 section 3.7: signed on every attempt, so a
+                    // retried upload carries it too. The attested fallback
+                    // carries it as well: the leaves stay under the old key on
+                    // that arm too, and discovery clears the link on a key
+                    // change that brings none.
+                    val link = rotationConversationLink(accountIdB64, secrets.accountIdentitySeed)
+                    if (withProof && link == null) {
+                        return me.lakko.app.devices.IdentityPublish.Retry(
+                            IllegalStateException("no earlier account key to link"),
+                        )
+                    }
                     discovery.uploadIdentityBundle(
                         accountId = secrets.accountId,
                         signaturePubkey = signaturePubkey,
                         x25519Pubkey = identity.x25519PublicKey(),
                         supersessionProofB64 = if (withProof) proofB64 else null,
+                        conversationLink = link,
                         // With the proof, discovery forwards it as the log
                         // leaf's authorisation; the attested-reset fallback
                         // is a first entry for this key and self-signs.
@@ -6817,6 +6912,29 @@ public class AuthRepository(
             cause
         }
         return me.lakko.app.devices.rotationIdentityPublishOf(error)
+    }
+
+    /**
+     * ADR-0074 section 3.7: the two-way link from the key every conversation
+     * leaf stays under (the OLDEST own predecessor) to [currentSeed]. `null`
+     * when no predecessor is readable, which after an adoption is a failure
+     * of the store.
+     */
+    private fun rotationConversationLink(accountIdB64: String, currentSeed: ByteArray): ByteArray? {
+        val rows = ownPredecessorStore.load(accountIdB64)
+        try {
+            return conversationLinkOf(
+                rows = rows,
+                currentSeed = currentSeed,
+                nowSecs = System.currentTimeMillis() / 1000L,
+                ed25519Of = { seed -> Identity.fromSeed(seed).use { it.ed25519Seed() } },
+                sign = { conversation, current, at ->
+                    uniffi.lakko_ffi_uniffi.signConversationLink(conversation, current, at)
+                },
+            )
+        } finally {
+            rows.forEach { it.zero() }
+        }
     }
 
     /**
@@ -6926,6 +7044,7 @@ public class AuthRepository(
                     "the phrase on this device is not the rotated one"
                 }
                 val seed = me.lakko.app.backup.ed25519SeedFromIdentitySeed(phraseSeed)
+                val predecessors = backupOwnPredecessors(accountIdB64)
                 try {
                     val contacts =
                         me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext, accountIdB64).map { c ->
@@ -6953,10 +7072,12 @@ public class AuthRepository(
                                 knownGroupIdsHex,
                             ),
                             syncedState = syncedState,
+                            ownPredecessors = predecessors,
                         )
                     }
                 } finally {
                     seed.fill(0)
+                    predecessors.forEach { it.seed.fill(0) }
                 }
             } finally {
                 phraseSeed.fill(0)
@@ -7886,6 +8007,27 @@ public class AuthRepository(
             }
         }
 
+        override fun storeOwnPredecessors(
+            predecessors: List<uniffi.lakko_ffi_uniffi.BackupOwnPredecessor>,
+        ): me.lakko.app.backup.OwnPredecessorsStored? =
+            // Where a kept device holds them, through the same function the
+            // pairing state bundle runs.
+            me.lakko.app.devices.StateBundle.storeOwnPredecessorSeeds(
+                context = applicationContext,
+                accountIdB64 = accountIdB64,
+                seeds = predecessors.map {
+                    me.lakko.app.devices.StateBundle.OwnPredecessorSeed(it.seed, it.adoptedAtMs.toLong())
+                },
+            )?.let { me.lakko.app.backup.OwnPredecessorsStored(it.conversationKeyChanged) }
+
+        override suspend fun rebindConversationKey() {
+            // A chat layer already loaded (the retry at a later landing) is
+            // rebuilt under the oldest key and its KeyPackage published again.
+            // On a phrase route nothing is loaded yet: the session bootstrap
+            // reads the store itself.
+            me.lakko.app.devices.StateBundle.conversationKeySink?.invoke(accountIdB64)
+        }
+
         override fun mergeContacts(
             contacts: List<uniffi.lakko_ffi_uniffi.BackupContactRecord>,
             createdAtMs: ULong,
@@ -8043,20 +8185,27 @@ public class AuthRepository(
                     )
                 }
             try {
-                backupClient.uploadNow(
-                    accountId = accountId,
-                    ed25519Seed = seed,
-                    phraseBytes = phraseBytes,
-                    contacts = contactRecords,
-                    // ADR-0037 (G-11): mint the auth-signed head + persist the
-                    // monotonic version floor under the Keystore-backed store.
-                    context = applicationContext,
-                    accountIdB64 = accountIdB64,
-                    // A backup always lists the conversations: what this
-                    // device holds, plus what a restored backup named.
-                    knownGroupIdsHex = knownGroupIdsForBackup(accountIdB64),
-                    syncedState = syncedState,
-                )
+                // ADR-0074 section 3.7: every backup carries them.
+                val predecessors = backupOwnPredecessors(accountIdB64)
+                try {
+                    backupClient.uploadNow(
+                        accountId = accountId,
+                        ed25519Seed = seed,
+                        phraseBytes = phraseBytes,
+                        contacts = contactRecords,
+                        // ADR-0037 (G-11): mint the auth-signed head + persist the
+                        // monotonic version floor under the Keystore-backed store.
+                        context = applicationContext,
+                        accountIdB64 = accountIdB64,
+                        // A backup always lists the conversations: what this
+                        // device holds, plus what a restored backup named.
+                        knownGroupIdsHex = knownGroupIdsForBackup(accountIdB64),
+                        syncedState = syncedState,
+                        ownPredecessors = predecessors,
+                    )
+                } finally {
+                    predecessors.forEach { it.seed.fill(0) }
+                }
             } catch (cause: Throwable) {
                 Log.w("lakko-auth", "backup baseline upload ($context) failed", cause)
             } finally {

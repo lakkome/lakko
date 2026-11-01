@@ -2329,6 +2329,27 @@ public final class AuthRepository: ObservableObject {
         return DevicePhrase.read(accountIdB64: account.accountIdB64)
     }
 
+    /// ADR-0075 section 3 (amended 2026-11-01) — the words "Save a recovery
+    /// phrase" shows when no key has to change: the phrase this device holds
+    /// for the signed-in account, unless it is not the account's. `nil` sends
+    /// the screen down the rotation: words that are not the current seed's
+    /// would save nothing.
+    func heldPhraseToSave() -> String? {
+        guard let phrase = heldPhraseForEmailVault(), let secrets = identitySecrets,
+              (try? RecoveryMnemonic.fromPhrase(phrase: phrase).toSeed()) == secrets.accountIdentitySeed
+        else { return nil }
+        return phrase
+    }
+
+    /// The account's phrase was saved: the local flag, the marker that keeps
+    /// this device from being told about its own act, and the protection
+    /// rows. The one way both "Save a recovery phrase" paths record it.
+    func notePhraseSaved(accountIdB64: String) {
+        protectionStore.setPhraseSaved(true, accountIdB64: accountIdB64)
+        protectionStore.markOwnAction(.phraseSaved, atMs: grantNowMs(), accountIdB64: accountIdB64)
+        onProtectionChanged?()
+    }
+
     /// ADR-0075 — whether the signed-in account's recovery phrase was saved,
     /// as this device knows it. The new words of a rotation, a reset or a
     /// recall, and every link to them, are shown only then.
@@ -6182,7 +6203,8 @@ public final class AuthRepository: ObservableObject {
             return .fetchFailed
         case .restored(let parsed):
             result = .applied(PhraseRestoreBackup.apply(
-                parsed, accountIdB64: accountIdB64, context: context, defaults: backupDefaults))
+                parsed, accountIdB64: accountIdB64, context: context, defaults: backupDefaults,
+                ownPredecessors: ownPredecessors))
         }
         // A definitive answer: nothing is owed any more.
         BackupRestoreRetryStore.clear(accountIdB64: accountIdB64, defaults: backupDefaults)
@@ -7024,6 +7046,12 @@ extension AuthRepository {
     /// there is one) and, when `withProof`, the supersession proof, on the
     /// new session. No genesis attestation is minted here: auth moved its
     /// record of the account key inside the rotation.
+    ///
+    /// ADR-0074 section 3.7 — every attempt carries the conversation link,
+    /// the fallback without a proof too (that upload also changes the key,
+    /// and a key change with no link clears the stored one). It is signed
+    /// here, so a retried owed publish gets one the same way a first upload
+    /// does; the bytes are not compared.
     public func publishRotatedIdentity(
         supersessionProof: Data, attestation: Data?, withProof: Bool
     ) async throws {
@@ -7031,12 +7059,17 @@ extension AuthRepository {
             throw SessionNotReady()
         }
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
+        let link = OwnAccountKeys.conversationLink(
+            currentSeed: secrets.accountIdentitySeed,
+            predecessorSeeds: ownPredecessors.load(accountIdB64: base64Encode(secrets.accountId)),
+            issuedAtUnixSecs: grantNowMs() / 1000)
         try await accountDirectory.publishRotatedIdentityBundle(
             accountId: secrets.accountId,
             signaturePubkey: identity.signaturePublicKey(),
             x25519Pubkey: identity.x25519PublicKey(),
             supersessionProof: withProof ? supersessionProof : nil,
             keyResetAttest: attestation,
+            conversationLink: link,
             sessionToken: token
         )
     }

@@ -41,6 +41,9 @@ struct AppliedBackup: Equatable {
     var syncedStateMerged: Bool = false
     /// How many conversations the backup named.
     var knownGroups: Int = 0
+    /// How many own predecessor seeds this device holds after the backup, `0`
+    /// when the backup carried none or the slot could not be written.
+    var ownPredecessors: Int = 0
 }
 
 /// How a phrase restore's backup step ended. Never an error to the caller:
@@ -60,8 +63,9 @@ enum PhraseRestoreBackupOutcome: Equatable {
 
 /// Applying an account backup to this device.
 ///
-/// A backup carries the account's contacts, the ADR-0058 synced state and the
-/// list of its conversations. It carries NO MLS state, and this takes no
+/// A backup carries the account's contacts, the ADR-0058 synced state, the
+/// list of its conversations and its own predecessor seeds (ADR-0074 section
+/// 3.7). It carries NO MLS state, and this takes no
 /// `Identity`: a restored device's MLS state is whatever it already held
 /// locally for the account (possibly nothing), and it is admitted to its
 /// chats by their other members (ADR-0050 section 2.5a).
@@ -76,17 +80,43 @@ enum PhraseRestoreBackup {
     ///     register keeps the newer stamp.
     ///   * Conversations: recorded in ``RestoredKnownGroupsStore``. Never in
     ///     ``KnownGroupsStore``, which lists the groups this device holds.
+    ///   * Own predecessors, FIRST: stored where a kept device holds them,
+    ///     before anything reads the slot. A device restored from the phrase
+    ///     holds the newest key only, and every conversation leaf of the
+    ///     account is bound to the oldest (ADR-0074 section 3.7): without
+    ///     them its binding names a key no conversation knows.
     ///
     /// A live repository bound to the account is told through the same two
-    /// notifications the pairing bundle and the DeviceGroup restore use.
+    /// notifications the pairing bundle and the DeviceGroup restore use. A
+    /// restore that runs before the chat layer bootstraps needs neither: the
+    /// first binding is minted from the slot. One that runs after it (a
+    /// retried restore) re-mints as the bundle path does
+    /// (``ChatRepository/rebindAfterStateBundle(accountIdB64:)``).
     @discardableResult
     static func apply(
         _ parsed: ParsedBackupPayload,
         accountIdB64: String,
         context: String,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        ownPredecessors: OwnPredecessorStoring = KeychainOwnPredecessorStore()
     ) -> AppliedBackup {
         var applied = AppliedBackup()
+
+        if !parsed.ownPredecessors.isEmpty {
+            do {
+                applied.ownPredecessors = try StateBundle.storeOwnPredecessors(
+                    parsed.ownPredecessors.map {
+                        StateBundle.OwnPredecessor(
+                            seedB64: $0.seed.base64EncodedString(),
+                            adoptedAtMs: Int64(clamping: $0.adoptedAtMs))
+                    },
+                    accountIdB64: accountIdB64,
+                    store: ownPredecessors,
+                    adoptions: PredecessorMailbox.AdoptionStore(defaults: defaults))
+            } catch {
+                NSLog("backup restore (\(context)): the account's own predecessors were not stored")
+            }
+        }
 
         // The backup does not carry the inbox metadata, so the reconstructed
         // request holds sentinels (ADR-0021): a negative messageId, a zero
@@ -99,12 +129,15 @@ enum PhraseRestoreBackup {
         )
         if !restored.isEmpty {
             AcceptedContactsStore.save(existing + restored, accountIdB64: accountIdB64)
-            // A repository already bound to this account merges them (its
-            // next save would otherwise overwrite the write above).
+            applied.contactsAdded = restored.count
+        }
+        if !restored.isEmpty || applied.ownPredecessors > 0 {
+            // A repository already bound to this account merges the contacts
+            // (its next save would otherwise overwrite the write above), and
+            // the chat layer re-reads the predecessor slot.
             NotificationCenter.default.post(
                 name: .lakkoStateBundleApplied, object: restored,
                 userInfo: [StateBundle.appliedAccountKey: accountIdB64])
-            applied.contactsAdded = restored.count
         }
 
         // ADR-0058 section 5.2 — folders, pins, mutes, archive, read cursors,
@@ -133,7 +166,8 @@ enum PhraseRestoreBackup {
             "backup restore (\(context)): \(applied.contactsAdded) new contact(s) of "
                 + "\(parsed.acceptedContacts.count), synced state "
                 + "\(applied.syncedStateMerged ? "merged" : "absent"), "
-                + "\(applied.knownGroups) conversation(s) named, backup of \(parsed.createdAtMs)")
+                + "\(applied.knownGroups) conversation(s) named, "
+                + "\(applied.ownPredecessors) own predecessor(s), backup of \(parsed.createdAtMs)")
         return applied
     }
 

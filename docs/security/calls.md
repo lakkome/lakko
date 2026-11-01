@@ -5716,6 +5716,29 @@ DeviceGroup. Invariants **#3** (a join condition; external review under G-39)
 and **#4** (refuse, never fall back); **#2** and **#5** untouched.
 
 
+## A key joins a person only with the consent of the key pinned for them (C-89)
+
+### C-89: a proven predecessor comes from an anchored proof or a link both keys signed
+
+A client records a key as a proven predecessor of a key it trusts only from a
+supersession proof anchored at a key it already pinned, or from a two-way
+conversation link signed by both keys (ADR-0074 section 3.7). A binding under a
+proven predecessor passes the KeyPackage add filter, so a predecessor a
+directory could choose would be a way into a person's conversations. A
+supersession proof is signed by the old key alone, which is why it never
+anchors a first observation: a malicious directory could mint one from a key of
+its own to anyone's published key.
+
+A link is verified after the identity gate has passed, against the key the gate
+left trusted. One that does not verify records nothing and refuses nothing: the
+directory can strip or spoil a link, which costs the person a returning chat
+and never trusts a key.
+
+**Enforced by:** `crates/lakko-transparency/src/conversation_link.rs`
+(`a_link_the_pinned_key_did_not_sign_is_refused`,
+`the_conversation_key_must_have_signed_too`, `a_link_for_another_person_is_refused`,
+fuzz `conversation_link_open`) and the identity gate of each client.
+
 ## A Welcome replaces an ended group and nothing else (C-88)
 
 ### C-88: a Welcome joins over a stored group only when that group is ended and is a conversation, a refused join leaves the storage as it found it, and a delete takes only an ended group

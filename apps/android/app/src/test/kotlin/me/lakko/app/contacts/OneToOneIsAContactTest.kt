@@ -134,6 +134,52 @@ class OneToOneIsAContactTest {
         assertArrayEquals(bob, after[2].request.fromPubkey)
     }
 
+    // ADR-0074 section 3.7: a person met after a rotation asks with their
+    // newest key while the conversation is under the key their leaves are
+    // bound to. Seen as two rows of one person on 2026-11-01.
+
+    @Test
+    fun `the conversation key of a person adds no second row`() {
+        val before = listOf(row(alice, 7L, null, displayName = "Alice A."))
+        val after = adoptingOneToOnePeer(
+            accepted = before,
+            signatureKey = bob,
+            accountId = bobAccount,
+            groupIdHex = chatWithBob,
+            nowMs = 5_000uL,
+            createdAt = "2026-09-26T10:00:00Z",
+            samePerson = { _, _ -> true },
+        )!!
+        assertEquals(1, after.size)
+        assertArrayEquals(alice, after[0].request.fromPubkey)
+        assertEquals(chatWithBob, after[0].groupIdHex)
+        assertEquals("Alice A.", after[0].displayName)
+    }
+
+    @Test
+    fun `an accept after the conversation key was adopted leaves one row`() {
+        val adopted = adopt(emptyList())!!
+        val request = row(alice, 7L, null).request
+        val after = acceptingRequests(adopted, listOf(request), chatWithBob) { _, _ -> true }
+        assertEquals(1, after.size)
+        assertEquals(7L, after[0].request.messageId)
+        assertArrayEquals(alice, after[0].request.fromPubkey)
+        assertEquals(chatWithBob, after[0].groupIdHex)
+    }
+
+    @Test
+    fun `a second request of a person keeps the row they have`() {
+        val before = listOf(row(alice, 7L, "a11ce", displayName = "Alice A."))
+        val after = acceptingRequests(before, listOf(row(alice, 9L, null).request), chatWithBob)
+        assertEquals(before, after)
+    }
+
+    @Test
+    fun `two keys nothing proved are two people`() {
+        val after = acceptingRequests(adopt(emptyList())!!, listOf(row(alice, 7L, null).request), null)
+        assertEquals(2, after.size)
+    }
+
     @Test
     fun `synthetic id is stable negative and per key`() {
         val idBob = syntheticContactMessageId(bob)

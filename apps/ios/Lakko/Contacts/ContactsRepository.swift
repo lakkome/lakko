@@ -287,7 +287,8 @@ public final class ContactsRepository: ObservableObject {
         boundAccountIdB64 = accountIdB64
         loadingBoundRows = true
         // One person is one row, also for rows stored before that was so.
-        let rows = Self.reconciled(accepted: accepted, pending: persisted.pending)
+        let rows = Self.reconciled(
+            accepted: accepted, pending: persisted.pending, samePerson: provenSamePerson)
         state = state.with(
             pending: rows.pending, accepted: rows.accepted, sent: sent, outstandingInvites: [],
             cursor: persisted.cursor)
@@ -896,16 +897,26 @@ public final class ContactsRepository: ObservableObject {
         // A person removed from the list stays removed although the
         // conversation remains (seen on web 2026-10-24: a removed contact
         // came back on the next load).
-        guard !removedKeys.contains(signatureKey) else { return false }
+        let samePerson = provenSamePerson
+        guard !removedKeys.contains(where: { samePerson($0, signatureKey) }) else { return false }
         let next = Self.adopting(
             state.accepted, signatureKey: signatureKey, accountId: accountId,
-            groupIdHex: groupIdHex, nowMs: nowMs, createdAt: createdAt) ?? state.accepted
+            groupIdHex: groupIdHex, nowMs: nowMs, createdAt: createdAt,
+            samePerson: samePerson) ?? state.accepted
         // A request from them is gone with it (a process that died inside an
         // accept left both), carried on the row so its ack can still go out.
-        let rows = Self.reconciled(accepted: next, pending: state.pending)
+        let rows = Self.reconciled(accepted: next, pending: state.pending, samePerson: samePerson)
         guard rows.accepted != state.accepted || rows.pending != state.pending else { return false }
         state = state.with(pending: rows.pending, accepted: rows.accepted)
         return true
+    }
+
+    /// Whether two account keys are one person across proven rotations
+    /// (ADR-0074 section 3.7): the rule every contact row is matched by, so a
+    /// person is one row whichever of their keys an event names.
+    private var provenSamePerson: (Data, Data) -> Bool {
+        let proven = ProvenPredecessorStore().load()
+        return { proven.samePerson(base64Encode($0), base64Encode($1)) }
     }
 
     /// Put a person the viewer removed back on the contact list, with their
@@ -951,11 +962,12 @@ public final class ContactsRepository: ObservableObject {
     /// two rows of one key become one, and a pending request from a contact
     /// moves onto that contact's row. Pure.
     nonisolated static func reconciled(
-        accepted: [AcceptedContact], pending: [IncomingContactRequest]
+        accepted: [AcceptedContact], pending: [IncomingContactRequest],
+        samePerson: (Data, Data) -> Bool = { $0 == $1 }
     ) -> (accepted: [AcceptedContact], pending: [IncomingContactRequest]) {
         var rows: [AcceptedContact] = []
         for row in accepted {
-            if let idx = rows.firstIndex(where: { $0.request.fromPubkey == row.request.fromPubkey }) {
+            if let idx = rows.firstIndex(where: { samePerson($0.request.fromPubkey, row.request.fromPubkey) }) {
                 rows[idx] = merging(rows[idx], with: row)
             } else {
                 rows.append(row)
@@ -977,9 +989,10 @@ public final class ContactsRepository: ObservableObject {
     /// recorded chat and the keys they held stay. The row takes the request's
     /// id, which is what its owed ack is found by.
     nonisolated static func accepting(
-        _ request: IncomingContactRequest, into accepted: [AcceptedContact], groupIdHex: String?
+        _ request: IncomingContactRequest, into accepted: [AcceptedContact], groupIdHex: String?,
+        samePerson: (Data, Data) -> Bool = { $0 == $1 }
     ) -> [AcceptedContact] {
-        guard let idx = accepted.firstIndex(where: { $0.request.fromPubkey == request.fromPubkey }) else {
+        guard let idx = accepted.firstIndex(where: { samePerson($0.request.fromPubkey, request.fromPubkey) }) else {
             return accepted + [AcceptedContact(request: request, groupIdHex: groupIdHex)]
         }
         var rows = accepted
@@ -995,7 +1008,12 @@ public final class ContactsRepository: ObservableObject {
         _ held: AcceptedContact, with other: AcceptedContact
     ) -> AcceptedContact {
         let request = other.request.messageId > 0 || held.request.messageId < 0 ? other.request : held.request
-        let previous = (held.previousKeysB64 ?? []) + (other.previousKeysB64 ?? [])
+        var previous = (held.previousKeysB64 ?? []) + (other.previousKeysB64 ?? [])
+        // Two keys of one person (ADR-0074 section 3.7): the one that does
+        // not name the row stays an alias of it.
+        for key in [held.request.fromPubkey, other.request.fromPubkey] where key != request.fromPubkey {
+            previous.append(base64Encode(key))
+        }
         var seen = Set<String>()
         let keys = previous.filter { seen.insert($0).inserted }
         return AcceptedContact(
@@ -1025,14 +1043,23 @@ public final class ContactsRepository: ObservableObject {
         accountId: Data?,
         groupIdHex: String,
         nowMs: UInt64,
-        createdAt: String
+        createdAt: String,
+        samePerson: (Data, Data) -> Bool = { $0 == $1 }
     ) -> [AcceptedContact]? {
-        if let idx = accepted.firstIndex(where: { $0.request.fromPubkey == signatureKey }) {
+        if let idx = accepted.firstIndex(where: { samePerson($0.request.fromPubkey, signatureKey) }) {
             let old = accepted[idx]
-            guard old.groupIdHex == nil else { return nil }
+            // A person met after a rotation (ADR-0074 section 3.7): the row
+            // is under the key they asked with, the conversation under the
+            // key their leaves are bound to. One person, one row.
+            var previous = old.previousKeysB64 ?? []
+            let alias = base64Encode(signatureKey)
+            let newAlias = old.request.fromPubkey != signatureKey && !previous.contains(alias)
+            if newAlias { previous.append(alias) }
+            guard old.groupIdHex == nil || newAlias else { return nil }
             var rows = accepted
             rows[idx] = AcceptedContact(
-                request: old.request, groupIdHex: groupIdHex, displayName: old.displayName)
+                request: old.request, groupIdHex: old.groupIdHex ?? groupIdHex,
+                displayName: old.displayName, previousKeysB64: previous.isEmpty ? nil : previous)
             return rows
         }
         let synthetic = IncomingContactRequest(
@@ -1157,8 +1184,9 @@ public final class ContactsRepository: ObservableObject {
     /// an empty Contacts tab, seen live on 2026-09-16). One row per person;
     /// the matching sent request is retired.
     func applyContactAck(_ ack: IncomingContactAck) {
+        let samePerson = provenSamePerson
         let alreadyKnown = state.accepted.contains {
-            $0.request.fromPubkey == ack.accepterPubkey
+            samePerson($0.request.fromPubkey, ack.accepterPubkey)
         }
         let accepterAccountIdB64 = base64Encode(ack.accepterAccountId)
         // ADR-0060 — the request was answered: its `reply` key goes.
@@ -1255,7 +1283,8 @@ public final class ContactsRepository: ObservableObject {
         remaining.remove(at: idx)
         // One person is one row: a one-to-one already made them a contact
         // when a process died inside the accept.
-        let newAccepted = Self.accepting(accepted, into: state.accepted, groupIdHex: groupIdHex)
+        let newAccepted = Self.accepting(
+            accepted, into: state.accepted, groupIdHex: groupIdHex, samePerson: provenSamePerson)
         state = state.with(pending: remaining, accepted: newAccepted)
     }
 

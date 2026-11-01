@@ -461,6 +461,37 @@ export function loadRenames(owner?: string): Map<string, string> {
   return out;
 }
 
+/** Whether two account keys are one person across proven rotations: both on
+ *  one pin, as its current key or a proven predecessor (ADR-0074 section 3.7).
+ *  Contact rows are matched by this, so a person is one row whichever of their
+ *  keys an event names. */
+function provenSamePerson(state: {
+  readonly pins: Readonly<Record<string, AccountPubkeyPin>>;
+}): (a: string, b: string) => boolean {
+  const chains = Object.values(state.pins).map(
+    (pin) => new Set([pin.pinnedSignaturePubkeyB64, ...(pin.provenPredecessorsB64 ?? [])]),
+  );
+  return (a, b) => a === b || chains.some((keys) => keys.has(a) && keys.has(b));
+}
+
+/** The row `incoming` makes of a person who already has `held`. Under one key
+ *  it replaces the row, as it always did; under another key of theirs the row
+ *  keeps what it knew and the key that no longer names it stays an alias. */
+function mergedRow(held: AcceptedContact, incoming: AcceptedContact): AcceptedContact {
+  if (held.signaturePubkeyB64 === incoming.signaturePubkeyB64) return incoming;
+  const aliases = [
+    ...(held.previousSignaturePubkeysB64 ?? []),
+    ...(incoming.previousSignaturePubkeysB64 ?? []),
+    held.signaturePubkeyB64,
+  ];
+  return {
+    ...held,
+    ...incoming,
+    displayName: incoming.displayName.length > 0 ? incoming.displayName : held.displayName,
+    previousSignaturePubkeysB64: [...new Set(aliases)],
+  };
+}
+
 /** Append (or replace by `signaturePubkeyB64`) an accepted
  *  contact in `owner`'s list (default: the bound account) and persist.
  *  Returns the new list; with no account nothing is written and the result
@@ -469,16 +500,17 @@ export function upsertAccepted(contact: AcceptedContact, owner?: string): Accept
   const account = ownerOf(owner);
   if (account === null) return [];
   const current = load(account);
-  const existing = current.accepted.findIndex(
-    (a) => a.signaturePubkeyB64 === contact.signaturePubkeyB64,
+  const onePerson = provenSamePerson(current);
+  const existing = current.accepted.findIndex((a) =>
+    onePerson(a.signaturePubkeyB64, contact.signaturePubkeyB64),
   );
   const next =
     existing === -1
       ? [...current.accepted, contact]
-      : current.accepted.map((a, i) => (i === existing ? contact : a));
+      : current.accepted.map((a, i) => (i === existing ? mergedRow(a, contact) : a));
   // An explicit add is the person's own act: a removal before it no longer
   // keeps the adoption rule away.
-  const removed = (current.removed ?? []).filter((k) => k !== contact.signaturePubkeyB64);
+  const removed = (current.removed ?? []).filter((k) => !onePerson(k, contact.signaturePubkeyB64));
   save(account, { ...current, accepted: next, removed });
   notifyAcceptedChanged("edited");
   return next;
@@ -495,8 +527,9 @@ export function adoptOneToOne(peer: OneToOnePeer, owner?: string): boolean {
   // A person removed from the list stays removed although the conversation
   // remains (seen on test.lakko.me 2026-10-24: a removed contact came back
   // on the next page load).
-  if ((current.removed ?? []).includes(peer.signatureKey)) return false;
-  const next = adoptOneToOnePeer(current.accepted, peer);
+  const onePerson = provenSamePerson(current);
+  if ((current.removed ?? []).some((k) => onePerson(k, peer.signatureKey))) return false;
+  const next = adoptOneToOnePeer(current.accepted, peer, onePerson);
   if (next === null) return false;
   save(account, { ...current, accepted: next });
   notifyAcceptedChanged("edited");
@@ -511,9 +544,10 @@ export function restoreRemovedContact(peer: OneToOnePeer, owner?: string): boole
   const account = ownerOf(owner);
   if (account === null) return false;
   const current = load(account);
-  const wasRemoved = (current.removed ?? []).includes(peer.signatureKey);
-  const removed = (current.removed ?? []).filter((k) => k !== peer.signatureKey);
-  const next = adoptOneToOnePeer(current.accepted, peer);
+  const onePerson = provenSamePerson(current);
+  const wasRemoved = (current.removed ?? []).some((k) => onePerson(k, peer.signatureKey));
+  const removed = (current.removed ?? []).filter((k) => !onePerson(k, peer.signatureKey));
+  const next = adoptOneToOnePeer(current.accepted, peer, onePerson);
   if (!wasRemoved && next === null) return false;
   save(account, { ...current, accepted: next ?? current.accepted, removed });
   notifyAcceptedChanged("edited");
@@ -738,6 +772,9 @@ export interface AcceptedReset {
   readonly keyGeneration: number;
   readonly signedAtMs: number;
   readonly nowMs: number;
+  /** Keys proven as predecessors of `heldKeyB64` where no pin holds them (a
+   *  verified binding's conversation key): retired with it. */
+  readonly heldPredecessorsB64?: readonly string[];
 }
 
 /**
@@ -772,6 +809,7 @@ export function acceptReset(reset: AcceptedReset, owner?: string): AcceptResetRe
     retire(existing.pinnedSignaturePubkeyB64);
   }
   retire(reset.heldKeyB64);
+  for (const k of reset.heldPredecessorsB64 ?? []) retire(k);
   const previousKeys = [...(existing?.previousKeysB64 ?? [])];
   const superseded = [...(existing?.supersededKeysB64 ?? [])];
   for (const k of retired) {
@@ -952,6 +990,58 @@ export function recordCarriedProvenPredecessors(
   if (next.length > 0) pin.provenPredecessorsB64 = next;
   else delete pin.provenPredecessorsB64;
   save(account, { ...current, pins: { ...current.pins, [accountIdB64]: pin } });
+  notifyAcceptedChanged("edited");
+  return true;
+}
+
+/**
+ * ADR-0074 section 3.7: record the key a person's conversations are bound
+ * to, from a two-way conversation link that verified under the pinned key.
+ * The third writer of the proven-predecessor store beside the fail-closed
+ * gate and the pairing bundle; the evidence is both keys' signatures.
+ *
+ * It goes FIRST in the chain: it is the oldest key the account has. It is
+ * also an alias of the person (`previousKeysB64`, and the contact row's old
+ * keys), so a leaf bound to it names them, for a contact who never pinned it.
+ *
+ * Written only when the account is pinned under exactly `pinnedKeyB64`, and
+ * never for a key an accepted reset retired: old keys do not come back.
+ * Returns whether anything changed.
+ */
+export function recordConversationKey(
+  accountIdB64: string,
+  pinnedKeyB64: string,
+  conversationKeyB64: string,
+  owner?: string,
+): boolean {
+  const account = ownerOf(owner);
+  if (account === null || conversationKeyB64.length === 0 || conversationKeyB64 === pinnedKeyB64) {
+    return false;
+  }
+  const current = load(account);
+  const existing = current.pins[accountIdB64];
+  if (existing === undefined || existing.pinnedSignaturePubkeyB64 !== pinnedKeyB64) return false;
+  if ((existing.supersededKeysB64 ?? []).includes(conversationKeyB64)) return false;
+  const held = existing.provenPredecessorsB64 ?? [];
+  if (held.includes(conversationKeyB64)) return false;
+  const previousKeys = existing.previousKeysB64 ?? [];
+  const pin: AccountPubkeyPin = {
+    ...existing,
+    provenPredecessorsB64: [conversationKeyB64, ...held],
+    previousKeysB64: previousKeys.includes(conversationKeyB64)
+      ? [...previousKeys]
+      : [...previousKeys, conversationKeyB64],
+  };
+  const accepted = current.accepted.map((c) => {
+    const namesAccount =
+      accountIdB64OfHex(c.accountIdHex) === accountIdB64 || c.signaturePubkeyB64 === pinnedKeyB64;
+    if (!namesAccount || c.signaturePubkeyB64 === conversationKeyB64) return c;
+    const rowKeys = c.previousSignaturePubkeysB64 ?? [];
+    return rowKeys.includes(conversationKeyB64)
+      ? c
+      : { ...c, previousSignaturePubkeysB64: [...rowKeys, conversationKeyB64] };
+  });
+  save(account, { ...current, accepted, pins: { ...current.pins, [accountIdB64]: pin } });
   notifyAcceptedChanged("edited");
   return true;
 }

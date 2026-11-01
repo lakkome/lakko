@@ -874,6 +874,9 @@ export class DiscoveryClient {
     leafAuth?: Uint8Array | string,
     genesisAttest?: Uint8Array | string,
     keyResetAttest?: Uint8Array | string,
+    /** ADR-0074 section 3.7: the two-way conversation link a rotation mints.
+     *  Raw bytes, or a string already in standard base64. */
+    conversationLink?: Uint8Array | string,
   ): Promise<void> {
     if (accountId.length !== 16) {
       throw new DiscoveryClientArgError("accountId must be 16 bytes");
@@ -934,6 +937,12 @@ export class DiscoveryClient {
         typeof keyResetAttest === "string" ? keyResetAttest : base64Encode(keyResetAttest);
     }
 
+    let conversationLinkB64: string | undefined;
+    if (conversationLink !== undefined) {
+      conversationLinkB64 =
+        typeof conversationLink === "string" ? conversationLink : base64Encode(conversationLink);
+    }
+
     const resp = await this.identityUpload({
       account_id: base64Encode(accountId),
       signature_pubkey: base64Encode(signaturePubkey),
@@ -944,6 +953,7 @@ export class DiscoveryClient {
         ? { genesis_attest: genesisAttestB64 }
         : {}),
       ...(keyResetAttestB64 !== undefined ? { key_reset_attest: keyResetAttestB64 } : {}),
+      ...(conversationLinkB64 !== undefined ? { conversation_link: conversationLinkB64 } : {}),
     });
     if (!resp.ok) {
       throw new DiscoveryHttpError(

@@ -834,13 +834,19 @@ public class ChatRepository(
      * conversation key replaces the one in the directory.
      *
      * `false` when nothing was loaded for that account (the next
-     * [bootstrap] reads the predecessor store itself) or the loaded
-     * conversation key already is the stored one.
+     * [bootstrap] reads the predecessor store itself), the loaded
+     * conversation key already is the stored one, or this device holds a
+     * conversation: its leaves carry the binding it has, and a new mint would
+     * split it between two account keys ([me.lakko.app.auth.BindingVerdict]).
      */
     public suspend fun rebindConversationIdentity(secrets: IdentitySecrets): Boolean =
         withContext(mlsDispatcher) {
             val accountIdB64 = base64UrlSafe(secrets.accountId)
             if (currentAccountIdB64.get() != accountIdB64) return@withContext false
+            if (knownGroupsStore.load(accountIdB64).isNotEmpty()) {
+                android.util.Log.i("ChatRepository", "ADR-0074: this device holds conversations; its binding stays")
+                return@withContext false
+            }
             val seed = me.lakko.app.auth.conversationAccountSeedOf(
                 applicationContext,
                 accountIdB64,
@@ -897,6 +903,39 @@ public class ChatRepository(
         }
     }
 
+    /** The key the account publishes now and its own predecessor keys, oldest
+     *  first ([me.lakko.app.auth.bindingVerdict]'s inputs). */
+    private fun ownBindingKeys(accountIdB64: String, currentSeed: ByteArray): Pair<ByteArray, List<ByteArray>> {
+        val current = me.lakko.app.auth.SessionSecretWipe.use(currentSeed) { seed ->
+            Identity.fromSeed(seed).use { it.signaturePublicKey() }
+        }
+        val rows = try {
+            me.lakko.app.auth.OwnPredecessorStore.onDevice(applicationContext).load(accountIdB64)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        return current to rows.map { it.signaturePubkey.copyOf() }.also { rows.forEach { row -> row.zero() } }
+    }
+
+    /** The identity of this account whose key is [key]: an own predecessor,
+     *  or the current one. `null` when it is neither. */
+    private fun ownIdentityNamed(accountIdB64: String, currentSeed: ByteArray, key: ByteArray): Identity? {
+        val rows = try {
+            me.lakko.app.auth.OwnPredecessorStore.onDevice(applicationContext).load(accountIdB64)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        try {
+            rows.firstOrNull { it.signaturePubkey.contentEquals(key) }?.let { return Identity.fromSeed(it.phraseSeed) }
+        } finally {
+            rows.forEach { it.zero() }
+        }
+        val current = me.lakko.app.auth.SessionSecretWipe.use(currentSeed) { Identity.fromSeed(it) }
+        if (current.signaturePublicKey().contentEquals(key)) return current
+        current.close()
+        return null
+    }
+
     private suspend fun bootstrapOnMlsThread(secrets: IdentitySecrets, bound: me.lakko.app.Binding) {
         val newAccountIdB64 = base64UrlSafe(secrets.accountId)
         // Refresh the publish credentials even on the same-account early
@@ -947,20 +986,23 @@ public class ChatRepository(
         val conversationSeed = me.lakko.app.auth.SessionSecretWipe.use(secrets.accountIdentitySeed) { seed ->
             me.lakko.app.auth.conversationAccountSeedOf(applicationContext, newAccountIdB64, seed)
         }
-        val account = try {
+        val conversationIdentity = try {
             Identity.fromSeed(conversationSeed)
         } finally {
             conversationSeed.fill(0)
         }
-        refreshPublishedAccountIdentity(secrets.accountIdentitySeed, conversation = account)
         ensureOwnProvenChainBestEffort(newAccountIdB64, secrets.accountIdentitySeed)
         // ADR-0050: every conversation leaf is this device's identity, bound to
         // the account key. A missing device seed falls back to a second unbound
         // instance of the account identity (the pre-ADR-0050 behaviour).
+        val ownKeys = ownBindingKeys(newAccountIdB64, secrets.accountIdentitySeed)
         val identity = me.lakko.app.auth.SessionIdentities.deviceIdentity(
             applicationContext,
             newAccountIdB64,
-            account,
+            conversationIdentity,
+            currentKey = ownKeys.first,
+            predecessorKeys = ownKeys.second,
+            holdsConversations = knownGroupsStore.load(newAccountIdB64).isNotEmpty(),
         ) ?: me.lakko.app.auth.SessionSecretWipe.use(secrets.accountIdentitySeed) { current ->
             me.lakko.app.auth.conversationAccountSeedOf(applicationContext, newAccountIdB64, current)
         }.let { seed ->
@@ -970,6 +1012,15 @@ public class ChatRepository(
                 seed.fill(0)
             }
         }
+        // ADR-0074 part 3 - a kept binding that names another of the account's
+        // own keys than the oldest ([me.lakko.app.auth.BindingVerdict]): the
+        // chat layer acts as the key its leaves actually carry.
+        val account = identity.accountPublicKey()
+            ?.takeIf { bound -> !bound.contentEquals(conversationIdentity.signaturePublicKey()) }
+            ?.let { bound -> ownIdentityNamed(newAccountIdB64, secrets.accountIdentitySeed, bound) }
+            ?.also { conversationIdentity.close() }
+            ?: conversationIdentity
+        refreshPublishedAccountIdentity(secrets.accountIdentitySeed, conversation = account)
         // Cold start: the restore below is the single heaviest thing the app
         // does before its lists can render — the Keystore unwrap of the
         // snapshot, `restoreStorage` of the whole provider, one `loadGroup`
@@ -7595,8 +7646,13 @@ public class ChatRepository(
         } catch (_: Throwable) {
             emptyList()
         }
-        val keys = me.lakko.app.contacts.keysOfPerson(pin.pinnedSignaturePubkeyB64, links)
-        return keys.take(keys.indexOf(pin.pinnedSignaturePubkeyB64) + 1)
+        return provenChainEndingAt(pin.pinnedSignaturePubkeyB64, links)
+    }
+
+    /** [keyB64] with its proven predecessors, [keyB64] last. */
+    private fun provenChainEndingAt(keyB64: String, links: List<me.lakko.app.contacts.ProvenLink>): List<String> {
+        val keys = me.lakko.app.contacts.keysOfPerson(keyB64, links)
+        return keys.take(keys.indexOf(keyB64) + 1)
     }
 
     /** The account id each of [personKeysB64] is CLAIMED or known under (a
@@ -9319,9 +9375,20 @@ public class ChatRepository(
         } else {
             null
         }
+        // A verified binding is followed along its proven steps as a pin is
+        // (ADR-0074 section 3.7): the conversation link names the key this
+        // person's conversations stay under.
+        val bindingChain = binding?.let { key ->
+            val links = try {
+                owner?.let { me.lakko.app.contacts.SharedPrefsProvenLinkStore(applicationContext).load(it.accountIdB64) }
+            } catch (_: Throwable) {
+                null
+            }
+            provenChainEndingAt(key, links.orEmpty())
+        }
         return me.lakko.app.contacts.addFilterKeys(
             expectedKeyB64 = expectedKeyB64,
-            pinnedChainB64 = chain,
+            pinnedChainB64 = chain ?: bindingChain,
             bindingKeyB64 = binding,
             retiredKeysB64 = supersededKeys().keys,
         )
@@ -9598,11 +9665,6 @@ public class ChatRepository(
             },
         )
         val pins = me.lakko.app.contacts.PeerPinStore.forBoundAccount(applicationContext)
-        val provenLinks = try {
-            me.lakko.app.contacts.SharedPrefsProvenLinkStore(applicationContext).load(account.accountIdB64)
-        } catch (_: Throwable) {
-            emptyList()
-        }
         // The key a looked-up account's devices must be bound to, per person
         // key the planner files them under (rule 2 of the mirror brief).
         val expectedKeyOf = HashMap<String, Set<String>>()
@@ -9633,17 +9695,25 @@ public class ChatRepository(
             } catch (_: Throwable) {
                 null
             }
-            val chain = pin?.let { me.lakko.app.contacts.keysOfPerson(it.pinnedSignaturePubkeyB64, provenLinks) }
-                ?.let { keys -> keys.take(keys.indexOf(pin.pinnedSignaturePubkeyB64) + 1) }
+            // Read after the check above: the conversation link it may just
+            // have recorded (ADR-0074 section 3.7) counts in this same round.
+            val provenLinks = try {
+                me.lakko.app.contacts.SharedPrefsProvenLinkStore(applicationContext).load(account.accountIdB64)
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            val chain = pin?.let { provenChainEndingAt(it.pinnedSignaturePubkeyB64, provenLinks) }
+            val bindingKey = if (pin == null) {
+                verifiedBindingStore.read(account.accountIdB64, candidate.accountIdB64)?.keyB64
+            } else {
+                null
+            }
             val standing = DeviceReadmission.lookupStanding(
                 rosterKeyB64 = candidate.rosterKeyB64,
                 pinnedChainB64 = chain,
                 supersededKeysB64 = supersededKeys().filterValues { it == candidate.accountIdB64 }.keys,
-                bindingKeyB64 = if (pin == null) {
-                    verifiedBindingStore.read(account.accountIdB64, candidate.accountIdB64)?.keyB64
-                } else {
-                    null
-                },
+                bindingKeyB64 = bindingKey,
+                bindingChainB64 = bindingKey?.let { provenChainEndingAt(it, provenLinks) }.orEmpty(),
             )
             if (standing == DeviceReadmission.LookupStanding.SKIP) {
                 android.util.Log.i(

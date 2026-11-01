@@ -256,6 +256,11 @@ data class IdentityUploadRequest(
      *  than it stored, and deletes every KeyPackage row of the account in the
      *  same transaction. */
     val key_reset_attest: String? = null,
+    /** ADR-0074 section 3.7: standard base64 of the 201-byte conversation
+     *  link a rotation mints: the key the account's conversations are bound
+     *  to and the key it publishes, each signing the other. Opaque to the
+     *  server. */
+    val conversation_link: String? = null,
 )
 
 /** Response body of `POST /discovery/identity`. */
@@ -284,6 +289,10 @@ data class IdentityFetchResponse(
      *  change is accepted as a reset. After a later PROVEN rotation it no
      *  longer binds the served key, and that path never reads it. */
     val key_reset_attest: String? = null,
+    /** ADR-0074 section 3.7: standard base64 of the account's conversation
+     *  link, absent when it never rotated. Opaque to discovery; verified
+     *  locally against the key the gate left trusted, ignored when refused. */
+    val conversation_link: String? = null,
 )
 
 // ----------------------------------------------------------------------------

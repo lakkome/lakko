@@ -993,15 +993,61 @@ public object StateBundle {
         pubkeyOfSeed: (ByteArray) -> ByteArray,
         nowMs: Long = System.currentTimeMillis(),
     ): OwnPredecessorReceipt? {
+        val seeds = decodedOwnPredecessors(carried) ?: return null
+        return try {
+            receiveOwnPredecessorSeeds(store, links, accountIdB64, seeds, currentAccountKey, pubkeyOfSeed, nowMs)
+        } finally {
+            seeds.forEach { it.seed.fill(0) }
+        }
+    }
+
+    /** One of this account's earlier keys as it arrived, the seed raw. */
+    public class OwnPredecessorSeed(
+        public val seed: ByteArray,
+        /** When the account adopted the key that replaced it (unix ms). */
+        public val adoptedAtMs: Long,
+    ) {
+        override fun toString(): String = "OwnPredecessorSeed(<redacted>)"
+    }
+
+    /** [carried] decoded, or `null` when one of them is not a seed. */
+    private fun decodedOwnPredecessors(carried: List<CarriedOwnPredecessor>): List<OwnPredecessorSeed>? {
+        val seeds = ArrayList<OwnPredecessorSeed>()
+        for (c in carried.take(MAX_PREDECESSORS)) {
+            val seed = standardBase64OfLength(c.seedB64, SEED_LEN)
+            if (seed == null) {
+                seeds.forEach { it.seed.fill(0) }
+                return null
+            }
+            seeds += OwnPredecessorSeed(seed, c.adoptedAtMs)
+        }
+        return seeds
+    }
+
+    /**
+     * [receiveOwnPredecessors] over raw seeds: what a pairing bundle and a
+     * restored backup (ADR-0074 section 3.7) both end in. [seeds] stay the
+     * caller's to zero.
+     */
+    internal fun receiveOwnPredecessorSeeds(
+        store: me.lakko.app.auth.OwnPredecessorStore,
+        links: me.lakko.app.contacts.ProvenLinkStore,
+        accountIdB64: String,
+        seeds: List<OwnPredecessorSeed>,
+        currentAccountKey: ByteArray?,
+        pubkeyOfSeed: (ByteArray) -> ByteArray,
+        nowMs: Long = System.currentTimeMillis(),
+    ): OwnPredecessorReceipt? {
         val held = store.load(accountIdB64)
-        if (carried.isEmpty()) {
+        if (seeds.isEmpty()) {
             held.forEach { it.zero() }
             return OwnPredecessorReceipt(held.size, conversationKeyChanged = false)
         }
         val rows = ArrayList<me.lakko.app.auth.OwnPredecessor>()
         try {
-            for (c in carried.take(MAX_PREDECESSORS)) {
-                val seed = standardBase64OfLength(c.seedB64, SEED_LEN) ?: return null
+            for (c in seeds.take(MAX_PREDECESSORS)) {
+                if (c.seed.size != SEED_LEN) return null
+                val seed = c.seed.copyOf()
                 rows += me.lakko.app.auth.OwnPredecessor(pubkeyOfSeed(seed), seed, c.adoptedAtMs)
             }
             val merged = mergedOwnPredecessors(held, rows)
@@ -1113,6 +1159,38 @@ public object StateBundle {
     @Volatile
     public var conversationKeySink: (suspend (String) -> Unit)? = null
 
+    /**
+     * Store [seeds] on this device for [accountIdB64]: the one place a bundle
+     * and a restored backup do it. The step to the current key is recorded
+     * when the account's seed is on the device. `null` when not stored.
+     */
+    public fun storeOwnPredecessorSeeds(
+        context: Context,
+        accountIdB64: String,
+        seeds: List<OwnPredecessorSeed>,
+    ): OwnPredecessorReceipt? {
+        val owner = me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+        return try {
+            val current = me.lakko.app.auth.AccountIdentitySeedStore.getAccountIdentitySeed(context, owner)
+            val currentKey = try {
+                current?.let { seed -> uniffi.lakko_ffi_uniffi.Identity.fromSeed(seed).use { it.signaturePublicKey() } }
+            } finally {
+                current?.fill(0)
+            }
+            receiveOwnPredecessorSeeds(
+                store = me.lakko.app.auth.OwnPredecessorStore.onDevice(context),
+                links = me.lakko.app.contacts.SharedPrefsProvenLinkStore(context),
+                accountIdB64 = owner,
+                seeds = seeds,
+                currentAccountKey = currentKey,
+                pubkeyOfSeed = { seed -> uniffi.lakko_ffi_uniffi.Identity.fromSeed(seed).use { it.signaturePublicKey() } },
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("StateBundle", "own predecessors not stored: ${cause.javaClass.simpleName}")
+            null
+        }
+    }
+
     /** Tell [conversationKeySink] when [applied] moved the conversation key.
      *  Best-effort: a device whose chat layer is not loaded reads the
      *  predecessor store when it loads. */
@@ -1153,24 +1231,12 @@ public object StateBundle {
         val receipt = if (bundle.ownPredecessors.isEmpty()) {
             null
         } else {
-            try {
-                val current = me.lakko.app.auth.AccountIdentitySeedStore.getAccountIdentitySeed(context, owner)
-                val currentKey = try {
-                    current?.let { seed -> uniffi.lakko_ffi_uniffi.Identity.fromSeed(seed).use { it.signaturePublicKey() } }
+            decodedOwnPredecessors(bundle.ownPredecessors)?.let { seeds ->
+                try {
+                    storeOwnPredecessorSeeds(context, owner, seeds)
                 } finally {
-                    current?.fill(0)
+                    seeds.forEach { it.seed.fill(0) }
                 }
-                receiveOwnPredecessors(
-                    store = me.lakko.app.auth.OwnPredecessorStore.onDevice(context),
-                    links = linkStore,
-                    accountIdB64 = owner,
-                    carried = bundle.ownPredecessors,
-                    currentAccountKey = currentKey,
-                    pubkeyOfSeed = { seed -> uniffi.lakko_ffi_uniffi.Identity.fromSeed(seed).use { it.signaturePublicKey() } },
-                )
-            } catch (cause: Throwable) {
-                android.util.Log.w("StateBundle", "own predecessors not stored: ${cause.javaClass.simpleName}")
-                null
             }
         }
         val dec = Base64.getDecoder()

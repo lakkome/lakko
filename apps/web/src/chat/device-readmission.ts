@@ -264,7 +264,8 @@ export type LookupStanding =
  * | yes    | the pin, or a proven predecessor of the pin     | `same-person`    |
  * | yes    | a key an accepted reset of this account retired | `reset-identity` |
  * | yes    | anything else                                   | `skip`           |
- * | no     | the key of this device's VERIFIED BINDING       | `same-person`    |
+ * | no     | the key of this device's VERIFIED BINDING, or   | `same-person`    |
+ * |        | the conversation key a link proved for it       |                  |
  * | no     | anything else, or no binding                    | `skip`           |
  *
  * `skip` is what stops a member's own profile from attaching another
@@ -283,11 +284,15 @@ export function lookupStanding(input: {
       }
     | undefined;
   /** The verified binding of the account when it is NOT pinned. */
-  readonly binding?: { readonly keyB64: string } | undefined;
+  readonly binding?:
+    | { readonly keyB64: string; readonly conversationKeyB64?: string | undefined }
+    | undefined;
 }): LookupStanding {
   const pin = input.pin;
   if (pin === undefined) {
-    return input.binding !== undefined && input.binding.keyB64 === input.rosterKeyB64
+    const binding = input.binding;
+    return binding !== undefined &&
+      (binding.keyB64 === input.rosterKeyB64 || binding.conversationKeyB64 === input.rosterKeyB64)
       ? "same-person"
       : "skip";
   }

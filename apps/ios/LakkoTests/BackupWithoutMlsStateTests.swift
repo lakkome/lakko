@@ -121,13 +121,13 @@ final class BackupPayloadShapeTests: XCTestCase {
     }
 
     /// The parsed payload has exactly these fields. A snapshot field coming
-    /// back would be a seventh.
+    /// back would be an eighth.
     func testTheParsedPayloadHasNoMlsSnapshotField() throws {
         let parsed = try parsedBackup(accountId: randomBytes(16))
         let fields = Set(Mirror(reflecting: parsed).children.compactMap(\.label))
         XCTAssertEqual(fields, [
             "accountId", "createdAtMs", "ed25519Seed", "acceptedContacts",
-            "knownGroupIds", "syncedState",
+            "knownGroupIds", "syncedState", "ownPredecessors",
         ])
         XCTAssertFalse(fields.contains { $0.lowercased().contains("snapshot") })
     }
@@ -519,6 +519,21 @@ final class PhraseRouteBackupTests: XCTestCase {
         // And no MLS state came with the backup.
         XCTAssertNil(IdentitySnapshotStore().getSnapshot(accountIdB64: accountIdB64))
         XCTAssertTrue(KnownGroupsStore().load(accountIdB64: accountIdB64).isEmpty)
+    }
+
+    /// ADR-0074 section 3.7 — the route stores the predecessors BEFORE the
+    /// session lands, so the first binding is minted under the oldest.
+    func testThePhrasePromptStoresTheOwnPredecessorsBeforeTheSessionLands() async throws {
+        let oldest = Data(repeating: 0xA0, count: 64)
+        var parsed = try parsedBackup(accountId: accountId)
+        parsed.ownPredecessors = [BackupOwnPredecessor(seed: oldest, adoptedAtMs: 1_000)]
+        let h = try await parkedAtThePhrasePrompt(outcomes: [.restored(parsed)])
+        defer { KeychainOwnPredecessorStore().clear(accountIdB64: accountIdB64) }
+
+        try await h.repository.provideRecoveryPhrase(mnemonicPhrase: phrase)
+
+        XCTAssertEqual(h.repository.state, landed)
+        XCTAssertEqual(KeychainOwnPredecessorStore().load(accountIdB64: accountIdB64), [oldest])
     }
 
     func testAnAccountWithNoBackupSignsInAndOwesNoRetry() async throws {

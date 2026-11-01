@@ -1347,3 +1347,278 @@ final class RecoveryEmailTests: XCTestCase {
         }
     }
 }
+
+// MARK: - Save a recovery phrase: the two routes (ADR-0075 section 3, amended 2026-11-01)
+
+@MainActor
+final class SavePhraseFlowTests: XCTestCase {
+
+    private final class World {
+        var status: Result<AccountPhraseStatus, Error> = .success(
+            AccountPhraseStatus(saved: false, rotationNeeded: false))
+        var held: String? = "held words"
+        var grant: String? = "grant"
+        var markErrors: [Error] = []
+        var rotationResult: KeyRotationPlan.Result = .rotated(phrase: "new words")
+        var resume: KeyRotationPlan.Resume = .nothing
+        var rotationWords: String?
+        var onFinish: (() -> Void)?
+        private(set) var events: [String] = []
+        func note(_ event: String) { events.append(event) }
+    }
+
+    private func flow(_ world: World) -> SavePhraseFlow {
+        SavePhraseFlow(ports: SavePhraseFlow.Ports(
+            accountIdB64: { "acct" },
+            sessionToken: { "tok" },
+            freshGrant: { world.grant },
+            readStatus: { _ in
+                world.note("read")
+                return try world.status.get()
+            },
+            heldPhrase: { world.held },
+            markOwnAction: { _ in world.note("own-action") },
+            markSaved: { _, grant in
+                XCTAssertEqual(grant, world.grant)
+                world.note("post")
+                if !world.markErrors.isEmpty { throw world.markErrors.removeFirst() }
+            },
+            phraseWasSaved: { _ in world.note("phrase-saved") },
+            rotate: {
+                world.note("rotate")
+                return world.rotationResult
+            },
+            rotationResume: { world.resume },
+            finishRotation: {
+                world.note("finish")
+                world.onFinish?()
+            },
+            rotationWords: { world.rotationWords },
+            proofExpired: { world.note("proof-expired") }
+        ))
+    }
+
+    private func http(_ status: Int, _ body: String) -> Error {
+        AuthClientError.http(status: status, endpoint: "/account/phrase/saved", body: body)
+    }
+
+    func testTheRouteIsOneRule() {
+        XCTAssertEqual(SavePhraseRoute.decide(rotationNeeded: false, heldPhrase: "w"), .heldWords("w"))
+        XCTAssertEqual(SavePhraseRoute.decide(rotationNeeded: true, heldPhrase: "w"), .rotation)
+        XCTAssertEqual(SavePhraseRoute.decide(rotationNeeded: false, heldPhrase: nil), .rotation)
+        XCTAssertEqual(SavePhraseRoute.decide(rotationNeeded: true, heldPhrase: nil), .rotation)
+    }
+
+    /// The defect: a phrase no vault ever held rotated the keys anyway.
+    func testAPhraseNoVaultEverHeldShowsTheWordsTheDeviceHoldsAndChangesNoKey() async {
+        let world = World()
+        let flow = flow(world)
+
+        await flow.open()
+        XCTAssertEqual(flow.state, .idle)
+        XCTAssertFalse(flow.changesKeys, "no paragraph about new keys, no progress line")
+
+        await flow.primary()
+        XCTAssertEqual(flow.state, .heldWords("held words"))
+        XCTAssertEqual(world.events, ["read"], "nothing counts as saved before the three words")
+
+        let saved = await flow.confirmHeldWords()
+
+        XCTAssertTrue(saved)
+        XCTAssertEqual(
+            world.events, ["read", "own-action", "post", "phrase-saved"],
+            "the own action is marked before the server writes the notice")
+        XCTAssertFalse(world.events.contains("rotate"))
+    }
+
+    func testRotationNeededKeepsTheRotationPath() async {
+        let world = World()
+        world.status = .success(AccountPhraseStatus(saved: false, rotationNeeded: true))
+        let flow = flow(world)
+
+        await flow.open()
+        XCTAssertEqual(flow.state, .idle)
+        XCTAssertTrue(flow.changesKeys, "the paragraph about new keys stays")
+
+        await flow.primary()
+
+        XCTAssertEqual(flow.state, .words("new words"))
+        XCTAssertEqual(world.events, ["read", "rotate"])
+    }
+
+    func testADeviceThatDoesNotHoldThePhraseRotates() async {
+        let world = World()
+        world.held = nil
+        let flow = flow(world)
+
+        await flow.open()
+        XCTAssertTrue(flow.changesKeys)
+        await flow.primary()
+
+        XCTAssertEqual(flow.state, .words("new words"))
+        XCTAssertFalse(world.events.contains("post"))
+    }
+
+    func testAnAnswerThatDidNotArriveGuessesNoPath() async {
+        let world = World()
+        world.status = .failure(URLError(.notConnectedToInternet))
+        let flow = flow(world)
+
+        await flow.open()
+
+        XCTAssertEqual(flow.state, .failed)
+        XCTAssertNil(flow.route)
+        XCTAssertFalse(flow.changesKeys)
+        XCTAssertFalse(flow.primaryNeedsProof, "reading the route again asks for nothing")
+
+        // Try again reads it, and neither route has run.
+        await flow.primary()
+        XCTAssertEqual(flow.state, .failed)
+        XCTAssertEqual(world.events, ["read", "read"])
+
+        world.status = .success(AccountPhraseStatus(saved: false, rotationNeeded: false))
+        await flow.primary()
+        XCTAssertEqual(flow.state, .idle)
+        XCTAssertEqual(flow.route, .heldWords("held words"))
+        XCTAssertTrue(flow.primaryNeedsProof)
+    }
+
+    /// Nothing counts as saved before that POST, and the three-word screen
+    /// stays with `Try again`.
+    func testAFailedSaveStaysOnTheWordsAndTryAgainSends() async {
+        let world = World()
+        world.markErrors = [http(500, ""), AuthClientError.network(endpoint: "/x", underlying: URLError(.timedOut))]
+        let flow = flow(world)
+        await flow.open()
+        await flow.primary()
+
+        let first = await flow.confirmHeldWords()
+        XCTAssertFalse(first)
+        XCTAssertEqual(flow.state, .heldWords("held words"))
+        XCTAssertTrue(flow.confirmFailed)
+        XCTAssertFalse(world.events.contains("phrase-saved"))
+
+        let second = await flow.confirmHeldWords()
+        XCTAssertFalse(second, "an unanswered call is a failure too")
+        XCTAssertTrue(flow.confirmFailed)
+
+        let third = await flow.confirmHeldWords()
+        XCTAssertTrue(third)
+        XCTAssertFalse(flow.confirmFailed)
+        XCTAssertEqual(world.events.filter { $0 == "phrase-saved" }.count, 1)
+    }
+
+    /// The phrase went into a vault after the route was read.
+    func testTheServersNeedsRotationAnswerRunsTheRotation() async {
+        let world = World()
+        world.markErrors = [http(409, #"{"error":"phrase-save-needs-rotation"}"#)]
+        let flow = flow(world)
+        await flow.open()
+        await flow.primary()
+
+        let saved = await flow.confirmHeldWords()
+
+        XCTAssertFalse(saved, "the words held were not the ones saved")
+        XCTAssertEqual(flow.state, .words("new words"))
+        XCTAssertTrue(flow.changesKeys)
+        XCTAssertEqual(world.events, ["read", "own-action", "post", "rotate"])
+    }
+
+    func testAnotherConflictIsAFailureNotARotation() async {
+        let world = World()
+        world.markErrors = [http(409, #"{"error":"something-else"}"#)]
+        let flow = flow(world)
+        await flow.open()
+        await flow.primary()
+
+        _ = await flow.confirmHeldWords()
+
+        XCTAssertEqual(flow.state, .heldWords("held words"))
+        XCTAssertTrue(flow.confirmFailed)
+        XCTAssertFalse(world.events.contains("rotate"))
+    }
+
+    func testAProofThatRanOutAsksForTheProofWithoutAnError() async {
+        let world = World()
+        world.markErrors = [http(403, #"{"error":"fresh-auth-required"}"#)]
+        let flow = flow(world)
+        await flow.open()
+        await flow.primary()
+
+        let saved = await flow.confirmHeldWords()
+
+        XCTAssertFalse(saved)
+        XCTAssertEqual(flow.state, .heldWords("held words"))
+        XCTAssertFalse(flow.confirmFailed, "the block appears; nothing went wrong")
+        XCTAssertTrue(world.events.contains("proof-expired"))
+
+        // No grant at all: nothing is sent.
+        let before = world.events.filter { $0 == "post" }.count
+        world.grant = nil
+        let again = await flow.confirmHeldWords()
+        XCTAssertFalse(again)
+        XCTAssertEqual(world.events.filter { $0 == "post" }.count, before)
+    }
+
+    func testAChangeThatAlreadyWentThroughIsFinishedAndNeverStartedAgain() async {
+        let world = World()
+        world.resume = .finishOwed
+        world.onFinish = { world.rotationWords = "owed words" }
+        let flow = flow(world)
+
+        await flow.open()
+
+        XCTAssertEqual(flow.state, .words("owed words"))
+        XCTAssertEqual(world.events, ["finish"], "the route is not read and no second rotation starts")
+    }
+
+    func testAPublishStillOwedKeepsTheWordsBackAndTryAgainFinishes() async {
+        let world = World()
+        world.resume = .finishOwed
+        let flow = flow(world)
+
+        await flow.open()
+        XCTAssertEqual(flow.state, .publishOwed)
+        XCTAssertFalse(flow.primaryNeedsProof)
+
+        world.onFinish = { world.rotationWords = "owed words" }
+        await flow.primary()
+        XCTAssertEqual(flow.state, .words("owed words"))
+    }
+
+    func testAScreenOpenedTwiceRunsOnce() async {
+        let world = World()
+        let flow = flow(world)
+        await flow.open()
+        await flow.primary()
+        await flow.open()
+        XCTAssertEqual(flow.state, .heldWords("held words"))
+        XCTAssertEqual(world.events, ["read"])
+    }
+
+    func testTheRoutesOfThePhrase() async throws {
+        let host = NameRouteStub.scope { method, path, _ in
+            switch (method, path) {
+            case ("GET", "/account/phrase"): return (200, #"{"saved":false,"rotation_needed":true}"#)
+            case ("POST", "/account/phrase/saved"): return (204, "")
+            default: return (404, "")
+            }
+        }
+        let client = NameRouteStub.client(host)
+
+        let status = try await client.accountPhraseStatus(sessionToken: "tok")
+        XCTAssertEqual(status, AccountPhraseStatus(saved: false, rotationNeeded: true))
+        try await client.markPhraseSaved(sessionToken: "tok", freshGrant: "grant")
+
+        let posted = try XCTUnwrap(NameRouteStub.requests(host).last)
+        XCTAssertEqual(posted.authorization, "Bearer tok")
+        XCTAssertEqual(posted.json["fresh_grant"] as? String, "grant")
+    }
+
+    func testTheRefusalIsReadFromItsCode() {
+        XCTAssertTrue(PhraseSaveRefusal.needsRotation(http(409, #"{"error":"phrase-save-needs-rotation"}"#)))
+        XCTAssertFalse(PhraseSaveRefusal.needsRotation(http(409, #"{"error":"phrase-saved"}"#)))
+        XCTAssertFalse(PhraseSaveRefusal.needsRotation(http(403, #"{"error":"phrase-save-needs-rotation"}"#)))
+        XCTAssertFalse(PhraseSaveRefusal.needsRotation(URLError(.timedOut)))
+    }
+}

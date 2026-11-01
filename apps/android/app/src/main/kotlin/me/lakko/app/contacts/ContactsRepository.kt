@@ -608,6 +608,13 @@ public class ContactsRepository(
     private fun provenLinks(): List<ProvenLink> =
         boundAccountB64?.let { provenLinkStore.load(it) }.orEmpty()
 
+    /** Whether two account keys are one person across proven rotations
+     *  (ADR-0074 section 3.7): the rule contact rows are matched by. */
+    private fun provenSamePerson(): (ByteArray, ByteArray) -> Boolean {
+        val links = provenLinks()
+        return { a, b -> samePerson(base64Encode(a), base64Encode(b), links) }
+    }
+
     /**
      * ADR-0074 section 3.5 - whether two account keys are the same person
      * across PROVEN rotations (never across a reset or an unproven change).
@@ -1048,6 +1055,9 @@ public class ContactsRepository(
 
     private fun keyHex(key: ByteArray): String = key.joinToString("") { "%02x".format(it) }
 
+    private fun keyOfHex(hex: String): ByteArray =
+        hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+
     // -----------------------------------------------------------------
     // A one-to-one conversation IS a contact
     // -----------------------------------------------------------------
@@ -1073,7 +1083,8 @@ public class ContactsRepository(
         // A person removed from the list stays removed although the
         // conversation remains (seen on web 2026-10-24: a removed contact
         // came back on the next load).
-        if (removedContactKeys.contains(keyHex(signatureKey))) return false
+        val onePerson = provenSamePerson()
+        if (removedContactKeys.any { onePerson(keyOfHex(it), signatureKey) }) return false
         var changed = false
         mutableState.update { state ->
             // `update` may re-run the lambda on a lost CAS; the verdict is the
@@ -1086,6 +1097,7 @@ public class ContactsRepository(
                 groupIdHex = groupIdHex,
                 nowMs = nowMs,
                 createdAt = createdAt,
+                samePerson = onePerson,
             ) ?: return@update state
             changed = true
             state.copy(accepted = next)
@@ -1881,13 +1893,10 @@ public class ContactsRepository(
             // device) must not duplicate the accepted row. Seen live on
             // 2026-09-16 as "Web Wanda" listed twice, which the keyed
             // LazyColumn of the redesigned Contacts screen then refused.
-            val known = state.accepted.map { it.request.fromPubkey.toList() }.toHashSet()
-            val fresh = accepted.filter { it.fromPubkey.toList() !in known }
+            val onePerson = provenSamePerson()
             state.copy(
                 pending = remaining,
-                accepted = state.accepted + fresh.map {
-                    AcceptedContact(request = it, groupIdHex = groupIdHex)
-                },
+                accepted = acceptingRequests(state.accepted, accepted, groupIdHex, onePerson),
             )
         }
         persistAccepted()

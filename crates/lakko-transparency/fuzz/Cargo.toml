@@ -83,3 +83,12 @@ path = "fuzz_targets/verify_leaf_genesis.rs"
 test = false
 doc = false
 bench = false
+
+# ADR-0074 section 3.7 two-way conversation link: served by the directory
+# beside the identity bundle, so a malicious directory chooses every byte.
+[[bin]]
+name = "conversation_link_open"
+path = "fuzz_targets/conversation_link_open.rs"
+test = false
+doc = false
+bench = false

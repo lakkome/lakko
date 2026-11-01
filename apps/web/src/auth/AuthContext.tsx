@@ -258,6 +258,7 @@ import {
   EMPTY_KEY_ROTATION_STATE,
   conversationSeed,
   deleteKeyRotationState,
+  dropUnreadableKeyRotationState,
   getKeyRotationState,
   updateKeyRotationState,
   predecessorSeeds,
@@ -265,6 +266,7 @@ import {
   type KeyRotationState,
   type PreparedRotation,
 } from "./key-rotation-store";
+import { mintConversationLink } from "./conversation-link-mint";
 import { bindingVerdict, rebindsAfterStateBundle } from "../devices/own-conversation-key";
 import { loadMlsSnapshot } from "../chat/mls-store";
 import { stampPredecessorAdoption } from "../contacts/address-resolver";
@@ -360,7 +362,11 @@ import {
   runServerLogout,
   type LogoutAttempt,
 } from "./logout-owed";
-import { restoreAccountBackup, restoreOwedAccountBackup } from "../backup/restore";
+import {
+  prefetchAccountBackup,
+  restoreAccountBackup,
+  restoreOwedAccountBackup,
+} from "../backup/restore";
 import { isBackupRestoreOwed, markBackupRestoreOwed } from "../backup/restore-owed";
 import {
   backupKnownGroupIds,
@@ -3564,6 +3570,23 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     else if (!openAccountStoresSince(wipes, accountStoreIds(args.accountIdB64))) {
       throw new StaleBindingError();
     }
+    // ADR-0074 section 3.7: a landing with the phrase in hand holds the newest
+    // key alone. The backup says which key the conversations and the
+    // DeviceGroup are under, so it is read before anything is bound.
+    if (args.restorePhrase !== undefined) {
+      const deviceKey = await getDeviceKey(args.accountIdB64);
+      if (deviceKey !== null) {
+        await dropUnreadableKeyRotationState(args.accountIdB64, deviceKey);
+        await prefetchAccountBackup({
+          accountIdBytes: args.accountIdBytes,
+          accountIdB64: args.accountIdB64,
+          deviceKey,
+          sessionToken: args.session.sessionToken,
+          phrase: args.restorePhrase,
+        });
+      }
+      requireNotSignedOut();
+    }
     const canonical = args.wasm.Identity.fromSeed(args.accountIdentitySeed);
     // The keys are on this device now; nothing is left to explain.
     setRestoreNotice(null);
@@ -3705,6 +3728,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       sessionToken: args.session.sessionToken,
       deviceKey: () => getDeviceKey(args.accountIdB64),
       ...(args.restorePhrase !== undefined ? { phrase: args.restorePhrase } : {}),
+      onOwnPredecessorsStored: () => rebindAfterStateBundle(args.accountIdB64),
     }).then(() => undefined);
   }
 
@@ -5360,7 +5384,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     async uploadIdentity(mode, attestationB64Url, proofB64) {
       // Step 8: the bundle of the NEW identity with the proof AND the
       // attestation (the proven-rotation arm), or one of the two fallbacks.
-      const { accountIdBytes, secrets } = rotationSession();
+      const { accountIdB64, accountIdBytes, secrets } = rotationSession();
       const wasm = await loadWasm();
       const canonical = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
       try {
@@ -5374,6 +5398,20 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // reset fallback is a NEW binding and carries one.
         const leafAuth =
           mode === "attestation-only" ? await mintLeafGenesisAuth(canonical, accountIdBytes) : undefined;
+        // ADR-0074 section 3.7: what a contact first met after this rotation
+        // follows the person by. Signed on every attempt, so a retried owed
+        // publish carries it too. The attested fallback carries it as well:
+        // the leaves stay under the old key on that arm too, and discovery
+        // clears the link on a key change that brings none.
+        const deviceKey = await rotationDeviceKey(accountIdB64);
+        const held = await getKeyRotationState(accountIdB64, deviceKey);
+        const conversationLink =
+          mintConversationLink(
+            wasm,
+            held.predecessorSeedsB64,
+            secrets.accountIdentitySeed,
+            Math.floor(Date.now() / 1000),
+          ) ?? undefined;
         await uploadIdentityBundle(
           discovery,
           accountIdBytes,
@@ -5382,6 +5420,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           leafAuth,
           undefined,
           attestation,
+          conversationLink,
         );
       } finally {
         canonical.free();
@@ -7269,8 +7308,29 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // before the recover, which is the whole point: contacts
         // never re-verify. ChatProvider free()s the prior
         // (pre-recovery) Identity if anything was lingering.
+        //
+        // ADR-0074 section 3.7: the phrase holds the newest key alone. The
+        // backup says which key the conversations and the DeviceGroup are
+        // under, so it is read before anything is bound. A row of earlier
+        // keys sealed under the device key just replaced opens no more.
+        await dropUnreadableKeyRotationState(accountIdB64, deviceKey);
+        flow.require();
+        await prefetchAccountBackup({
+          accountIdBytes,
+          accountIdB64,
+          deviceKey,
+          sessionToken: result.session.sessionToken,
+          phrase: canonicalPhrase,
+        });
+        flow.require();
         const canonical = wasm.Identity.fromSeed(accountIdentitySeed);
-        await installSessionIdentities(wasm, canonical, accountIdB64, false, flow.current);
+        const conversationIdentitySeed = await installSessionIdentities(
+          wasm,
+          canonical,
+          accountIdB64,
+          false,
+          flow.current,
+        );
         flow.require();
         keyPackageAccount = { accountIdBytes, accountIdB64 };
 
@@ -7351,6 +7411,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           accountId: accountIdBytes,
           exportKey: result.exportKey,
           accountIdentitySeed,
+          ...(conversationIdentitySeed !== null ? { conversationIdentitySeed } : {}),
           sessionToken: result.session.sessionToken,
           sessionExpiresAtMs: result.session.sessionExpiresAtMs,
           keyGeneration: result.session.keyGeneration,
@@ -7386,6 +7447,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           deviceKey,
           sessionToken: result.session.sessionToken,
           phrase: canonicalPhrase,
+          onOwnPredecessorsStored: () => rebindAfterStateBundle(accountIdB64),
         });
         if (restoreOutcome.kind === "deferred") {
           // The backup could not be fetched. Uploading a baseline now would
@@ -7931,6 +7993,10 @@ async function probeStoredSecrets(): Promise<{
  * (from `AuthClient.resetAccountKeys`) under which discovery accepts a
  * changed key without a supersession proof. Supplied ONLY by the
  * key-reset publish (`publishResetIdentity`).
+ *
+ * ADR-0074 section 3.7: `conversationLink`, when present, is the two-way
+ * link a rotation uploads beside its supersession proof
+ * (`conversation-link-mint.ts`). Supplied ONLY by the rotation's upload.
  */
 async function uploadIdentityBundle(
   discovery: DiscoveryClient,
@@ -7940,6 +8006,7 @@ async function uploadIdentityBundle(
   leafAuth?: Uint8Array | string,
   genesisAttest?: Uint8Array | string,
   keyResetAttest?: Uint8Array | string,
+  conversationLink?: Uint8Array | string,
 ): Promise<void> {
   await discovery.uploadIdentityBundle(
     accountId,
@@ -7949,6 +8016,7 @@ async function uploadIdentityBundle(
     leafAuth,
     genesisAttest,
     keyResetAttest,
+    conversationLink,
   );
 }
 

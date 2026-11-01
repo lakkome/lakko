@@ -2366,11 +2366,21 @@ stay as they are. Your other devices stay signed in.
 [ Show my 12 words ]
 ```
 
+The paragraph "This gives your account new keys..." appears only on an account
+that ever had an email vault (ADR-0075 section 3, amended 2026-11-01). On every
+other account saving a phrase changes no key: the screen shows the words the
+device already holds.
+
 - Needs the proof of 17.1. Then the existing phrase screens: the words in
   the grid, the confirmation of three of them, "I wrote them down".
-- The words are shown only when the change has gone through; until then a
-  progress line, and on failure "We could not finish. Nothing changed." with
-  `Try again`.
+- With the new keys: the words are shown only when the change has gone
+  through; until then a progress line, and on failure "We could not finish.
+  Nothing changed." with `Try again`.
+- Without them: the words appear at once. The account counts as protected
+  only after the three-word check, when the server has been told; on failure
+  of that last call the three-word screen stays, with "We could not finish.
+  Nothing changed." and `Try again`. A person who leaves before then has saved
+  nothing, and the row in Settings stays as it was.
 - Afterwards Settings shows "Protected by your recovery phrase" and `Show
   phrase` (behind 17.1). There is no way back to an account without one.
 - Other devices of the account show once: "A recovery phrase was saved for

@@ -74,6 +74,7 @@ import {
   loadRenames,
   removeAccepted,
   adoptOneToOne,
+  recordConversationKey,
   isRemovedContact,
   restoreRemovedContact,
   subscribeAcceptedChanged,
@@ -549,5 +550,41 @@ describe("peerContactByMemberPubkeys (ADR-0021 universal 1×1 resolver)", () => 
   it("returns undefined when the only member is self", () => {
     const got = peerContactByMemberPubkeys([PUB_OLD], PUB_OLD, [alice, bob]);
     expect(got).toBeUndefined();
+  });
+});
+
+// ADR-0074 section 3.7: a person met after a rotation asks with their newest
+// key while the conversation is under the key their leaves are bound to.
+// Seen as two rows of one person on 2026-11-01.
+describe("one person, one contact row across proven keys", () => {
+  const person = () => {
+    setPin(ACCT_A, PUB_NEW, 0);
+    expect(recordConversationKey(ACCT_A, PUB_NEW, PUB_OLD)).toBe(true);
+  };
+
+  it("keeps one row when the conversation key was adopted before the accept", () => {
+    person();
+    adoptOneToOne({ signatureKey: PUB_OLD, groupIdB64: "Z3JvdXA=", nowMs: 1 });
+    upsertAccepted({ signaturePubkeyB64: PUB_NEW, displayName: "Nora", acceptedAtMs: 2 });
+    const rows = loadAccepted();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.signaturePubkeyB64).toBe(PUB_NEW);
+    expect(rows[0]?.displayName).toBe("Nora");
+    expect(rows[0]?.groupIdB64).toBe("Z3JvdXA=");
+    expect(rows[0]?.previousSignaturePubkeysB64).toEqual([PUB_OLD]);
+  });
+
+  it("does not bring back a person removed under their other key", () => {
+    person();
+    upsertAccepted({ signaturePubkeyB64: PUB_NEW, displayName: "Nora", acceptedAtMs: 2 });
+    removeAccepted(PUB_NEW);
+    expect(adoptOneToOne({ signatureKey: PUB_OLD, groupIdB64: "Z3JvdXA=", nowMs: 3 })).toBe(false);
+    expect(loadAccepted()).toHaveLength(0);
+  });
+
+  it("keeps two keys nothing proved as two people", () => {
+    upsertAccepted({ signaturePubkeyB64: PUB_NEW, displayName: "Nora", acceptedAtMs: 2 });
+    adoptOneToOne({ signatureKey: PUB_OLD, groupIdB64: "Z3JvdXA=", nowMs: 3 });
+    expect(loadAccepted()).toHaveLength(2);
   });
 });

@@ -967,6 +967,76 @@ devices destroy the predecessor seed. Until then it is on them. Stage B is
 not specified further here; it gets its own section when R.5 to R.7 are
 built and the two-identities-per-device cost on each client has been read.
 
+#### 3.7 Restoring from the phrase after a rotation (added 2026-11-01)
+
+Found walking the base scenarios on two clients. Stage A leaves every
+conversation leaf under the oldest key, new conversations included, while the
+phrase and the directory hold the newest one. Two things followed:
+
+- A device restored from the phrase held only the newest key, so its
+  KeyPackage was bound to a key no conversation knew: a different account to
+  every gate.
+- A contact first met after the rotation pinned the newest key by first
+  observation and held no link to the key the roster names, so its
+  re-admission check did not follow the person. Worse, such a contact was
+  talking to a key its pin said nothing about.
+
+The visible result: the sender's message reads Sent, the restored person
+receives nothing, and neither is told.
+
+**The backup carries the own predecessors.** `BackupPayload` version 7 adds
+the account's own predecessor seeds, oldest first, at most 8, each with its
+adoption time (the fields of the pairing state bundle). The backup is sealed
+under the newest phrase, whose holder already outranks every predecessor, so
+this widens nothing. On restore a device stores them where a kept device does
+and takes the path a paired device takes: it mints its binding under the
+oldest own predecessor while it holds no conversation.
+
+**A two-way conversation link.** `lakko-transparency::conversation_link`: 201
+bytes, `version ‖ conversation_key(32) ‖ current_key(32) ‖ issued_at(8 BE) ‖
+sig_by_conversation_key(64) ‖ sig_by_current_key(64)`, both signatures over
+the same domain-separated bytes (`lakko/transparency/conversation-link/v1`).
+No expiry: it states what the account's conversations are bound to.
+
+A supersession proof is not enough here. It is signed by the OLD key alone, so
+it is anchored by a pin of the old key, which is exactly what a contact first
+met after the rotation does not have. Accepting one at first observation would
+let a malicious directory attach a key of its choosing to a person, and a
+KeyPackage bound to that key would then pass the check that a binding is under
+the pin or a proven predecessor of it. The link is signed by the key the
+contact pinned, so it cannot be attached without that key's consent.
+
+The rotating device mints the link (it holds both seeds) and uploads it with
+the identity bundle. `identity_bundles.conversation_link` is opaque, at most
+256 bytes, never parsed: kept across a re-upload of the same key, replaced by
+a rotation, cleared by a reset. A malicious server can strip it (the contact
+then stays where it is today, an availability loss) and cannot forge it.
+
+A client verifies it after the identity gate has passed, against the key the
+gate left pinned, and records the conversation key as a proven predecessor of
+that pin. A link that does not verify is ignored and changes nothing.
+
+**One person, one contact row.** Found on the first live walk of this section:
+the contact row of a person met after a rotation is under the key they asked
+with, the conversation under the key their leaves are bound to, and the rule
+that a one-to-one is a contact compared the key alone, so one person became two
+rows. Every rule that writes a contact row now matches by the proven chain:
+the conversation key is kept as an alias on the row, a removal of either key
+holds for the person, and two rows of one person merge on load.
+
+**As built, 2026-11-01.** Web, iOS and Android, walked on a local stack with
+the vault flag set by hand: each client as the rotated account, restored from
+the phrase, and iOS and Android as the contact who met them afterwards. The
+letter path was not walked. Left open: a group member with no pin and no
+binding stays unknown, so no link is fetched for them; a device that restores
+after it has already landed has opened its DeviceGroup under the wrong lineage;
+a pre-rotation contact has not been walked on this path.
+
+Unchanged: Stage B, and everything in 3.1 about what the old seed can still
+do. A person who rotated keeps two keys; 3.7 makes that survivable, not gone.
+Most accounts no longer rotate at all (ADR-0075 section 3, amended the same
+day).
+
 ### 4. How the three interact
 
 1. **A recall is a reset to everyone else.** Peers follow it by attestation

@@ -220,7 +220,7 @@ export function buildStateBundle(
     contacts,
     pins,
     knownGroupIdsB64: [...knownGroupIdsB64],
-    ownPredecessors: carriedOwn(ownPredecessors),
+    ownPredecessors: boundedOwnPredecessors(ownPredecessors),
     groupNames: carriedGroupNames(extras.groupNames ?? [], knownGroupIdsB64),
     profiles: carriedProfiles(extras.profiles ?? []),
     pendingContacts: carriedPending(extras.pendingContacts ?? []),
@@ -361,7 +361,9 @@ function carriedKeys(keysB64: readonly string[]): string[] {
 
 /** The own chain a sender puts on the wire. Over the bound, the OLDEST (the
  *  key the conversation leaves are bound to) and the newest are kept. */
-function carriedOwn(own: readonly CarriedOwnPredecessor[]): CarriedOwnPredecessor[] {
+export function boundedOwnPredecessors(
+  own: readonly CarriedOwnPredecessor[],
+): CarriedOwnPredecessor[] {
   const valid = own.filter(
     (p) => decodesTo(p.seedB64, ACCOUNT_SEED_LENGTH) && Number.isSafeInteger(p.adoptedAtMs),
   );
@@ -575,6 +577,25 @@ export function mergeCarriedPredecessorSeeds(
   return out;
 }
 
+/** The lower-case hex account signature key of a 64-byte account seed. */
+export function accountKeyHexOfSeed(
+  wasm: {
+    readonly Identity: {
+      fromSeed(seed: Uint8Array): { readonly signaturePublicKey: Uint8Array; free(): void };
+    };
+  },
+  seed: Uint8Array,
+): string {
+  const identity = wasm.Identity.fromSeed(seed);
+  try {
+    let out = "";
+    for (const byte of identity.signaturePublicKey) out += byte.toString(16).padStart(2, "0");
+    return out;
+  } finally {
+    identity.free();
+  }
+}
+
 /**
  * Sending device: its own predecessor chain for the bundle, oldest first.
  * A predecessor with no adoption time stored gets one now (the same rule
@@ -607,7 +628,8 @@ export async function collectOwnPredecessors(
 }
 
 /**
- * Receiving device: store the own predecessors exactly as a kept device
+ * Receiving device (a pairing state bundle or a restored backup, ADR-0074
+ * section 3.7): store the own predecessors exactly as a kept device
  * that adopted holds them. The seeds go into the key-rotation row sealed
  * under the device key (the store `adoptRotatedKeys` writes), so the next
  * session install binds the device's conversation identity under the OLDEST
@@ -620,7 +642,7 @@ export async function collectOwnPredecessors(
  * install them again before any KeyPackage is published.
  */
 export async function applyOwnPredecessors(
-  bundle: StateBundleV3,
+  bundle: Pick<StateBundleV3, "ownPredecessors">,
   accountIdB64: string,
   deviceKey: DeviceCipher,
   keyHexOfSeed: (seed: Uint8Array) => string,

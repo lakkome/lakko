@@ -922,6 +922,14 @@ pub(crate) async fn enrol_finish(
             .execute(&mut *tx)
             .await
             .map_err(ApiError::Db)?;
+            // ADR-0075 section 3: from here a copy of the vault opens this
+            // phrase, so saving it takes a rotation, whatever happens to the
+            // email later.
+            sqlx::query("UPDATE accounts SET phrase_in_vault = 1 WHERE id = ?")
+                .bind(&account_id[..])
+                .execute(&mut *tx)
+                .await
+                .map_err(ApiError::Db)?;
         },
         None => {
             // A vault the account had was sealed under the previous address.

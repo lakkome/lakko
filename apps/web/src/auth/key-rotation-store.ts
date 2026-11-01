@@ -238,6 +238,28 @@ export function updateKeyRotationState(
   return queued;
 }
 
+/**
+ * Delete a row that does not open under `deviceKey` (it was sealed under a
+ * device key this device no longer has, a recover with a new password): what
+ * it held cannot be read, and a restore must be able to write the row again.
+ * A row that opens is left alone. Never throws.
+ */
+export async function dropUnreadableKeyRotationState(
+  accountIdB64: string,
+  deviceKey: DeviceCipher,
+): Promise<void> {
+  try {
+    await getKeyRotationState(accountIdB64, deviceKey);
+  } catch {
+    try {
+      await deleteKeyRotationState(accountIdB64);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("key-rotation state not cleared", err instanceof Error ? err.name : "unknown");
+    }
+  }
+}
+
 export async function deleteKeyRotationState(accountIdB64: string): Promise<void> {
   if (typeof indexedDB === "undefined") return;
   const db = await openDb();

@@ -254,10 +254,13 @@ struct LakkoApp: App {
         // ADR-0050 section 2.4 — the accounts the re-admission check can look
         // up: every accepted contact whose account id is known.
         chat.readmissionContactsProvider = { [weak contacts] in
-            (contacts?.state.accepted ?? []).map { contact in
-                DeviceReadmission.LookupContact(
-                    signaturePubkeyB64: base64Encode(contact.request.fromPubkey),
-                    previousKeysB64: contact.previousKeysB64 ?? [],
+            let proven = ProvenPredecessorStore().load()
+            return (contacts?.state.accepted ?? []).map { contact in
+                let key = base64Encode(contact.request.fromPubkey)
+                return DeviceReadmission.LookupContact(
+                    signaturePubkeyB64: key,
+                    previousKeysB64: DeviceReadmission.keysARowAnswersTo(
+                        contactKeyB64: key, previousKeysB64: contact.previousKeysB64 ?? [], proven: proven),
                     accountId: contact.request.fromAccountId)
             }
         }

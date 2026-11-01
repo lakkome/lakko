@@ -48,6 +48,14 @@ export type RecoverOpened =
   | { readonly mode: "vault"; readonly vaultSalt: string; readonly sealedEntropy: string }
   | { readonly mode: "password" };
 
+/** What `GET /account/phrase` answers. */
+export interface PhraseStatus {
+  /** The account's owner saved a recovery phrase. */
+  readonly saved: boolean;
+  /** Saving one takes a key rotation: the phrase was ever in an email vault. */
+  readonly rotationNeeded: boolean;
+}
+
 /** The session `recover/password/finish` lands. It mints no fresh grant. */
 export interface EmailPasswordResult {
   readonly accountId: Uint8Array;
@@ -109,6 +117,7 @@ export class RecoveryEmailClient {
     if (!response.ok) {
       throw new AuthHttpError(response.status, endpoint, await safeBody(response), retryAfterHeader(response));
     }
+    if (response.status === 204) return {};
     const parsed: unknown = await response.json();
     return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
   }
@@ -125,6 +134,25 @@ export class RecoveryEmailClient {
     const status = parseRecoveryEmailStatus(await this.send("GET", endpoint, undefined, sessionToken));
     if (status === null) throw new AuthHttpError(200, endpoint, "not a status body");
     return status;
+  }
+
+  /** Bearer `GET /account/phrase`: which way this account saves a phrase. It
+   *  answers on a server that sends no mail too, where `/recovery-email` is
+   *  `503` (ADR-0075 section 3, amended 2026-11-01). */
+  async phraseStatus(sessionToken: string): Promise<PhraseStatus> {
+    const endpoint = "/account/phrase";
+    const res = await this.send("GET", endpoint, undefined, sessionToken);
+    if (typeof res["saved"] !== "boolean" || typeof res["rotation_needed"] !== "boolean") {
+      throw new AuthHttpError(200, endpoint, "not a phrase status body");
+    }
+    return { saved: res["saved"], rotationNeeded: res["rotation_needed"] };
+  }
+
+  /** Bearer `POST /account/phrase/saved`: the person checked the words this
+   *  device holds. `409 phrase-save-needs-rotation` when the phrase was ever
+   *  in an email vault. Idempotent. */
+  async markPhraseSaved(sessionToken: string, freshGrant: string): Promise<void> {
+    await this.send("POST", "/account/phrase/saved", { fresh_grant: freshGrant }, sessionToken);
   }
 
   /** Bearer `POST /recovery-email/enrol/start`. */
