@@ -33,7 +33,7 @@ vi.mock("../channels/api", () => ({
 vi.mock("../channels/composer", () => ({
   decodeAndDecryptPost: async () => ({ hadSeed: true, epochId: 1 }),
 }));
-vi.mock("../channels/PostCard", () => ({
+vi.mock("../channels/post-decode", () => ({
   toPostDecode: () => ({ kind: "meta" }),
 }));
 vi.mock("../channels/channel-meta", () => ({

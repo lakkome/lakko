@@ -118,6 +118,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// (docs/ux/second-device.md section 3.1). Reset on sign-out and on an
     /// account switch.
     @Published public private(set) var deviceRemoved: Bool = false
+    /// Whether another device of this account is signed in, as far as this
+    /// one knows: the DeviceGroup roster, or the directory while this device
+    /// holds no DeviceGroup. `nil` until it is known.
+    @Published public private(set) var otherDeviceSignedIn: Bool?
 
     // MARK: - Internals
 
@@ -372,6 +376,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         activeAccountId = nil
         ready = false
         deviceRemoved = false
+        otherDeviceSignedIn = nil
         syncedState = SyncedState()
         pending = nil
         refreshDerived()
@@ -902,6 +907,20 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         return sealedEpoch
     }
 
+    /// Wait for the DeviceGroup handle of the session that just landed: a
+    /// device with no DeviceGroup yet reads the directory first. Returns
+    /// whether the handle is there. Chosen, not measured: ten seconds.
+    @discardableResult
+    public func waitForHandle(timeoutMs: Int64 = 10_000) async -> Bool {
+        let start = Int64(Date().timeIntervalSince1970 * 1000)
+        while group == nil, !deviceRemoved, activeAccountIdB64 != nil,
+              Int64(Date().timeIntervalSince1970 * 1000) - start < timeoutMs {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            if Task.isCancelled { break }
+        }
+        return group != nil
+    }
+
     /// How long ``waitForJournalHead(timeoutMs:)`` waits by default: one long
     /// poll (25 s) and a margin. Chosen, not measured.
     public static let journalHeadTimeoutMs: Int64 = 30_000
@@ -941,8 +960,31 @@ public final class DeviceGroupSyncRepository: ObservableObject {
 
     /// Encrypt with `compose` under the DeviceGroup's current epoch and
     /// publish it on the DeviceGroup journal. Returns the DS message id.
+    ///
+    /// A handle that fell behind the disk (another handle of this device
+    /// committed) stops ``publishOnce(_:)`` before anything is sent. It is
+    /// reloaded there, and the message is sealed once more on the reloaded
+    /// handle, so a publish is not lost to that race.
     @discardableResult
     private func publish(
+        _ compose: (DeviceGroup, Identity) throws -> Data
+    ) async throws -> Int64 {
+        try await Self.retryingOnceOnStaleHandle { try await publishOnce(compose) }
+    }
+
+    /// `attempt`, and one more time when it stopped on a handle that fell
+    /// behind the disk. Any other error, and a second stale handle, is the
+    /// caller's.
+    static func retryingOnceOnStaleHandle<T>(_ attempt: () async throws -> T) async throws -> T {
+        do {
+            return try await attempt()
+        } catch is DeviceGroupSnapshotStore.SnapshotChanged {
+            NSLog("DeviceGroupSync: the snapshot moved under this handle; sealing again on the reloaded one")
+            return try await attempt()
+        }
+    }
+
+    private func publishOnce(
         _ compose: (DeviceGroup, Identity) throws -> Data
     ) async throws -> Int64 {
         if deviceRemoved {
@@ -1501,6 +1543,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             }
             guard let self, let mayFound, !Task.isCancelled, bound.isCurrent,
                   self.activeAccountIdB64 == accountIdB64 else { return }
+            self.otherDeviceSignedIn = !mayFound
             if mayFound {
                 do {
                     let ensured = try DeviceGroupLifecycle.ensureDeviceGroup(
@@ -2020,6 +2063,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     private func reportRoster(group g: DeviceGroup) {
         guard let accountIdB64 = activeAccountIdB64, !deviceRemoved,
               let devices = try? g.devices(), !devices.isEmpty else { return }
+        otherDeviceSignedIn = devices.count > 1
         let own = (try? g.ownLeafIndex()).flatMap { leaf in
             devices.first { $0.leafIndex == leaf }?.signaturePublicKey
         }

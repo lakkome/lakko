@@ -42,6 +42,8 @@ class BackupRestoreTest {
         groups: List<String> = listOf(g1, g2),
         synced: ByteArray = byteArrayOf(7, 7, 7),
         predecessors: List<BackupOwnPredecessor> = emptyList(),
+        ownProfile: ByteArray = ByteArray(0),
+        visibility: ByteArray = ByteArray(0),
     ) = ParsedBackupPayload(
         accountId = ByteArray(16) { 9 },
         createdAtMs = 1_700_000_000_000uL,
@@ -50,6 +52,8 @@ class BackupRestoreTest {
         knownGroupIds = groups.map { hex -> ByteArray(32) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() } },
         syncedState = synced,
         ownPredecessors = predecessors,
+        ownProfile = ownProfile,
+        visibility = visibility,
     )
 
     private fun predecessor(tag: Int) = BackupOwnPredecessor(seed = ByteArray(64) { tag.toByte() }, adoptedAtMs = tag.toULong() * 1_000uL)
@@ -112,6 +116,29 @@ class BackupRestoreTest {
 
         override fun rememberRestoredGroups(groupIdsHex: List<String>) {
             rememberedGroups += groupIdsHex
+        }
+
+        val appliedProfiles = mutableListOf<ByteArray>()
+        val appliedVisibilities = mutableListOf<ByteArray>()
+        var everyoneUnknownNotes = 0
+        val restoredMarks = mutableListOf<Boolean>()
+        var failOwnProfile = false
+
+        override fun applyOwnProfile(envelope: ByteArray) {
+            if (failOwnProfile) throw IllegalStateException("does not decode")
+            appliedProfiles += envelope
+        }
+
+        override fun applyVisibility(envelope: ByteArray) {
+            appliedVisibilities += envelope
+        }
+
+        override fun noteEveryoneUnknown() {
+            everyoneUnknownNotes += 1
+        }
+
+        override fun markRestored(knewConversations: Boolean) {
+            restoredMarks += knewConversations
         }
 
         override fun markBackupDirty() {
@@ -259,7 +286,8 @@ class BackupRestoreTest {
             setOf(
                 "fetch", "storeOwnPredecessors", "rebindConversationKey", "mergeContacts", "mergeSyncedState",
                 "rememberRestoredGroups", "markBackupDirty", "setRetryPending", "retryPending",
-                "raiseRollbackAlert", "log",
+                "raiseRollbackAlert", "log", "applyOwnProfile", "applyVisibility", "noteEveryoneUnknown",
+                "markRestored",
             ),
             portNames.filterNot { it.contains('$') }.toSet(),
         )
@@ -508,7 +536,10 @@ class BackupRestoreTest {
             .substringBefore("val envelope")
         val named = Regex("""^\s*(\w+) = """, RegexOption.MULTILINE).findAll(compose).map { it.groupValues[1] }.toList()
         assertEquals(
-            listOf("accountId", "createdAtMs", "ed25519Seed", "contacts", "knownGroupIds", "syncedState", "ownPredecessors"),
+            listOf(
+                "accountId", "createdAtMs", "ed25519Seed", "contacts", "knownGroupIds", "syncedState",
+                "ownPredecessors", "ownProfile", "visibility",
+            ),
             named,
         )
     }
@@ -594,5 +625,46 @@ class BackupRestoreTest {
         // One shared function, and it is the only caller of the rule.
         assertEquals(1, Regex("restoreBackupAndApply\\(").findAll(auth).count())
         assertEquals(1, Regex("retryPendingBackupRestore\\(").findAll(auth).count())
+    }
+
+    // ---- the own profile and the setting ----------------------------------
+
+    private fun payloadWith(ownProfile: ByteArray, visibility: ByteArray, groups: List<String> = emptyList()) =
+        GatedRestoreOutcome.Restored(payload(ownProfile = ownProfile, visibility = visibility, groups = groups))
+
+    @Test
+    fun `a restore hands on the own profile and the setting, and marks the list`() = runTest {
+        val p = ports({ payloadWith(byteArrayOf(1), byteArrayOf(2), listOf(g1)) })
+        val outcome = restoreBackupAndApply("recover", p) { false }
+        assertEquals(BackupRestoreOutcome.APPLIED, outcome)
+        assertEquals(1, p.appliedProfiles.size)
+        assertEquals(1, p.appliedVisibilities.size)
+        assertEquals(1, p.everyoneUnknownNotes)
+        assertEquals(listOf(true), p.restoredMarks)
+    }
+
+    @Test
+    fun `an empty field changes nothing`() = runTest {
+        val p = ports({ payloadWith(ByteArray(0), ByteArray(0)) })
+        restoreBackupAndApply("recover", p) { false }
+        assertTrue(p.appliedProfiles.isEmpty())
+        assertTrue(p.appliedVisibilities.isEmpty())
+        assertEquals(listOf(false), p.restoredMarks)
+    }
+
+    @Test
+    fun `a profile that does not decode costs nothing else`() = runTest {
+        val p = ports({ payloadWith(byteArrayOf(1), byteArrayOf(2)) })
+        p.failOwnProfile = true
+        val outcome = restoreBackupAndApply("recover", p) { false }
+        assertEquals(BackupRestoreOutcome.APPLIED, outcome)
+        assertEquals(1, p.appliedVisibilities.size)
+    }
+
+    @Test
+    fun `no backup still ends the restore, with no conversation to speak of`() = runTest {
+        val p = ports({ GatedRestoreOutcome.NoBackup })
+        restoreBackupAndApply("recover", p) { false }
+        assertEquals(listOf(false), p.restoredMarks)
     }
 }

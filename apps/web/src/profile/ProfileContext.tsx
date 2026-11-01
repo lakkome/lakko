@@ -94,6 +94,7 @@ import {
   bindOwnProfileSync,
   ownProfileChanged,
   subscribeOwnProfileAdopted,
+  subscribeOwnStateRestored,
   unbindOwnProfileSync,
 } from "./own-profile-sync";
 import { durableSnapshotHook } from "../chat/persist-hooks";
@@ -166,6 +167,9 @@ export interface ProfileApi {
   /** ADR-0060 — this account's username certificate, `null` until fetched
    *  (or for a guest account). */
   ownUsernameCertificate(): Uint8Array | null;
+  /** The certificate, fetched first when none is held yet. `null` when it
+   *  could not be had; asked again next time. */
+  fetchOwnUsernameCertificate(): Promise<Uint8Array | null>;
   /** The 16-byte auth account id a person CLAIMED in their profile, as 32
    *  lower-case hex characters, or `null` when none is held. For the viewer's
    *  own key it is the signed-in account. Reactive. */
@@ -588,6 +592,16 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     // and the member cards follow; the groups already got it.
   });
 
+  // A restore: the stored profile may be new, and the person is told again
+  // everywhere, as after any change (the groups this device holds now; the
+  // ones it joins later get it from `groupJoined`).
+  const unsubscribeOwnRestored = subscribeOwnStateRestored(() => {
+    setOwnProfileTick((t) => t + 1);
+    bump();
+    ownProfileChanged();
+    void scheduler.profileChanged(chats.groups().map((g) => g.groupIdB64));
+  });
+
   /** The pending contact (ADR-0079) whose account key is `keyB64` or the
    *  canonical key it aliases, if any. Reactive on the pending list. */
   function pendingContactOf(keyB64: string, canonical: string): PendingContact | undefined {
@@ -653,6 +667,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     unsubscribeStore();
     unsubscribeRenames();
     unsubscribeOwnAdopted();
+    unsubscribeOwnRestored();
     unsubscribeCarried();
     scheduler.stop();
   });
@@ -875,6 +890,10 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     },
     ownProfileEnvelope,
     ownUsernameCertificate: () => ownCert(),
+    async fetchOwnUsernameCertificate() {
+      await ensureOwnCertificate();
+      return ownCert();
+    },
     accountIdHexOf(keyB64) {
       version();
       const own = chats.identity();

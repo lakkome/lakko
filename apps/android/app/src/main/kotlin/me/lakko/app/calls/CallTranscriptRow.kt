@@ -56,6 +56,9 @@ public enum class CallOutcome {
 
     /** Refused on purpose — by this device, or by the other side. */
     DECLINED,
+
+    /** Answered here and never connected: it was not missed. */
+    FAILED,
 }
 
 /** One finished call, as the conversation records it. */
@@ -80,21 +83,26 @@ public data class CallTranscriptEntry(
  *  - an **incoming call that was never answered** is `Missed`, whether it rang
  *    out, the caller gave up first, or this device was busy — from the callee's
  *    seat those are the same fact;
+ *  - an **incoming call answered here that never connected** is `Failed`
+ *    (`docs/ux/calls.md`: answered but never connected, never Missed);
  *  - everything else is simply which way the call went.
  *
  * @param incoming this device was being called.
  * @param answered the user accepted (incoming) or dialed (outgoing).
  * @param declinedHere the user pressed Decline on this device.
  * @param declinedByPeer the other side answered with a decline.
+ * @param connected media flowed at some point in the call.
  */
 public fun callOutcome(
     incoming: Boolean,
     answered: Boolean,
     declinedHere: Boolean,
     declinedByPeer: Boolean,
+    connected: Boolean = true,
 ): CallOutcome = when {
     declinedHere || declinedByPeer -> CallOutcome.DECLINED
     incoming && !answered -> CallOutcome.MISSED
+    incoming && !connected -> CallOutcome.FAILED
     incoming -> CallOutcome.INCOMING
     else -> CallOutcome.OUTGOING
 }
@@ -132,6 +140,7 @@ public fun callRowText(entry: CallTranscriptEntry, strings: Strings = Localizati
     return when (entry.outcome) {
         CallOutcome.MISSED -> strings["call.log.missed"]
         CallOutcome.DECLINED -> strings["call.log.declined"]
+        CallOutcome.FAILED -> strings["call.log.failed"]
         CallOutcome.OUTGOING -> duration
             ?.let { strings.format("call.log.outgoing_duration", mapOf("duration" to it)) }
             ?: strings["call.log.outgoing"]
@@ -152,8 +161,9 @@ public fun callRowSpokenLabel(entry: CallTranscriptEntry, strings: Strings = Loc
         CallOutcome.INCOMING -> "incoming"
         CallOutcome.MISSED -> "missed"
         CallOutcome.DECLINED -> "declined"
+        CallOutcome.FAILED -> null
     }
-    val head = strings["call.log.a11y.${kind}_$direction"]
+    val head = direction?.let { strings["call.log.a11y.${kind}_$it"] } ?: strings["call.log.failed"]
     // The same readable duration the call screen's status line announces, so a
     // screen reader hears one call described the same way live and afterwards.
     val spoken = entry.durationSecs?.let { spokenCallDuration(it, strings) }

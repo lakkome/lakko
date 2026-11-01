@@ -191,7 +191,7 @@
       "status": "machine"
     },
     "auth.signup.lede": {
-      "text": "Ваш пароль ніколи не залишає ваш пристрій. Далі ви отримаєте фразу відновлення, яку треба записати.",
+      "text": "Ваш пароль ніколи не залишає пристрій.",
       "status": "machine"
     },
     "auth.signup.name.hint": {
@@ -964,6 +964,10 @@
     },
     "call.log.declined": {
       "text": "Відхилено",
+      "status": "machine"
+    },
+    "call.log.failed": {
+      "text": "Дзвінок не вдався",
       "status": "machine"
     },
     "call.log.incoming": {
@@ -3462,6 +3466,14 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
+    "chats.restored.banner_other_devices": {
+      "text": "Інші ваші пристрої додають цей пристрій до чатів.",
+      "status": "machine"
+    },
+    "chats.restored.card": {
+      "text": "Ключі відновлено. Чати повернуться, коли ваші контакти відкриють Lakko. Попередні повідомлення не відновлюються.",
+      "status": "machine"
+    },
     "chats.row.actions": {
       "text": "Дії з розмовою",
       "status": "machine"
@@ -3834,6 +3846,10 @@
       "text": "Щоб подзвонити, спершу надішліть повідомлення.",
       "status": "machine"
     },
+    "contacts.detail.chat_starting": {
+      "text": "Чат створюється.",
+      "status": "machine"
+    },
     "contacts.detail.gone_body": {
       "text": "Цієї людини більше немає у ваших контактах.",
       "status": "machine"
@@ -4052,6 +4068,10 @@
     },
     "contacts.scan_qr.not_a_link": {
       "text": "Це не посилання Lakko. Спробуйте інший код.",
+      "status": "machine"
+    },
+    "contacts.search.ask_again": {
+      "text": "Попросити знову",
       "status": "machine"
     },
     "desktop.capture.body": {
@@ -5771,7 +5791,7 @@
       "status": "machine"
     },
     "group.join.wait_secondary": {
-      "text": "Жоден із кроків не має обмеження в часі. Якщо нічого не відбувається, запит можна надіслати знову.",
+      "text": "Якщо нічого не відбувається, запит можна надіслати знову.",
       "status": "machine"
     },
     "guest.claim.error.generic": {
@@ -6059,7 +6079,7 @@
       "status": "machine"
     },
     "invite.group.invited_by": {
-      "text": "Запрошення від {fingerprint}",
+      "text": "Запрошення від {name}",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {
@@ -6443,7 +6463,7 @@
       "status": "machine"
     },
     "new_group.no_contacts": {
-      "text": "Спершу додайте контакти: група починається з людей, яких ви вже знаєте.",
+      "text": "Групу можна почати самому. Людей можна додати зараз або пізніше.",
       "status": "machine"
     },
     "new_group.subtitle": {
@@ -6723,7 +6743,7 @@
       "status": "machine"
     },
     "protect.phrase.body": {
-      "text": "12 слів, які зберігаєте лише ви. Надійніше і не пов’язано з поштою.",
+      "text": "12 слів, які зберігаєте лише ви. Найнадійніший спосіб повернутися.",
       "status": "machine"
     },
     "protect.phrase.save.body": {

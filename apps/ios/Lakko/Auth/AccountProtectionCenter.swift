@@ -89,6 +89,9 @@ final class AccountProtectionCenter: ObservableObject {
     @Published private(set) var hasPasskey: Bool?
     /// `It was not me` asked for the screen that secures the account.
     @Published var secureRequested = false
+    /// The sign-up step left "Save a recovery phrase" for the app: Settings
+    /// opens on it (the key rotation needs the session's runtime).
+    @Published var savePhraseRequested = false
 
     private let ports: Ports
     private let store: AccountProtectionStore
@@ -260,6 +263,7 @@ final class AccountProtectionCenter: ObservableObject {
         hasPasskey = nil
         fetchedThrough = 0
         secureRequested = false
+        savePhraseRequested = false
     }
 
     /// Read the status from the server, then evaluate the automatic
@@ -351,7 +355,8 @@ final class AccountProtectionCenter: ObservableObject {
 
     /// Read the notices: after the stored cursor, or, on a device that
     /// never kept one, of the last 30 days. What comes back is shown (minus
-    /// this device's own actions) and a cursor is kept from then on. A
+    /// this device's own actions), except on a device with no cursor: that
+    /// device is new, so it only takes the newest id as its cursor. A
     /// failure shows nothing and moves nothing: the next landing reads again.
     func loadNotices() async {
         guard let session = ports.session() else { return }

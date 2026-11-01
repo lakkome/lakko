@@ -237,11 +237,17 @@ class PeopleModelTest {
 
     @Test
     fun `the heading never stands alone`() {
-        assertFalse(showsPeopleHeading(rows = 0, channel = false, searching = false, line = false))
-        assertTrue(showsPeopleHeading(rows = 1, channel = false, searching = false, line = false))
-        assertTrue(showsPeopleHeading(rows = 0, channel = true, searching = false, line = false))
-        assertTrue(showsPeopleHeading(rows = 0, channel = false, searching = true, line = false))
-        assertTrue(showsPeopleHeading(rows = 0, channel = false, searching = false, line = true))
+        assertFalse(showsPeopleHeading(rows = 0, searching = false, line = false))
+        assertTrue(showsPeopleHeading(rows = 1, searching = false, line = false))
+        assertTrue(showsPeopleHeading(rows = 0, searching = true, line = false))
+        assertTrue(showsPeopleHeading(rows = 0, searching = false, line = true))
+    }
+
+    @Test
+    fun `a channel reads its name when known, else its handle, never a prefix`() {
+        assertEquals("Trip news", channelResultLabel(" Trip news ", "trip"))
+        assertEquals("@trip", channelResultLabel(null, "trip"))
+        assertEquals("@trip", channelResultLabel("  ", "trip"))
     }
 
     @Test

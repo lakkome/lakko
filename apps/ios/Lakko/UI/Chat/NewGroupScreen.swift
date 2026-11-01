@@ -6,7 +6,9 @@ import SwiftUI
 /// Groups > New group (docs/ux/new-group.md): a name field above the
 /// accepted contacts, one checkbox per contact, and Create.
 ///
-/// The name is optional (ADR-0051 §3: sent into the group right after the
+/// A name with nobody picked founds a group with nobody else in it; people
+/// are added from its info as in any group. With people picked the name is
+/// optional (ADR-0051 §3: sent into the group right after the
 /// creating commit, so the first Welcome recipients get it with their first
 /// poll; empty means the title is built from the members). The group is
 /// created with the first picked contact through the same
@@ -43,6 +45,15 @@ struct NewGroupScreen: View {
         accepted.filter { selected.contains($0.request.fromPubkey) }
     }
 
+    private var trimmedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// What Create needs: at least a name or one person.
+    static func canCreate(name: String, picks: Int) -> Bool {
+        picks > 0 || !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var body: some View {
         List {
             Section {
@@ -61,6 +72,7 @@ struct NewGroupScreen: View {
             }
             Section(l10n.t("chat.members.title")) {
                 if accepted.isEmpty {
+                    // Nobody to pick: a name alone founds the group.
                     Text(l10n.t("new_group.no_contacts"))
                         .foregroundStyle(Color.lakkoTextMuted)
                 } else {
@@ -85,7 +97,7 @@ struct NewGroupScreen: View {
                 Button(l10n.t(busy ? "chats.new_group.creating" : "chats.create.group")) {
                     Task { await create() }
                 }
-                .disabled(busy || picks.isEmpty)
+                .disabled(busy || !Self.canCreate(name: name, picks: picks.count))
             }
         }
         .disabled(busy)
@@ -137,22 +149,27 @@ struct NewGroupScreen: View {
     private func create() async {
         if busy { return }
         let chosen = picks
-        guard let first = chosen.first, let firstAccountId = first.request.fromAccountId else { return }
+        guard Self.canCreate(name: name, picks: chosen.count) else { return }
         busy = true
         defer { busy = false }
         errorMessage = nil
 
         // 1. Found the group with the first pick (one Welcome, we are the
-        //    owner). A failure here created nothing: the form stays filled.
+        //    owner), or with nobody else when none was picked. A failure here
+        //    created nothing: the form stays filled.
         let groupIdHex: String
         do {
-            groupIdHex = try await chatRepository.startGroupWith(
-                recipientAccountId: firstAccountId,
-                recipientSignaturePubkey: first.request.fromPubkey,
-                // ADR-0062 — a group, fixed in the GroupContext, even while
-                // it still has two people.
-                kind: .group
-            )
+            if let first = chosen.first, let firstAccountId = first.request.fromAccountId {
+                groupIdHex = try await chatRepository.startGroupWith(
+                    recipientAccountId: firstAccountId,
+                    recipientSignaturePubkey: first.request.fromPubkey,
+                    // ADR-0062 — a group, fixed in the GroupContext, even while
+                    // it still has two people.
+                    kind: .group
+                )
+            } else {
+                groupIdHex = try await chatRepository.foundGroupWithNobodyElse()
+            }
         } catch {
             NSLog("New group: founding failed: \(error)")
             errorMessage = "chats.new_group.error"
@@ -166,7 +183,6 @@ struct NewGroupScreen: View {
         //    poll and every later add's growth re-send has a stored name to
         //    carry. A failed send leaves the group nameless; the members
         //    panel offers the rename.
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedName.isEmpty {
             do {
                 try await chatRepository.setGroupName(groupIdHex: groupIdHex, name: trimmedName)

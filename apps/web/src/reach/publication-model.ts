@@ -61,14 +61,26 @@ export type EveryoneAction =
   | { readonly kind: "publish" }
   | { readonly kind: "withdraw" };
 
-/** The inputs the Everyone publication (name terms + public record) is
- *  built from, as one key. */
+/**
+ * The inputs the Everyone publication (name terms + public record) is built
+ * from, as one key. The account key is one of them: a finder keeps a record
+ * only when it names the key the directory serves (`search/people-search.ts`),
+ * so after a key rotation the record already at discovery finds nobody.
+ */
 export function everyoneKey(
   name: string | null,
   username: string | null,
   usernameCertificateB64: string | null,
+  accountKeyHex: string,
 ): string {
-  return JSON.stringify([name ?? "", username ?? "", usernameCertificateB64 ?? ""]);
+  return JSON.stringify([name ?? "", username ?? "", usernameCertificateB64 ?? "", accountKeyHex]);
+}
+
+/** The state with its Everyone note made stale: whatever was published stands
+ *  as published, and no key matches it, so the next pass sends it again. */
+export function staleEveryoneNote(state: PublicationState): PublicationState {
+  if (state.everyone === null || state.everyone.key === null) return state;
+  return { ...state, everyone: { public: state.everyone.public, key: null } };
 }
 
 export function everyoneAction(

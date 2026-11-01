@@ -14,8 +14,8 @@ Until 2026-09-26 the page read `Invited by:` followed by twelve groups of five
 digits - the inviter's key fingerprint. The maintainer's verdict, on seeing it:
 it means slightly less than nothing to the person invited. A link is an
 invitation, and an invitation says who is inviting you and to what. The
-fingerprint stays, as the one thing on the page the inviter cannot fake, but it
-stops being the headline.
+fingerprint stayed at the foot of the card until 2026-11-01, when it left the
+page altogether.
 
 ## 2. What the page needs, and where it comes from
 
@@ -42,7 +42,7 @@ Every state shows one card. The card's headline changes; the controls do not.
 <N> members
 
 [ Request to join ]
-Invited by <fingerprint>            (small, muted, one line)
+Invited by <Inviter name>           (small, muted, one line)
 ```
 
 - The inviter's name is the headline's subject. A missing inviter name reads
@@ -50,9 +50,9 @@ Invited by <fingerprint>            (small, muted, one line)
 - A missing group name reads `a group` in the headline (`Anna invites you to a
   group`) and the group line is omitted.
 - `1 member` / `N members`; the count is the roster at mint time.
-- The fingerprint moves to the foot of the card in the muted style, prefixed
-  `Invited by`, so a person who was told the digits out of band can still
-  compare them. It is never the only thing on the page when a preview exists.
+- The foot line carries the inviter's name in the muted style, prefixed
+  `Invited by`. With no name the line is gone. Amended 2026-11-01: digits never
+  appear on this page; they meant nothing to the person reading it.
 
 **Without a preview** (a link minted without one; since 2026-09-28 a link
 whose fragment was lost is no longer this state, it is damaged - below):
@@ -60,7 +60,6 @@ whose fragment was lost is no longer this state, it is damaged - below):
 ```
 You are invited to a group
 [ Request to join ]
-Invited by <fingerprint>
 ```
 
 Nothing invents a name. The page does not say why the preview is missing.
@@ -91,7 +90,9 @@ is damaged or invalid. `/i/` has the same rule with its own copy
 ([`contact-invite-link.md`](contact-invite-link.md)).
 
 **Invalid or expired link** - unchanged: `This invite link is invalid or has
-expired.` and a link to open Lakko.
+expired.` and a link to open Lakko. Amended 2026-11-01: a link with no uses left reads the same to a visitor with
+no session, from the `used_up` flag of the ledger fetch. With a session the page
+stays, and the consume decides.
 
 **Not signed in** - unchanged: the preview is shown above the sign-up / log-in
 buttons when it opens, so the person knows what they are signing up to join.

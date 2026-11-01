@@ -467,6 +467,22 @@ public class ChatViewModel(
         viewModelScope.launch {
             me.lakko.app.chat.PinStore.version.collect { refreshPins() }
         }
+        // The members panel follows the group while it is open: a commit of
+        // this device (its own sweep) lands with no repository emission, and
+        // the panel must not keep old buttons or a change that already landed.
+        viewModelScope.launch {
+            mutableMembersPanelOpen.collectLatest { open ->
+                var seen: List<String>? = null
+                while (open) {
+                    kotlinx.coroutines.delay(me.lakko.app.chat.MEMBERS_PANEL_REFRESH_MS)
+                    val now = withContext(kotlinx.coroutines.Dispatchers.Default) {
+                        repo.membersPanelSignature(groupIdHex)
+                    }
+                    if (now != seen) refreshMembers()
+                    seen = now
+                }
+            }
+        }
         viewModelScope.launch {
             repo.state.collect { repoState ->
                 // The live roster reads below are synchronous Rust calls that
@@ -3463,12 +3479,13 @@ public class ChatViewModel(
                     onProgress = onProgress,
                 )
             },
-            publish = { ref, reply ->
+            publish = { ref, reply, onRowShown ->
                 repo.sendMessage(
                     groupIdHex = groupIdHex,
                     plaintext = "",
                     attachments = listOf(ref),
                     reply = reply,
+                    onRowShown = onRowShown,
                 )
             },
             onLog = { line -> android.util.Log.w("ChatViewModel", line) },

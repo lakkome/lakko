@@ -195,7 +195,7 @@
       "comment": "Line under the sign-up form; {link} is the 'Log in' link."
     },
     "auth.signup.lede": {
-      "text": "Your password never leaves your device. You will get a recovery phrase to write down next.",
+      "text": "Your password never leaves your device.",
       "comment": "Line under the sign-up title.",
       "security_critical": true
     },
@@ -994,6 +994,10 @@
     "call.log.declined": {
       "text": "Declined",
       "comment": "Call history row: a call that was declined."
+    },
+    "call.log.failed": {
+      "text": "Call failed",
+      "comment": "Call history row: a call answered here that never connected."
     },
     "call.log.incoming": {
       "text": "Incoming call",
@@ -3565,7 +3569,7 @@
     },
     "chats.create.open_link": {
       "text": "Open a link",
-      "comment": "Item of the create menu on the desktop app: opens a pasted Lakko link."
+      "comment": "Title of the dialog the desktop app opens where a web page copied a link for it."
     },
     "chats.empty.action": {
       "text": "Start one",
@@ -3634,6 +3638,14 @@
     "chats.preview.sender": {
       "text": "{name}: {text}",
       "comment": "Chat list row of a group, second line: {name} is who sent the last message, {text} the message or its kind."
+    },
+    "chats.restored.banner_other_devices": {
+      "text": "Your other devices are adding this one to your chats.",
+      "comment": "Banner on the chat list of a restored device while another device of the account is still signed in."
+    },
+    "chats.restored.card": {
+      "text": "Your keys are restored. Your chats come back as your contacts open Lakko. Messages from before are not restored.",
+      "comment": "Card on the empty chat list of a device restored from the recovery phrase or a passkey. It is not a loading state."
     },
     "chats.row.actions": {
       "text": "Conversation actions",
@@ -4007,6 +4019,10 @@
       "text": "Send a message first to start a call.",
       "comment": "Tooltip of the disabled Call and Video buttons when there is no chat with this contact on this device yet."
     },
+    "contacts.detail.chat_starting": {
+      "text": "Your chat is being set up.",
+      "comment": "Under the disabled Message button in the seconds between accepting a contact and the chat arriving."
+    },
     "contacts.detail.gone_body": {
       "text": "This person is no longer in your contacts.",
       "comment": "Shown on the contact page and the safety number page when the contact was removed while it was open."
@@ -4239,6 +4255,10 @@
     "contacts.scan_qr.not_a_link": {
       "text": "This code is not a Lakko link. Try another code.",
       "comment": "Shown on the scanner when the scanned QR code is not a Lakko invite, group or call link."
+    },
+    "contacts.search.ask_again": {
+      "text": "Ask again",
+      "comment": "Beside a person in search who has not answered an earlier request."
     },
     "desktop.capture.body": {
       "text": "Allow it in your system's privacy settings, then try again.",
@@ -6089,8 +6109,8 @@
       "comment": "Group invite page after the person asked to join: an admin must approve, then the change is applied."
     },
     "group.join.wait_secondary": {
-      "text": "Neither step has a time limit. If nothing happens, you can send the request again.",
-      "comment": "Second line on the group invite page while a join request is waiting: neither step has a deadline, and the request can be sent again."
+      "text": "If nothing happens, you can send the request again.",
+      "comment": "Second line on the group invite page while a join request is waiting: the request can be sent again."
     },
     "guest.claim.error.generic": {
       "text": "The account could not be created. Try again.",
@@ -6382,9 +6402,8 @@
       "comment": "Link on an invite page back to the app's start page."
     },
     "invite.group.invited_by": {
-      "text": "Invited by {fingerprint}",
-      "comment": "Muted foot line of the group invite page. {fingerprint} is the digits of the inviter's key fingerprint, which the inviter cannot fake; keep it verbatim.",
-      "security_critical": true
+      "text": "Invited by {name}",
+      "comment": "Muted line of the group invite page. {name} is the inviter's display name from the link's sealed preview. With no name the line is not shown."
     },
     "invite.group.lead_anonymous": {
       "text": "You are invited to",
@@ -6775,8 +6794,8 @@
       "comment": "Example group name in the empty field."
     },
     "new_group.no_contacts": {
-      "text": "Add contacts first; a group starts from people you already know.",
-      "comment": "Create-group form with no contacts to pick."
+      "text": "A group can start with just you. Add people now or later.",
+      "comment": "Create-group form with no contacts to pick; the group can still be created."
     },
     "new_group.subtitle": {
       "text": "You will be the group's owner. You can add more people later.",
@@ -7211,7 +7230,7 @@
       "comment": "Row on the protect-your-account step."
     },
     "protect.phrase.body": {
-      "text": "12 words only you keep. Stronger, and nothing to do with email.",
+      "text": "12 words only you keep. The strongest way back.",
       "comment": "Under 'Save a recovery phrase' on the protect-your-account step.",
       "security_critical": true
     },

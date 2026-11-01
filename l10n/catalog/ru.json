@@ -191,7 +191,7 @@
       "status": "machine"
     },
     "auth.signup.lede": {
-      "text": "Ваш пароль никогда не покидает устройство. Затем вы получите фразу восстановления, которую нужно записать.",
+      "text": "Ваш пароль никогда не покидает устройство.",
       "status": "machine"
     },
     "auth.signup.name.hint": {
@@ -964,6 +964,10 @@
     },
     "call.log.declined": {
       "text": "Отклонён",
+      "status": "machine"
+    },
+    "call.log.failed": {
+      "text": "Звонок не удался",
       "status": "machine"
     },
     "call.log.incoming": {
@@ -3578,6 +3582,14 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
+    "chats.restored.banner_other_devices": {
+      "text": "Другие ваши устройства добавляют это устройство в чаты.",
+      "status": "machine"
+    },
+    "chats.restored.card": {
+      "text": "Ключи восстановлены. Чаты вернутся, когда ваши контакты откроют Lakko. Прежние сообщения не восстанавливаются.",
+      "status": "machine"
+    },
     "chats.row.actions": {
       "text": "Действия с разговором",
       "status": "machine"
@@ -3950,6 +3962,10 @@
       "text": "Чтобы позвонить, сначала отправьте сообщение.",
       "status": "machine"
     },
+    "contacts.detail.chat_starting": {
+      "text": "Чат создаётся.",
+      "status": "machine"
+    },
     "contacts.detail.gone_body": {
       "text": "Этого человека больше нет в ваших контактах.",
       "status": "machine"
@@ -4168,6 +4184,10 @@
     },
     "contacts.scan_qr.not_a_link": {
       "text": "Это не ссылка Lakko. Попробуйте другой код.",
+      "status": "machine"
+    },
+    "contacts.search.ask_again": {
+      "text": "Попросить снова",
       "status": "machine"
     },
     "desktop.capture.body": {
@@ -5887,7 +5907,7 @@
       "status": "machine"
     },
     "group.join.wait_secondary": {
-      "text": "Ни у одного из шагов нет ограничения по времени. Если ничего не происходит, запрос можно отправить снова.",
+      "text": "Если ничего не происходит, запрос можно отправить снова.",
       "status": "machine"
     },
     "guest.claim.error.generic": {
@@ -6175,7 +6195,7 @@
       "status": "machine"
     },
     "invite.group.invited_by": {
-      "text": "Приглашение от {fingerprint}",
+      "text": "Приглашение от {name}",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {
@@ -6559,7 +6579,7 @@
       "status": "machine"
     },
     "new_group.no_contacts": {
-      "text": "Сначала добавьте контакты: группа начинается с людей, которых вы уже знаете.",
+      "text": "Группу можно начать одному. Людей можно добавить сейчас или позже.",
       "status": "machine"
     },
     "new_group.subtitle": {
@@ -6959,7 +6979,7 @@
       "status": "machine"
     },
     "protect.phrase.body": {
-      "text": "12 слов, которые храните только вы. Надёжнее и не связано с почтой.",
+      "text": "12 слов, которые храните только вы. Самый надёжный способ вернуться.",
       "status": "machine"
     },
     "protect.phrase.save.body": {

@@ -191,7 +191,7 @@
       "status": "machine"
     },
     "auth.signup.lede": {
-      "text": "رمز عبور شما هرگز از دستگاهتان خارج نمی‌شود. در مرحله بعد یک عبارت بازیابی می‌گیرید که باید آن را یادداشت کنید.",
+      "text": "گذرواژه شما هرگز از دستگاهتان خارج نمی‌شود.",
       "status": "machine"
     },
     "auth.signup.name.hint": {
@@ -964,6 +964,10 @@
     },
     "call.log.declined": {
       "text": "ردشده",
+      "status": "machine"
+    },
+    "call.log.failed": {
+      "text": "تماس ناموفق بود",
       "status": "machine"
     },
     "call.log.incoming": {
@@ -3462,6 +3466,14 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
+    "chats.restored.banner_other_devices": {
+      "text": "دستگاه‌های دیگرتان این دستگاه را به گفتگوها اضافه می‌کنند.",
+      "status": "machine"
+    },
+    "chats.restored.card": {
+      "text": "کلیدهای شما بازیابی شد. گفتگوهایتان وقتی مخاطبانتان Lakko را باز کنند برمی‌گردند. پیام‌های قبلی بازیابی نمی‌شوند.",
+      "status": "machine"
+    },
     "chats.row.actions": {
       "text": "کارهای گفتگو",
       "status": "machine"
@@ -3834,6 +3846,10 @@
       "text": "برای شروع تماس ابتدا پیامی بفرستید.",
       "status": "machine"
     },
+    "contacts.detail.chat_starting": {
+      "text": "گفتگوی شما در حال آماده شدن است.",
+      "status": "machine"
+    },
     "contacts.detail.gone_body": {
       "text": "این شخص دیگر در مخاطبان شما نیست.",
       "status": "machine"
@@ -4052,6 +4068,10 @@
     },
     "contacts.scan_qr.not_a_link": {
       "text": "این کد پیوند Lakko نیست. کد دیگری را امتحان کنید.",
+      "status": "machine"
+    },
+    "contacts.search.ask_again": {
+      "text": "درخواست دوباره",
       "status": "machine"
     },
     "desktop.capture.body": {
@@ -5771,7 +5791,7 @@
       "status": "machine"
     },
     "group.join.wait_secondary": {
-      "text": "هیچ‌یک از این دو مرحله محدودیت زمانی ندارد. اگر اتفاقی نیفتاد، می‌توانید دوباره درخواست بفرستید.",
+      "text": "اگر اتفاقی نیفتاد، می‌توانید درخواست را دوباره بفرستید.",
       "status": "machine"
     },
     "guest.claim.error.generic": {
@@ -6059,7 +6079,7 @@
       "status": "machine"
     },
     "invite.group.invited_by": {
-      "text": "دعوت از طرف {fingerprint}",
+      "text": "دعوت از طرف {name}",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {
@@ -6443,7 +6463,7 @@
       "status": "machine"
     },
     "new_group.no_contacts": {
-      "text": "ابتدا مخاطب اضافه کنید؛ گروه با افرادی شروع می‌شود که از قبل می‌شناسید.",
+      "text": "گروه می‌تواند فقط با شما شروع شود. افراد را اکنون یا بعداً اضافه کنید.",
       "status": "machine"
     },
     "new_group.subtitle": {
@@ -6723,7 +6743,7 @@
       "status": "machine"
     },
     "protect.phrase.body": {
-      "text": "12 کلمه که فقط شما نگه می‌دارید. قوی‌تر است و ربطی به ایمیل ندارد.",
+      "text": "۱۲ کلمه که فقط شما نگه می‌دارید. مطمئن‌ترین راه بازگشت.",
       "status": "machine"
     },
     "protect.phrase.save.body": {

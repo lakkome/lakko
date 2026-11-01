@@ -46,7 +46,11 @@ export function publicOriginFor(
   locationOrigin: string | undefined,
 ): string {
   if (platform === "desktop") {
-    if (typeof hostValue === "string" && /^https:\/\/[^/?#]+$/.test(hostValue)) {
+    // The host takes an https origin, or 127.0.0.1 for a local stack; so does this.
+    if (
+      typeof hostValue === "string" &&
+      /^(?:https:\/\/[^/?#]+|http:\/\/127\.0\.0\.1(?::\d+)?)$/.test(hostValue)
+    ) {
       return hostValue;
     }
     throw new Error("desktop: the host did not provide the public origin");

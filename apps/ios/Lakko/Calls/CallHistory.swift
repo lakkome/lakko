@@ -41,6 +41,7 @@ public enum CallHistoryOutcome: String, Codable, Equatable, Sendable {
     case answered
     case missed
     case declined
+    case failed
 }
 
 /// Which screen a row opens, as the index stores it. Only the two MLS kinds
@@ -102,6 +103,8 @@ public struct CallHistoryEntry: Codable, Equatable, Identifiable, Sendable {
             return CallTranscriptRow(direction: direction, outcome: .missed)
         case .declined:
             return CallTranscriptRow(direction: direction, outcome: .declined)
+        case .failed:
+            return CallTranscriptRow(direction: direction, outcome: .failed)
         }
     }
 
@@ -111,6 +114,7 @@ public struct CallHistoryEntry: Codable, Equatable, Identifiable, Sendable {
         case .answered(let durationMs): return (.answered, max(0, durationMs))
         case .missed: return (.missed, 0)
         case .declined: return (.declined, 0)
+        case .failed: return (.failed, 0)
         }
     }
 
@@ -262,6 +266,8 @@ public enum CallHistory {
             head = Localization.text(video ? "call.log.a11y.video_missed" : "call.log.a11y.voice_missed")
         case .declined:
             head = Localization.text(video ? "call.log.a11y.video_declined" : "call.log.a11y.voice_declined")
+        case .failed:
+            head = entry.transcriptRow.text
         }
         return Localization.joinList([title, head, clock])
     }
@@ -279,7 +285,7 @@ public enum CallHistory {
         switch entry.outcome {
         case .answered:
             return entry.direction == .outgoing ? "phone.arrow.up.right" : "phone.arrow.down.left"
-        case .missed, .declined:
+        case .missed, .declined, .failed:
             return "phone.down"
         }
     }

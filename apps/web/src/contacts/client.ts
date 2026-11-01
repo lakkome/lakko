@@ -3153,47 +3153,7 @@ export class ContactsClient {
       throw ContactsError.wrap(err);
     }
     void added.commit;
-    // ADR-0057 obligation 1 — the owner claims the journal at creation with
-    // its ROOT (derived from the account identity), at the epoch the one
-    // commit above moved it to (nobody ever holds epoch 0: the commit fans out
-    // to nobody), naming that epoch's access key. FAIL-CLOSED (the second
-    // security pass, finding 3): the claim must answer 204 before any Welcome
-    // leaves, else whoever claimed the id first would be its root for good. A
-    // failure aborts the creation with nothing published; the local group is
-    // dropped (its random id is never reused).
-    try {
-      const founding = takeSigner(() => group.dsAccessSigner(myIdentity));
-      if (founding === null) throw new Error("ds: the founding epoch's key could not be derived");
-      let account: WasmIdentity | null = null;
-      try {
-        account = await this.resolveAccountIdentity(identity);
-        const root = wasm.dsJournalRootSigner(account, group.groupId);
-        try {
-          await claimAtCreation(this.ds, group.groupId, root, founding.epoch, founding.verifyingKey());
-        } finally {
-          root.free();
-        }
-      } finally {
-        founding.free();
-        if (account !== null && account !== this.accountIdentityProvider?.()) {
-          try {
-            account.free();
-          } catch {
-            /* already freed */
-          }
-        }
-      }
-      dsAccess.markRootHeld(group.groupId);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("ds: claim at group creation failed; the group was not created", err);
-      try {
-        group.free();
-      } catch {
-        /* already freed */
-      }
-      throw ContactsError.wrap(err instanceof JournalClaimFailedError ? err.cause : err);
-    }
+    await this.claimFoundedJournal(identity, group, myIdentity);
     // One Welcome target per PERSON (a KeyPackage bound to a proven
     // predecessor names the same mailbox as one bound to the current key).
     const targets: { accountKey: Uint8Array; isRecipient: boolean }[] = [];
@@ -3230,6 +3190,100 @@ export class ContactsClient {
       throw err;
     }
     return { group, welcome: added.welcome, targets };
+  }
+
+  /**
+   * ADR-0057 obligation 1 — the owner claims the journal at creation with its
+   * ROOT (derived from the account identity), at the epoch the group stands
+   * at, naming that epoch's access key. FAIL-CLOSED (the second security
+   * pass, finding 3): the claim must answer 204 before any Welcome leaves,
+   * else whoever claimed the id first would be its root for good. A failure
+   * aborts the creation with nothing published; the local group is dropped
+   * (its random id is never reused).
+   */
+  private async claimFoundedJournal(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    myIdentity: WasmIdentity,
+  ): Promise<void> {
+    const wasm = await loadWasm();
+    try {
+      const founding = takeSigner(() => group.dsAccessSigner(myIdentity));
+      if (founding === null) throw new Error("ds: the founding epoch's key could not be derived");
+      let account: WasmIdentity | null = null;
+      try {
+        account = await this.resolveAccountIdentity(identity);
+        const root = wasm.dsJournalRootSigner(account, group.groupId);
+        try {
+          await claimAtCreation(this.ds, group.groupId, root, founding.epoch, founding.verifyingKey());
+        } finally {
+          root.free();
+        }
+      } finally {
+        founding.free();
+        if (account !== null && account !== this.accountIdentityProvider?.()) {
+          try {
+            account.free();
+          } catch {
+            /* already freed */
+          }
+        }
+      }
+      dsAccess.markRootHeld(group.groupId);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ds: claim at group creation failed; the group was not created", err);
+      try {
+        group.free();
+      } catch {
+        /* already freed */
+      }
+      throw ContactsError.wrap(err instanceof JournalClaimFailedError ? err.cause : err);
+    }
+  }
+
+  /**
+   * Create a group with nobody else in it (D3): this account's own other
+   * devices, and people added later the way people are added to any group.
+   * With no other device there is no commit at all: the group stands at its
+   * first epoch, and that epoch is the one claimed.
+   */
+  async startGroupAlone(identity: IdentitySecrets | null): Promise<{ group: WasmGroup }> {
+    const wasm = await loadWasm();
+    const myIdentity = await this.resolveIdentity(identity);
+    const group = new wasm.Group(myIdentity, wasm.GroupKind.Group);
+    const ownDevices = await this.ownOtherDevices(identity, myIdentity);
+    let welcome: Uint8Array | null = null;
+    if (ownDevices.length > 0) {
+      try {
+        welcome = group.addMembers(
+          myIdentity,
+          ownDevices.map((d) => d.keyPackage),
+        ).welcome;
+      } catch (err) {
+        throw ContactsError.wrap(err);
+      }
+    }
+    await this.claimFoundedJournal(identity, group, myIdentity);
+    try {
+      await this.persistProposalOrThrow();
+    } catch (err) {
+      try {
+        group.free();
+      } catch {
+        /* already freed */
+      }
+      throw err;
+    }
+    if (welcome !== null) {
+      const first = ownDevices[0];
+      if (first !== undefined) {
+        const accountKey = await accountKeyOfKeyPackage(first.keyPackage);
+        await this.deliverPreparedWelcomes(group.groupId, welcome, [{ accountKey, isRecipient: false }]);
+      }
+      await this.persistBestEffort();
+    }
+    return { group };
   }
 
   /**
@@ -4615,23 +4669,28 @@ export class ContactsClient {
    *  `isDiscoveryRateLimited`), never as "not found". */
   async resolveGroupInviteSlug(
     slug: string,
-  ): Promise<{ sealed: Uint8Array; blobId: Uint8Array }> {
+  ): Promise<{ sealed: Uint8Array; blobId: Uint8Array; usedUp: boolean }> {
     let parsed;
     try {
       parsed = parseGroupInviteSlug(slug, inviteLinkWidths(await loadWasm()));
     } catch (err) {
       throw ContactsError.wrap(err);
     }
+    let usedUp = false;
     let fetched: Uint8Array | null;
     try {
-      fetched = await fetchLedgerLink(() => this.discovery.fetchGroupInvite(parsed.blobId));
+      fetched = await fetchLedgerLink(async () => {
+        const row = await this.discovery.fetchGroupInviteRow(parsed.blobId);
+        usedUp = row?.usedUp === true;
+        return row?.sealed ?? null;
+      });
     } catch (err) {
       throw ContactsError.wrap(err);
     }
     if (fetched === null) {
       throw ContactsError.wrap(new Error("group invite not found or expired"));
     }
-    return { sealed: fetched, blobId: parsed.blobId };
+    return { sealed: fetched, blobId: parsed.blobId, usedUp };
   }
 
   /** Sealed-link amendment of ADR-0028 (2026-09-28): open a `/g/` link. A
@@ -4649,6 +4708,7 @@ export class ContactsClient {
     capabilityWire: Uint8Array;
     blobId: Uint8Array;
     linkSecret: Uint8Array;
+    usedUp: boolean;
   }> {
     const wasm = await loadWasm();
     const widths = inviteLinkWidths(wasm);
@@ -4660,13 +4720,13 @@ export class ContactsClient {
     }
     const fragment = parseInviteLinkFragment(hash, widths);
     if (fragment.kind !== "secret") throw new InviteLinkDamagedError();
-    const { sealed, blobId } = await this.resolveGroupInviteSlug(slug);
+    const { sealed, blobId, usedUp } = await this.resolveGroupInviteSlug(slug);
     const capability = openSealedInvite(
       (b, k) => wasm.GroupInviteCapability.openLink(b, k),
       sealed,
       fragment,
     );
-    return { capability, capabilityWire: capability.wire, blobId, linkSecret: fragment.secret };
+    return { capability, capabilityWire: capability.wire, blobId, linkSecret: fragment.secret, usedUp };
   }
 
   /** ADR-0028 (G-3) — joiner step 1: request to join a group from a `/g/` link

@@ -802,10 +802,17 @@ public final class DiscoveryClient {
     /// with the link's fragment secret (`InviteCapability.openLink`), which
     /// also re-verifies the signature, so a substituted blob opens nothing.
     public func fetchInvite(blobId: Data) async throws -> Data? {
-        guard let raw = try await inviteFetch(blobId: blobId) else {
+        try await fetchInviteRow(blobId: blobId)?.sealed
+    }
+
+    /// ``fetchInvite(blobId:)`` with the ledger's `used_up` flag, which only
+    /// a page with no session reads.
+    public func fetchInviteRow(blobId: Data) async throws -> (sealed: Data, usedUp: Bool)? {
+        guard let raw = try await inviteFetch(blobId: blobId),
+              let sealed = base64Decode(raw.sealed) else {
             return nil
         }
-        return base64Decode(raw.sealed)
+        return (sealed, raw.usedUp ?? false)
     }
 
     /// Atomically bump the consume counter for the invite at

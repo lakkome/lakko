@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import { mayCreateGroup } from "./group-title";
 import {
   DEFAULT_GROUP_LABEL,
   DIRECT_CHAT_STAND_IN,
@@ -59,5 +60,19 @@ describe("groupTitle", () => {
 
   it("never shows the reload stand-in", () => {
     expect(groupTitle("Group aB3_-x", ["Anna", "Ivan"])).toBe("Anna, Ivan");
+  });
+});
+
+describe("mayCreateGroup (D3)", () => {
+  it("a name is enough", () => {
+    expect(mayCreateGroup("Club", 0)).toBe(true);
+  });
+
+  it("a person is enough, as before", () => {
+    expect(mayCreateGroup("", 1)).toBe(true);
+  });
+
+  it("neither is not a group", () => {
+    expect(mayCreateGroup("   ", 0)).toBe(false);
   });
 });

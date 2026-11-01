@@ -352,6 +352,10 @@ internal fun visibleRequests(
 /** The §5.1 pending-notice copy, or `null` when nothing is waiting. */
 public data class PendingNotice(val count: UiText, val liveness: UiText)
 
+/** How often an open members panel re-reads the group. A read that shows no
+ *  change does nothing. Chosen, not measured. */
+internal const val MEMBERS_PANEL_REFRESH_MS: Long = 2_000L
+
 internal fun pendingNotice(requests: List<PendingRequest>): PendingNotice? {
     val waiting = requests.count { it.state == RequestState.WAITING }
     if (waiting == 0) return null

@@ -72,6 +72,16 @@ import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
 
+/** The line under the disabled Message button: a contact with a known account
+ *  is seconds from its chat after an accept; only one with no account cannot
+ *  be started from here. */
+internal fun contactChatLineKey(accountId: ByteArray?): String =
+    if (accountId != null && accountId.size == CONTACT_ACCOUNT_ID_LEN) {
+        "contacts.detail.chat_starting"
+    } else {
+        "contacts.detail.message_unavailable"
+    }
+
 /**
  * Contact detail — docs/ux/client-redesign.md section 5.3, and the person a
  * one-to-one conversation opens (docs/ux/conversation-info.md section 2.1).
@@ -193,6 +203,7 @@ public fun ContactDetailScreen(
         if (c != null && resolvedName != null) {
             ContactDetailBody(
                 contactKey = contactKey,
+                accountId = contact?.request?.fromAccountId,
                 name = resolvedName,
                 groupIdHex = groupIdHex,
                 sections = sections,
@@ -288,6 +299,7 @@ public fun ContactDetailScreen(
 @Composable
 private fun ContactDetailBody(
     contactKey: String,
+    accountId: ByteArray?,
     name: me.lakko.app.profile.ResolvedName,
     groupIdHex: String?,
     sections: List<InfoSection>,
@@ -381,7 +393,7 @@ private fun ContactDetailBody(
             if (groupIdHex == null && hasConversationActions) {
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    t("contacts.detail.message_unavailable"),
+                    t(contactChatLineKey(accountId)),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

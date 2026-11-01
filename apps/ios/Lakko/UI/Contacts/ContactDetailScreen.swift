@@ -87,6 +87,15 @@ struct ContactDetailScreen: View {
         removedHere ? nil : person
     }
 
+    /// The line under the name of a contact with no chat on this device.
+    /// Right after an accept the Welcome is on its way; a contact whose
+    /// account is not known cannot be messaged from here; a contact a backup
+    /// brought back waits for a member to add this device.
+    static func noChatLineKey(_ contact: AcceptedContact) -> String {
+        if contact.request.fromAccountId == nil { return "contacts.detail.message_unavailable" }
+        return contact.request.messageId >= 0 ? "contacts.detail.chat_starting" : "chats.new_chat.not_available"
+    }
+
     @ViewBuilder
     private func detail(contact: AcceptedContact, isContact: Bool, resolved: ResolvedDisplayName) -> some View {
         let chat = viewModel.chatGroupIdHex(for: contact)
@@ -131,7 +140,7 @@ struct ContactDetailScreen: View {
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                     if chat == nil {
-                        Text(l10n.t("chats.new_chat.not_available"))
+                        Text(l10n.t(Self.noChatLineKey(contact)))
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }

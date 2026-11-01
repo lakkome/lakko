@@ -56,6 +56,39 @@ public fun ownProfileDeviceEnvelope(
 }
 
 /**
+ * The own profile envelope a backup carries: what the account's devices send
+ * each other plus the username, with the name's stored stamp, or `null` when
+ * no name or photo was ever saved. A restore on a device with nothing has no
+ * other source for either.
+ */
+public fun ownProfileBackupEnvelope(
+    profile: OwnProfile?,
+    accountId: ByteArray,
+    compose: (FfiProfile) -> ByteArray,
+): ByteArray? {
+    val wire = ownProfileForDevices(profile, accountId) ?: return null
+    return try {
+        compose(wire.copy(username = profile?.username?.takeIf { it.isNotEmpty() }))
+    } catch (_: Throwable) {
+        null
+    }
+}
+
+/**
+ * What a restore keeps of the backup's own profile: [adoptOwnProfileFromDevice]
+ * (nothing when this device holds a name as new, or the envelope names another
+ * account), with the backup's username when this device states none yet.
+ */
+public fun adoptOwnProfileFromBackup(
+    stored: OwnProfile?,
+    incoming: FfiProfile,
+    ownAccountId: ByteArray,
+): OwnProfile? =
+    adoptOwnProfileFromDevice(stored, incoming, ownAccountId)?.let { adopted ->
+        if (adopted.username == null) adopted.copy(username = incoming.username) else adopted
+    }
+
+/**
  * What this device keeps of an own profile [incoming] from another of the
  * account's devices: the profile to store, or `null` when nothing changes —
  * a profile naming another account, or a stamp not strictly greater than

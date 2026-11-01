@@ -693,6 +693,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     readonly startedAtMs: number;
     /** When media first flowed, or `null` if it never did. */
     connectedAtMs: number | null;
+    /** This device pressed Accept: a call that then never connected failed,
+     *  it was not missed. */
+    accepted: boolean;
     /** The reason the recorded row was written from, so a second terminal
      *  report that carries no reason cannot overwrite one that did. */
     recordedWithReason: boolean;
@@ -715,7 +718,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const connected = j.connectedAtMs !== null;
     const entry: CallLogEntry = {
       id: j.callIdHex,
-      outcome: classifyCallOutcome({ incoming: j.incoming, connected, reason }),
+      outcome: classifyCallOutcome({ incoming: j.incoming, connected, accepted: j.accepted, reason }),
       video: j.video,
       // `null`, not zero: a call that never connected has no duration, and
       // `Outgoing call, 0:00` would report a conversation that did not happen.
@@ -742,6 +745,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       video,
       startedAtMs: Date.now(),
       connectedAtMs: null,
+      accepted: false,
       recordedWithReason: false,
     };
   }
@@ -1053,12 +1057,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         if (s === "connected") startOneToOneShare(session, groupIdB64, callId);
         if (s === "done") {
           endOneToOneShare(session);
-          if (callJournal?.session === session) recordOneToOneCall(reason);
+          if (callJournal?.session === session && !session.neverPlaced()) recordOneToOneCall(reason);
           endedCallIds.add(callIdHex(callId));
           activeCall = null;
           setSilentRing(false);
           setQuietOffer(null);
-          if (reason !== undefined) setLastEnded({ groupIdB64, reason });
+          if (reason !== undefined && !session.neverPlaced()) setLastEnded({ groupIdB64, reason });
           setRemoteStream(null);
           setLocalStream(null);
           setVideoCall(false);
@@ -1417,6 +1421,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       // A later call has the slot: this one was already over, and neither its
       // failure nor its video flag belongs to the call that replaced it.
       if (slotSession !== session) return;
+      // A call that never rang anywhere leaves no trace: no row in the
+      // conversation and no "last call ended" line beside the one sentence
+      // the caller shows for this failure.
+      if (callJournal?.session === session) callJournal = null;
+      setLastEnded(null);
       // `dial` drives the session to `done` on a capture / setup failure; make
       // sure the slot is free even if it threw before reporting a state.
       if (activeCall === session) {
@@ -1438,6 +1447,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (!permits.microphone || activeCall !== call || call.getState() !== "ringing") return;
     const withVideo = askedVideo && permits.camera;
     if (withVideo) setVideoCall(true);
+    if (callJournal?.session === call) callJournal.accepted = true;
     await call.accept();
     // Opting into video on accept drives the same mid-call camera-on path the
     // caller uses (see the camera effect below). Only for the call that was

@@ -76,7 +76,10 @@ export type CallOutcome =
    *  first, or this device was already busy. */
   | "missed"
   /** Refused on purpose — by this device, or by the other side. */
-  | "declined";
+  | "declined"
+  /** Answered here, and the connection never came up. Not missed: the person
+   *  was there. */
+  | "failed";
 
 /** One call, as this device saw it. */
 export interface CallLogEntry {
@@ -102,6 +105,8 @@ export interface CallOutcomeInput {
   readonly incoming: boolean;
   /** Media flowed: the call was actually answered. */
   readonly connected: boolean;
+  /** This device pressed Accept. */
+  readonly accepted?: boolean;
   /** The session's end reason (`calls/call-session.ts` `WebCallEndReason`), or
    *  `undefined` when it ended without giving one. */
   readonly reason: "hungUp" | "busy" | "declined" | "timedOut" | "error" | undefined;
@@ -120,14 +125,15 @@ export interface CallOutcomeInput {
  * - An **incoming call that was never answered** is `missed`, whether it rang
  *   out, the caller gave up first, or this device was busy — from the callee's
  *   seat those are the same fact, and §2.1 records a missed call for both
- *   sides of a call nobody answered.
+ *   sides of a call nobody answered. One this device accepted and that never
+ *   connected is `failed`: the person answered.
  * - Everything else is simply which way the call went. A call that connected
  *   is always its direction's row however it then ended: hanging up is how
  *   calls normally finish, and the row is not the place to relitigate it.
  */
 export function classifyCallOutcome(input: CallOutcomeInput): CallOutcome {
   if (input.reason === "declined") return "declined";
-  if (input.incoming && !input.connected) return "missed";
+  if (input.incoming && !input.connected) return input.accepted === true ? "failed" : "missed";
   return input.incoming ? "incoming" : "outgoing";
 }
 
@@ -169,6 +175,8 @@ export function callRowLabel(entry: CallLogEntry): string {
       return t("call.log.missed");
     case "declined":
       return t("call.log.declined");
+    case "failed":
+      return t("call.log.failed");
   }
 }
 
@@ -177,7 +185,7 @@ export function callRowLabel(entry: CallLogEntry): string {
  * spoke. Never the only signal: the label says it too (§8).
  */
 export function callRowIsUnanswered(entry: CallLogEntry): boolean {
-  return entry.outcome === "missed" || entry.outcome === "declined";
+  return entry.outcome === "missed" || entry.outcome === "declined" || entry.outcome === "failed";
 }
 
 /**
@@ -226,6 +234,9 @@ export function callRowAccessibleLabel(entry: CallLogEntry): string {
       break;
     case "declined":
       head = video ? t("call.log.a11y.video_declined") : t("call.log.a11y.voice_declined");
+      break;
+    case "failed":
+      head = t("call.log.failed");
       break;
   }
   const spoken = spokenCallDuration(entry.durationMs);

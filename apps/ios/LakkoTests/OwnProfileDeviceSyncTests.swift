@@ -251,4 +251,76 @@ final class OwnProfileDeviceSyncTests: XCTestCase {
             DeviceGroupSyncRepository.serviceEnvelopeSlot(
                 try composeVisibilityEnvelope(setting: defaultVisibilitySetting())))
     }
+
+    // MARK: - The backup (D31)
+
+    func testABackupCarriesTheStoredProfileWithItsStamp() throws {
+        let defaults = try freshDefaults()
+        let d = try directory(defaults: defaults)
+        XCTAssertNil(d.backupProfileEnvelope(accountIdB64: accountIdB64), "never set: nothing to carry")
+
+        OwnProfileStore(defaults: defaults).store(
+            OwnProfile(displayName: "Alice", updatedAtMs: 1_234), accountIdB64: accountIdB64)
+        let envelope = try XCTUnwrap(d.backupProfileEnvelope(accountIdB64: accountIdB64))
+        let decoded = try decodeProfileEnvelope(plaintext: envelope)
+        XCTAssertEqual(decoded.displayName, "Alice")
+        XCTAssertEqual(decoded.updatedAtMs, 1_234, "the profile's own stamp, not a fresh one")
+        XCTAssertEqual(decoded.accountId, accountId)
+        XCTAssertEqual(decoded.username, "valentin")
+    }
+
+    func testARestoredProfileLandsWhenNothingNewerIsHeldEvenBeforeTheSession() throws {
+        let defaults = try freshDefaults()
+        let d = try directory(defaults: defaults)
+        d.deactivate()
+
+        XCTAssertEqual(
+            d.adoptRestoredOwnProfile(
+                envelope: try envelope("Alice", stamp: 1_000), accountIdB64: accountIdB64),
+            .adopted)
+        XCTAssertEqual(
+            OwnProfileStore(defaults: defaults).load(accountIdB64: accountIdB64),
+            OwnProfile(displayName: "Alice", updatedAtMs: 1_000))
+
+        d.activate(accountIdB64: accountIdB64, username: "valentin")
+        XCTAssertEqual(d.ownProfile?.displayName, "Alice", "the session reads what the restore stored")
+    }
+
+    func testARestoredProfileNeverReplacesANewerOne() throws {
+        let defaults = try freshDefaults()
+        let d = try directory(defaults: defaults)
+        OwnProfileStore(defaults: defaults).store(
+            OwnProfile(displayName: "Newer", updatedAtMs: 2_000), accountIdB64: accountIdB64)
+
+        XCTAssertEqual(
+            d.adoptRestoredOwnProfile(
+                envelope: try envelope("Older", stamp: 1_000), accountIdB64: accountIdB64),
+            .notNewer)
+        XCTAssertEqual(
+            OwnProfileStore(defaults: defaults).load(accountIdB64: accountIdB64)?.displayName, "Newer")
+    }
+
+    func testARestoredProfileIsFailClosed() throws {
+        let defaults = try freshDefaults()
+        let d = try directory(defaults: defaults)
+        XCTAssertEqual(
+            d.adoptRestoredOwnProfile(envelope: Data([1, 2, 3]), accountIdB64: accountIdB64), .notAProfile)
+        XCTAssertEqual(
+            d.adoptRestoredOwnProfile(
+                envelope: try envelope("Mallory", stamp: 9, accountId: Data(repeating: 7, count: 16)),
+                accountIdB64: accountIdB64),
+            .foreignAccount)
+        XCTAssertNil(OwnProfileStore(defaults: defaults).load(accountIdB64: accountIdB64))
+    }
+
+    func testSavingANameAsksForABackup() throws {
+        let d = try directory()
+        // Fresh account id, so the shared defaults carry no earlier state.
+        let account = base64Encode(Data((0..<16).map { _ in UInt8.random(in: 0...255) }))
+        d.activate(accountIdB64: account, username: "valentin")
+        defer { AutoBackupStore.clear(accountIdB64: account) }
+        XCTAssertNil(AutoBackupStore.load(accountIdB64: account).dirtySinceMs)
+        _ = try d.setOwnDisplayName("Alice", accountIdB64: account)
+        XCTAssertNotNil(AutoBackupStore.load(accountIdB64: account).dirtySinceMs)
+    }
 }

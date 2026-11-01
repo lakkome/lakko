@@ -97,3 +97,65 @@ public enum ChannelDiscovery {
         return try await resolveChannelHandle(trimmed)
     }
 }
+
+/// The channel id a `@handle` was claimed for, kept from the moment of the
+/// claim until the channel exists: a create that fails after the claim
+/// retries with the same id, which discovery answers as already this
+/// channel's, and the person's handle is not burned.
+///
+/// Per account, in `UserDefaults`: a handle and a random id, no secret.
+/// Removed by ``AccountLocalDataWipe``.
+public enum PendingChannelHandleStore {
+
+    static let keyPrefix = "lakko.channels.pending-handles.v1."
+
+    private static func key(_ accountIdB64: String) -> String { keyPrefix + accountIdB64 }
+
+    private static func normalized(_ handle: String) -> String {
+        String(handle.trimmingCharacters(in: .whitespaces).drop(while: { $0 == "@" })).lowercased()
+    }
+
+    private static func load(_ accountIdB64: String, _ defaults: UserDefaults) -> [String: String] {
+        defaults.data(forKey: key(accountIdB64))
+            .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+    }
+
+    private static func save(_ held: [String: String], _ accountIdB64: String, _ defaults: UserDefaults) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        if held.isEmpty {
+            defaults.removeObject(forKey: key(accountIdB64))
+        } else if let data = try? JSONEncoder().encode(held) {
+            defaults.set(data, forKey: key(accountIdB64))
+        }
+    }
+
+    /// The id kept for `handle`, `nil` for none.
+    public static func channelId(
+        forHandle handle: String, accountIdB64: String, defaults: UserDefaults = .standard
+    ) -> String? {
+        load(accountIdB64, defaults)[normalized(handle)]
+    }
+
+    /// Keep `channelIdHex` for `handle`, before the claim goes out.
+    public static func keep(
+        handle: String, channelIdHex: String, accountIdB64: String, defaults: UserDefaults = .standard
+    ) {
+        var held = load(accountIdB64, defaults)
+        held[normalized(handle)] = channelIdHex
+        save(held, accountIdB64, defaults)
+    }
+
+    /// The channel exists, or the handle turned out to be someone else's.
+    public static func forget(
+        handle: String, accountIdB64: String, defaults: UserDefaults = .standard
+    ) {
+        var held = load(accountIdB64, defaults)
+        guard held.removeValue(forKey: normalized(handle)) != nil else { return }
+        save(held, accountIdB64, defaults)
+    }
+
+    public static func clear(accountIdB64: String, defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: key(accountIdB64))
+    }
+}

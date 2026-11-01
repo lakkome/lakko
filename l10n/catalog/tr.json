@@ -191,7 +191,7 @@
       "status": "machine"
     },
     "auth.signup.lede": {
-      "text": "Şifreniz cihazınızdan asla çıkmaz. Sonraki adımda not almanız için bir kurtarma ifadesi alacaksınız.",
+      "text": "Parolanız cihazınızdan asla çıkmaz.",
       "status": "machine"
     },
     "auth.signup.name.hint": {
@@ -964,6 +964,10 @@
     },
     "call.log.declined": {
       "text": "Reddedildi",
+      "status": "machine"
+    },
+    "call.log.failed": {
+      "text": "Arama başarısız oldu",
       "status": "machine"
     },
     "call.log.incoming": {
@@ -3462,6 +3466,14 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
+    "chats.restored.banner_other_devices": {
+      "text": "Diğer cihazlarınız bunu sohbetlerinize ekliyor.",
+      "status": "machine"
+    },
+    "chats.restored.card": {
+      "text": "Anahtarlarınız geri yüklendi. Kişileriniz Lakko’yu açtıkça sohbetleriniz geri gelir. Önceki iletiler geri yüklenmez.",
+      "status": "machine"
+    },
     "chats.row.actions": {
       "text": "Sohbet işlemleri",
       "status": "machine"
@@ -3834,6 +3846,10 @@
       "text": "Arama başlatmak için önce bir mesaj gönderin.",
       "status": "machine"
     },
+    "contacts.detail.chat_starting": {
+      "text": "Sohbetiniz hazırlanıyor.",
+      "status": "machine"
+    },
     "contacts.detail.gone_body": {
       "text": "Bu kişi artık kişileriniz arasında değil.",
       "status": "machine"
@@ -4052,6 +4068,10 @@
     },
     "contacts.scan_qr.not_a_link": {
       "text": "Bu kod bir Lakko bağlantısı değil. Başka bir kod deneyin.",
+      "status": "machine"
+    },
+    "contacts.search.ask_again": {
+      "text": "Yeniden iste",
       "status": "machine"
     },
     "desktop.capture.body": {
@@ -5771,7 +5791,7 @@
       "status": "machine"
     },
     "group.join.wait_secondary": {
-      "text": "İki adımın da süre sınırı yok. Bir şey olmazsa isteği yeniden gönderebilirsiniz.",
+      "text": "Bir şey olmazsa isteği yeniden gönderebilirsiniz.",
       "status": "machine"
     },
     "guest.claim.error.generic": {
@@ -6059,7 +6079,7 @@
       "status": "machine"
     },
     "invite.group.invited_by": {
-      "text": "Davet eden: {fingerprint}",
+      "text": "Davet eden: {name}",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {
@@ -6443,7 +6463,7 @@
       "status": "machine"
     },
     "new_group.no_contacts": {
-      "text": "Önce kişi ekleyin; grup zaten tanıdığınız kişilerle başlar.",
+      "text": "Grup yalnızca sizinle başlayabilir. Kişileri şimdi veya daha sonra ekleyin.",
       "status": "machine"
     },
     "new_group.subtitle": {
@@ -6723,7 +6743,7 @@
       "status": "machine"
     },
     "protect.phrase.body": {
-      "text": "Yalnızca sizin sakladığınız 12 kelime. Daha güçlüdür ve e-postayla ilgisi yoktur.",
+      "text": "Yalnızca sizin sakladığınız 12 sözcük. Geri dönmenin en güçlü yolu.",
       "status": "machine"
     },
     "protect.phrase.save.body": {

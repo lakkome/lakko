@@ -48,7 +48,7 @@ class ApiEndpointsTest {
             assertEquals("http://10.0.2.2:8083", ApiEndpoints.resolve(empty, ApiService.STORAGE))
             assertEquals("http://10.0.2.2:8084", ApiEndpoints.resolve(empty, ApiService.DISCOVERY))
             assertEquals("http://10.0.2.2:8085", ApiEndpoints.resolve(empty, ApiService.PUSH_GW))
-            assertEquals("http://10.0.2.2:8090", ApiEndpoints.resolve(empty, ApiService.CHANNELS))
+            assertEquals("http://10.0.2.2:8086", ApiEndpoints.resolve(empty, ApiService.CHANNELS))
             assertEquals("http://10.0.2.2:8091", ApiEndpoints.resolve(empty, ApiService.GIFS))
         }
     }

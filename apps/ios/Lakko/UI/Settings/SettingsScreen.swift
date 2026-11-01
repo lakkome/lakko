@@ -289,6 +289,10 @@ struct SettingsScreen: View {
             }
         }
         .listStyle(.insetGrouped)
+        // Settings opened: the phrase-saved flag and the protection rows
+        // follow the server. On the list, not on a row of it: a row with no
+        // content still takes a row's height.
+        .task { await accountProtection?.refresh() }
         // A UIKit-backed List keeps the mirroring it was built with when the
         // environment's layout direction flips under it (its glyphs come out
         // mirrored), so the list is rebuilt when the direction changes.

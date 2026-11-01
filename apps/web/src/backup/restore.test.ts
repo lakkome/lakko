@@ -71,6 +71,8 @@ function restored(overrides: Partial<Extract<RestoreResult, { kind: "restored" }
     knownGroupIds: [G1, G2],
     syncedState: SYNCED,
     ownPredecessors: [],
+    ownProfile: new Uint8Array(0),
+    visibility: new Uint8Array(0),
     ...overrides,
   };
 }
@@ -90,6 +92,7 @@ interface Harness {
   readonly fetched: { phrase: string; token: string; gate: RestoreGateContext }[];
   readonly contacts: AcceptedContact[];
   readonly synced: Uint8Array[];
+  readonly ownState: { ownProfile: Uint8Array; visibility: Uint8Array }[];
   alerts: number;
 }
 
@@ -104,6 +107,7 @@ function harness(answer: () => Promise<RestoreResult>): Harness {
     fetched: [],
     contacts: [],
     synced: [],
+    ownState: [],
     alerts: 0,
     deps: {
       fetch: async (phraseBytes, sessionToken, gate) => {
@@ -123,8 +127,15 @@ function harness(answer: () => Promise<RestoreResult>): Harness {
         h.calls.push(`rememberKnownGroups ${accountIdB64}`);
         addRestoredKnownGroups(accountIdB64, ids, storage);
       },
+      applyOwnState: async (accountIdB64, own) => {
+        h.calls.push(`applyOwnState ${accountIdB64}`);
+        h.ownState.push(own);
+      },
       applyOwnPredecessors: async (accountIdB64) => {
         h.calls.push(`applyOwnPredecessors ${accountIdB64}`);
+      },
+      markRestored: (accountIdB64, conversations) => {
+        h.calls.push(`markRestored ${accountIdB64} ${conversations}`);
       },
       markOwed: (accountIdB64) => markBackupRestoreOwed(accountIdB64, storage),
       clearOwed: (accountIdB64) => {
@@ -275,8 +286,31 @@ describe("restoreAccountBackup", () => {
       `applyContacts ${ACCOUNT}`,
       `applySyncedState ${ACCOUNT} true`,
       `rememberKnownGroups ${ACCOUNT}`,
+      `applyOwnState ${ACCOUNT}`,
       "clearOwed",
+      `markRestored ${ACCOUNT} 2`,
     ]);
+    expect(isBackupRestoreOwed(ACCOUNT, h.storage)).toBe(false);
+  });
+
+  it("hands over the own profile and the setting, before the owed flag goes", async () => {
+    const ownProfile = new Uint8Array([1, 2]);
+    const visibility = new Uint8Array([3]);
+    const h = harness(async () => restored({ ownProfile, visibility }));
+    await restoreAccountBackup(INPUTS, h.deps);
+    expect(h.ownState).toEqual([{ ownProfile, visibility }]);
+  });
+
+  it("a failure of the own state costs the rest of the restore nothing", async () => {
+    const h = harness(async () => restored());
+    const deps = {
+      ...h.deps,
+      applyOwnState: async () => {
+        throw new Error("no");
+      },
+    };
+    const { value } = await quietly(() => restoreAccountBackup(INPUTS, deps));
+    expect(value).toEqual({ kind: "applied", contacts: 1, knownGroups: 2 });
     expect(isBackupRestoreOwed(ACCOUNT, h.storage)).toBe(false);
   });
 
@@ -301,10 +335,12 @@ describe("restoreAccountBackup", () => {
       "alertRollbackRefused",
       "applyContacts",
       "applyOwnPredecessors",
+      "applyOwnState",
       "applySyncedState",
       "clearOwed",
       "fetch",
       "markOwed",
+      "markRestored",
       "rememberKnownGroups",
     ]);
     expect(Object.keys(restored()).sort()).toEqual([
@@ -315,7 +351,9 @@ describe("restoreAccountBackup", () => {
       "kind",
       "knownGroupIds",
       "ownPredecessors",
+      "ownProfile",
       "syncedState",
+      "visibility",
     ]);
   });
 

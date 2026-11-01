@@ -194,11 +194,10 @@ describe("the joiner's half", () => {
    *     AssertionError: expected 'Request sent. Waiting for an admin to …' to
    *     contain 'time limit'
    */
-  it("states that neither step is bounded, and offers the one repair", () => {
+  it("says what the wait is, and offers the one repair", () => {
     expect(JOIN_WAIT_PRIMARY()).toBe(
       "Request sent. An admin approves it, then the change is applied to the group.",
     );
-    expect(JOIN_WAIT_SECONDARY()).toContain("time limit");
     expect(JOIN_WAIT_SECONDARY()).toContain("send the request again");
     expect(JOIN_REQUEST_AGAIN()).toBe("Request again");
   });

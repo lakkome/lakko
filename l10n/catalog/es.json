@@ -191,7 +191,7 @@
       "status": "machine"
     },
     "auth.signup.lede": {
-      "text": "Tu contraseña nunca sale de tu dispositivo. A continuación recibirás una frase de recuperación para anotar.",
+      "text": "Tu contraseña nunca sale de tu dispositivo.",
       "status": "machine"
     },
     "auth.signup.name.hint": {
@@ -964,6 +964,10 @@
     },
     "call.log.declined": {
       "text": "Rechazada",
+      "status": "machine"
+    },
+    "call.log.failed": {
+      "text": "Llamada fallida",
       "status": "machine"
     },
     "call.log.incoming": {
@@ -3462,6 +3466,14 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
+    "chats.restored.banner_other_devices": {
+      "text": "Tus otros dispositivos están añadiendo este a tus chats.",
+      "status": "machine"
+    },
+    "chats.restored.card": {
+      "text": "Tus claves se han restaurado. Tus chats vuelven cuando tus contactos abren Lakko. Los mensajes anteriores no se restauran.",
+      "status": "machine"
+    },
     "chats.row.actions": {
       "text": "Acciones de la conversación",
       "status": "machine"
@@ -3834,6 +3846,10 @@
       "text": "Envía primero un mensaje para poder llamar.",
       "status": "machine"
     },
+    "contacts.detail.chat_starting": {
+      "text": "Tu chat se está preparando.",
+      "status": "machine"
+    },
     "contacts.detail.gone_body": {
       "text": "Esta persona ya no está en tus contactos.",
       "status": "machine"
@@ -4052,6 +4068,10 @@
     },
     "contacts.scan_qr.not_a_link": {
       "text": "Este código no es un enlace de Lakko. Prueba con otro código.",
+      "status": "machine"
+    },
+    "contacts.search.ask_again": {
+      "text": "Volver a pedir",
       "status": "machine"
     },
     "desktop.capture.body": {
@@ -5771,7 +5791,7 @@
       "status": "machine"
     },
     "group.join.wait_secondary": {
-      "text": "Ninguno de los dos pasos tiene límite de tiempo. Si no pasa nada, puedes volver a enviar la solicitud.",
+      "text": "Si no pasa nada, puedes enviar la solicitud de nuevo.",
       "status": "machine"
     },
     "guest.claim.error.generic": {
@@ -6059,7 +6079,7 @@
       "status": "machine"
     },
     "invite.group.invited_by": {
-      "text": "Invitación de {fingerprint}",
+      "text": "Invitación de {name}",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {
@@ -6443,7 +6463,7 @@
       "status": "machine"
     },
     "new_group.no_contacts": {
-      "text": "Primero añade contactos: un grupo empieza con personas que ya conoces.",
+      "text": "Un grupo puede empezar solo contigo. Añade personas ahora o más tarde.",
       "status": "machine"
     },
     "new_group.subtitle": {
@@ -6723,7 +6743,7 @@
       "status": "machine"
     },
     "protect.phrase.body": {
-      "text": "12 palabras que solo tú guardas. Más fuerte, y sin relación con el correo.",
+      "text": "12 palabras que solo guardas tú. La forma más segura de volver.",
       "status": "machine"
     },
     "protect.phrase.save.body": {

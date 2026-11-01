@@ -232,6 +232,8 @@ export interface InviteFetchResponse {
   /** Standard-alphabet base64 of the stored sealed blob; opened with the
    *  link secret from the fragment (`XCapability.openLink`). */
   sealed: string;
+  /** No uses left. Served by the contact and group ledgers, not by `/c/`. */
+  used_up?: boolean;
 }
 
 /** Body of `POST /discovery/invite/{blob_id_b64url}/consume`

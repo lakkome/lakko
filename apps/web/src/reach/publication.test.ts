@@ -16,22 +16,35 @@ import {
   mayOfferTo,
   offerTargets,
   recordsDigest,
+  staleEveryoneNote,
   termsToEvaluate,
 } from "./publication-model";
 import { keepsScopedEnvelope } from "./scoped-intake";
 
 describe("the Everyone publication", () => {
-  const anna = everyoneKey("Anna", "anna", "c");
+  const anna = everyoneKey("Anna", "anna", "c", "k1");
   it("publishes on entering Everyone and whenever the name, username or certificate moved, and only then", () => {
     expect(everyoneAction(null, true, anna)).toEqual({ kind: "publish" });
     expect(everyoneAction({ public: true, key: anna }, true, anna)).toEqual({ kind: "none" });
     for (const moved of [
-      everyoneKey("Anna W", "anna", "c"),
-      everyoneKey("Anna", null, null),
-      everyoneKey("Anna", "anna", "c2"),
+      everyoneKey("Anna W", "anna", "c", "k1"),
+      everyoneKey("Anna", null, null, "k1"),
+      everyoneKey("Anna", "anna", "c2", "k1"),
+      // A rotation: a finder keeps a record only under the key the directory
+      // serves, so the one already published finds nobody.
+      everyoneKey("Anna", "anna", "c", "k2"),
     ]) {
       expect(everyoneAction({ public: true, key: anna }, true, moved)).toEqual({ kind: "publish" });
     }
+  });
+
+  it("a stale note publishes again and still withdraws what stands at discovery", () => {
+    const state = { ...EMPTY_PUBLICATION, everyone: { public: true, key: anna } };
+    const stale = staleEveryoneNote(state);
+    expect(stale.everyone).toEqual({ public: true, key: null });
+    expect(everyoneAction(stale.everyone, true, anna)).toEqual({ kind: "publish" });
+    expect(everyoneAction(stale.everyone, false, anna)).toEqual({ kind: "withdraw" });
+    expect(staleEveryoneNote(EMPTY_PUBLICATION)).toBe(EMPTY_PUBLICATION);
   });
 
   it("withdraws on leaving, and never withdraws what was never published", () => {

@@ -191,7 +191,7 @@
       "status": "machine"
     },
     "auth.signup.lede": {
-      "text": "كلمة مرورك لا تغادر جهازك أبدًا. ستحصل بعد ذلك على عبارة استرداد لتدوّنها.",
+      "text": "لا تغادر كلمة مرورك جهازك أبدًا.",
       "status": "machine"
     },
     "auth.signup.name.hint": {
@@ -964,6 +964,10 @@
     },
     "call.log.declined": {
       "text": "مرفوضة",
+      "status": "machine"
+    },
+    "call.log.failed": {
+      "text": "فشلت المكالمة",
       "status": "machine"
     },
     "call.log.incoming": {
@@ -3462,6 +3466,14 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
+    "chats.restored.banner_other_devices": {
+      "text": "تضيف أجهزتك الأخرى هذا الجهاز إلى محادثاتك.",
+      "status": "machine"
+    },
+    "chats.restored.card": {
+      "text": "تمت استعادة مفاتيحك. تعود محادثاتك عندما يفتح جهات اتصالك Lakko. لا تتم استعادة الرسائل السابقة.",
+      "status": "machine"
+    },
     "chats.row.actions": {
       "text": "إجراءات المحادثة",
       "status": "machine"
@@ -3834,6 +3846,10 @@
       "text": "أرسل رسالة أولًا لبدء مكالمة.",
       "status": "machine"
     },
+    "contacts.detail.chat_starting": {
+      "text": "يجري إعداد محادثتك.",
+      "status": "machine"
+    },
     "contacts.detail.gone_body": {
       "text": "لم يعد هذا الشخص ضمن جهات اتصالك.",
       "status": "machine"
@@ -4052,6 +4068,10 @@
     },
     "contacts.scan_qr.not_a_link": {
       "text": "هذا الرمز ليس رابط Lakko. جرّب رمزًا آخر.",
+      "status": "machine"
+    },
+    "contacts.search.ask_again": {
+      "text": "اطلب مرة أخرى",
       "status": "machine"
     },
     "desktop.capture.body": {
@@ -5771,7 +5791,7 @@
       "status": "machine"
     },
     "group.join.wait_secondary": {
-      "text": "لا توجد مهلة زمنية لأي من الخطوتين. إذا لم يحدث شيء، يمكنك إرسال الطلب مجددًا.",
+      "text": "إذا لم يحدث شيء، يمكنك إرسال الطلب مرة أخرى.",
       "status": "machine"
     },
     "guest.claim.error.generic": {
@@ -6059,7 +6079,7 @@
       "status": "machine"
     },
     "invite.group.invited_by": {
-      "text": "الدعوة من {fingerprint}",
+      "text": "الدعوة من {name}",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {
@@ -6443,7 +6463,7 @@
       "status": "machine"
     },
     "new_group.no_contacts": {
-      "text": "أضف جهات اتصال أولًا؛ فالمجموعة تبدأ بأشخاص تعرفهم بالفعل.",
+      "text": "يمكن أن تبدأ المجموعة بك وحدك. أضف أشخاصًا الآن أو لاحقًا.",
       "status": "machine"
     },
     "new_group.subtitle": {
@@ -6723,7 +6743,7 @@
       "status": "machine"
     },
     "protect.phrase.body": {
-      "text": "12 كلمة تحتفظ بها أنت وحدك. أقوى، ولا علاقة لها بالبريد الإلكتروني.",
+      "text": "12 كلمة تحتفظ بها أنت فقط. أقوى طريقة للعودة.",
       "status": "machine"
     },
     "protect.phrase.save.body": {

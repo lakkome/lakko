@@ -19,10 +19,17 @@ import uniffi.lakko_ffi_uniffi.OprfResult
 
 /** What the publication is keyed on: a change of any part republishes. The
  *  certificate is in the key so a certificate arriving later republishes the
- *  record with the username in it. */
-internal fun everyonePublishKey(displayName: String?, username: String?, certificate: ByteArray?): String {
+ *  record with the username in it; the mailbox binding is, so a rotation of
+ *  the account keys replaces a record naming the old mailbox. */
+internal fun everyonePublishKey(
+    displayName: String?,
+    username: String?,
+    certificate: ByteArray?,
+    mailboxBinding: ByteArray? = null,
+): String {
     val cert = certificate?.joinToString("") { "%02x".format(it) } ?: ""
-    return "${displayName ?: ""}|${username ?: ""}|$cert"
+    val binding = mailboxBinding?.joinToString("") { "%02x".format(it) } ?: ""
+    return "${displayName ?: ""}|${username ?: ""}|$cert|$binding"
 }
 
 /** What a refresh has to do. */
@@ -49,6 +56,23 @@ internal fun everyoneAction(
     published == false -> EveryoneAction.NONE
     published == null -> EveryoneAction.NOTE_WITHDRAWN
     else -> EveryoneAction.PUT
+}
+
+/**
+ * [everyoneAction] for one refresh. The first refresh of a session in Everyone
+ * sends even when the note says the server already holds it: the note is this
+ * device's memory, not the server's state, and a person who chose Everyone and
+ * cannot be found has no way to tell.
+ */
+internal fun everyoneActionForRefresh(
+    wantPublic: Boolean,
+    published: Boolean?,
+    publishedKey: String?,
+    currentKey: String,
+    firstOfSession: Boolean,
+): EveryoneAction {
+    val action = everyoneAction(wantPublic, published, publishedKey, currentKey)
+    return if (action == EveryoneAction.NONE && wantPublic && firstOfSession) EveryoneAction.PUT else action
 }
 
 /** The person as the publication states them. */

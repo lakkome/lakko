@@ -93,9 +93,13 @@ struct NewChannelScreen: View {
         // The account this channel is made for, before any wait: a founding
         // mark is filed under it and under no account signed in later.
         let accountIdB64 = AcceptedContactsStore.boundAccountIdB64
-        let id = ChannelsComposer.freshChannelIdHex()
         let wantedHandle = handle.trimmingCharacters(in: .whitespaces)
         let cleanHandle = String(wantedHandle.drop(while: { $0 == "@" }))
+        // A create that failed after claiming this handle: the same channel
+        // id, which the claim answers as already this channel's.
+        let id = accountIdB64.flatMap {
+            PendingChannelHandleStore.channelId(forHandle: cleanHandle, accountIdB64: $0)
+        } ?? ChannelsComposer.freshChannelIdHex()
         do {
             // G4-5: claim the optional `@handle` FIRST (before the channel
             // exists on the channels service) so a first-come-first-served
@@ -109,12 +113,21 @@ struct NewChannelScreen: View {
                     errorMessage = .key("channels.new.error.sign_in")
                     return
                 }
+                // Kept before the claim goes out: an answer that does not
+                // arrive may still have claimed the name.
+                if let accountIdB64 {
+                    PendingChannelHandleStore.keep(
+                        handle: cleanHandle, channelIdHex: id, accountIdB64: accountIdB64)
+                }
                 do {
                     _ = try await ChannelDiscovery.registerChannelHandle(
                         handle: wantedHandle,
                         channelIdHex: id
                     )
                 } catch let DiscoveryClientError.http(status, _, _) where status == 409 {
+                    if let accountIdB64 {
+                        PendingChannelHandleStore.forget(handle: cleanHandle, accountIdB64: accountIdB64)
+                    }
                     errorMessage = .key("channels.new.error.handle_taken", texts: ["handle": "@\(cleanHandle)"])
                     return
                 } catch let token as AnonTokenUnavailable {
@@ -178,6 +191,9 @@ struct NewChannelScreen: View {
                 handle: cleanHandle
             ))
             state.setKeys(channelId: id, keys: keys)
+            if let accountIdB64 {
+                PendingChannelHandleStore.forget(handle: cleanHandle, accountIdB64: accountIdB64)
+            }
             // ADR-0073 phase 2 (UX 16.6) — which key generation registered the
             // owner key, so a later reset on this device can say the channel
             // is orphaned.

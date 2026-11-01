@@ -986,12 +986,15 @@ public class DiscoveryClient(
      * to re-verify locally so a malicious server cannot serve
      * substituted bytes).
      */
-    public suspend fun fetchInvite(blobId: ByteArray): ByteArray? {
+    public suspend fun fetchInvite(blobId: ByteArray): ByteArray? = fetchInviteRow(blobId)?.sealed
+
+    /** [fetchInvite] with whether every use of the link is spent. */
+    public suspend fun fetchInviteRow(blobId: ByteArray): FetchedInvite? {
         if (blobId.size != blobIdLen) {
             throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         val raw = inviteFetch(blobId) ?: return null
-        return base64Decode(raw.sealed)
+        return FetchedInvite(base64Decode(raw.sealed), raw.used_up)
     }
 
     /**
@@ -1942,3 +1945,6 @@ public class DiscoveryNetworkError(
     public val endpoint: String,
     cause: Throwable,
 ) : RuntimeException("discovery $endpoint network error: $cause", cause)
+
+/** A ledger row as [DiscoveryClient.fetchInviteRow] answers it. */
+public class FetchedInvite(public val sealed: ByteArray, public val usedUp: Boolean)

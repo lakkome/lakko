@@ -69,6 +69,7 @@ import {
 import { getPhrase } from "./phrase-store";
 import { mintBackupHead } from "./head-mint";
 import { evaluateRestoreBlob } from "./head-restore";
+import { ownProfileForBackup, visibilityForBackup } from "./own-state";
 import { putFloor, type BackupFloor } from "./floor-store";
 import type { BackupContact as WasmBackupContact } from "../../wasm/lakko_ffi_wasm";
 
@@ -130,6 +131,10 @@ export type RestoreResult =
        *  with their adoption times; empty for an account that never rotated.
        *  The seeds go where a kept device holds them. Never log them. */
       readonly ownPredecessors: readonly CarriedOwnPredecessor[];
+      /** The account's own profile envelope; empty when none was held. */
+      readonly ownProfile: Uint8Array;
+      /** The "who can find me" envelope; empty when none was held. */
+      readonly visibility: Uint8Array;
     }
   | { readonly kind: "no-backup" }
   | { readonly kind: "wrong-phrase-or-tampered" }
@@ -488,6 +493,8 @@ export class BackupClient {
         parsed.ownPredecessorSeeds,
         parsed.ownPredecessorAdoptedAtMs,
       ),
+      ownProfile: parsed.ownProfile,
+      visibility: parsed.visibility,
     };
   }
 
@@ -550,6 +557,10 @@ export class BackupClient {
             ),
           );
     const { seeds, adoptedAtMs } = flattenOwnPredecessors(own);
+    // The person themselves: without these a restore has no name, no photo
+    // and the default "who can find me".
+    const ownProfile = ownProfileForBackup(wasm, base64Encode(accountId), accountId);
+    const visibility = await visibilityForBackup(base64Encode(accountId));
     try {
       const payload = wasm.buildBackupPayload(
         accountId,
@@ -565,6 +576,8 @@ export class BackupClient {
         currentSyncedStateBytes() ?? undefined,
         own.length === 0 ? undefined : seeds,
         own.length === 0 ? undefined : adoptedAtMs,
+        ownProfile ?? undefined,
+        visibility ?? undefined,
       );
       return wasm.sealBackup(phraseBytes, payload);
     } finally {

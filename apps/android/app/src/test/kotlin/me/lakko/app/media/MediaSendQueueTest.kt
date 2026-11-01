@@ -46,7 +46,7 @@ class MediaSendQueueTest {
                 progress(0.5f)
                 ref(meta)
             },
-            publish = { ref, _ -> published += ref },
+            publish = { ref, _, _ -> published += ref },
         )
         val id = queue.newTempId()
         queue.enqueue(
@@ -77,7 +77,7 @@ class MediaSendQueueTest {
                 uploads += 1
                 ref(meta)
             },
-            publish = { _, _ ->
+            publish = { _, _, _ ->
                 publishAttempts += 1
                 if (publishAttempts == 1) throw IllegalStateException("DS unreachable")
             },
@@ -113,7 +113,7 @@ class MediaSendQueueTest {
                 gate.await()
                 ref(meta)
             },
-            publish = { ref, _ -> published += ref },
+            publish = { ref, _, _ -> published += ref },
         )
         val id = queue.newTempId()
         queue.enqueue(
@@ -147,7 +147,7 @@ class MediaSendQueueTest {
                 names += name
                 ref(meta)
             },
-            publish = { _, _ -> },
+            publish = { _, _, _ -> },
         )
         val id = queue.newTempId()
         queue.enqueue(
@@ -175,7 +175,7 @@ class MediaSendQueueTest {
             scope = this,
             uploadThumb = { thumb() },
             uploadMain = { _, _, _, _, _ -> throw IllegalStateException("storage down") },
-            publish = { _, _ -> },
+            publish = { _, _, _ -> },
         )
         val id = queue.newTempId()
         queue.enqueue(
@@ -188,6 +188,37 @@ class MediaSendQueueTest {
         runCurrent()
         assertTrue(queue.rows.value.single().failed)
         queue.discard(id)
+        assertEquals(emptyList<PendingMediaRow>(), queue.rows.value)
+    }
+
+    @Test
+    fun oneMessageIsOneRowOnceItsOwnRowIsShown() = runTest {
+        val rowsDuringPublish = ArrayList<Int>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        lateinit var queue: MediaSendQueue
+        queue = MediaSendQueue(
+            scope = this,
+            uploadThumb = { thumb() },
+            uploadMain = { _, _, _, meta, _ -> ref(meta) },
+            publish = { _, _, onRowShown ->
+                onRowShown()
+                rowsDuringPublish += queue.rows.value.size
+                release.await()
+                throw IllegalStateException("not sent")
+            },
+        )
+        queue.enqueue(
+            MediaSendQueue.Job(
+                tempId = queue.newTempId(), kind = KIND_VOICE, mime = "audio/mp4", name = "v.m4a",
+                durationMs = 1_000, waveform = null, width = null, height = null, poster = null,
+                loadBytes = { byteArrayOf(1) to "audio/mp4" },
+            ),
+        )
+        runCurrent()
+        assertEquals(listOf(0), rowsDuringPublish)
+        release.complete(Unit)
+        runCurrent()
+        // The conversation's own row says "Not sent" now: no second row.
         assertEquals(emptyList<PendingMediaRow>(), queue.rows.value)
     }
 }

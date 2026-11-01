@@ -197,3 +197,24 @@ describe("callRowAccessibleLabel", () => {
     }
   });
 });
+
+describe("a call answered here that never connected (D24)", () => {
+  it("reads failed, not missed", () => {
+    expect(classifyCallOutcome({ incoming: true, connected: false, accepted: true, reason: "error" })).toBe("failed");
+  });
+
+  it("is missed when nobody pressed Accept", () => {
+    expect(classifyCallOutcome({ incoming: true, connected: false, accepted: false, reason: "timedOut" })).toBe("missed");
+    expect(classifyCallOutcome({ incoming: true, connected: false, reason: "error" })).toBe("missed");
+  });
+
+  it("a decline stays a decline", () => {
+    expect(classifyCallOutcome({ incoming: true, connected: false, accepted: true, reason: "declined" })).toBe("declined");
+  });
+
+  it("is drawn as unanswered", () => {
+    expect(
+      callRowIsUnanswered({ id: "a", outcome: "failed", video: false, startedAtMs: 1, durationMs: null }),
+    ).toBe(true);
+  });
+});

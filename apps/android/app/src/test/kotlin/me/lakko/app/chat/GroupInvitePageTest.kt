@@ -321,7 +321,10 @@ class GroupInvitePageTest {
     }
 
     @Test
-    fun `the foot names the fingerprint`() {
-        assertEquals("Invited by 12345 67890", invitedByLine("12345 67890").en)
+    fun `the foot names the inviter from the preview, and is gone with no name`() {
+        val named = GroupInvitePreviewUi(groupName = "Trip", inviterName = "Anna", memberCount = 3)
+        assertEquals("Invited by Anna", invitedByLine(named)?.en)
+        assertNull(invitedByLine(named.copy(inviterName = "  ")))
+        assertNull(invitedByLine(null))
     }
 }

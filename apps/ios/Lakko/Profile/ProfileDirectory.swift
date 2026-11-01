@@ -193,6 +193,8 @@ public final class ProfileDirectory: ObservableObject {
         let nowMs = UInt64(max(0, Date().timeIntervalSince1970 * 1000))
         let saved = ownStore.save(
             displayName: normalized, avatar: avatar, accountIdB64: account, nowMs: nowMs)
+        // The backup carries the name and the photo.
+        AutoBackupStore.markDirty(accountIdB64: account, nowMs: Int64(nowMs))
         gate.leave()
         if account == self.accountIdB64 {
             ownProfile = saved
@@ -291,6 +293,59 @@ public final class ProfileDirectory: ObservableObject {
         ownStore.store(adopted, accountIdB64: accountIdB64)
         ownProfile = adopted
         bump()
+        return .adopted
+    }
+
+    /// The own profile as the envelope a backup carries for `accountIdB64`,
+    /// stored stamp and all, or `nil` when it was never set. Read from the
+    /// store, so a baseline sent before the session mounted carries it too;
+    /// the username and its certificate go along when this account is the
+    /// active one. No grants: they belong to a conversation.
+    func backupProfileEnvelope(accountIdB64: String) -> Data? {
+        guard let own = ownStore.load(accountIdB64: accountIdB64), own.updatedAtMs > 0 else { return nil }
+        let username = accountIdB64 == self.accountIdB64 ? ownUsername : nil
+        let profile = FfiProfile(
+            displayName: own.displayName,
+            username: username,
+            updatedAtMs: own.updatedAtMs,
+            accountId: Data(base64Encoded: accountIdB64).flatMap { $0.count == 16 ? $0 : nil },
+            usernameCertificate: username == nil ? nil : ReachCenter.shared.ownUsernameCertificate,
+            grants: [],
+            avatar: own.avatar?.ffi
+        )
+        do {
+            return try composeProfileEnvelope(profile: profile)
+        } catch {
+            NSLog("ADR-0048 own profile backup envelope refused: \(error)")
+            return nil
+        }
+    }
+
+    /// The own profile a restored backup carried, for `accountIdB64`, which
+    /// may not be the active account yet (a route restores before its session
+    /// lands). Fail closed: bytes the core refuses, or a profile of another
+    /// account, change nothing. Kept only when the store holds nothing newer,
+    /// stamp as received.
+    @discardableResult
+    func adoptRestoredOwnProfile(envelope: Data, accountIdB64: String) -> OwnProfileAdoption {
+        guard let incoming = try? decodeProfileEnvelope(plaintext: envelope) else {
+            return .notAProfile
+        }
+        if let claimed = incoming.accountId, claimed != Data(base64Encoded: accountIdB64) {
+            return .foreignAccount
+        }
+        guard profileIsNewer(
+            incomingUpdatedAtMs: incoming.updatedAtMs,
+            storedUpdatedAtMs: ownStore.load(accountIdB64: accountIdB64)?.updatedAtMs ?? 0)
+        else { return .notNewer }
+        let adopted = OwnProfile(
+            displayName: incoming.displayName, updatedAtMs: incoming.updatedAtMs,
+            avatar: ProfileAvatar(incoming.avatar))
+        ownStore.store(adopted, accountIdB64: accountIdB64)
+        if accountIdB64 == self.accountIdB64 {
+            ownProfile = adopted
+            bump()
+        }
         return .adopted
     }
 

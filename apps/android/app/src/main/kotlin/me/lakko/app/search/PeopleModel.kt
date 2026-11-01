@@ -372,9 +372,14 @@ public fun namesFormerContact(people: List<PersonResult>, contactKeysB64: Set<St
     people.any { it.reach == PersonReach.CONTACT && it.keyB64 !in contactKeysB64 }
 
 /** Whether the heading **People** stands: over a row, the spinner or a line,
- *  never alone. */
-public fun showsPeopleHeading(rows: Int, channel: Boolean, searching: Boolean, line: Boolean): Boolean =
-    rows > 0 || channel || searching || line
+ *  never alone. A channel has its own heading. */
+public fun showsPeopleHeading(rows: Int, searching: Boolean, line: Boolean): Boolean =
+    rows > 0 || searching || line
+
+/** What a channel found by its handle reads as: its name when one is known,
+ *  else the handle. */
+public fun channelResultLabel(name: String?, handle: String): String =
+    name?.trim()?.takeIf { it.isNotEmpty() } ?: "@$handle"
 
 /** Lower-case hex of a byte string. */
 public fun searchHex(bytes: ByteArray): String {

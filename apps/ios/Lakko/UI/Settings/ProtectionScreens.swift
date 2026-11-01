@@ -601,9 +601,14 @@ final class SavePhraseFlow: ObservableObject {
 
     private let ports: Ports
     private var opened = false
+    /// The rotation needs the session's runtime (the DeviceGroup, the chats,
+    /// the reach keys), which is not up on the sign-up step. There, this is
+    /// set: the route lands in the app and the rotation runs from Settings.
+    private let rotationNeedsSession: (@MainActor () -> Void)?
 
-    init(ports: Ports) {
+    init(ports: Ports, rotationNeedsSession: (@MainActor () -> Void)? = nil) {
         self.ports = ports
+        self.rotationNeedsSession = rotationNeedsSession
     }
 
     /// Whether this screen says the account gets new keys, and shows the
@@ -689,6 +694,7 @@ final class SavePhraseFlow: ObservableObject {
             route = SavePhraseRoute.decide(
                 rotationNeeded: status.rotationNeeded, heldPhrase: ports.heldPhrase())
             state = .idle
+            if route == .rotation { rotationNeedsSession?() }
         } catch {
             NSLog("[protect] whether saving a phrase changes the keys could not be read")
             state = .failed
@@ -696,6 +702,11 @@ final class SavePhraseFlow: ObservableObject {
     }
 
     private func rotate() async {
+        if let rotationNeedsSession {
+            state = .idle
+            rotationNeedsSession()
+            return
+        }
         state = .working
         let result = await ports.rotate()
         if result == .freshAuthRequired { ports.proofExpired() }
@@ -774,8 +785,11 @@ struct SavePhraseScreen: View {
     @StateObject private var flow: SavePhraseFlow
     @ObservedObject private var l10n = Localization.shared
 
+    /// - Parameter rotationNeedsSession: set on the sign-up step, where the
+    ///   session's runtime is not up: called instead of rotating.
     init(
         authRepository: AuthRepository, center: AccountProtectionCenter, rotation: KeyRotationRunner,
+        rotationNeedsSession: (@MainActor () -> Void)? = nil,
         onDone: @escaping () -> Void
     ) {
         self.authRepository = authRepository
@@ -785,7 +799,8 @@ struct SavePhraseScreen: View {
         let proof = FreshAuthProofModel(surface: .savePhrase, repository: authRepository)
         self._proof = StateObject(wrappedValue: proof)
         self._flow = StateObject(wrappedValue: SavePhraseFlow(
-            ports: .live(authRepository: authRepository, rotation: rotation, proof: proof)))
+            ports: .live(authRepository: authRepository, rotation: rotation, proof: proof),
+            rotationNeedsSession: rotationNeedsSession))
     }
 
     private var working: Bool { flow.state == .working || proof.layout.working }
@@ -914,14 +929,6 @@ struct AccountProtectionSection: View {
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
-        // Always present (even before the first status is known), so that
-        // opening Settings reads the account's protection again.
-        Color.clear
-            .frame(height: 0)
-            .listRowInsets(EdgeInsets())
-            .listRowSeparator(.hidden)
-            .accessibilityHidden(true)
-            .task { await refreshOnOpen() }
         if let rows = center.rows {
             HStack {
                 Label(l10n.t(rows.statusKey), systemImage: "lock.shield")
@@ -1010,9 +1017,6 @@ struct AccountProtectionSection: View {
             }
         }
     }
-
-    /// Settings opened: the phrase-saved flag and the rows follow the server.
-    private func refreshOnOpen() async { await center.refresh() }
 
     private func valueRow(
         title: String, systemImage: String, value: String?, action: @escaping () -> Void

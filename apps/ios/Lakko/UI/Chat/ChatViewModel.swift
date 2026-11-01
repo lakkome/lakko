@@ -2308,15 +2308,11 @@ public final class ChatViewModel: ObservableObject {
         // ADR-0087 section 9 — the thread leaves the state the moment an end
         // is recorded.
         noteConversationEnd(threadPresent: thread != nil)
-        // ADR-0027 (G-3) — a poll may have retained a fresh external-join
-        // request; refresh the pending list live while the members sheet is
-        // open (cheap in-memory read of the group's retained set).
-        if conversationInfoOpen {
-            pendingJoins = refreshedPendingJoins()
-            unkeptJoinRequest =
-                !membershipHasEnded && repository.sawUnkeptExternalJoin(groupIdHex: groupIdHex)
-            refreshJoinAttributions()
-        }
+        // The info screen follows the group while it is open: a sweep that
+        // landed, a role that changed, a person who left, a fresh external-join
+        // request. This state publishes whichever poll carried the change (the
+        // chat's own, or the app-wide one while the chat is covered).
+        if conversationInfoOpen { refreshMembers() }
     }
 
     /// UX 9.1, 9.4 — the conversation left from under this screen. Answered

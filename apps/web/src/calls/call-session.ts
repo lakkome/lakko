@@ -403,6 +403,7 @@ export function mintCallId(): Uint8Array {
  * is automatic on `done`.
  */
 export class CallSession {
+  private placedNowhere = false;
   /** 16-byte call id minted by the offerer. Stable across
    *  the call lifetime. */
   readonly callId: Uint8Array;
@@ -737,6 +738,12 @@ export class CallSession {
   /** Whether media on this call is sealed — what the encryption chip reads. */
   hasCallKey(): boolean {
     return this.callKey !== null;
+  }
+
+  /** A call this device was placing ended before anything of it was sent:
+   *  it is no call at all, so nothing records it. */
+  neverPlaced(): boolean {
+    return this.placedNowhere;
   }
 
   /** Current state — UI re-reads after every callback. */
@@ -1335,7 +1342,9 @@ export class CallSession {
       if (this.callIsOver()) return;
       // eslint-disable-next-line no-console
       console.warn("getUserMedia denied / failed", err);
-      void this.endLocal("error");
+      // Placing a call: no Offer left this device, so there is nobody to tell.
+      if (this.isOfferer) this.endBeforeOffer();
+      else void this.endLocal("error");
       throw err;
     }
     // The call ended while the capture (and its permission prompt) was in
@@ -1658,6 +1667,18 @@ export class CallSession {
    * caller passing `error` names its cause, and this logs it once here rather
    * than at each site.
    */
+  /** The call ends before anything of it was sent: no End on the wire, which
+   *  would wake the other person's devices for a call that never rang. */
+  private endBeforeOffer(): void {
+    if (this.state === "ending" || this.state === "done") return;
+    this.placedNowhere = true;
+    this.clearPhaseTimer();
+    this.clearIceGraceTimer();
+    this.setState("ending", "error");
+    this.dispose();
+    this.setState("done", "error");
+  }
+
   private async endLocal(reason: WebCallEndReason, cause?: string): Promise<void> {
     // `ending` too: a timer firing while a hang-up is already publishing its
     // End must not publish a second one.

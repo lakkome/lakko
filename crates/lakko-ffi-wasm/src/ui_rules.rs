@@ -355,6 +355,45 @@ pub fn guest_name(random: u32) -> String {
     lakko_ui_rules::guest_name::guest_name(u64::from(random))
 }
 
+/// One run of a message's text: `docs/ux/message-links.md`.
+#[wasm_bindgen]
+#[derive(Debug, Clone)]
+pub struct MessageTextPiece {
+    text: String,
+    is_link: bool,
+}
+
+#[wasm_bindgen]
+impl MessageTextPiece {
+    /// The text as sent.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.text.clone()
+    }
+
+    /// Whether this run is a link to open. The address is the text.
+    #[wasm_bindgen(getter, js_name = isLink)]
+    #[must_use]
+    pub fn is_link(&self) -> bool {
+        self.is_link
+    }
+}
+
+/// A message's text as pieces, in order. Joining every piece's text gives the
+/// input back. Draw a link piece as a link; decide nothing else about it here.
+#[wasm_bindgen(js_name = splitMessageLinks)]
+#[must_use]
+pub fn split_message_links(text: &str) -> Vec<MessageTextPiece> {
+    lakko_ui_rules::message_links::split_message_links(text)
+        .into_iter()
+        .map(|p| MessageTextPiece {
+            text: p.text,
+            is_link: p.is_link,
+        })
+        .collect()
+}
+
 /// Which info a conversation's name opens — `docs/ux/conversation-info.md`
 /// section 1.
 #[wasm_bindgen(js_name = InfoTarget)]

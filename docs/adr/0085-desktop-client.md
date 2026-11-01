@@ -185,6 +185,10 @@ never keeps MLS state.
 
 - Closing the window hides it; the host and the webview keep running
   (`desktop.md` section 3). Quit ends both.
+- A web client's receive loop parks only where a push wake reaches it
+  (`chat/receive-activity.ts`), which is never in the desktop app. The mailbox
+  loop parked on `hidden` alone until 2026-11-01, so a closed window took no
+  contact request and no Welcome; seen with no other device running, fixed.
 - Messages and calls while the window is hidden arrive through the web
   client's existing receive loop (`BackgroundReceiveContext`, the DS long
   poll), which keeps running in the hidden webview, and the web client asks
@@ -214,8 +218,10 @@ never keeps MLS state.
   in a meeting link. Safari does not: measured 2026-10-31, with no handler for
   the scheme it shows "Safari cannot open the page because the address is
   invalid". Chrome and Firefox kept the page working through a scripted link
-  click with no handler. The in-app "Open a link" (`desktop.md` 7) takes a
-  pasted `https` link.
+  click with no handler. The in-app "Open a link" item was removed on
+  2026-11-01 (maintainer): nobody copies a link to open it, a link is clicked.
+  Links in messages are live ([`message-links.md`](../ux/message-links.md)), and
+  the host gained `POST open-url` for the system's default browser.
 - **The link secret never rides a command line.** On Windows and Linux the OS
   starts the app with the URL as an argument, readable by the user's other
   processes. Settled in S5 (maintainer, 2026-10-31): macOS hands a link over as

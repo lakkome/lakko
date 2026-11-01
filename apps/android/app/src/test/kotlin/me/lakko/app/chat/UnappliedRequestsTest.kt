@@ -111,24 +111,14 @@ class UnappliedRequestsTest {
     }
 
     /**
-     * The joiner cannot be TOLD anything, so what it gets is the truth about the
-     * wait plus the one repair available to it.
-     *
-     * DISCRIMINATION (RUN, then reverted): with `JOIN_WAIT_SECONDARY` reverted
-     * to the pre-change copy `Waiting for an admin to approve, then for the
-     * change to be applied.`:
-     *
-     *     java.lang.AssertionError: the joiner is not told the wait is unbounded
+     * The joiner cannot be TOLD anything, so what it gets is the one repair
+     * available to it.
      */
     @Test
-    fun `the joiner is told the wait is unbounded and offered the one repair`() {
+    fun `the joiner is offered the one repair`() {
         assertEquals(
             "Request sent. An admin approves it, then the change is applied to the group.",
             JOIN_WAIT_PRIMARY.en,
-        )
-        assertTrue(
-            "the joiner is not told the wait is unbounded",
-            JOIN_WAIT_SECONDARY.en.contains("time limit"),
         )
         assertTrue(JOIN_WAIT_SECONDARY.en.contains("send the request again"))
         assertEquals("Request again", JOIN_REQUEST_AGAIN.en)

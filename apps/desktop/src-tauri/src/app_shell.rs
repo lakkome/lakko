@@ -19,6 +19,8 @@
 //! - `GET capabilities` -> `{privacySettings}`: whether this OS has a link to
 //!   its microphone and camera settings;
 //! - `POST open-privacy` `{what: "microphone" | "camera"}`: open that page;
+//! - `POST open-url` `{url}`: open an `http` or `https` link in the system's
+//!   default browser (`docs/ux/message-links.md`);
 //! - `POST attention`: bounce the Dock icon once / flash the taskbar (an
 //!   incoming call with the window open, `desktop.md` section 4.1).
 //!
@@ -446,6 +448,19 @@ pub fn handle<R: Runtime>(
             }
             no_content()
         },
+        (&Method::POST, "/open-url") => {
+            let Ok(v) = serde_json::from_slice::<Value>(request.body()) else {
+                return plain(StatusCode::BAD_REQUEST, "json");
+            };
+            let Some(url) = v.get("url").and_then(Value::as_str).and_then(browser_link) else {
+                return plain(StatusCode::BAD_REQUEST, "url");
+            };
+            if let Err(e) = std::process::Command::new(BROWSER_OPENER).arg(url).spawn() {
+                warn!(error = %e, "open a link in the browser");
+                return plain(StatusCode::INTERNAL_SERVER_ERROR, "open");
+            }
+            no_content()
+        },
         (&Method::POST, "/attention") => {
             if let Some(w) = app.get_webview_window(MAIN) {
                 if let Err(e) = w.request_user_attention(Some(UserAttentionType::Informational)) {
@@ -497,6 +512,26 @@ fn on_notification<R: Runtime>(app: &AppHandle<R>, outcome: Outcome, req: notify
 const OPENER: &str = "explorer.exe";
 #[cfg(not(windows))]
 const OPENER: &str = "open";
+
+/// The command that opens a link in the default browser. It takes the address
+/// as one argument, with no shell in between.
+#[cfg(windows)]
+const BROWSER_OPENER: &str = "explorer.exe";
+#[cfg(target_os = "macos")]
+const BROWSER_OPENER: &str = "open";
+#[cfg(not(any(windows, target_os = "macos")))]
+const BROWSER_OPENER: &str = "xdg-open";
+
+/// `raw` in its parsed form when it may go to the browser: `http` or `https`,
+/// a host, no user before the host. Anything else stays in the app, whatever
+/// the page asked for: the opener would hand a file path or another scheme to
+/// whichever program claims it.
+fn browser_link(raw: &str) -> Option<String> {
+    let url = url::Url::parse(raw).ok()?;
+    let web = matches!(url.scheme(), "http" | "https");
+    let clean = url.host_str().is_some() && url.username().is_empty() && url.password().is_none();
+    (web && clean).then(|| url.to_string())
+}
 
 /// The OS page for `what`, from a fixed table: nothing the page sends reaches
 /// the command. Linux has no such page.
@@ -792,6 +827,26 @@ mod tests {
     fn autostart_entry_quotes_the_path() {
         let e = autostart_entry("/opt/My \"Apps\"/$lakko");
         assert!(e.contains("Exec=\"/opt/My \\\"Apps\\\"/\\$lakko\" --hidden\n"));
+    }
+
+    #[test]
+    fn only_a_clean_web_address_reaches_the_browser() {
+        assert_eq!(
+            browser_link("https://a.example/p?q=1#top").as_deref(),
+            Some("https://a.example/p?q=1#top")
+        );
+        assert!(browser_link("http://a.example").is_some());
+        for refused in [
+            "file:///etc/passwd",
+            "lakko://i/abc",
+            "javascript:alert(1)",
+            "x-apple.systempreferences:com.apple.preference.security",
+            "https://lakko.me@evil.example/",
+            "-a Calculator",
+            "",
+        ] {
+            assert_eq!(browser_link(refused), None, "{refused}");
+        }
     }
 
     #[test]

@@ -1671,8 +1671,7 @@ private fun CallHistoryRow(
     time: String?,
     onCallBack: (video: Boolean) -> Unit,
 ) {
-    val missed = entry.outcome == me.lakko.app.calls.CallOutcome.MISSED ||
-        entry.outcome == me.lakko.app.calls.CallOutcome.DECLINED
+    val missed = me.lakko.app.calls.callHistoryIsUnanswered(entry.outcome)
     val tint = if (missed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
     val strings = me.lakko.app.l10n.LocalStrings.current
     val spoken = remember(entry, strings) { me.lakko.app.calls.callRowSpokenLabel(entry, strings) }
@@ -2047,9 +2046,14 @@ internal fun Bubble(
                                 onJoin = { openCallLink?.invoke(callInvite.argument) },
                             )
                         } else if (msg.text.isNotEmpty()) {
-                            Text(
+                            // docs/ux/message-links.md section 1 — the accent on
+                            // an incoming bubble; on an outgoing one the accent
+                            // is the background, so the bubble's own text colour.
+                            me.lakko.app.ui.components.MessageLinkText(
                                 text = msg.text,
                                 style = MaterialTheme.typography.bodyMedium,
+                                linkColor = if (isOwn) contentColor else MaterialTheme.colorScheme.primary,
+                                onLongPress = openMenu,
                             )
                         }
                         if (msg.attachments.isNotEmpty()) {

@@ -31,9 +31,10 @@
  * Since ADR-0028 v2 the capability also carries a sealed preview (the group's
  * name, the inviter's name, the member count at mint time) under a link key
  * that rides the URL fragment; the card's headline comes from it
- * (docs/ux/group-invite-page.md section 3), and the issuer fingerprint moves
- * to the foot. A missing or refused preview shows the same card without a
- * headline name — never a guess, never an error.
+ * (docs/ux/group-invite-page.md section 3), and the inviter's name stands at
+ * the foot. A missing or refused preview shows the same card without a
+ * headline name and without that line — never a guess, never an error, and
+ * never the issuer's key as digits.
  *
  * ## What this side is NOT told (ADR-0045 S7 residual 1)
  *
@@ -107,8 +108,10 @@ interface DecodedTicket {
   wire: Uint8Array;
   /** The ledger id; drives the consume gate (ADR-0028 OQ1). */
   blobId: Uint8Array;
-  fingerprint: string;
   valid: boolean;
+  /** The ledger says no uses are left. Read only with no session: a signed-in
+   *  person may be the one who used it, and the consume tells them apart. */
+  usedUp: boolean;
   /** The sealed preview, opened with the link secret from the URL fragment,
    *  or `null` when the link was minted without one. A preview that does not
    *  open never reaches here: the link is refused as damaged. */
@@ -160,8 +163,8 @@ export default function JoinGroup() {
           return {
             wire: opened.capabilityWire,
             blobId: opened.blobId,
-            fingerprint: cap.issuerFingerprint(),
             valid: cap.isValidNow(BigInt(Date.now())),
+            usedUp: opened.usedUp,
             preview: outcome.kind === "preview" ? outcome.preview : null,
           };
         } finally {
@@ -185,6 +188,13 @@ export default function JoinGroup() {
   const ticket = (): DecodedTicket | null => {
     const d = decoded();
     return d === undefined || d === null || typeof d === "string" ? null : d;
+  };
+  /** Whether the link can be offered: its own expiry, and with no session the
+   *  ledger's used-up flag too. */
+  const linkWorks = (): boolean => {
+    const d = ticket();
+    if (d === null || !d.valid) return false;
+    return auth.state().kind === "session" || !d.usedUp;
   };
 
   const [phase, setPhase] = createSignal<JoinPhase>("idle");
@@ -277,7 +287,7 @@ export default function JoinGroup() {
         <h1>{t("group.join.title")}</h1>
         <p>{t("invite.link.loading")}</p>
       </Show>
-      <Show when={!decoded.loading && (decoded() === null || ticket()?.valid === false)}>
+      <Show when={!decoded.loading && (decoded() === null || (ticket() !== null && !linkWorks()))}>
         <h1>{t("group.join.title")}</h1>
         <p>{t("invite.link.invalid")}</p>
         <A href={paths.home}>{t("common.open_lakko")}</A>
@@ -303,7 +313,7 @@ export default function JoinGroup() {
         </button>
         <A href={paths.home}>{t("common.open_lakko")}</A>
       </Show>
-      <Show when={!decoded.loading && ticket()?.valid === true}>
+      <Show when={!decoded.loading && linkWorks()}>
         <Show when={headline().title} fallback={<h1>{headline().lead}</h1>}>
           {(title) => (
             <>
@@ -328,7 +338,9 @@ export default function JoinGroup() {
                   <button type="button">{t("auth.login.submit")}</button>
                 </A>
               </div>
-              <p class="lk-meta">{invitedByLine(ticket()?.fingerprint ?? "")}</p>
+              <Show when={invitedByLine(ticket()?.preview ?? null)}>
+                {(line) => <p class="lk-meta">{line()}</p>}
+              </Show>
             </>
           }
         >
@@ -372,7 +384,9 @@ export default function JoinGroup() {
           {/* The one thing on the page the inviter cannot fake stays, at the
               foot and in the muted style, for a person who was told the
               digits out of band. */}
-          <p class="lk-meta">{invitedByLine(ticket()?.fingerprint ?? "")}</p>
+          <Show when={invitedByLine(ticket()?.preview ?? null)}>
+            {(line) => <p class="lk-meta">{line()}</p>}
+          </Show>
         </Show>
       </Show>
     </PublicLayout>

@@ -153,19 +153,11 @@ export function cursorAfterSkipped(
   return Math.max(cursor, first.id - 1);
 }
 
-/** A device with no cursor asks for the notices of this long back. */
-export const FIRST_LANDING_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+/** How a landing asks: from the cursor. */
+export type NoticeQuery = { readonly kind: "after"; readonly after: number };
 
-/** How a landing asks: from the cursor, or (a device that has none) from
- *  thirty days ago. */
-export type NoticeQuery =
-  | { readonly kind: "after"; readonly after: number }
-  | { readonly kind: "since"; readonly sinceMs: number };
-
-export function firstNoticeQuery(cursorKnown: boolean, cursor: number, nowMs: number): NoticeQuery {
-  return cursorKnown
-    ? { kind: "after", after: cursor }
-    : { kind: "since", sinceMs: Math.max(0, nowMs - FIRST_LANDING_WINDOW_MS) };
+export function firstNoticeQuery(cursor: number): NoticeQuery {
+  return { kind: "after", after: cursor };
 }
 
 /**
@@ -173,8 +165,9 @@ export function firstNoticeQuery(cursorKnown: boolean, cursor: number, nowMs: nu
  *
  * The notices that are not this device's own action are shown; the cursor
  * moves at once past the ones it skips; the markers that hid a notice are
- * used up. A device that had no cursor (it asked for the last thirty days)
- * shows what came back the same way and keeps a cursor from then on.
+ * used up. A device that had no cursor is new: everything already there
+ * happened before it existed, so it takes the newest id as its cursor and
+ * shows nothing older.
  */
 export function planNotices(input: {
   readonly cursor: number;
@@ -182,10 +175,13 @@ export function planNotices(input: {
   /** `next_after` of the last page fetched. */
   readonly nextAfter: number;
   readonly marks: readonly SelfMark[];
+  /** This device had no cursor before this read. */
+  readonly firstLanding?: boolean;
 }): { readonly show: AccountNotice[]; readonly cursor: number; readonly usedMarks: SelfMark[] } {
   const split = splitOwnActions(input.notices, input.cursor, input.marks);
   const first = split.show[0];
   const head = Math.max(input.cursor, input.nextAfter, ...input.notices.map((n) => n.id));
+  if (input.firstLanding === true) return { show: [], cursor: head, usedMarks: split.used };
   return {
     show: split.show,
     cursor: first === undefined ? head : Math.max(input.cursor, first.id - 1),
@@ -280,9 +276,8 @@ export function readNoticeCursor(storage: MarkerStorage | undefined, accountIdB6
   }
 }
 
-/** Whether this device has a cursor for the account at all. A device that
- *  has none (its first landing) asks for the last thirty days
- *  ({@link firstNoticeQuery}). */
+/** Whether this device has a cursor for the account at all. One that has
+ *  none is new (`planNotices`). */
 export function noticeCursorKnown(storage: MarkerStorage | undefined, accountIdB64: string): boolean {
   try {
     return (storage?.getItem(cursorKey(accountIdB64)) ?? null) !== null;

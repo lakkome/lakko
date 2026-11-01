@@ -77,6 +77,9 @@ public enum class RowAction {
     /** **Add contact** while the request is going out (not pressable). */
     ADDING,
 
+    /** **Ask again**: a decline is silent, so a request can stand for good. */
+    ASK_AGAIN,
+
     /** Nothing to press. */
     NONE,
 }
@@ -85,11 +88,21 @@ public enum class RowAction {
 public data class PersonRowView(val action: RowAction, val note: UiText?)
 
 /** Who the outgoing list (Contacts > Sent) holds. */
-public data class OutgoingRequests(val keysHex: Set<String>, val accountIdsHex: Set<String>) {
+public data class OutgoingRequests(
+    val keysHex: Set<String>,
+    val accountIdsHex: Set<String>,
+    /** Those of them added through an invite link: the link is what they
+     *  answer, so there is nothing to ask again. */
+    val invitedAccountIdsHex: Set<String> = emptySet(),
+) {
     /** Whether a request to this person is waiting. By account id too: their
      *  key may have rotated since the request went out. */
     public fun holds(person: PersonResult): Boolean =
         person.keyHex in keysHex || person.accountIdHex?.let { it in accountIdsHex } == true
+
+    /** Whether the row of this person may offer **Ask again**. */
+    public fun canAskAgain(person: PersonResult): Boolean =
+        holds(person) && person.accountIdHex !in invitedAccountIdsHex
 
     public companion object {
         /** Nobody. */
@@ -108,6 +121,7 @@ public data class OutgoingRequests(val keysHex: Set<String>, val accountIdsHex: 
                     invited.mapNotNull { hexOfBase64(it.signaturePubkeyB64) },
                 accountIdsHex = sent.mapNotNullTo(HashSet()) { hexOfBase64(it.recipientAccountIdB64) } +
                     invited.map { it.accountIdHex },
+                invitedAccountIdsHex = invited.mapTo(HashSet()) { it.accountIdHex },
             )
 
         private fun hexOfBase64(b64: String?): String? = try {
@@ -148,9 +162,14 @@ public val REQUEST_SENT: UiText = UiText("search.people.request_sent")
 public val REQUEST_FAILED: UiText = UiText("search.people.request_failed")
 
 /** What a result row shows, from the person and how their request stands. */
-public fun personRowView(person: PersonResult, send: RowSendState?): PersonRowView = when {
+public fun personRowView(
+    person: PersonResult,
+    send: RowSendState?,
+    canAskAgain: Boolean = false,
+): PersonRowView = when {
     person.reach == PersonReach.CONTACT -> PersonRowView(RowAction.OPEN, null)
-    send == RowSendState.SENT -> PersonRowView(RowAction.NONE, REQUEST_SENT)
+    send == RowSendState.SENT ->
+        PersonRowView(if (canAskAgain && canAddContact(person)) RowAction.ASK_AGAIN else RowAction.NONE, REQUEST_SENT)
     send == RowSendState.REFUSED -> PersonRowView(RowAction.NONE, REQUEST_REFUSED)
     !canAddContact(person) -> PersonRowView(RowAction.NONE, null)
     send == RowSendState.SENDING -> PersonRowView(RowAction.ADDING, null)
@@ -247,6 +266,11 @@ public class PeopleSearchMemory(
         }
     }
 
+    /** Forget how this row's request stood, so it can be sent again. */
+    internal fun forgetSend(keyHex: String) {
+        sends.update { it - keyHex }
+    }
+
     /** Drop [RowSendState.SENT] for whoever the outgoing list no longer holds.
      *  A row reads Request sent from the list itself ([rowSendState]); this
      *  lets the person be asked again. */
@@ -304,6 +328,8 @@ public class PeopleSearchSession(
     /** The DS reach check of a person (account key, base64) with one grant. */
     private val reachCheck: suspend (keyB64: String, grantWireB64: String) -> Boolean = { _, _ -> false },
     private val debounceMs: Long = NETWORK_SEARCH_DEBOUNCE_MS,
+    /** Take the person out of the outgoing list (Contacts > Sent > Dismiss). */
+    private val dismissSent: (PersonResult) -> Unit = {},
 ) {
     private val mutable = MutableStateFlow(PeopleNetworkView.HIDDEN)
 
@@ -422,6 +448,17 @@ public class PeopleSearchSession(
     /** The outgoing list changed. */
     public fun onOutgoing(outgoing: OutgoingRequests) {
         memory.dropSentExcept(outgoing)
+    }
+
+    /**
+     * **Ask again** on a row: what Contacts > Sent > Dismiss and then **Add
+     * contact** do, in one tap.
+     */
+    public fun askAgain(person: PersonResult) {
+        if (!canAddContact(person)) return
+        dismissSent(person)
+        memory.forgetSend(person.keyHex)
+        add(person)
     }
 
     /** **Add contact** on a row: the request goes out at once. */

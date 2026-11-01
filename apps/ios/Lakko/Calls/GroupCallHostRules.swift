@@ -131,11 +131,14 @@ enum GroupCallHostRules {
     /// row: a join that never connected rang nowhere and missed nothing, and the
     /// group-call banner is what announces a live call, so there is no missed
     /// row either.
-    static func transcriptRow(initiator: Bool, connectedAtMs: Int64?, endedAtMs: Int64) -> CallTranscriptRow? {
+    static func transcriptRow(
+        initiator: Bool, connectedAtMs: Int64?, endedAtMs: Int64, video: Bool = false
+    ) -> CallTranscriptRow? {
         guard let connectedAtMs else { return nil }
         return CallTranscriptRow(
             direction: initiator ? .outgoing : .incoming,
-            outcome: .answered(durationMs: max(0, endedAtMs &- connectedAtMs)))
+            outcome: .answered(durationMs: max(0, endedAtMs &- connectedAtMs)),
+            video: video)
     }
 
     // MARK: - Epoch changes

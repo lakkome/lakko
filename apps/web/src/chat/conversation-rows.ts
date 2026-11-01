@@ -10,7 +10,7 @@
  * same unread state - without a second copy of how a row is named. Must be
  * called inside a component (it reads contexts and owns effects).
  */
-import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
@@ -129,8 +129,17 @@ export function createConversationRows() {
     setLogSlots(log.groups);
   }
 
-  onMount(() => {
+  // Read again when the account lands and when the groups arrive: on a cold
+  // load the list mounts before either, the read then finds nothing, and with
+  // no time to go by every conversation stood at the bottom in no order until
+  // something new was written.
+  createEffect(() => {
+    accountId();
+    chats.groups().length;
     void reloadLog();
+  });
+
+  onMount(() => {
     const unsubscribe = subscribeMessageLogChanged((account) => {
       const s = auth.state();
       if (s.kind === "session" && s.account.accountId === account) {

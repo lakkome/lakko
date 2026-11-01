@@ -36,6 +36,7 @@ pub mod guest_name;
 pub mod info;
 pub mod layer_display;
 pub mod lookup;
+pub mod message_links;
 pub mod ring;
 pub mod speaking;
 pub mod visibility;

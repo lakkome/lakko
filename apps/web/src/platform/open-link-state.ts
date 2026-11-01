@@ -4,7 +4,8 @@
 /** Whether the Open a link dialog is up, and why (`docs/ux/desktop.md` 7). */
 import { createSignal } from "solid-js";
 
-/** `menu`: the person chose it. `copied`: a web page copied the link. */
-export type OpenLinkReason = "menu" | "copied";
+/** `copied`: a web page copied the link, on the OSes where the app cannot be
+ *  handed it (`docs/ux/desktop.md` section 7). */
+export type OpenLinkReason = "copied";
 
 export const [openLinkReason, setOpenLinkReason] = createSignal<OpenLinkReason | null>(null);

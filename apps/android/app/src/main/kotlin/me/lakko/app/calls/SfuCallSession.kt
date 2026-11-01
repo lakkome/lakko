@@ -856,13 +856,18 @@ class SfuCallSession(
     /** Tear down. Idempotent. */
     fun hangUp() {
         // Stop + release the camera first (stop blocks until libwebrtc
-        // releases the device; dispose frees the capturer + EGL pool).
-        localCameraCapture?.let { capture ->
-            capture.stop()
-            capture.dispose()
-        }
+        // releases the device; dispose frees the capturer + EGL pool), and
+        // the peer connection after it: off the main thread, in that order.
+        val capture = localCameraCapture
         localCameraCapture = null
         localCameraSource = null
+        val closing = pc
+        pc = null
+        CallMediaCloser.close {
+            capture?.stop()
+            capture?.dispose()
+            closing?.close()
+        }
         callbacks.onLocalVideoTrack(null)
         keepaliveJob?.cancel()
         keepaliveJob = null
@@ -889,8 +894,6 @@ class SfuCallSession(
         publishOfferSent = false
         signaling?.close()
         signaling = null
-        pc?.close()
-        pc = null
         offerQueue.clear()
         // Reset perfect-negotiation + video-publish state so a late callback
         // after teardown starts clean (piece B).

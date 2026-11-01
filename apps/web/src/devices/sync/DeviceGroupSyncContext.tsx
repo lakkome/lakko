@@ -1012,6 +1012,25 @@ export function DeviceGroupSyncProvider(props: {
     // ADR-0060 section 7 - an envelope marked while the handle was being
     // replaced (a pairing hands its setting over this way) goes now.
     void flushServiceEnvelopes();
+    // The other sends that wait on a handle go too: they keep their change
+    // unsent when a publish fails, and nothing else would retry before the
+    // next change.
+    void flushUnsentLineage();
+    void flushUnsentRecoveryEmail();
+    void flushUnsentOwnUsername();
+    void flushUnsentDeviceAcks();
+    void flushUnsentLinkRecords();
+  }
+
+  /** One reload for a handle found behind the disk, however many sends and
+   *  polls found it. Not awaited by a sender: the reload waits for the poll,
+   *  and a send can run inside it. */
+  let behindHandleReload: Promise<void> | null = null;
+  function reloadBehindHandle(): Promise<void> {
+    behindHandleReload ??= reloadHandle().finally(() => {
+      behindHandleReload = null;
+    });
+    return behindHandleReload;
   }
 
   function teardown(): void {
@@ -2030,7 +2049,7 @@ export function DeviceGroupSyncProvider(props: {
           // hold the cursor forever. Reload from disk; the poll restarts
           // from the stored cursor.
           if (err instanceof DeviceGroupSnapshotChangedError && group === g) {
-            void reloadHandle();
+            void reloadBehindHandle();
           }
         },
       });
@@ -2616,7 +2635,16 @@ export function DeviceGroupSyncProvider(props: {
     if (deviceKey !== null && identity === id) {
       // Fail-closed and conditional on the row this handle read (ADR-0081
       // decision 3).
-      await writeHandleSnapshot(id, account, deviceKey, undefined, () => identity === id);
+      try {
+        await writeHandleSnapshot(id, account, deviceKey, undefined, () => identity === id);
+      } catch (err) {
+        // Another handle wrote the group since this one read it, so what this
+        // one sealed may be unreadable. The error keeps the send owed, and
+        // the reload sends it again from the state on disk; without that the
+        // handle stays behind and every later send fails the same way.
+        if (err instanceof DeviceGroupSnapshotChangedError) void reloadBehindHandle();
+        throw err;
+      }
       if (!current()) throw new StaleBindingError();
     }
     return published.id;

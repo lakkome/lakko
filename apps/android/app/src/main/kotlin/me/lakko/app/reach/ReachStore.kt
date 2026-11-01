@@ -241,3 +241,7 @@ internal class EncryptedReachDocStore(context: Context) : ReachDocStore {
         const val KEY_PREFIX = "doc.v1."
     }
 }
+
+/** The document once nothing is known about the Everyone publication: `true`
+ *  with no key sends, in or out of Everyone ([everyoneAction]). */
+internal fun ReachDoc.withUnknownEveryoneNote(): ReachDoc = copy(publishedPublic = true, publishedKey = null)

@@ -29,7 +29,6 @@ import {
 } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
 import { isDesktop } from "../platform";
-import { setOpenLinkReason } from "../platform/open-link-state";
 import {
   clearListCommand,
   folderTabIndexFor,
@@ -63,6 +62,7 @@ import { createLongPress } from "../ui/long-press";
 import { t } from "../l10n";
 import { FolderBar, type FolderTab } from "./folders/FolderBar";
 import { MembershipEndBanners } from "./MembershipEndNotices";
+import { RestoredNotice, useRestoredList } from "./RestoredNotice";
 import { RecallDoneNotice } from "../devices/RecallDoneNotice";
 import { KeysRotatedNotice } from "../devices/KeysRotatedNotice";
 import { AddToFolderItems } from "./folders/AddToFolderMenu";
@@ -95,6 +95,7 @@ import {
   type PendingContact,
 } from "../contacts/pending-contacts";
 import { displayLocale } from "../l10n/display-locale";
+import { channelsState } from "../state/channels-state";
 
 type Flag = "pinned" | "muted" | "archived";
 
@@ -151,20 +152,6 @@ function CreateMenu(props: { onClose: () => void }): JSX.Element {
           <Icon name="channels" size={16} />
           {t("chats.create.channel")}
         </button>
-        {/* docs/ux/desktop.md section 7 - the route that always works. */}
-        <Show when={isDesktop()}>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              props.onClose();
-              setOpenLinkReason("menu");
-            }}
-          >
-            <Icon name="link" size={16} />
-            {t("chats.create.open_link")}
-          </button>
-        </Show>
         {/* ADR-0065 section 3 — Saved, from the menu that holds New group. */}
         <div class="lk-menu-sep" />
         <button type="button" role="menuitem" onClick={() => go(paths.saved)}>
@@ -375,6 +362,10 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     onCleanup(() => window.removeEventListener("keydown", onKey));
   });
 
+  // docs/ux/identity-recovery.md 7.2: what a restored device says while its
+  // conversations are on their way back.
+  const restoredList = useRestoredList(() => orderedRows().length);
+
   /** The people in this device's groups, as base64 account keys - what the
    *  people half of the search field (`search/PeopleSearch.tsx`) matches
    *  locally beside the contacts. */
@@ -406,6 +397,16 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   const chatHrefOf = (personKeyB64: string): string | null => {
     const g = chats.groups().find((candidate) => chatPeerOf(candidate) === personKeyB64);
     return g === undefined ? null : hrefOf(g);
+  };
+
+  /** The name of a channel this device already knows (a subscription or its
+   *  own); a channel it does not know has only its handle to show. */
+  const channelNameOf = (channelIdHex: string): string | null => {
+    const shared = channelsState.metaByChannel().get(channelIdHex)?.name?.trim() ?? "";
+    if (shared.length > 0) return shared;
+    const local =
+      channelsState.channels().find((c) => c.id === channelIdHex)?.localName.trim() ?? "";
+    return local.length > 0 ? local : null;
   };
 
   /** A channel the people search found by its handle opens its subscribe
@@ -575,6 +576,9 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       {/* docs/ux/identity-recovery.md 18.4: the account was taken back here. */}
       <RecallDoneNotice />
       <KeysRotatedNotice />
+      <Show when={restoredList() === "banner"}>
+        <RestoredNotice state="banner" />
+      </Show>
       {/* `docs/ux/chat-folders.md` section 2: the folder bar, once one folder
           exists. Hidden while searching - a search covers everything. */}
       <Show when={folders().length > 0 && !searching() && orderedRows().length > 0}>
@@ -591,21 +595,23 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       <Show
         when={!showsEmptyState(orderedRows().length + invitedRows().length, query())}
         fallback={
-          <div class="lk-empty">
-            <Icon name="chat" size={40} strokeWidth={1.4} />
-            <strong>{copy().emptyTitle()}</strong>
-            {/* The SAME menu the compose button opens, not a different set
-                of choices in a different place. */}
-            <button
-              type="button"
-              class="primary"
-              aria-haspopup="menu"
-              aria-expanded={createOpen()}
-              onClick={() => setCreateOpen((open) => !open)}
-            >
-              {copy().emptyAction()}
-            </button>
-          </div>
+          <Show when={restoredList() !== "card"} fallback={<RestoredNotice state="card" />}>
+            <div class="lk-empty">
+              <Icon name="chat" size={40} strokeWidth={1.4} />
+              <strong>{copy().emptyTitle()}</strong>
+              {/* The SAME menu the compose button opens, not a different set
+                  of choices in a different place. */}
+              <button
+                type="button"
+                class="primary"
+                aria-haspopup="menu"
+                aria-expanded={createOpen()}
+                onClick={() => setCreateOpen((open) => !open)}
+              >
+                {copy().emptyAction()}
+              </button>
+            </div>
+          </Show>
         }
       >
         <div class="lk-pane-body">
@@ -869,6 +875,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               listedB64={listedInvited}
               standingAboveB64={visibleChatPeers}
               chatHrefOf={chatHrefOf}
+              channelNameOf={channelNameOf}
             />
           </Show>
         </div>

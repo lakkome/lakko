@@ -164,6 +164,9 @@ pub(crate) struct FetchResponse {
     /// with the link secret, which verifies the capability inside and then
     /// opens its preview; without the secret it opens nothing.
     pub(crate) sealed: String,
+    /// No uses left. A page with no session reads the link as dead; a signed-in
+    /// client still reads it, and `consume` says whether this person used it.
+    pub(crate) used_up: bool,
 }
 
 /// `GET /discovery/group-invite/{blob_id}` — fetch by id.
@@ -176,20 +179,22 @@ pub(crate) async fn fetch(
 ) -> Result<Json<FetchResponse>, (StatusCode, String)> {
     let blob_id = crate::ledger_id::parse_blob_id(&blob_id_b64url)?;
 
-    let row: Option<(Vec<u8>, u64)> =
-        sqlx::query_as("SELECT sealed_capability, expiry_ms FROM group_invites WHERE blob_id = ?")
-            .bind(&blob_id[..])
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "fetch group_invites");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal db error".to_string(),
-                )
-            })?;
+    let row: Option<(Vec<u8>, u64, u32, u32)> = sqlx::query_as(
+        "SELECT sealed_capability, expiry_ms, max_uses, used_count \
+         FROM group_invites WHERE blob_id = ?",
+    )
+    .bind(&blob_id[..])
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "fetch group_invites");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?;
 
-    let (sealed, expiry_ms) =
+    let (sealed, expiry_ms, max_uses, used_count) =
         row.ok_or((StatusCode::NOT_FOUND, "group-invite not found".to_string()))?;
 
     if expiry_ms != 0 && current_unix_ms() >= expiry_ms {
@@ -199,6 +204,7 @@ pub(crate) async fn fetch(
 
     Ok(Json(FetchResponse {
         sealed: B64.encode(&sealed),
+        used_up: crate::ledger_id::link_used_up(max_uses, used_count),
     }))
 }
 
@@ -740,6 +746,16 @@ mod tests {
         let Json(fetched) = fetch(State(state.clone()), Path(stored.blob_id.clone()))
             .await
             .expect("the stored blob fetches");
+        assert!(!fetched.used_up, "a fresh link has uses left");
+        sqlx::query("UPDATE group_invites SET used_count = 1 WHERE blob_id = ?")
+            .bind(&crate::ledger_id::parse_blob_id(&stored.blob_id).unwrap()[..])
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let Json(spent) = fetch(State(state.clone()), Path(stored.blob_id.clone()))
+            .await
+            .expect("a used-up link is still served, flagged");
+        assert!(spent.used_up, "the row at its ceiling reads as used up");
         let fetched = B64.decode(fetched.sealed).unwrap();
         assert_eq!(fetched, sealed);
         let (cap, opened) = open_link(&secret, &fetched).expect("the secret opens it");

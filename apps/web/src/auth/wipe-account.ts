@@ -95,6 +95,7 @@ import { clearSelectedTab } from "../chat/folders/selected-tab";
 import { deleteCallLogRow } from "../calls/call-log-idb";
 import { clearGroupCallsForAccount } from "../calls/group-call-store";
 import { wipeChannelsForAccount } from "../state/channels-state";
+import { clearClaimedHandles } from "../channels/claimed-handles";
 import { clearOrphanedByResetForAccount } from "../channels/orphaned-by-reset";
 import { clearOwnerMoved } from "../channels/owner-moved";
 import { clearRotationStatesForAccount } from "../channels/rotation-state-store";
@@ -128,6 +129,7 @@ import { deleteFloor } from "../backup/floor-store";
 import { clearAutoBackupState } from "../backup/auto-backup";
 import { clearRestoredKnownGroups } from "../backup/restored-known-groups";
 import { clearBackupRestoreOwed } from "../backup/restore-owed";
+import { clearRestoreMarker } from "../backup/restored-marker";
 import { clearGroupRoutingForAccount } from "../push/group-routing-store";
 import { clearSupersededMirrorForAccount } from "../push/superseded-mirror";
 import { deleteAnonTokensForAccount } from "../tokens/anon-token-store";
@@ -212,6 +214,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // keys since reset. Its own step: a plain localStorage row that must go
     // whether or not the channel log's IndexedDB delete did.
     { name: "channels-orphaned", run: () => clearOrphanedByResetForAccount(accountIdB64) },
+    { name: "channels-claimed-handles", run: () => clearClaimedHandles(accountIdB64) },
     // ADR-0074 section 3.5: which channels' owner key moved to the key of a
     // rotated identity.
     { name: "channels-owner-moved", run: () => clearOwnerMoved(accountIdB64) },
@@ -399,6 +402,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // joined yet, and the "backup not consulted yet" flag (2026-10-02).
     { name: "restored-known-groups", run: () => clearRestoredKnownGroups(accountIdB64) },
     { name: "backup-restore-owed", run: () => clearBackupRestoreOwed(accountIdB64) },
+    { name: "backup-restored-marker", run: () => clearRestoreMarker(accountIdB64) },
     { name: "knock-cursors", run: () => clearKnockCursorsForAccount(accountIdB64) },
     { name: "known-group-ids", run: () => clearKnownGroupIds(accountIdB64) },
     { name: "channel-rotation", run: () => clearRotationStatesForAccount(accountIdB64) },

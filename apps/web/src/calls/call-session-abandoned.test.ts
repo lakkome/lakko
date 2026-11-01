@@ -377,6 +377,22 @@ describe("a 1x1 call that ends while its devices are being opened", () => {
     expect(h.reasons).toContain("error");
   });
 
+  it("D20: a refused capture while placing a call sends nothing and is no call at all", async () => {
+    const h = makeSession();
+    const dial = watch(h.session.dial({ audio: true, video: false }));
+    await settle();
+
+    at(captures, 0).refuse();
+    await settle();
+
+    expect(dial.settled()).toBe("rejected");
+    // No End: no Offer ever left, and an End would wake the other person.
+    expect(h.published).toEqual([]);
+    expect(h.session.getState()).toBe("done");
+    expect(h.session.neverPlaced()).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("dial, hung up while the relay credential was being fetched: no peer connection is built", async () => {
     const h = makeSession();
     let grantTurn: (server: RTCIceServer | null) => void = () => {};

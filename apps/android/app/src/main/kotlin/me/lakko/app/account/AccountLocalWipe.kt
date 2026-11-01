@@ -287,6 +287,7 @@ public object AccountLocalWipe {
             me.lakko.app.profile.ProfileRequestPrefsStore(ctx).deleteAccount(acct)
         },
         Step("reach") { ctx, acct -> me.lakko.app.reach.EncryptedReachDocStore(ctx).delete(acct) },
+        Step("channel-handle-claims") { ctx, acct -> me.lakko.app.channels.ChannelHandleClaims.forgetAccount(ctx, acct) },
 
         // ---- contacts -------------------------------------------------------
         Step("accepted-contacts") { ctx, acct -> me.lakko.app.contacts.AcceptedContactsStore.delete(ctx, acct) },

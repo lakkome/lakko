@@ -31,6 +31,14 @@ ADR-0087. Add a scenario whenever a defect shows one was missing.
 5. Find a person by @username and by name; send a request; accept; decline; ask again.
 6. Invite link: open it signed in, signed out, offline inviter, dead link. Dead means
    expired, revoked and used up; each reads as dead before the person signs up.
+6b. A link in a message, on every client in both roles, in text around it and alone:
+   a Lakko link opens its screen in place, any other link opens in the browser, a long
+   press is the message menu. Nobody copies a link anywhere.
+6c. A link from outside on a computer with the desktop app: clicked in a browser, the page
+   offers the app and the app opens on the same screen, signed in and on the same account.
+6d. With the desktop app's window closed, and in a web tab with notifications refused: a
+   contact request through a link is answered, a message arrives, and it is all there when
+   the window opens. No other device of the account is running.
 7. Remove a contact, then find and add them again, from each side.
 8. Who can find me: each setting, and what a searcher sees under it.
 9. One person is one row in every list and every search.

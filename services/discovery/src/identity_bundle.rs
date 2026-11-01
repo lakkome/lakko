@@ -1550,7 +1550,7 @@ mod tests {
         let x25519 = [0x33u8; X25519_PUBKEY_LEN];
         let self_sig = [0x44u8; 64];
         let reset_att = [0x77u8; 177];
-        const LINK: &[u8] = &[0x5Au8; 201];
+        let conversation_link: &[u8] = &[0x5Au8; 201];
 
         sqlx::query("DELETE FROM identity_bundles WHERE account_id = ?")
             .bind(&acct[..])
@@ -1558,7 +1558,10 @@ mod tests {
             .await
             .expect("clear pre-existing row");
 
-        for (link, expected) in [(Some(LINK), Some(LINK)), (None, Some(LINK))] {
+        for (link, expected) in [
+            (Some(conversation_link), Some(conversation_link)),
+            (None, Some(conversation_link)),
+        ] {
             try_apply_identity_once(
                 &pool,
                 COOLDOWN,

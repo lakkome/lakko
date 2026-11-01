@@ -41,12 +41,17 @@ export interface AutoBackupState {
    *  the first report - which counts as a change, because nothing here can
    *  vouch for what the server already holds. */
   readonly lastGroupsKey: string | null;
+  /** The stamps of the own profile and the "who can find me" setting this
+   *  device last reported. `null` before the first report, which counts as a
+   *  change: an older blob may carry neither. */
+  readonly lastOwnStateKey: string | null;
 }
 
 export const CLEAN_STATE: AutoBackupState = {
   lastUploadAtMs: 0,
   dirtySinceMs: null,
   lastGroupsKey: null,
+  lastOwnStateKey: null,
 };
 
 export type AutoBackupVerdict = "clean" | "throttled" | "due";
@@ -120,7 +125,8 @@ export function loadAutoBackupState(accountIdB64: string): AutoBackupState {
     const last = typeof p.lastUploadAtMs === "number" ? p.lastUploadAtMs : 0;
     const dirty = typeof p.dirtySinceMs === "number" ? p.dirtySinceMs : null;
     const groups = typeof p.lastGroupsKey === "string" ? p.lastGroupsKey : null;
-    return { lastUploadAtMs: last, dirtySinceMs: dirty, lastGroupsKey: groups };
+    const own = typeof p.lastOwnStateKey === "string" ? p.lastOwnStateKey : null;
+    return { lastUploadAtMs: last, dirtySinceMs: dirty, lastGroupsKey: groups, lastOwnStateKey: own };
   } catch {
     return CLEAN_STATE;
   }
@@ -273,5 +279,18 @@ export function knownGroupsChanged(
   const state = loadAutoBackupState(accountIdB64);
   if (state.lastGroupsKey === key) return false;
   saveAutoBackupState(accountIdB64, { ...state, lastGroupsKey: key });
+  return true;
+}
+
+/**
+ * Whether the person's own profile or setting moved since the last time this
+ * was asked, recording the new key as it goes. A name, a photo or the setting
+ * changes on this device or arrives from another one; the stamps say so for
+ * both, and asking at the tick needs no hook at either.
+ */
+export function ownStateChanged(accountIdB64: string, key: string): boolean {
+  const state = loadAutoBackupState(accountIdB64);
+  if (state.lastOwnStateKey === key) return false;
+  saveAutoBackupState(accountIdB64, { ...state, lastOwnStateKey: key });
   return true;
 }

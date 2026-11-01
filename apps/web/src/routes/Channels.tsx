@@ -28,6 +28,9 @@
  */
 
 import { anonTokenMessage } from "../tokens/token-copy";
+import { pollWhileVisible, samePosts } from "../channels/open-channel-poll";
+import { sessionAccountOf } from "../chat/persist-hooks";
+import { channelIdForHandle, forgetClaimedHandle } from "../channels/claimed-handles";
 import {
   createEffect,
   createMemo,
@@ -82,7 +85,8 @@ import { ManagePanel } from "../channels/ManagePanel";
 import { MembersPanel } from "../channels/MembersPanel";
 import { useMembershipEnd, type MembershipEndApi } from "../chat/MembershipEndContext";
 import { useOwnMemberCard } from "../channels/own-member-card";
-import { isHiddenPostDecode, PostCard, toPostDecode, type PostDecode } from "../channels/PostCard";
+import { PostCard } from "../channels/PostCard";
+import { isHiddenPostDecode, toPostDecode, type PostDecode } from "../channels/post-decode";
 import { PublishComposer } from "../channels/PublishComposer";
 import { DsClient } from "../ds/client";
 import { useAuth } from "../auth/AuthContext";
@@ -132,9 +136,9 @@ function ChannelHead(props: {
       <button
         type="button"
         class="lk-icon-button lk-narrow-only"
-        title={t("nav.channels")}
-        aria-label={t("channels.back")}
-        onClick={(): void => navigate(paths.channels)}
+        title={t("nav.chats")}
+        aria-label={t("chat.header.back")}
+        onClick={(): void => navigate(paths.home)}
       >
         <Icon name="back" size={20} />
       </button>
@@ -506,14 +510,19 @@ const NewChannel: Component = () => {
     // The channel exists and is recorded whether or not the person waits for
     // it; only opening it is addressed to this screen (`ui/screen-anchor.ts`).
     const here = screenAnchor(location);
-    const id = freshChannelIdHex();
+    // The handle's own id when an earlier attempt claimed it (D5).
+    const wantedHandle = handle().trim().replace(/^@/, "");
+    const account = sessionAccountOf(auth.state());
+    const id =
+      wantedHandle.length > 0 && account !== null
+        ? channelIdForHandle(account, wantedHandle, freshChannelIdHex())
+        : freshChannelIdHex();
     try {
       // ADR-0057, the second security pass (finding 3) - found the channel's
       // PublisherGroup and claim its journal FIRST: the claim must land before
       // the channel is announced (the handle registered, the channel created
       // on the service), else whoever claimed the id first would be its root.
-      // A failed claim aborts here with nothing announced; the next attempt
-      // uses a fresh channel id.
+      // A failed claim aborts here with nothing announced.
       //
       // Mint local publisher keys — the content-key seed comes from an MLS
       // PublisherGroup exporter (ADR-0010 Tier 1), the signing-key seed is a
@@ -538,14 +547,15 @@ const NewChannel: Component = () => {
       // on the channels service so a first-come-first-served collision
       // (409) aborts cleanly without leaving a half-created channel. An
       // empty handle skips discovery entirely. The mapping is `@handle ->
-      // channel_id`; the OPRF hash is all the server ever sees.
-      const wantedHandle = handle().trim().replace(/^@/, "");
+      // channel_id`; the OPRF hash is all the server ever sees. The same id
+      // claims it again, so a create that failed below can be retried.
       if (wantedHandle.length > 0) {
         try {
           await registerChannelHandle(wantedHandle, id, secrets.sessionToken);
         } catch (err) {
           const taken = `@${wantedHandle}`;
           if (err instanceof DiscoveryHttpError && err.status === 409) {
+            if (account !== null) forgetClaimedHandle(account, wantedHandle);
             setError(() => t("channels.new.error.handle_taken", { handle: taken }));
           } else if (anonTokenMessage(err, "") !== null) {
             // ADR-0054 S3: the lookup and the register each spend a token.
@@ -564,6 +574,7 @@ const NewChannel: Component = () => {
       // The channel is registered under the owner key this account derives
       // for it (ADR-0059 section 1).
       await createChannel(id, identity);
+      if (wantedHandle.length > 0 && account !== null) forgetClaimedHandle(account, wantedHandle);
       channelsActions.addChannel({
         id,
         localName: name().trim(),
@@ -601,10 +612,10 @@ const NewChannel: Component = () => {
       <button
         type="button"
         class="ghost small lk-narrow-only lk-self-start"
-        onClick={(): void => navigate(paths.channels)}
+        onClick={(): void => navigate(paths.home)}
       >
         <Icon name="back" size={16} />
-        {t("nav.channels")}
+        {t("nav.chats")}
       </button>
       <div class="lk-page-head">
         <h1>{t("channels.new.title")}</h1>
@@ -664,7 +675,7 @@ const NewChannel: Component = () => {
           <button
             type="button"
             class="ghost"
-            onClick={(): void => navigate(paths.channels)}
+            onClick={(): void => navigate(paths.home)}
             disabled={busy()}
           >
             {t("common.cancel")}
@@ -794,10 +805,10 @@ const JoinCoPublisher: Component = () => {
       <button
         type="button"
         class="ghost small lk-narrow-only lk-self-start"
-        onClick={(): void => navigate(paths.channels)}
+        onClick={(): void => navigate(paths.home)}
       >
         <Icon name="back" size={16} />
-        {t("nav.channels")}
+        {t("nav.chats")}
       </button>
       <div class="lk-page-head">
         <h1>{t("channels.join.title")}</h1>
@@ -866,7 +877,7 @@ const JoinCoPublisher: Component = () => {
           <button
             type="button"
             class="ghost"
-            onClick={(): void => navigate(paths.channels)}
+            onClick={(): void => navigate(paths.home)}
             disabled={busy()}
           >
             {t("common.cancel")}
@@ -942,6 +953,10 @@ const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
       return { posts: postsPage.posts, epoch: epochView.epoch };
     },
   );
+
+  // A co-publisher's post reaches an open channel the same way a reader's
+  // does: nothing pushes it.
+  onCleanup(pollWhileVisible(async () => void (await refetch())));
 
   // Sync the cache as soon as a fetch completes so the list pane's time
   // stays fresh on back-nav.
@@ -1126,7 +1141,7 @@ const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
                 void confirmStopFollowing(params.id, meta().name, membershipEnd).then((done) => {
                   if (!done) return;
                   setInfoOpen(false);
-                  if (here()) navigate(paths.channels);
+                  if (here()) navigate(paths.home);
                 });
               }}
             />
@@ -1164,7 +1179,7 @@ const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
                     class="danger"
                     onClick={(): void => {
                       channelsActions.removeChannel(params.id);
-                      navigate(paths.channels);
+                      navigate(paths.home);
                     }}
                   >
                     {t("channels.keys_reset.remove")}
@@ -1429,19 +1444,27 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
     });
   });
 
-  // Posts loader — fetch the page once we go active.
+  // Posts loader — fetch the page once we go active, and keep fetching while
+  // the channel stands open and visible: nothing pushes a post to a reader.
+  async function loadPosts(): Promise<void> {
+    const page = await fetchPosts(params.id, 0);
+    const held = untrack(posts);
+    if (samePosts(held, page.posts)) return;
+    // A new post may be of a newer epoch, and the seed that opens it came
+    // with the rotation.
+    const kp = channelsState.subscriberKeysByChannel().get(params.id);
+    if (kp !== undefined && held.length > 0) await catchUpSeeds(bytesToHex(kp.public));
+    setPosts(page.posts);
+    channelsActions.setPosts(params.id, page.posts);
+  }
   createEffect(() => {
     if (bootstrap() !== "active") return;
-    void (async (): Promise<void> => {
-      try {
-        const page = await fetchPosts(params.id, 0);
-        setPosts(page.posts);
-        channelsActions.setPosts(params.id, page.posts);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error("subscribe post-load error", err);
-      }
-    })();
+    void loadPosts().catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.error("subscribe post-load error", err);
+    });
+    const stop = pollWhileVisible(() => loadPosts());
+    onCleanup(stop);
   });
 
   let decodeSeq = 0;
@@ -1523,7 +1546,7 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
               void confirmStopFollowing(params.id, meta().name, membershipEnd).then((done) => {
                 if (!done) return;
                 setInfoOpen(false);
-                if (here()) navigate(paths.channels);
+                if (here()) navigate(paths.home);
               });
             }}
           />

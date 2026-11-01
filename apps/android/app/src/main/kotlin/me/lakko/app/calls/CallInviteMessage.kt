@@ -60,11 +60,11 @@ public fun callInviteOf(text: String, ownOrigin: String): CallInviteTarget? {
     return CallInviteTarget(slug = slug, secret = secret)
 }
 
-private class ParsedOrigin(val uri: URI, val origin: Triple<String, String, Int>)
+internal class ParsedOrigin(val uri: URI, val origin: Triple<String, String, Int>)
 
 /** The scheme, host and effective port of an `http(s)` URL, or `null` for
  *  anything else (another scheme, no host, not a URL at all). */
-private fun originOf(text: String): ParsedOrigin? {
+internal fun originOf(text: String): ParsedOrigin? {
     val uri = try {
         URI(text)
     } catch (_: URISyntaxException) {

@@ -781,7 +781,7 @@ public struct ChatScreen: View {
                                 // `docs/ux/calls.md` section 6 — tapping a
                                 // call row calls back, the same way the
                                 // header's phone button does.
-                                onCallBack: { viewModel.onCallButton(video: false) },
+                                onCallBack: { viewModel.onCallButton(video: $0) },
                                 // ADR-0052 — Reply arms the composer with a
                                 // snapshot of this message.
                                 onReply: { viewModel.beginReply(entry.message) },
@@ -797,6 +797,9 @@ public struct ChatScreen: View {
                                 // a call invitation opens the call through the
                                 // same intake a tapped link goes through.
                                 onJoinCallInvite: { inviteIntake.handle($0) },
+                                // `docs/ux/message-links.md` section 2 — a Lakko
+                                // link in the text opens the same way.
+                                onOpenOwnLink: { inviteIntake.handle($0) },
                                 // ADR-0052 decision 3 / section 4.1 — `Pin`
                                 // or `Unpin` after Forward; the sheet decides
                                 // who it is for.
@@ -1840,8 +1843,9 @@ struct MessageRow: View {
     let onReact: (String) -> Void
     /// ADR-0047 §4 — the reaction bar's trailing `+`: any single emoji.
     var onMoreReactions: () -> Void = {}
-    /// `docs/ux/calls.md` section 6 — tapping a call row calls back.
-    var onCallBack: () -> Void = {}
+    /// `docs/ux/calls.md` section 6 — tapping a call row calls back, in the
+    /// mode the row records.
+    var onCallBack: (_ video: Bool) -> Void = { _ in }
     /// ADR-0052 — the menu's Reply: arm the composer with this message.
     var onReply: () -> Void = {}
     /// ADR-0052 / section 3.1 — the quote block was tapped; the argument is
@@ -1856,6 +1860,8 @@ struct MessageRow: View {
     /// `docs/ux/call-links.md` section 3 — `Join` on a call invitation was
     /// pressed; the argument is the call's link.
     var onJoinCallInvite: (URL) -> Void = { _ in }
+    /// `docs/ux/message-links.md` section 2 — a Lakko link in the text.
+    var onOpenOwnLink: (URL) -> Void = { _ in }
     /// ADR-0052 decision 3 / section 4.1 — which word the card shows for this
     /// message (`Pin`, `Unpin`, or no row). Decided by the view model, which
     /// holds the two pin stores and this device's standing; the row is a pure
@@ -2086,7 +2092,7 @@ struct MessageRow: View {
     /// (section 8).
     @ViewBuilder
     private func callRow(_ call: CallTranscriptRow) -> some View {
-        Button(action: onCallBack) {
+        Button(action: { onCallBack(call.video) }) {
             HStack(spacing: 6) {
                 Image(systemName: glyph(for: call))
                     .font(.caption2)
@@ -2113,9 +2119,10 @@ struct MessageRow: View {
     private func glyph(for call: CallTranscriptRow) -> String {
         switch call.outcome {
         case .answered:
+            if call.video { return "video" }
             return call.direction == .outgoing ? "phone.arrow.up.right" : "phone.arrow.down.left"
-        case .missed, .declined:
-            return "phone.down"
+        case .missed, .declined, .failed:
+            return call.video ? "video.slash" : "phone.down"
         }
     }
 
@@ -2124,7 +2131,7 @@ struct MessageRow: View {
     private func tint(for call: CallTranscriptRow) -> Color {
         switch call.outcome {
         case .missed: return Color.lakkoDanger
-        case .answered, .declined: return Color.lakkoTextMuted
+        case .answered, .declined, .failed: return Color.lakkoTextMuted
         }
     }
 
@@ -2328,8 +2335,15 @@ struct MessageRow: View {
                         // loupe under a menu. `docs/ux/message-actions.md` §3
                         // replaces what selection was being used for with Copy,
                         // which takes the whole message in one tap.
-                        Text(message.text)
-                            .font(.body)
+                        // `docs/ux/message-links.md` — the accent is the
+                        // background of an outgoing bubble, so a link there
+                        // takes the bubble's own text colour.
+                        MessageText(
+                            text: message.text,
+                            linkColor: isOutgoing ? Color.lakkoAccentForeground : Color.lakkoAccent,
+                            onOwnLink: onOpenOwnLink
+                        )
+                        .font(.body)
                     }
                     if !message.attachments.isEmpty {
                         attachmentChips

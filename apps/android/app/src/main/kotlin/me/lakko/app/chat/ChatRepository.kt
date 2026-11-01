@@ -1367,6 +1367,46 @@ public class ChatRepository(
         return registerFoundedGroup(identity, created.group, created.groupId)
     }
 
+    /**
+     * A group with nobody else in it yet (`docs/ux` scenario 14): the owner
+     * alone, plus this account's other devices. People are added afterwards
+     * as in any group.
+     */
+    public suspend fun startGroupAlone(): String = forSession { startGroupAloneOnMlsThread() }
+
+    private suspend fun startGroupAloneOnMlsThread(): String {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException(
+                "ChatRepository not bootstrapped — call bootstrap() first",
+            )
+        val created = foundGroupOnMlsThread(identity, ownOtherDevices(identity), GroupKind.GROUP)
+        val createdHex = DsClient.pseudonymHex(created.groupId)
+        persistFoundedGroupBeforeWelcome(created.group, createdHex)
+        for (account in created.recipientAccounts) {
+            try {
+                publishWelcomeToMailbox(
+                    welcomeMailboxFor(account),
+                    created.welcomeEnvelope,
+                    createdHex,
+                    null,
+                    accountIdHint = null,
+                )
+            } catch (e: Throwable) {
+                currentAccountIdB64.get()?.let { runCatching { knownGroupsStore.remove(it, createdHex) } }
+                runCatching { created.group.close() }
+                throw ChatError(dsErrorMessage(e, "DS publishMailbox (Welcome) failed"), e)
+            }
+        }
+        return registerFoundedGroup(identity, created.group, created.groupId)
+    }
+
+    /** Whether the directory lists another device of this account. A failed
+     *  read counts as none. */
+    public suspend fun ownOtherDeviceListed(): Boolean {
+        val identity = canonicalIdentity.get() ?: return false
+        return ownOtherDevices(identity).isNotEmpty()
+    }
+
     /** ADR-0079 - one-to-ones founded for a won invite-link request and not
      *  yet held, by hex id. In memory; after a restart the group is loaded
      *  from the MLS snapshot the founding persisted. */
@@ -1607,7 +1647,19 @@ public class ChatRepository(
                 IllegalStateException("fetchKeyPackages returned no device bound to the expected key"),
             )
         }
-        val devices = recipientDevices + ownOtherDevices(identity)
+        return foundGroupOnMlsThread(identity, recipientDevices + ownOtherDevices(identity), kind)
+    }
+
+    /**
+     * The founding [prepareGroupOnMlsThread] and [startGroupAloneOnMlsThread]
+     * share: the group with [devices] added in one commit (none: the founder
+     * alone, no commit and no Welcome), its journal claimed, nothing sent.
+     */
+    private suspend fun foundGroupOnMlsThread(
+        identity: Identity,
+        devices: List<me.lakko.app.discovery.DeviceKeyPackage>,
+        kind: GroupKind,
+    ): CreatedGroup {
         // The directory answered for the account that asked; nothing is
         // created for another one.
         ensureSession()
@@ -1624,13 +1676,15 @@ public class ChatRepository(
             // to each leaf's own mailbox. One commit per device would strand
             // every device but the last at a Welcome epoch nobody could reach.
             val addResult = try {
-                group.addMembersFromWire(identity, devices.map { it.keyPackage })
+                devices.takeIf { it.isNotEmpty() }?.let { added ->
+                    group.addMembersFromWire(identity, added.map { it.keyPackage })
+                }
             } catch (e: FfiException) {
                 group.close()
                 throw ChatError("addMembersFromWire failed", e)
             }
             // ADR-0078: the raw Welcome; it is sealed per mailbox when written.
-            val welcomeEnvelope = addResult.welcome
+            val welcomeEnvelope = addResult?.welcome ?: ByteArray(0)
             // ADR-0060 §6 — one Welcome write per added ACCOUNT, into its
             // account mailbox (ADR-0050 §2.7 as amended): the recipient's and,
             // when this account has other devices, this account's own.
@@ -2254,6 +2308,10 @@ public class ChatRepository(
             // now and on the periodic re-check.
             runIntroductionsBestEffort()
             startIntroductionTicker()
+            // ADR-0060 §5 — a session in Everyone says so to the server, so a
+            // publication a rotation, a restore or a failed send left behind
+            // does not stay behind.
+            refreshEveryoneBestEffort()
             // ADR-0060 §5 — the username certificate this account's profile
             // carries, so a viewer shows the username without a lookup. A
             // first certificate republishes the profile everywhere.
@@ -4503,6 +4561,9 @@ public class ChatRepository(
          *  is a forward. A forward never carries a quote, so the two are not
          *  set together. */
         forward: ForwardRef? = null,
+        /** The message's row is in the conversation (it reads "Sending...",
+         *  then "Not sent" with a Retry when the publish fails). */
+        onRowShown: () -> Unit = {},
     ): Unit =
         forSession {
             sendMessageOnMlsThread(
@@ -4511,6 +4572,7 @@ public class ChatRepository(
                 attachments = attachments,
                 reply = reply,
                 forward = forward,
+                onRowShown = onRowShown,
             )
         }
 
@@ -4520,6 +4582,7 @@ public class ChatRepository(
         attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
         reply: ReplyRef? = null,
         forward: ForwardRef? = null,
+        onRowShown: () -> Unit = {},
     ): Unit {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
@@ -4556,6 +4619,7 @@ public class ChatRepository(
             forward = forward,
         )
         publishThreadList()
+        onRowShown()
         try {
             sendLocked(
                 groupIdHex = groupIdHex,
@@ -5339,71 +5403,133 @@ public class ChatRepository(
      * (the server refuses Everyone without a record).
      */
     private fun refreshEveryoneBestEffort() {
-        val account = keyPackageAccount.get() ?: return
+        val account = keyPackageAccount.get()
+        if (account == null) {
+            // Before a session bootstrapped: the bootstrap refreshes.
+            android.util.Log.i("ChatRepository", "ADR-0060 Everyone refresh waits for the session")
+            return
+        }
         reachScope.launchSession {
+            if (!everyoneMutex.tryLock()) {
+                everyoneAgain = true
+                return@launchSession
+            }
             try {
-                val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
-                val setting = reach.currentVisibility() ?: return@launchSession
-                val everyone = setting.mode == uniffi.lakko_ffi_uniffi.FfiVisibilityMode.EVERYONE
-                val own = me.lakko.app.profile.OwnProfileStore.load(applicationContext, account.accountId)
-                val name = own?.displayName?.takeIf { it.isNotBlank() }
-                val certificate = own?.username?.let { reach.usernameCertificate() }
-                val key = me.lakko.app.reach.everyonePublishKey(name, own?.username, certificate)
-                val (published, publishedKey) = reach.publishedEveryone()
-                when (me.lakko.app.reach.everyoneAction(everyone, published, publishedKey, key)) {
-                    me.lakko.app.reach.EveryoneAction.NONE -> return@launchSession
-                    me.lakko.app.reach.EveryoneAction.NOTE_WITHDRAWN -> {
-                        // Never published: nothing to withdraw beyond the default.
-                        reach.notePublishedEveryone(false, null)
-                        return@launchSession
-                    }
-                    me.lakko.app.reach.EveryoneAction.PUT -> Unit
-                }
-                val outcome = keyPackageDiscoveryFactory().use { client ->
-                    client.setSessionToken(account.sessionToken)
-                    me.lakko.app.reach.publishEveryone(
-                        wantPublic = everyone,
-                        who = me.lakko.app.reach.EveryoneIdentity(
-                            displayName = name,
-                            username = own?.username,
-                            certificate = certificate,
-                            identityPk = reach.ownAccountKey(),
-                            accountId = account.accountId,
-                            mailboxBinding = reach.ownMailboxBinding(),
-                        ),
-                        ops = me.lakko.app.reach.EveryoneOps(
-                            nameSearchTerms = { uniffi.lakko_ffi_uniffi.nameSearchTerms(it) },
-                            oprfNameTerm = { t -> reach.keptOprf("n:$t") { client.oprfNameTerm(t) } },
-                            oprfUsername = { u -> reach.keptOprf("u:$u") { client.oprfUsername(u) } },
-                            composePublicRecord = { payload, outputs, issuedAt ->
-                                uniffi.lakko_ffi_uniffi.composePublicRecord(payload, outputs, issuedAt)
-                            },
-                            putVisibility = { public, lookupKeys, record ->
-                                client.putVisibility(public, lookupKeys, record)
-                            },
-                        ),
-                        nowMs = System.currentTimeMillis(),
-                    )
-                }
-                // What was published is noted for the account that published
-                // it; the reach manager may hold another one by now.
-                ensureSession()
-                when (outcome) {
-                    me.lakko.app.reach.EveryoneOutcome.PUBLISHED -> reach.notePublishedEveryone(true, key)
-                    me.lakko.app.reach.EveryoneOutcome.WITHDRAWN -> reach.notePublishedEveryone(false, null)
-                    me.lakko.app.reach.EveryoneOutcome.NOTHING_TO_PUBLISH ->
-                        android.util.Log.i(
-                            "ChatRepository",
-                            "ADR-0060 Everyone not published: no name, no certified username or no identity",
-                        )
-                }
+                do {
+                    everyoneAgain = false
+                    refreshEveryone(account)
+                } while (everyoneAgain)
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
                 android.util.Log.w("ChatRepository", "ADR-0060 Everyone publication failed: ${cause.javaClass.simpleName}")
+                me.lakko.app.reach.ReachManager.get(applicationContext).noteEveryoneStuck()
+            } finally {
+                everyoneMutex.unlock()
             }
         }
     }
+
+    /** One refresh at a time: the setting, the name and the note are read
+     *  once for each send, so a run that started earlier can never overwrite
+     *  the server with a choice the person has since changed. */
+    private val everyoneMutex = kotlinx.coroutines.sync.Mutex()
+
+    @Volatile
+    private var everyoneAgain = false
+
+    /** Set by the first Everyone refresh of a session
+     *  ([me.lakko.app.reach.everyoneActionForRefresh]). */
+    private val everyoneCheckedThisSession = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private suspend fun refreshEveryone(account: KeyPackageAccount) {
+        val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
+        val setting = reach.currentVisibility()
+        if (setting == null) {
+            android.util.Log.i("ChatRepository", "ADR-0060 Everyone refresh: no session bound to the setting")
+            return
+        }
+        val everyone = setting.mode == uniffi.lakko_ffi_uniffi.FfiVisibilityMode.EVERYONE
+        val own = me.lakko.app.profile.OwnProfileStore.load(applicationContext, account.accountId)
+        val name = own?.displayName?.takeIf { it.isNotBlank() }
+        var certificate = own?.username?.let { reach.usernameCertificate() }
+        // The certificate is what publishes the username. A session that has
+        // none yet (a restore, a rotation) fetches it here rather than leave
+        // a person with no name out of the search.
+        if (everyone && certificate == null && own?.username != null) {
+            certificate = fetchUsernameCertificate(account, reach)
+        }
+        val key = me.lakko.app.reach.everyonePublishKey(name, own?.username, certificate, reach.ownMailboxBinding())
+        val (published, publishedKey) = reach.publishedEveryone()
+        val first = everyoneCheckedThisSession.compareAndSet(false, true)
+        when (me.lakko.app.reach.everyoneActionForRefresh(everyone, published, publishedKey, key, first)) {
+            me.lakko.app.reach.EveryoneAction.NONE -> return
+            me.lakko.app.reach.EveryoneAction.NOTE_WITHDRAWN -> {
+                // Never published: nothing to withdraw beyond the default.
+                reach.notePublishedEveryone(false, null)
+                return
+            }
+            me.lakko.app.reach.EveryoneAction.PUT -> Unit
+        }
+        val outcome = keyPackageDiscoveryFactory().use { client ->
+            client.setSessionToken(account.sessionToken)
+            me.lakko.app.reach.publishEveryone(
+                wantPublic = everyone,
+                who = me.lakko.app.reach.EveryoneIdentity(
+                    displayName = name,
+                    username = own?.username,
+                    certificate = certificate,
+                    identityPk = reach.ownAccountKey(),
+                    accountId = account.accountId,
+                    mailboxBinding = reach.ownMailboxBinding(),
+                ),
+                ops = me.lakko.app.reach.EveryoneOps(
+                    nameSearchTerms = { uniffi.lakko_ffi_uniffi.nameSearchTerms(it) },
+                    oprfNameTerm = { t -> reach.keptOprf("n:$t") { client.oprfNameTerm(t) } },
+                    oprfUsername = { u -> reach.keptOprf("u:$u") { client.oprfUsername(u) } },
+                    composePublicRecord = { payload, outputs, issuedAt ->
+                        uniffi.lakko_ffi_uniffi.composePublicRecord(payload, outputs, issuedAt)
+                    },
+                    putVisibility = { public, lookupKeys, record ->
+                        client.putVisibility(public, lookupKeys, record)
+                    },
+                ),
+                nowMs = System.currentTimeMillis(),
+            )
+        }
+        // What was published is noted for the account that published
+        // it; the reach manager may hold another one by now.
+        ensureSession()
+        when (outcome) {
+            me.lakko.app.reach.EveryoneOutcome.PUBLISHED -> reach.notePublishedEveryone(true, key)
+            me.lakko.app.reach.EveryoneOutcome.WITHDRAWN -> reach.notePublishedEveryone(false, null)
+            me.lakko.app.reach.EveryoneOutcome.NOTHING_TO_PUBLISH -> {
+                android.util.Log.w(
+                    "ChatRepository",
+                    "ADR-0060 Everyone not published: no name, no certified username or no identity",
+                )
+                reach.noteEveryoneStuck()
+            }
+        }
+    }
+
+    /** The username certificate, fetched and kept; `null` when there is none. */
+    private suspend fun fetchUsernameCertificate(
+        account: KeyPackageAccount,
+        reach: me.lakko.app.reach.ReachManager,
+    ): ByteArray? =
+        try {
+            val cert = keyPackageDiscoveryFactory().use { client ->
+                client.setSessionToken(account.sessionToken)
+                client.fetchUsernameCertificate()
+            }
+            cert?.also { reach.keepUsernameCertificate(it) }
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.i("ChatRepository", "ADR-0060: username certificate not fetched: ${cause.javaClass.simpleName}")
+            null
+        }
 
     // -----------------------------------------------------------------
     // ADR-0060 §4 — contacts of contacts: offer and relay
@@ -5575,6 +5701,8 @@ public class ChatRepository(
             while (true) {
                 kotlinx.coroutines.delay(INTRODUCTIONS_TICK_MS)
                 runIntroductionsBestEffort()
+                val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
+                if (reach.everyonePublicationStuck()) refreshEveryoneBestEffort()
             }
         }
     }
@@ -9956,6 +10084,7 @@ public class ChatRepository(
         lastBeaconAtMs.clear()
         localUnread.clear()
         keyPackageAccount.set(null)
+        everyoneCheckedThisSession.set(false)
         snapshotUnreadable.set(false)
         currentAccountIdB64.set(null)
         canonicalIdentity.set(null)
@@ -12711,6 +12840,24 @@ public class ChatRepository(
      * panel showing nothing is a strictly better failure than the panel showing
      * a request that is not there.
      */
+    /** What the members panel shows, in a form that changes when it does: the
+     *  roster, the role table and the pending set. `null` when not readable. */
+    public fun membersPanelSignature(groupIdHex: String): List<String>? {
+        val record = groups[groupIdHex] ?: return null
+        return try {
+            val roles = record.group.groupRoles()
+            buildList {
+                record.group.members().forEach { add(outboxB64(it.signaturePublicKey)) }
+                add("owner:" + (roles?.owner?.let(::outboxB64) ?: ""))
+                roles?.admins?.forEach { add("admin:" + outboxB64(it)) }
+                add("pending:" + record.group.pendingProposals().size)
+                add("joins:" + record.group.pendingExternalJoins().size)
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     public fun pendingMembershipRequests(groupIdHex: String): List<PendingRequest> {
         val accountIdB64 = currentAccountIdB64.get() ?: return emptyList()
         val record = groups[groupIdHex] ?: return emptyList()

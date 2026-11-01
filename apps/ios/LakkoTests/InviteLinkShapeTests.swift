@@ -402,6 +402,23 @@ final class InviteLinkShapeTests: XCTestCase {
         }
     }
 
+    /// D16: the ledger says used up; only a visitor with no session reads it
+    /// as dead, a signed-in person may be one who already used the link.
+    func testAUsedUpLinkIsDeadOnlyWithNoSession() {
+        XCTAssertTrue(ContactsRepository.usedUpReadsDead(usedUp: true, hasSession: false))
+        XCTAssertFalse(ContactsRepository.usedUpReadsDead(usedUp: true, hasSession: true))
+        XCTAssertFalse(ContactsRepository.usedUpReadsDead(usedUp: false, hasSession: false))
+    }
+
+    func testTheLedgerFlagIsReadAndItsAbsenceIsNotUsedUp() throws {
+        let decoder = JSONDecoder()
+        let flagged = try decoder.decode(
+            InviteFetchResponse.self, from: Data(#"{"sealed":"AA==","used_up":true}"#.utf8))
+        XCTAssertEqual(flagged.usedUp, true)
+        let absent = try decoder.decode(InviteFetchResponse.self, from: Data(#"{"sealed":"AA=="}"#.utf8))
+        XCTAssertNil(absent.usedUp)
+    }
+
     func testA404IsNotReadAsARateLimit() async throws {
         let client = GroupInviteDiscoveryURLProtocol.client(
             GroupInviteDiscoveryURLProtocol.freshScope(.status(404)))

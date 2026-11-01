@@ -48,6 +48,7 @@ import { conversationSeedOf, useAuth } from "../auth/AuthContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as hexOf } from "../devices/sync/state";
 import { useCallHost } from "../calls/CallHostContext";
+import { callFailureText } from "../calls/call-errors";
 import { QuietIncomingCallPanel } from "../calls/QuietIncomingCallPanel";
 import { quietCallOfferFor, type QuietCallOffer } from "../calls/quiet-call-offer";
 import { callOwnsCaptureNow } from "../calls/capture-rule";
@@ -1533,7 +1534,7 @@ function ChatView(props: {
       await callHost.dial(props.entry.groupIdB64, withVideo);
     } catch (err) {
       console.warn("[chat] could not start call", err);
-      setError(() => t("chat.call.error.start"));
+      setError(callFailureText(err, () => t("chat.call.error.start")));
     }
   }
 

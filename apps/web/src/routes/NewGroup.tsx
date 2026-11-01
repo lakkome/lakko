@@ -5,6 +5,8 @@
  * `/groups/new` — name a group and pick its first members from your contacts
  * (UX spec `docs/ux/new-group.md`). Creates the group with the first pick and
  * hands the rest to the chat view, which adds them through its own add path.
+ * A group may start with nobody else: a name is enough, and people are added
+ * later as in any group.
  */
 import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
@@ -25,7 +27,7 @@ import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { contactsErrorText } from "../contacts/errors";
 import { t } from "../l10n";
-import { DEFAULT_GROUP_LABEL } from "../chat/group-title";
+import { DEFAULT_GROUP_LABEL, mayCreateGroup } from "../chat/group-title";
 import { createLiveText } from "../l10n/live-text";
 import { paths } from "./paths";
 import { screenAnchor } from "../ui/screen-anchor";
@@ -79,19 +81,22 @@ export default function NewGroup(): JSX.Element {
     }
     const picks = accepted().filter((c) => picked().has(c.signaturePubkeyB64) && addable(c));
     const [first, ...rest] = picks;
-    if (first === undefined) return;
+    if (first === undefined && !mayCreateGroup(name(), 0)) return;
     setBusy(true);
     // The group is created and recorded whether or not the person waits for
     // it; only opening it is addressed to this screen (`ui/screen-anchor.ts`).
     const here = screenAnchor(location);
     try {
-      const result = await client.startGroupWith(
-        secrets,
-        accountIdBytesFromHex(first.accountIdHex as string),
-        base64Decode(first.signaturePubkeyB64),
-        // ADR-0062 — a group from the start, even while it holds two people.
-        "group",
-      );
+      const result =
+        first === undefined
+          ? await client.startGroupAlone(secrets)
+          : await client.startGroupWith(
+              secrets,
+              accountIdBytesFromHex(first.accountIdHex as string),
+              base64Decode(first.signaturePubkeyB64),
+              // ADR-0062 — a group from the start, even while it holds two people.
+              "group",
+            );
       const active = chats.add({
         label: name().trim().length > 0 ? name().trim() : DEFAULT_GROUP_LABEL,
         group: result.group,
@@ -208,7 +213,7 @@ export default function NewGroup(): JSX.Element {
         </section>
         <Show when={error()}>{(m) => <div class="form-error">{m()}</div>}</Show>
         <div class="lk-actions">
-          <button type="submit" class="primary" disabled={busy() || picked().size === 0}>
+          <button type="submit" class="primary" disabled={busy() || !mayCreateGroup(name(), picked().size)}>
             {busy() ? t("chats.new_group.creating") : t("chats.create.group")}
           </button>
           <button type="button" class="ghost" disabled={busy()} onClick={() => navigate(paths.groups)}>

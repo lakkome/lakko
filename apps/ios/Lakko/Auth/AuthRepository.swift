@@ -6202,9 +6202,18 @@ public final class AuthRepository: ObservableObject {
             NSLog("backup restore (\(context)) fetch failed, still owed: \(error)")
             return .fetchFailed
         case .restored(let parsed):
-            result = .applied(PhraseRestoreBackup.apply(
+            let applied = PhraseRestoreBackup.apply(
                 parsed, accountIdB64: accountIdB64, context: context, defaults: backupDefaults,
-                ownPredecessors: ownPredecessors))
+                ownPredecessors: ownPredecessors)
+            PhraseRestoreBackup.applyOwnState(
+                ownProfile: parsed.ownProfile, visibility: parsed.visibility,
+                accountIdB64: accountIdB64, context: context)
+            RestoredDeviceStore.noteRestored(
+                accountIdB64: accountIdB64, knownConversations: applied.knownGroups,
+                defaults: backupDefaults)
+            NotificationCenter.default.post(
+                name: .lakkoBackupRestored, object: nil, userInfo: ["accountIdB64": accountIdB64])
+            result = .applied(applied)
         }
         // A definitive answer: nothing is owed any more.
         BackupRestoreRetryStore.clear(accountIdB64: accountIdB64, defaults: backupDefaults)

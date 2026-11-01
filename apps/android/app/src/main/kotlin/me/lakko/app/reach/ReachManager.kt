@@ -162,6 +162,19 @@ public class ReachManager internal constructor(
     /** Whether [visibility] is in effect on the server. */
     public val applyStatus: StateFlow<ReachApplyStatus> = mutableStatus.asStateFlow()
 
+    /** The Everyone publication did not land, so the person is not findable
+     *  the way the setting says (or still findable after leaving it). Shown
+     *  through [applyStatus], whose Retry runs the publication again. */
+    @Volatile
+    private var everyoneStuck: Boolean = false
+
+    /** The account whose backup was just restored, read at the next [bind]. */
+    private val restoredBeforeBind = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** The visibility envelope a restore handed over before a session bound:
+     *  a backup composed in that window still carries it. */
+    private val restoredVisibility = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
+
     /** Called after a setting change landed (profiles republished, Everyone
      *  published or withdrawn). Installed by the chat repository. */
     @Volatile
@@ -221,6 +234,10 @@ public class ReachManager internal constructor(
         // the setting, the version counters and the grants this account
         // HOLDS for other people are filed under the contact, not this key.
         if (!sameAccount) doc = store.load(accountIdB64)
+        if (restoredBeforeBind.remove(accountIdB64)) {
+            doc = doc.withUnknownEveryoneNote()
+            store.save(accountIdB64, doc)
+        }
         val boundKeyHex = reachHex(accountKey)
         val decision = rekeyDecision(
             boundKeyHex = boundKeyHex,
@@ -263,6 +280,7 @@ public class ReachManager internal constructor(
             val pending = pendingDeviceSync.poll() ?: break
             adoptDeviceSync(pending)
         }
+        restoredVisibility.remove(accountIdB64)
     }
 
     /** Forget the session (sign-out, forget device). The stored document stays
@@ -273,6 +291,7 @@ public class ReachManager internal constructor(
         old?.accountSeed?.fill(0)
         pendingDeviceSync.clear()
         doc = ReachDoc()
+        everyoneStuck = false
         mutableVisibility.value = null
         mutableStatus.value = ReachApplyStatus.APPLIED
     }
@@ -761,6 +780,47 @@ public class ReachManager internal constructor(
         }
     }
 
+    /**
+     * The visibility envelope a restored backup carried: the path an incoming
+     * DeviceGroup envelope takes, so the mailbox and the Everyone publication
+     * run. On a phrase route no session is bound yet and it waits for [bind];
+     * a session of another account never takes it.
+     */
+    public fun adoptFromBackup(accountIdB64: String, envelope: ByteArray) {
+        val bound = binding.get()
+        if (bound != null && bound.accountIdB64 != accountIdB64) return
+        if (bound == null) restoredVisibility[accountIdB64] = envelope.copyOf()
+        adoptDeviceSync(envelope)
+    }
+
+    /**
+     * A backup of [accountIdB64] was restored here: what this device noted
+     * about the Everyone publication describes an earlier state of the
+     * account, so the next refresh tells the server what the setting says.
+     */
+    public fun noteRestoredFromBackup(accountIdB64: String) {
+        val b = binding.get()
+        if (b == null || b.accountIdB64 != accountIdB64) {
+            restoredBeforeBind.add(accountIdB64)
+            return
+        }
+        scope.launch {
+            lock.withLock {
+                if (binding.get() !== b) return@withLock
+                doc = doc.withUnknownEveryoneNote()
+                store.save(b.accountIdB64, doc)
+            }
+        }
+    }
+
+    /** The visibility envelope in force for [accountIdB64] with its original
+     *  stamp, for a backup; `null` when none was ever chosen. */
+    public fun visibilityEnvelopeFor(accountIdB64: String): ByteArray? {
+        val bound = binding.get()
+        val held = if (bound?.accountIdB64 == accountIdB64) doc else store.load(accountIdB64)
+        return held.visibilityHex?.let(::reachUnhex) ?: restoredVisibility[accountIdB64]?.copyOf()
+    }
+
     private suspend fun adoptVisibility(b: Binding, received: ReceivedDeviceSync.Visibility) {
         val accepted = lock.withLock {
             if (binding.get() !== b) return
@@ -893,7 +953,7 @@ public class ReachManager internal constructor(
                 doc = doc.copy(replies = liveReplies)
                 store.save(b.accountIdB64, doc)
             }
-            mutableStatus.value = recovery ?: ReachApplyStatus.APPLIED
+            mutableStatus.value = settledStatus(recovery)
             // While the recovery is pending this reports the restricted set
             // (`link` / `reply` keys only), so a link or reply mint proceeds;
             // the status says the rest is not applied.
@@ -925,7 +985,7 @@ public class ReachManager internal constructor(
                 replies = liveReplies,
             )
             store.save(b.accountIdB64, doc)
-            mutableStatus.value = recovery ?: ReachApplyStatus.APPLIED
+            mutableStatus.value = settledStatus(recovery)
             // Pending: only the restricted set went out (see above).
             true
         } catch (cancellation: CancellationException) {
@@ -940,6 +1000,11 @@ public class ReachManager internal constructor(
             false
         }
     }
+
+    /** What the reconcile leaves on screen: the recovery's status, a stuck
+     *  Everyone publication, or applied. */
+    private fun settledStatus(recovery: ReachApplyStatus?): ReachApplyStatus =
+        recovery ?: if (everyoneStuck) ReachApplyStatus.FAILED else ReachApplyStatus.APPLIED
 
     /**
      * ADR-0060 §1 ("Versions after a restore", amended 2026-10-01). Under [lock].
@@ -1247,9 +1312,23 @@ public class ReachManager internal constructor(
         return result
     }
 
+    /** Whether the last Everyone publication did not land. */
+    public fun everyonePublicationStuck(): Boolean = everyoneStuck
+
+    /** The Everyone publication could not be made: the person sees it on the
+     *  Who can find me screen, with Retry. */
+    public fun noteEveryoneStuck() {
+        everyoneStuck = true
+        mutableStatus.value = ReachApplyStatus.FAILED
+    }
+
     public fun notePublishedEveryone(public: Boolean, key: String?) {
         val b = binding.get() ?: return
         doc = doc.copy(publishedPublic = public, publishedKey = key)
+        if (everyoneStuck) {
+            everyoneStuck = false
+            if (mutableStatus.value == ReachApplyStatus.FAILED) mutableStatus.value = ReachApplyStatus.APPLIED
+        }
         scope.launch {
             lock.withLock {
                 if (binding.get() !== b) return@withLock

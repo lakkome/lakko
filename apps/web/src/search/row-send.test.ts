@@ -7,6 +7,7 @@ import type { PersonResult } from "./people";
 import {
   heldStateAfter,
   isOutgoing,
+  mayAskAgain,
   outgoingOf,
   rowSendState,
   rowView,
@@ -34,15 +35,15 @@ const record = (recipientAccountIdHex: string, recipientKeyB64?: string) => ({
 
 describe("a found person's row after Add contact (UX 6.1)", () => {
   it("offers Add contact before anything is sent", () => {
-    expect(rowView("idle", true)).toEqual({ add: "shown", sent: false, message: null });
+    expect(rowView("idle", true)).toEqual({ add: "shown", sent: false, askAgain: false, message: null });
   });
 
   it("keeps the button, disabled, while the request goes out", () => {
-    expect(rowView("sending", true)).toEqual({ add: "disabled", sent: false, message: null });
+    expect(rowView("sending", true)).toEqual({ add: "disabled", sent: false, askAgain: false, message: null });
   });
 
   it("reads Request sent and the button goes away", () => {
-    expect(rowView("sent", true)).toEqual({ add: "hidden", sent: true, message: null });
+    expect(rowView("sent", true)).toEqual({ add: "hidden", sent: true, askAgain: false, message: null });
   });
 
   it("on a refusal says they may have changed who can find them, with no button", () => {
@@ -61,18 +62,43 @@ describe("a found person's row after Add contact (UX 6.1)", () => {
 
   it("offers nothing on a row that cannot be added (a contact, a hidden person)", () => {
     for (const s of ["idle", "sending", "failed"] as const) {
-      expect(rowView(s, false)).toEqual({ add: "hidden", sent: false, message: null });
+      expect(rowView(s, false)).toEqual({ add: "hidden", sent: false, askAgain: false, message: null });
     }
   });
 
   it("reads Request sent even when the last check says they cannot be reached", () => {
-    expect(rowView("sent", false)).toEqual({ add: "hidden", sent: true, message: null });
+    expect(rowView("sent", false)).toEqual({ add: "hidden", sent: true, askAgain: false, message: null });
   });
 
   it("keeps the refusal sentence after the refusal took the offer away", () => {
     const v = rowView("refused", false);
     expect(v.add).toBe("hidden");
     expect(v.message?.text()).toBe(REQUEST_REFUSED());
+  });
+});
+
+describe("asking again (D2)", () => {
+  it("a row in the Sent list reads Request sent and offers Ask again", () => {
+    const outgoing = outgoingOf([record("11")]);
+    const v = rowView(rowSendState(person(), "idle", outgoing), true, mayAskAgain(person(), outgoing));
+    expect(v.sent).toBe(true);
+    expect(v.askAgain).toBe(true);
+  });
+
+  it("needs a way to reach the person", () => {
+    expect(rowView("sent", false, true).askAgain).toBe(false);
+  });
+
+  it("is not offered for a person added through their link", () => {
+    const outgoing = outgoingOf([record("33")], [{ accountIdHex: "33", signaturePubkeyB64: "KEY" }]);
+    expect(mayAskAgain(person({ accountIdHex: "33" }), outgoing)).toBe(false);
+  });
+
+  it("the repeat on its way, and one that failed, speak over the Sent list", () => {
+    const outgoing = outgoingOf([record("11")]);
+    expect(rowSendState(person(), "sending", outgoing)).toBe("sending");
+    expect(rowSendState(person(), "failed", outgoing)).toBe("failed");
+    expect(rowView("sending", true, true).add).toBe("disabled");
   });
 });
 

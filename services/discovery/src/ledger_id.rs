@@ -193,6 +193,21 @@ pub(crate) fn stored_revocation_key(bytes: &[u8]) -> Option<lakko_crypto::signin
     lakko_crypto::signing::VerifyingKey::from_bytes(bytes).ok()
 }
 
+/// `true` when a link has no uses left: `max_uses` 0 is single-use and
+/// `u32::MAX` never runs out, the ceiling the consume handlers' `CASE` applies.
+///
+/// The fetch routes report this instead of answering 404: a person who already
+/// used the link has to read it again (the "already in your contacts" page, a
+/// resent request), and only `consume` can tell them from anyone else. A page
+/// with no session has nobody to consume for, so it reads the link as dead.
+pub(crate) const fn link_used_up(max_uses: u32, used_count: u32) -> bool {
+    match max_uses {
+        0 => used_count >= 1,
+        u32::MAX => false,
+        ceiling => used_count >= ceiling,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +377,15 @@ mod tests {
         assert!(parse_revocation_pubkey("%%").is_err());
         assert!(stored_revocation_key(&key).is_some());
         assert!(stored_revocation_key(&[0u8; 3]).is_none());
+    }
+
+    #[test]
+    fn used_up_follows_the_consume_ceiling() {
+        assert!(!link_used_up(0, 0));
+        assert!(link_used_up(0, 1));
+        assert!(!link_used_up(3, 2));
+        assert!(link_used_up(3, 3));
+        assert!(!link_used_up(u32::MAX, u32::MAX));
     }
 
     #[tokio::test]

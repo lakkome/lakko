@@ -351,7 +351,7 @@ Confirm new password   [ ............ ]
 |---|---|
 | Another device | Fills as the other device adds this one to each chat; banner "Catching up with your other device..." until done. |
 | Recovery phrase or passkey, another device of the account is still signed in | Fills as that device notices this one and adds it (this can take until that device is next open); banner "Your other devices are adding this one to your chats." |
-| Recovery phrase or passkey, no other device left | Empty list with a card: "Your keys are restored. Your chats were on devices you no longer have. Your contacts will see you as the same person and can add you back." with a button to Contacts. Not a loading state; no spinner. |
+| Recovery phrase or passkey, no other device left | Fills as contacts open Lakko and their devices add this one. Until the first chat arrives the empty list carries a card: "Your keys are restored. Your chats come back as your contacts open Lakko. Messages from before are not restored." with a button to Contacts. Not a loading state; no spinner. A restored device that knew no conversation shows the ordinary empty list. |
 
 ## 8. Restore your keys (signed in, no keys on this device)
 
@@ -685,8 +685,6 @@ Follows the web build (the earlier text of this spec said otherwise):
 
 Open, not built on web:
 
-- **7.2**: the two banners and the empty-list card have no strings in the
-  catalog. Kept in the spec as required.
 - **"No passkey for Lakko was found on this device."** (section 4 in the
   earlier text): there is no such string; what the form shows when the
   system sheet has no passkey to offer was not checked. Removed from the

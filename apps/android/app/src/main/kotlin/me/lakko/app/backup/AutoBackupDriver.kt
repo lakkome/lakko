@@ -27,8 +27,9 @@ import uniffi.lakko_ffi_uniffi.BackupOwnPredecessor
  * first run after install a change, because nothing on this device can vouch
  * for what the server already holds.
  *
- * What goes up: contacts, the ADR-0058 synced state and the ids of the
- * account's conversations. No MLS provider state - a backup carries none
+ * What goes up: contacts, the ADR-0058 synced state, the ids of the account's
+ * conversations, the own name and photo and the visibility setting. No MLS
+ * provider state - a backup carries none
  * (see `BackupRestore.kt`).
  */
 public class AutoBackupDriver internal constructor(
@@ -63,6 +64,8 @@ public class AutoBackupDriver internal constructor(
         val syncedState: ByteArray?,
         /** ADR-0074 section 3.7 - the account's own predecessors. */
         val ownPredecessors: List<BackupOwnPredecessor> = emptyList(),
+        /** The own name, photo and visibility setting. */
+        val personal: BackupPersonal = BackupPersonal.NONE,
     )
 
     /**
@@ -89,6 +92,9 @@ public class AutoBackupDriver internal constructor(
          *  first, read at upload time. A read that throws fails the upload
          *  rather than leaving them out of the backup. */
         val ownPredecessors: (String) -> List<BackupOwnPredecessor> = { emptyList() },
+        /** The own name, photo and visibility setting, read at each tick: a
+         *  change of any of them gets a backup out. */
+        val personal: (String) -> BackupPersonal = { BackupPersonal.NONE },
     )
 
     public enum class Outcome { CLEAN, THROTTLED, NOT_READY, UPLOADED, FAILED }
@@ -128,6 +134,12 @@ public class AutoBackupDriver internal constructor(
         }
         if (groups != null &&
             AutoBackupStore.knownGroupsChanged(applicationContext, accountIdB64, groups)
+        ) {
+            AutoBackupStore.markDirty(applicationContext, accountIdB64, nowMs)
+        }
+        val personal = inputs.personal(accountIdB64)
+        if (personal != BackupPersonal.NONE &&
+            AutoBackupStore.personalChanged(applicationContext, accountIdB64, personal.changeKey())
         ) {
             AutoBackupStore.markDirty(applicationContext, accountIdB64, nowMs)
         }
@@ -186,6 +198,7 @@ public class AutoBackupDriver internal constructor(
                     knownGroupIdsHex = groups,
                     syncedState = inputs.syncedState(),
                     ownPredecessors = predecessors,
+                    personal = personal,
                 ),
             )
         } catch (cancel: kotlinx.coroutines.CancellationException) {
@@ -243,6 +256,7 @@ internal object CachedPhraseUploader : AutoBackupDriver.Uploader {
                 knownGroupIdsHex = request.knownGroupIdsHex,
                 syncedState = request.syncedState,
                 ownPredecessors = request.ownPredecessors,
+                personal = request.personal,
             )
         } finally {
             client.close()

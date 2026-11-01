@@ -404,9 +404,20 @@ public struct InviteFetchResponse: Codable, Equatable {
     /// Standard-alphabet base64 of the sealed link blob; opened on the device
     /// with the link's fragment secret (`XCapability.openLink`).
     public let sealed: String
+    /// Every use of the link is spent. The row is still served, because a
+    /// person who already used the link must reach "already in your contacts"
+    /// and only a consume can tell them apart: this answers only a visitor
+    /// with no session. Absent reads as not used up.
+    public let usedUp: Bool?
 
-    public init(sealed: String) {
+    public init(sealed: String, usedUp: Bool? = nil) {
         self.sealed = sealed
+        self.usedUp = usedUp
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case sealed
+        case usedUp = "used_up"
     }
 }
 

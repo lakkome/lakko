@@ -445,14 +445,14 @@ private fun InviteHeadline(card: GroupInviteCard?) {
     }
 }
 
-/** The muted foot: `Invited by <fingerprint>` — the one thing on the page the
- *  inviter cannot fake, kept so digits told out of band can be compared. */
+/** The muted foot: `Invited by <name>`. No name, no line: digits mean nothing
+ *  to a person. */
 @Composable
 private fun InviteFoot(card: GroupInviteCard?) {
-    val fingerprint = card?.fingerprint ?: return
+    val line = invitedByLine(card?.preview) ?: return
     Spacer(Modifier.height(16.dp))
     Text(
-        text = invitedByLine(fingerprint).text(),
+        text = line.text(),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         textAlign = TextAlign.Center,

@@ -25,7 +25,7 @@
 
 import { t } from "../l10n";
 import { KeyedError } from "../l10n/keyed-error";
-import type { PostDecode } from "./PostCard";
+import type { PostDecode } from "./post-decode";
 import { composePost, type WasmIdentity } from "./composer";
 import { publishPost } from "./api";
 import type { ChannelSharedMeta } from "./channel-log-codec";

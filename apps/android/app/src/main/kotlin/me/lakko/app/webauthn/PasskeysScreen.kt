@@ -79,6 +79,9 @@ import me.lakko.app.ui.components.LakkoDialogTone
 public fun PasskeysScreen(
     viewModel: PasskeysViewModel,
     onBack: () -> Unit,
+    /** Reached from Settings > Danger zone: the delete dialog is what was
+     *  asked for, and closing it goes back there. */
+    deleteAccountOnly: Boolean = false,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -86,7 +89,7 @@ public fun PasskeysScreen(
     val fileSaver = me.lakko.app.ui.components.rememberFileSaver()
     // A3 — drives the delete-account confirmation dialog. Saved, so a
     // rotation brings the dialog back (its typed password is the ViewModel's).
-    var confirmingDelete by rememberSaveable { mutableStateOf(false) }
+    var confirmingDelete by rememberSaveable { mutableStateOf(deleteAccountOnly) }
     // A removal names its target on the button (docs/l10n/batch-2-settings.md).
     var removing by remember { mutableStateOf<CredentialSummary?>(null) }
     // "Stop restoring keys" asks first.
@@ -274,6 +277,7 @@ public fun PasskeysScreen(
             onClose = {
                 viewModel.clearDeleteError()
                 confirmingDelete = false
+                if (deleteAccountOnly) onBack()
             },
         )
     }

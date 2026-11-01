@@ -208,6 +208,12 @@ enum AccountLocalDataWipe {
         step("backup-restore-retry") {
             BackupRestoreRetryStore.clear(accountIdB64: accountIdB64)
         }
+        step("backup-restored-device") {
+            RestoredDeviceStore.clear(accountIdB64: accountIdB64)
+        }
+        step("channel-pending-handles") {
+            PendingChannelHandleStore.clear(accountIdB64: accountIdB64)
+        }
         step("export-key") { ExportKeyStore.deleteExportKey(accountIdB64: accountIdB64) }
         step("account-identity-seed") {
             AccountIdentitySeedStore.deleteAccountIdentitySeed(accountIdB64: accountIdB64)

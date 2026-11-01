@@ -385,6 +385,10 @@ data class InviteFetchResponse(
     /** Standard base64 of the sealed link; opened locally under the URL
      *  fragment's secret. */
     val sealed: String,
+    /** Every use is spent. Served anyway: a person who used it must still
+     *  reach "already in your contacts", which only consume can tell. Read
+     *  by a visitor with no session only. */
+    val used_up: Boolean = false,
 )
 
 /** Body of `POST /discovery/invite/{blob_id_b64url}/consume`

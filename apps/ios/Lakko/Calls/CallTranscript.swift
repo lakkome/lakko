@@ -42,7 +42,7 @@ public struct CallTranscriptRow: Equatable, Sendable {
         case incoming
     }
 
-    /// How the call finished. Four outcomes, one per sentence section 6 lists.
+    /// How the call finished. One outcome per sentence section 6 lists.
     public enum Outcome: Equatable, Sendable {
         /// Media flowed. Carries how long for.
         case answered(durationMs: Int64)
@@ -50,6 +50,8 @@ public struct CallTranscriptRow: Equatable, Sendable {
         case missed
         /// A person, or their device, refused it.
         case declined
+        /// It was answered and no media ever flowed.
+        case failed
     }
 
     /// Why the call ended, as the call session reported it.
@@ -63,10 +65,14 @@ public struct CallTranscriptRow: Equatable, Sendable {
 
     public let direction: Direction
     public let outcome: Outcome
+    /// Started as a video call: what the row's mark shows and calling back
+    /// repeats.
+    public let video: Bool
 
-    public init(direction: Direction, outcome: Outcome) {
+    public init(direction: Direction, outcome: Outcome, video: Bool = false) {
         self.direction = direction
         self.outcome = outcome
+        self.video = video
     }
 
     // MARK: - Outcome
@@ -80,13 +86,15 @@ public struct CallTranscriptRow: Equatable, Sendable {
     ///
     /// Among calls that never connected, only a refusal is `declined`: a
     /// device answering **busy** refused it just as a person tapping Decline
-    /// did. Everything else — the 45-second ring running out, the caller
-    /// cancelling, a transport that never came up — is `missed`, which is the
-    /// word section 2.1 uses for both sides of a call nobody answered.
+    /// did. A call somebody answered that never carried media (`accepted`)
+    /// is `failed`: nobody missed it. Everything else — the 45-second ring
+    /// running out, the caller cancelling — is `missed`, which is the word
+    /// section 2.1 uses for both sides of a call nobody answered.
     public static func outcome(
         connectedAtMs: Int64?,
         endedAtMs: Int64,
-        cause: Cause?
+        cause: Cause?,
+        accepted: Bool = false
     ) -> Outcome {
         if let connectedAtMs {
             return .answered(durationMs: max(0, endedAtMs - connectedAtMs))
@@ -95,7 +103,7 @@ public struct CallTranscriptRow: Equatable, Sendable {
         case .declined, .busy:
             return .declined
         case .hungUp, .timedOut, .failed, nil:
-            return .missed
+            return accepted ? .failed : .missed
         }
     }
 
@@ -112,26 +120,30 @@ public struct CallTranscriptRow: Equatable, Sendable {
             return Localization.text("call.log.missed")
         case .declined:
             return Localization.text("call.log.declined")
+        case .failed:
+            return Localization.text("call.log.failed")
         }
     }
 
     /// The spoken form (`docs/ux/calls.md` section 8): a duration is announced
     /// as a duration, never read digit by digit, and the row says what a tap
-    /// on it does. The row does not know whether the call carried video, so
-    /// it reads as a call.
+    /// on it does.
     public var accessibilityLabel: String {
+        let mode = video ? "video" : "voice"
         let head: String
         switch outcome {
         case .answered(let durationMs):
             let kind = Localization.text(
-                direction == .outgoing ? "call.log.a11y.voice_outgoing" : "call.log.a11y.voice_incoming")
+                "call.log.a11y.\(mode)_\(direction == .outgoing ? "outgoing" : "incoming")")
             head = Localization.text(
                 "call.log.a11y.lasted",
                 texts: ["head": kind, "duration": Self.spokenDuration(ms: durationMs)])
         case .missed:
-            head = Localization.text("call.log.a11y.voice_missed")
+            head = Localization.text("call.log.a11y.\(mode)_missed")
         case .declined:
-            head = Localization.text("call.log.a11y.voice_declined")
+            head = Localization.text("call.log.a11y.\(mode)_declined")
+        case .failed:
+            head = Localization.text("call.log.failed")
         }
         return Localization.text("call.log.a11y.call_back", texts: ["head": head])
     }
@@ -191,15 +203,20 @@ public struct CallTranscriptRow: Equatable, Sendable {
     /// from the parsed value, so re-wording section 6 never has to migrate
     /// rows already on disk.
     public var marker: String {
+        let head = "\(Self.markerPrefix) \(direction.rawValue)"
+        let body: String
         switch outcome {
-        case .answered(let durationMs):
-            return "\(Self.markerPrefix) \(direction.rawValue) answered \(max(0, durationMs))"
-        case .missed:
-            return "\(Self.markerPrefix) \(direction.rawValue) missed"
-        case .declined:
-            return "\(Self.markerPrefix) \(direction.rawValue) declined"
+        case .answered(let durationMs): body = "\(head) answered \(max(0, durationMs))"
+        case .missed: body = "\(head) missed"
+        case .declined: body = "\(head) declined"
+        case .failed: body = "\(head) failed"
         }
+        return video ? "\(body) \(Self.videoField)" : body
     }
+
+    /// The last field of a video call's marker. A row written before it has
+    /// none and reads as a voice call.
+    private static let videoField = "video"
 
     /// `true` when `text` is a stored call row — parseable or not. A row that
     /// claims to be one and is not must be hidden rather than drawn raw.
@@ -210,20 +227,25 @@ public struct CallTranscriptRow: Equatable, Sendable {
     /// Read a stored marker back. `nil` for anything this build does not
     /// understand, which the timeline then does not draw.
     public static func parse(_ text: String) -> CallTranscriptRow? {
-        let fields = text.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        var fields = text.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        let video = fields.last == videoField
+        if video { fields.removeLast() }
         guard fields.count >= 3, fields[0] == markerPrefix,
               let direction = Direction(rawValue: fields[1])
         else { return nil }
         switch fields[2] {
         case "answered":
             guard fields.count == 4, let ms = Int64(fields[3]), ms >= 0 else { return nil }
-            return CallTranscriptRow(direction: direction, outcome: .answered(durationMs: ms))
+            return CallTranscriptRow(direction: direction, outcome: .answered(durationMs: ms), video: video)
         case "missed":
             guard fields.count == 3 else { return nil }
-            return CallTranscriptRow(direction: direction, outcome: .missed)
+            return CallTranscriptRow(direction: direction, outcome: .missed, video: video)
         case "declined":
             guard fields.count == 3 else { return nil }
-            return CallTranscriptRow(direction: direction, outcome: .declined)
+            return CallTranscriptRow(direction: direction, outcome: .declined, video: video)
+        case "failed":
+            guard fields.count == 3 else { return nil }
+            return CallTranscriptRow(direction: direction, outcome: .failed, video: video)
         default:
             return nil
         }

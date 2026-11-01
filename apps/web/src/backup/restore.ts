@@ -32,6 +32,11 @@
  *     and names its DeviceGroup under that key from the start; a restore that
  *     runs after the landing takes the pairing bundle's path (the session
  *     mints the binding again while the device holds no conversation);
+ *   * the person's own profile and "who can find me" setting (`own-state.ts`),
+ *     each only when nothing newer is held; the setting reaches the same
+ *     intake as one from another device, so the mailbox and the Everyone
+ *     publication run, and the note of what was last published is dropped,
+ *     since nothing says it still stands;
  *   * NO MLS state. The backup carries none (payload v6): a provider
  *     snapshot belongs to the device that made it, and loading one here
  *     would clone a leaf (ADR-0050), roll a reinstalled device back behind
@@ -79,6 +84,11 @@ import {
   markBackupRestoreOwed,
 } from "./restore-owed";
 import { addRestoredKnownGroups } from "./restored-known-groups";
+import { adoptRestoredOwnProfile, storeRestoredVisibility } from "./own-state";
+import { announceOwnStateRestored } from "../profile/own-profile-sync";
+import { markRestoreFinished } from "./restored-marker";
+import { resetEveryoneNote } from "../reach/publication-store";
+import { receiveServiceEnvelope } from "../reach/service-envelope-intake";
 
 /** What a run of {@link restoreAccountBackup} ended as. */
 export type AccountBackupRestoreOutcome =
@@ -137,6 +147,11 @@ export interface AccountBackupRestoreDeps {
   ) => Promise<void>;
   /** Keep the conversation ids the backup named. */
   readonly rememberKnownGroups: (accountIdB64: string, idsB64: readonly string[]) => void;
+  /** Keep the backup's own profile and setting, and tell the runtimes. */
+  readonly applyOwnState: (
+    accountIdB64: string,
+    own: { readonly ownProfile: Uint8Array; readonly visibility: Uint8Array },
+  ) => Promise<void>;
   /** Store the own predecessors under the device key. */
   readonly applyOwnPredecessors: (
     accountIdB64: string,
@@ -145,6 +160,8 @@ export interface AccountBackupRestoreDeps {
   ) => Promise<unknown>;
   readonly markOwed: (accountIdB64: string) => void;
   readonly clearOwed: (accountIdB64: string) => void;
+  /** The chat list's marker: the backup named this many conversations. */
+  readonly markRestored: (accountIdB64: string, conversations: number) => void;
   /** Tell the person a rolled-back / tampered backup was refused. */
   readonly alertRollbackRefused: () => void;
 }
@@ -174,6 +191,21 @@ async function mergeRestoredSyncedState(
   announceRestoredSyncedState(accountIdB64, synced);
 }
 
+/** The person's own part of a restore. Fail closed field by field: a field
+ *  that cannot be used changes nothing and the rest goes on. */
+async function applyRestoredOwnState(
+  accountIdB64: string,
+  own: { readonly ownProfile: Uint8Array; readonly visibility: Uint8Array },
+): Promise<void> {
+  await adoptRestoredOwnProfile(accountIdB64, own.ownProfile);
+  // Dropped before the setting lands, so the pass it starts publishes.
+  await resetEveryoneNote(accountIdB64);
+  if (await storeRestoredVisibility(accountIdB64, own.visibility)) {
+    await receiveServiceEnvelope(own.visibility);
+  }
+  announceOwnStateRestored();
+}
+
 const DEFAULT_DEPS: AccountBackupRestoreDeps = {
   fetch: (phraseBytes, sessionToken, gate) => {
     const client = new BackupClient();
@@ -183,6 +215,7 @@ const DEFAULT_DEPS: AccountBackupRestoreDeps = {
   applyContacts: applyRestoredContacts,
   applySyncedState: mergeRestoredSyncedState,
   rememberKnownGroups: (accountIdB64, idsB64) => addRestoredKnownGroups(accountIdB64, idsB64),
+  applyOwnState: applyRestoredOwnState,
   applyOwnPredecessors: async (accountIdB64, deviceKey, ownPredecessors) => {
     const wasm = await loadWasm();
     return applyOwnPredecessors({ ownPredecessors }, accountIdB64, deviceKey, (seed) =>
@@ -191,6 +224,7 @@ const DEFAULT_DEPS: AccountBackupRestoreDeps = {
   },
   markOwed: (accountIdB64) => markBackupRestoreOwed(accountIdB64),
   clearOwed: (accountIdB64) => clearBackupRestoreOwed(accountIdB64),
+  markRestored: (accountIdB64, conversations) => markRestoreFinished(accountIdB64, conversations),
   alertRollbackRefused: () => {
     // The app's own notice, never `window.alert` (design system section 6).
     void requestConfirm({
@@ -394,7 +428,18 @@ async function runRestore(
       // cleared: once it is, the automatic backup may upload, and that
       // upload must already list them.
       deps.rememberKnownGroups(accountIdB64, result.knownGroupIds);
+      // Before the owed flag goes too: the first upload after it carries them.
+      try {
+        await deps.applyOwnState(accountIdB64, {
+          ownProfile: result.ownProfile,
+          visibility: result.visibility,
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("account backup restore: own state not applied", err instanceof Error ? err.name : "");
+      }
       deps.clearOwed(accountIdB64);
+      deps.markRestored(accountIdB64, result.knownGroupIds.length);
       return {
         kind: "applied",
         contacts: result.acceptedContacts.length,

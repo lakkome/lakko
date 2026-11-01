@@ -1541,18 +1541,18 @@ public class CallSession(
         statsJob?.cancel()
         statsJob = null
         for (line in inboundCounters.total()) android.util.Log.i("CallSession", line)
-        rtc?.close()
+        // Both wait on libwebrtc's own threads (the peer's close, the camera
+        // thread's join), and this runs on the main thread: they held it long
+        // enough for the system's "isn't responding" dialog.
+        val closing = rtc
         rtc = null
-        localCameraCapture?.let { capture ->
-            // stopCapture is synchronous + thread-blocking
-            // for ~50 ms while libwebrtc's camera thread
-            // joins. Doing it inline here keeps the order
-            // predictable: by the time `Done` is observed
-            // by the UI, the camera is fully released.
-            capture.stop()
-            capture.dispose()
-        }
+        val capture = localCameraCapture
         localCameraCapture = null
+        CallMediaCloser.close {
+            closing?.close()
+            capture?.stop()
+            capture?.dispose()
+        }
         mutableLocalVideoTrack.value = null
         // G3-2-remote-video — drop the remote handle so the
         // gallery tile reverts to the avatar placeholder on

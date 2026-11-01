@@ -214,6 +214,9 @@ final class CallHost: ObservableObject {
     /// The call actually happened: it rang here, or it was dialed. A pre-join
     /// the user cancelled was never a call and leaves no row.
     private var callWasPlaced = false
+    /// Somebody answered: the call reached `.connecting`. A call that then
+    /// never carries media failed; nobody missed it.
+    private var callAccepted = false
     /// The row for the session in the slot has been written. A session reaches
     /// `.done` once, but the slot is cleared from several places; this keeps a
     /// second pass from filing a duplicate row.
@@ -595,6 +598,7 @@ final class CallHost: ObservableObject {
         connectedAtMs = nil
         callStartedAtMs = startedAtMs
         callWasPlaced = false
+        callAccepted = false
         callRecorded = false
         stateSubscription = session.$state.sink { [weak self, weak session] next in
             guard let self, let session, self.activeCall === session else { return }
@@ -621,6 +625,7 @@ final class CallHost: ObservableObject {
         connectedAtMs = nil
         callStartedAtMs = nil
         callWasPlaced = false
+        callAccepted = false
         callRecorded = false
     }
 
@@ -630,17 +635,19 @@ final class CallHost: ObservableObject {
     private func recordFinishedCall(_ session: CallSession) {
         guard callWasPlaced, !callRecorded, let groupIdHex = activeGroupIdHex else { return }
         callRecorded = true
-        let row = CallTranscriptRow(
-            direction: activeCallDirection,
-            outcome: CallTranscriptRow.outcome(
-                connectedAtMs: connectedAtMs,
-                endedAtMs: ports.nowMs(),
-                cause: Self.cause(session.endReason)))
         // The mode the call was STARTED in, which is what calling back should
         // repeat: the button this device pressed for a call it placed, and the
         // media the offer asked for on one it received. Read here rather than
         // off the session, whose camera flag is torn down before this runs.
         let video = activeCallDirection == .outgoing ? outgoingButton == .video : incomingVideo
+        let row = CallTranscriptRow(
+            direction: activeCallDirection,
+            outcome: CallTranscriptRow.outcome(
+                connectedAtMs: connectedAtMs,
+                endedAtMs: ports.nowMs(),
+                cause: Self.cause(session.endReason),
+                accepted: callAccepted),
+            video: video)
         ports.recordCall(FinishedCall(
             groupIdHex: groupIdHex,
             row: row,
@@ -691,6 +698,7 @@ final class CallHost: ObservableObject {
             armTimer(.establish, for: session)
         case .connecting:
             sessionWasPresented = true
+            callAccepted = true
             if timerPhase != .establish { armTimer(.establish, for: session) }
         case .connected:
             sessionWasPresented = true

@@ -38,7 +38,7 @@
  * the GROUP panel only, which a one-to-one had just stopped opening - so an
  * ended one-to-one had no way to be closed at all.
  */
-import { createEffect, createMemo, createSignal, For, on, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, type JSX } from "solid-js";
 
 import { base64Decode } from "../auth/account-id";
 import { DELETE_CHAT_CONTROL } from "../chat/membership-ended";
@@ -56,6 +56,7 @@ import { t } from "../l10n";
 import { namedActionKey } from "../ui/confirm-dialog";
 import { createLiveText } from "../l10n/live-text";
 import { computeSafetyNumber } from "./safety";
+import { messageAction, type MessageAction } from "./message-action";
 import { safetyNumberRows } from "./safety-number-format";
 
 export interface ContactDetailViewProps {
@@ -67,6 +68,9 @@ export interface ContactDetailViewProps {
   readonly chatHref: string | null;
   /** Whether Message can create the chat when there is none yet. */
   readonly canStartChat: boolean;
+  /** When the person became a contact, for the seconds a chat takes to
+   *  arrive after an accept. Absent where the screen has no such row. */
+  readonly acceptedAtMs?: number;
   readonly busy: () => boolean;
   readonly error: () => string | null;
   readonly myPubkey: () => Uint8Array | null;
@@ -226,6 +230,18 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
     if (ok) props.onRemove();
   }
 
+  // Ticks only so the card moves on by itself when the seconds are over.
+  const [clock, setClock] = createSignal(Date.now());
+  const clockTimer = setInterval(() => setClock(Date.now()), 5_000);
+  onCleanup(() => clearInterval(clockTimer));
+  const messageState = (): MessageAction =>
+    messageAction({
+      hasChat: props.chatHref !== null,
+      canStartChat: props.canStartChat,
+      acceptedAtMs: props.acceptedAtMs ?? null,
+      nowMs: clock(),
+    });
+
   const actions = (): ReadonlyArray<{
     label: string;
     icon: IconName;
@@ -244,11 +260,9 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
             {
               label: t("contacts.detail.message"),
               icon: "chat" as IconName,
-              disabled: props.busy() || (noChat && !props.canStartChat),
+              disabled: props.busy() || messageState() !== "go",
               title:
-                noChat && !props.canStartChat
-                  ? t("contacts.detail.message_unavailable")
-                  : undefined,
+                messageState() === "unavailable" ? t("contacts.detail.message_unavailable") : undefined,
               run: () => props.onMessage(),
             },
           ];
@@ -343,6 +357,11 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
               )}
             </For>
           </div>
+        </Show>
+        <Show when={sections().includes("message") && messageState() === "starting"}>
+          <p class="lk-meta" role="status">
+            {t("contacts.detail.chat_starting")}
+          </p>
         </Show>
         <Show when={props.error()}>{(message) => <div class="form-error">{message()}</div>}</Show>
 

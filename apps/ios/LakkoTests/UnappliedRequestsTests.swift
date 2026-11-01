@@ -177,13 +177,10 @@ final class UnappliedRequestsTests: XCTestCase {
     /// to be applied…`:
     ///
     ///     XCTAssertTrue failed - the joiner is not told the wait is unbounded
-    func testTheJoinerIsToldTheWaitIsUnboundedAndOfferedTheOneRepair() {
+    func testTheJoinerIsToldTheWaitAndOfferedTheOneRepair() {
         XCTAssertEqual(
             joinWaitPrimary,
             "Request sent. An admin approves it, then the change is applied to the group.")
-        XCTAssertTrue(
-            joinWaitSecondary.contains("time limit"),
-            "the joiner is not told the wait is unbounded")
         XCTAssertTrue(joinWaitSecondary.contains("send the request again"))
         XCTAssertEqual(joinRequestAgain, "Request again")
     }

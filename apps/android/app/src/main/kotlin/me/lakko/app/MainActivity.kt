@@ -295,6 +295,12 @@ class MainActivity : ComponentActivity() {
             me.lakko.app.reach.ReachManager.get(applicationContext).publishOwnProfileToDevices()
         }
 
+        // A restore that ran under a live session gave the name or photo back.
+        authRepository.onOwnProfileRestored = {
+            chatRepository.publishOwnProfileToAllGroups()
+            me.lakko.app.reach.ReachManager.get(applicationContext).publishOwnProfileToDevices()
+        }
+
         // ADR-0026 Phase 4 — the anti-censorship arming controller.
         // Apply the persisted preference at boot: when on, fetch +
         // verify the signed bootstrap config and publish the armed
@@ -355,17 +361,25 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    AppRoot(
-                        authRepository = authRepository,
-                        contactsRepository = contactsRepository,
-                        chatRepository = chatRepository,
-                        callHost = callHost,
-                        deviceGroupSync = deviceGroupSync,
-                        inviteIntake = inviteIntake,
-                        pushIntake = pushIntake,
-                        antiCensorship = antiCensorship,
-                        releaseChecker = releaseChecker,
-                    )
+                    // docs/ux/message-links.md section 2 — a Lakko link tapped
+                    // in a message goes where an opened app link goes.
+                    androidx.compose.runtime.CompositionLocalProvider(
+                        me.lakko.app.ui.components.LocalOpenLakkoLink provides { link ->
+                            inviteIntake.publishLink(link)
+                        },
+                    ) {
+                        AppRoot(
+                            authRepository = authRepository,
+                            contactsRepository = contactsRepository,
+                            chatRepository = chatRepository,
+                            callHost = callHost,
+                            deviceGroupSync = deviceGroupSync,
+                            inviteIntake = inviteIntake,
+                            pushIntake = pushIntake,
+                            antiCensorship = antiCensorship,
+                            releaseChecker = releaseChecker,
+                        )
+                    }
                 }
             }
             }
@@ -1295,7 +1309,9 @@ private fun SessionRoot(
                 username = canonicalUsername,
             )
         }
-        if (profileChanged) chatRepository.publishOwnProfileToAllGroups()
+        val profileRestored = authRepository.takeRestoredProfileOwed(me.lakko.app.auth.base64Encode(secrets.accountId))
+        if (profileChanged || profileRestored) chatRepository.publishOwnProfileToAllGroups()
+        if (profileRestored) me.lakko.app.reach.ReachManager.get(chatRepository.context).publishOwnProfileToDevices()
         // Phase 2a3e2b — bootstrap the cross-device sync
         // runtime alongside the chat bootstrap so the poll
         // loop starts at the same moment chat surfaces become
@@ -1649,6 +1665,9 @@ private fun SessionRoot(
                     // ADR-0074 section 3.7 — the keys the conversations stay
                     // under, for a device restored from the phrase.
                     ownPredecessors = { accountIdB64 -> authRepository.backupOwnPredecessors(accountIdB64) },
+                    personal = { accountIdB64 ->
+                        me.lakko.app.backup.BackupPersonal.of(backupContext, accountIdB64)
+                    },
                 ),
             )
             driver.start()
@@ -2081,6 +2100,9 @@ private fun SessionRoot(
                         // link, listed at once.
                         invited = invitedShown,
                         onOpenPendingChat = { hex -> navController.navigate(Routes.pendingChat(hex)) },
+                        // docs/ux/identity-recovery.md 7.2.
+                        restoredChats = restoredChatsHint(chatRepository),
+                        onOpenContacts = { navController.navigateToTab(Routes.CONTACTS) },
                         // docs/ux/chat-folders.md — the editor and Settings >
                         // Chat folders are pushed destinations.
                         onEditFolder = { id -> navController.navigate(Routes.folderEdit(id, null)) },
@@ -2400,6 +2422,7 @@ private fun SessionRoot(
                         username = account.username.takeIf { it.isNotBlank() },
                         onOpenProfile = { navController.navigate(Routes.PROFILE) },
                         onOpenPasskeys = { navController.navigate(Routes.PASSKEYS) },
+                        onDeleteAccount = { navController.navigate(Routes.DELETE_ACCOUNT) },
                         onOpenPassword = { navController.navigate(Routes.PASSWORD) },
                         onOpenDevices = { navController.navigate(Routes.DEVICES) },
                         onOpenRecovery = { navController.navigate(Routes.RECOVERY) },
@@ -2777,19 +2800,22 @@ private fun SessionRoot(
                         LoadingScreen()
                     }
                 }
-                composable(Routes.PASSKEYS) {
-                    val passkeysVm: me.lakko.app.webauthn.PasskeysViewModel = viewModel(
-                        factory = singletonViewModelFactory {
-                            me.lakko.app.webauthn.PasskeysViewModel(
-                                repo = authRepository,
-                                onAccountDeleted = forgetDevice,
-                            )
-                        },
-                    )
-                    me.lakko.app.webauthn.PasskeysScreen(
-                        viewModel = passkeysVm,
-                        onBack = { navController.popBackStack() },
-                    )
+                for (route in listOf(Routes.PASSKEYS, Routes.DELETE_ACCOUNT)) {
+                    composable(route) {
+                        val passkeysVm: me.lakko.app.webauthn.PasskeysViewModel = viewModel(
+                            factory = singletonViewModelFactory {
+                                me.lakko.app.webauthn.PasskeysViewModel(
+                                    repo = authRepository,
+                                    onAccountDeleted = forgetDevice,
+                                )
+                            },
+                        )
+                        me.lakko.app.webauthn.PasskeysScreen(
+                            viewModel = passkeysVm,
+                            onBack = { navController.popBackStack() },
+                            deleteAccountOnly = route == Routes.DELETE_ACCOUNT,
+                        )
+                    }
                 }
                 composable(Routes.DEVICES) {
                     DevicesScreen(
@@ -3021,6 +3047,7 @@ private object Routes {
     const val PROFILE = "settings/profile"
     const val WHO_CAN_FIND_ME = "settings/privacy/who-can-find-me"
     const val PASSKEYS = "settings/passkeys"
+    const val DELETE_ACCOUNT = "settings/delete-account"
     const val PASSWORD = "settings/password"
     const val DEVICES = "settings/devices"
     const val DEVICES_ADD = "settings/devices/add"
@@ -3114,6 +3141,31 @@ private fun NavHostController.navigateToTab(route: String) {
 }
 
 /** Safe-drawing insets for the roots outside the tabbed shell (auth, recovery). */
+/**
+ * What the chat list says after a restore. The list being empty is the chat
+ * layer's; the marker is dropped for good when the first conversation arrives.
+ */
+@Composable
+private fun restoredChatsHint(chatRepository: ChatRepository): me.lakko.app.backup.RestoredChatsHint {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val state by chatRepository.state.collectAsStateWithLifecycle()
+    val accountIdB64 = chatRepository.activeAccountIdB64
+    val listEmpty = state.bootstrapped && state.threads.isEmpty()
+    val knew = remember(accountIdB64, state.bootstrapped, state.threads.size) {
+        accountIdB64?.let { me.lakko.app.backup.BackupRestoreStore.restoredChats(context, it) }
+    }
+    var otherDevice by remember(accountIdB64) { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(accountIdB64, knew != null) {
+        if (knew != null) otherDevice = chatRepository.ownOtherDeviceListed()
+    }
+    LaunchedEffect(accountIdB64, knew != null, state.threads.isNotEmpty()) {
+        if (knew != null && state.threads.isNotEmpty() && accountIdB64 != null) {
+            me.lakko.app.backup.BackupRestoreStore.clearRestoredChats(context, accountIdB64)
+        }
+    }
+    return me.lakko.app.backup.restoredChatsHint(knew, listEmpty, otherDevice)
+}
+
 @Composable
 private fun InsetRoot(content: @Composable () -> Unit) {
     Box(

@@ -66,6 +66,20 @@ class DiscoveryAnonymousRoutesTest {
     }
 
     @Test
+    fun aLedgerRowSaysWhetherEveryUseIsSpent() = runTest {
+        val seen = mutableListOf<Seen>()
+        var body = """{"sealed":"AAEC","used_up":true}"""
+        client(seen, FakeAnonTokenSource(), answer = { _, _ -> HttpStatusCode.OK to body }).use { c ->
+            val row = c.fetchInviteRow(ByteArray(6))
+            assertEquals(true, row?.usedUp)
+            assertEquals(3, row?.sealed?.size)
+            // An older server says nothing: not used up.
+            body = """{"sealed":"AAEC"}"""
+            assertEquals(false, c.fetchInviteRow(ByteArray(6))?.usedUp)
+        }
+    }
+
+    @Test
     fun tokenRoutesCarryATokenAndNeverTheSession() = runTest {
         val seen = mutableListOf<Seen>()
         val tokens = FakeAnonTokenSource()

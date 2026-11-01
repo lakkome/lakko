@@ -92,6 +92,13 @@ public struct ChatListScreen: View {
     /// that conversation's row here as well as in the chat itself. Every other
     /// call surface is the root view's (``CallHostOverlay``); this one has to be
     /// where the person already looks, and answerable without navigating.
+    /// The account signed in here, for the restored-device notice.
+    var accountIdB64: String?
+    /// `Contacts` on the restored-device card.
+    var onOpenContacts: () -> Void = {}
+    /// The marker of a restore, read when the list opens and when a restore
+    /// finishes (section 7.2 of `docs/ux/identity-recovery.md`).
+    @State private var restored: RestoredDeviceStore.Record?
     @EnvironmentObject private var callHost: CallHost
 
     init(
@@ -106,8 +113,12 @@ public struct ChatListScreen: View {
         accountNotice: AccountNoticeBanner? = nil,
         recalledNotice: RecalledNoticeBanner? = nil,
         keysUpdatingLabel: KeysUpdatingLabel? = nil,
-        peopleSearch: PeopleSearchModel? = nil
+        peopleSearch: PeopleSearchModel? = nil,
+        accountIdB64: String? = nil,
+        onOpenContacts: @escaping () -> Void = {}
     ) {
+        self.accountIdB64 = accountIdB64
+        self.onOpenContacts = onOpenContacts
         self.viewModel = viewModel
         self.channels = channels
         self.feedReading = feedReading
@@ -195,6 +206,11 @@ public struct ChatListScreen: View {
             // channels sit at the bottom of the list until something else
             // fetches them.
             .task { await refreshChannels() }
+            .task(id: accountIdB64) { reloadRestored() }
+            .onReceive(NotificationCenter.default.publisher(for: .lakkoBackupRestored)) { _ in
+                reloadRestored()
+            }
+            .onChange(of: allRows.isEmpty && invitedRows.isEmpty) { _, _ in noteConversationIfAny() }
             .toolbar {
                 // ADR-0050 / docs/ux/second-device.md section 2: one label
                 // while this device is still being admitted to the chats a
@@ -400,6 +416,57 @@ public struct ChatListScreen: View {
         .listRowSeparator(.hidden)
     }
 
+    /// Section 7.2 — what the list says about a restored device. No spinner:
+    /// the list stays what it is, a sentence says why.
+    private var restoredNotice: RestoredListNotice {
+        RestoredListNotice.decide(
+            record: restored, listEmpty: allRows.isEmpty && invitedRows.isEmpty,
+            otherDeviceSignedIn: deviceGroupSync.otherDeviceSignedIn)
+    }
+
+    private func reloadRestored() {
+        restored = accountIdB64.flatMap { RestoredDeviceStore.load(accountIdB64: $0) }
+        noteConversationIfAny()
+    }
+
+    /// The first conversation arrived: the notice is gone for good.
+    private func noteConversationIfAny() {
+        guard let accountIdB64, restored?.awaitingFirstConversation == true,
+              !allRows.isEmpty || !invitedRows.isEmpty else { return }
+        RestoredDeviceStore.noteConversationArrived(accountIdB64: accountIdB64)
+        restored = RestoredDeviceStore.load(accountIdB64: accountIdB64)
+    }
+
+    private var restoredCard: some View {
+        VStack(spacing: 16) {
+            Text(l10n.t("chats.restored.card"))
+                .font(.subheadline)
+                .foregroundStyle(Color.lakkoText)
+                .multilineTextAlignment(.center)
+            Button(action: onOpenContacts) {
+                Text(l10n.t("nav.contacts"))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.lakkoAccent)
+                    .foregroundStyle(Color.lakkoAccentForeground)
+                    .clipShape(Capsule())
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 80)
+    }
+
+    private var restoredBanner: some View {
+        Text(l10n.t("chats.restored.banner_other_devices"))
+            .font(.footnote)
+            .foregroundStyle(Color.lakkoTextMuted)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+    }
+
     /// One page: All chats (`folder == nil`) or one folder's rows.
     @ViewBuilder
     private func listPage(rows visible: [ConversationListRow], folder: FolderView?) -> some View {
@@ -412,14 +479,23 @@ public struct ChatListScreen: View {
                 if let folder {
                     folderEmptyState(folder)
                 } else if query.isEmpty {
-                    emptyState
+                    switch restoredNotice {
+                    case .card:
+                        restoredCard
+                    case .banner:
+                        restoredBanner
+                        emptyState
+                    case .none:
+                        emptyState
+                    }
                 } else {
                     VStack(spacing: 12) {
                         if let peopleSearch {
                             PeopleSearchSection(
                                 model: peopleSearch, includesChannels: true, showsLocalContacts: true,
                                 emptyText: l10n.t("chats.search.no_results"),
-                                onOpenPerson: onOpenPerson, onOpenChannel: openFoundChannel)
+                                onOpenPerson: onOpenPerson, onOpenChannel: openFoundChannel,
+                                channelName: foundChannelName)
                         } else {
                             Text(l10n.t("chats.search.no_results"))
                                 .foregroundStyle(Color.lakkoTextMuted)
@@ -483,7 +559,8 @@ public struct ChatListScreen: View {
                         chatPeers: Set(visible.filter { $0.kind == .chat }.compactMap {
                             viewModel.peerSignatureKey(groupIdHex: $0.id)
                         }),
-                        onOpenPerson: onOpenPerson, onOpenChannel: openFoundChannel)
+                        onOpenPerson: onOpenPerson, onOpenChannel: openFoundChannel,
+                                channelName: foundChannelName)
                         .listRowSeparator(.hidden)
                 }
             }
@@ -682,6 +759,10 @@ public struct ChatListScreen: View {
 
     /// A channel row under People: its subscribe page. The field is cleared,
     /// as it was for the lookup row this replaced.
+    private func foundChannelName(_ channelIdHex: String) -> String? {
+        channels.channels.first { $0.id == channelIdHex }.map(\.title)
+    }
+
     private func openFoundChannel(_ channelIdHex: String, _ handle: String) {
         searchText = ""
         onFoundChannel(channelIdHex, handle)

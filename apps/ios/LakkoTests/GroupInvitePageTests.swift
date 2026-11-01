@@ -141,10 +141,12 @@ final class GroupInvitePageTests: XCTestCase {
         XCTAssertNil(headline.members)
     }
 
-    func testTheFooterNamesTheFingerprint() {
+    func testTheFooterNamesTheInviterAndNeverDigits() {
         XCTAssertEqual(
-            plain(GroupInviteHeadline.footer(fingerprint: "12345 67890")),
-            "Invited by 12345 67890")
+            plain(GroupInviteHeadline.footer(inviterName: " Nora ")),
+            "Invited by Nora")
+        XCTAssertNil(GroupInviteHeadline.footer(inviterName: nil), "no name, no line")
+        XCTAssertNil(GroupInviteHeadline.footer(inviterName: "   "))
         XCTAssertEqual(groupInviteInvalidMessage, "This invite link is invalid or has expired.")
     }
 

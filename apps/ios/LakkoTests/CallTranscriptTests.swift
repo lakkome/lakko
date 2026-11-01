@@ -246,4 +246,41 @@ final class CallTranscriptTests: XCTestCase {
             senderName: nil)
         XCTAssertEqual(l10nPlain(preview), "Outgoing call, 12:04")
     }
+
+    func testACallAnsweredThatNeverCarriedMediaIsFailedNotMissed() {
+        for cause in [CallTranscriptRow.Cause.failed, .timedOut, .hungUp] {
+            XCTAssertEqual(
+                CallTranscriptRow.outcome(connectedAtMs: nil, endedAtMs: 1, cause: cause, accepted: true),
+                .failed)
+        }
+        XCTAssertEqual(
+            CallTranscriptRow.outcome(connectedAtMs: nil, endedAtMs: 1, cause: nil, accepted: true), .failed)
+        // A refusal stays a refusal, and media that flowed stays answered.
+        XCTAssertEqual(
+            CallTranscriptRow.outcome(connectedAtMs: nil, endedAtMs: 1, cause: .declined, accepted: true),
+            .declined)
+        XCTAssertEqual(
+            CallTranscriptRow.outcome(connectedAtMs: 1, endedAtMs: 3, cause: .failed, accepted: true),
+            .answered(durationMs: 2))
+    }
+
+    func testAVideoCallKeepsItsModeInTheStoredRow() {
+        for outcome: CallTranscriptRow.Outcome in [.answered(durationMs: 12), .missed, .declined, .failed] {
+            let row = CallTranscriptRow(direction: .incoming, outcome: outcome, video: true)
+            XCTAssertEqual(CallTranscriptRow.parse(row.marker), row)
+            XCTAssertEqual(CallTranscriptRow.parse(row.marker)?.video, true)
+        }
+    }
+
+    func testARowFromBeforeTheVideoFieldReadsAsVoice() {
+        XCTAssertEqual(CallTranscriptRow.parse("[call] outgoing missed")?.video, false)
+        XCTAssertEqual(CallTranscriptRow.parse("[call] outgoing answered 5")?.video, false)
+        XCTAssertNil(CallTranscriptRow.parse("[call] outgoing video"))
+    }
+
+    func testAFailedCallDoesNotReadAsMissed() {
+        let row = CallTranscriptRow(direction: .incoming, outcome: .failed)
+        XCTAssertNotEqual(row.text, CallTranscriptRow(direction: .incoming, outcome: .missed).text)
+        XCTAssertEqual(row.text, Localization.text("call.log.failed"))
+    }
 }

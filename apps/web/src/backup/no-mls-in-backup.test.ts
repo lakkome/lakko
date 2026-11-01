@@ -182,7 +182,10 @@ describe("the backup payload (real wasm core)", () => {
       // ADR-0074 section 3.7: account seeds, which go to the key-rotation
       // row. No provider is built from them.
       "ownPredecessors",
+      // Two opaque envelopes of the person themselves (D31, D37).
+      "ownProfile",
       "syncedState",
+      "visibility",
     ]);
     expect(result.acceptedContacts.map((c) => c.signaturePubkeyB64)).toEqual([peer]);
     expect(result.knownGroupIds).toEqual([G1, G2]);
@@ -235,7 +238,7 @@ describe("no path from a backup to MLS state (source)", () => {
     expect(text).toMatch(/rehydrateMlsState\(chats, /);
   });
 
-  it("the only `buildBackupPayload` call passes eight arguments, the ids fifth", () => {
+  it("the only `buildBackupPayload` call passes ten arguments, the ids fifth", () => {
     const text = code(join(src, "backup", "client.ts"));
     const calls = text.match(/wasm\.buildBackupPayload\(([^;]*?)\);/gs) ?? [];
     expect(calls).toHaveLength(1);
@@ -254,6 +257,8 @@ describe("no path from a backup to MLS state (source)", () => {
       "currentSyncedStateBytes() ?? undefined",
       "own.length === 0 ? undefined : seeds",
       "own.length === 0 ? undefined : adoptedAtMs",
+      "ownProfile ?? undefined",
+      "visibility ?? undefined",
     ]);
     // And nowhere else in the app.
     const others: string[] = [];

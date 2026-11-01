@@ -2142,7 +2142,12 @@ const ParticipantList: Component = () => (
 // itself after 2 s")
 // ============================================================================
 
-const CallEndedOverlay: Component<{ summary: string; onDismiss: () => void }> = (props) => {
+const CallEndedOverlay: Component<{
+  summary: string;
+  /** The group's name on a group call's end screen. */
+  title: string | null;
+  onDismiss: () => void;
+}> = (props) => {
   let timer: number | null = null;
   onMount(() => {
     timer = window.setTimeout(props.onDismiss, ENDED_DISMISS_MS);
@@ -2152,6 +2157,7 @@ const CallEndedOverlay: Component<{ summary: string; onDismiss: () => void }> = 
   });
   return (
     <div class="lk-call-ended" role="status" aria-live="polite">
+      <Show when={props.title}>{(title) => <p class="lk-call-ended-title">{title()}</p>}</Show>
       <p>{props.summary}</p>
     </div>
   );
@@ -3009,6 +3015,7 @@ const Call: Component<{
       <Show when={phaseKind() === "ended"}>
         <CallEndedOverlay
           summary={endedSummary(callState.connectedAt(), endedAtMs(callState.phase()))}
+          title={props.group === true ? (props.groupName ?? null) : null}
           onDismiss={exit}
         />
       </Show>

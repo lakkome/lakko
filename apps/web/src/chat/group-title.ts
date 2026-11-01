@@ -67,3 +67,9 @@ export function groupTitleFromNames(names: readonly string[]): string {
 export function groupTitle(label: string, memberNames: readonly string[]): string {
   return isUnnamedGroupLabel(label) ? groupTitleFromNames(memberNames) : label.trim();
 }
+
+/** Whether the create-group button works: a name, or at least one person. A
+ *  group may start with nobody else. */
+export function mayCreateGroup(name: string, pickedCount: number): boolean {
+  return pickedCount > 0 || name.trim().length > 0;
+}

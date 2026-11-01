@@ -265,6 +265,29 @@ pub fn guest_name(random: u64) -> String {
     lakko_ui_rules::guest_name::guest_name(random)
 }
 
+/// One run of a message's text: `docs/ux/message-links.md`.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MessageTextPiece {
+    /// The text as sent.
+    pub text: String,
+    /// Whether this run is a link to open. The address is the text.
+    pub is_link: bool,
+}
+
+/// A message's text as pieces, in order. Joining every piece's text gives the
+/// input back. Draw a link piece as a link; decide nothing else about it here.
+#[uniffi::export]
+#[must_use]
+pub fn split_message_links(text: String) -> Vec<MessageTextPiece> {
+    lakko_ui_rules::message_links::split_message_links(&text)
+        .into_iter()
+        .map(|p| MessageTextPiece {
+            text: p.text,
+            is_link: p.is_link,
+        })
+        .collect()
+}
+
 /// Which info a conversation's name opens — `docs/ux/conversation-info.md`
 /// section 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -2051,6 +2074,14 @@ mod tests {
         assert!(looks_like_a_name("@anna".to_string()));
         assert!(!looks_like_a_name("ab".to_string()));
         assert_eq!(bare_name("  @anna ".to_string()), "anna");
+    }
+
+    #[test]
+    fn a_message_link_crosses_the_boundary_as_a_piece() {
+        let pieces = split_message_links("see https://lakko.me/x now".to_owned());
+        assert_eq!(pieces.len(), 3);
+        assert!(pieces[1].is_link);
+        assert_eq!(pieces[1].text, "https://lakko.me/x");
     }
 
     #[test]

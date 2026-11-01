@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Visibility
@@ -80,9 +81,8 @@ import me.lakko.app.ui.components.LakkoDialogTone
  *
  * Header with the avatar, the name and the username; Account, Security
  * (Password, Passkeys, Devices, Recovery), Appearance and Media inline, Network, About
- * (version, licence) and the Danger zone at the bottom: Log out and Forget
- * this device behind the confirmations the flows already had. There is no
- * Delete account row: the client has no account-deletion call yet.
+ * (version, licence) and the Danger zone at the bottom: Log out, Forget this
+ * device and Delete account behind the confirmations the flows already had.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -103,6 +103,8 @@ public fun SettingsScreen(
     /** ADR-0059 section 6 — Security -> Channels I share. */
     onOpenChannelsIShare: () -> Unit = {},
     onForgetDevice: () -> Unit,
+    /** The delete dialog; its proof and its server calls live with Passkeys. */
+    onDeleteAccount: () -> Unit = {},
     modifier: Modifier = Modifier,
     /** docs/ux/chat-folders.md section 4 — between Notifications and Appearance. */
     onOpenChatFolders: () -> Unit = {},
@@ -319,6 +321,12 @@ public fun SettingsScreen(
                 title = t("settings.account.forget_device.label"),
                 icon = Icons.Filled.DeleteForever,
                 onClick = { confirmingForget = true },
+                danger = true,
+            )
+            SettingsRow(
+                title = t("settings.account.delete.confirm"),
+                icon = Icons.Filled.PersonRemove,
+                onClick = onDeleteAccount,
                 danger = true,
             )
             Text(

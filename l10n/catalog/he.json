@@ -191,7 +191,7 @@
       "status": "machine"
     },
     "auth.signup.lede": {
-      "text": "הסיסמה שלכם אף פעם לא יוצאת מהמכשיר. בשלב הבא תקבלו ביטוי שחזור שצריך לרשום.",
+      "text": "הסיסמה שלכם לעולם לא יוצאת מהמכשיר.",
       "status": "machine"
     },
     "auth.signup.name.hint": {
@@ -964,6 +964,10 @@
     },
     "call.log.declined": {
       "text": "נדחתה",
+      "status": "machine"
+    },
+    "call.log.failed": {
+      "text": "השיחה נכשלה",
       "status": "machine"
     },
     "call.log.incoming": {
@@ -3462,6 +3466,14 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
+    "chats.restored.banner_other_devices": {
+      "text": "המכשירים האחרים שלכם מוסיפים את המכשיר הזה לצ׳אטים.",
+      "status": "machine"
+    },
+    "chats.restored.card": {
+      "text": "המפתחות שלכם שוחזרו. הצ׳אטים חוזרים כשאנשי הקשר שלכם פותחים את Lakko. הודעות קודמות לא משוחזרות.",
+      "status": "machine"
+    },
     "chats.row.actions": {
       "text": "פעולות על הצ׳אט",
       "status": "machine"
@@ -3834,6 +3846,10 @@
       "text": "כדי להתחיל שיחה, שלחו קודם הודעה.",
       "status": "machine"
     },
+    "contacts.detail.chat_starting": {
+      "text": "הצ׳אט שלכם בהקמה.",
+      "status": "machine"
+    },
     "contacts.detail.gone_body": {
       "text": "האדם הזה כבר לא ברשימת אנשי הקשר שלכם.",
       "status": "machine"
@@ -4052,6 +4068,10 @@
     },
     "contacts.scan_qr.not_a_link": {
       "text": "הקוד הזה אינו קישור של Lakko. נסו קוד אחר.",
+      "status": "machine"
+    },
+    "contacts.search.ask_again": {
+      "text": "לבקש שוב",
       "status": "machine"
     },
     "desktop.capture.body": {
@@ -5771,7 +5791,7 @@
       "status": "machine"
     },
     "group.join.wait_secondary": {
-      "text": "לאף אחד משני השלבים אין מגבלת זמן. אם שום דבר לא קורה, אפשר לשלוח את הבקשה שוב.",
+      "text": "אם לא קורה כלום, אפשר לשלוח את הבקשה שוב.",
       "status": "machine"
     },
     "guest.claim.error.generic": {
@@ -6059,7 +6079,7 @@
       "status": "machine"
     },
     "invite.group.invited_by": {
-      "text": "הוזמנתם על ידי {fingerprint}",
+      "text": "הוזמנתם על ידי {name}",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {
@@ -6443,7 +6463,7 @@
       "status": "machine"
     },
     "new_group.no_contacts": {
-      "text": "הוסיפו קודם אנשי קשר: קבוצה מתחילה מאנשים שאתם כבר מכירים.",
+      "text": "קבוצה יכולה להתחיל רק איתכם. הוסיפו אנשים עכשיו או מאוחר יותר.",
       "status": "machine"
     },
     "new_group.subtitle": {
@@ -6723,7 +6743,7 @@
       "status": "machine"
     },
     "protect.phrase.body": {
-      "text": "12 מילים שרק אתם שומרים. חזק יותר, וללא קשר לאימייל.",
+      "text": "12 מילים שרק אתם שומרים. הדרך החזקה ביותר לחזור.",
       "status": "machine"
     },
     "protect.phrase.save.body": {

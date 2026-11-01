@@ -215,6 +215,18 @@ public enum ReachRules {
                 channels: channels.isEmpty ? previous.channels : channels))
     }
 
+    /// What an Everyone publication was composed for. The account key and the
+    /// mailbox binding are in it because the record names both: a rotation
+    /// keeps the name and moves them.
+    public static func everyonePublishKey(
+        displayName: String, username: String?, certificate: Data?, accountKey: Data?, mailboxBinding: Data?
+    ) -> String {
+        [
+            displayName, username ?? "", certificate?.base64EncodedString() ?? "",
+            accountKey?.base64EncodedString() ?? "", mailboxBinding?.base64EncodedString() ?? "",
+        ].joined(separator: "|")
+    }
+
     /// The counter slots among `specs` that `state` holds no version for and
     /// that were not checked against the DS yet (`checked`): what must be
     /// recovered before anything is registered.

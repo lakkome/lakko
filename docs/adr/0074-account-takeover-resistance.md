@@ -992,6 +992,11 @@ this widens nothing. On restore a device stores them where a kept device does
 and takes the path a paired device takes: it mints its binding under the
 oldest own predecessor while it holds no conversation.
 
+The same version carries the person's own profile envelope and their "who can
+find me" envelope, opaque and bounded. Neither was anywhere a device with no
+other device alive could read it: a restored person lost their name and their
+setting, seen on every client on 2026-11-01.
+
 **A two-way conversation link.** `lakko-transparency::conversation_link`: 201
 bytes, `version ‖ conversation_key(32) ‖ current_key(32) ‖ issued_at(8 BE) ‖
 sig_by_conversation_key(64) ‖ sig_by_current_key(64)`, both signatures over

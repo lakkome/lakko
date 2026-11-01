@@ -15,8 +15,9 @@ import uniffi.lakko_ffi_uniffi.BackupOwnPredecessor
  * device with no cached seed).
  *
  * What a backup is (maintainer decision, 2026-10-02): the account's contacts,
- * the ADR-0058 synced state, the NAMES of its conversations and (ADR-0074
- * section 3.7) the account's own predecessor keys. It carries no MLS state. A provider snapshot belongs to the device that made it: loaded on
+ * the ADR-0058 synced state, the NAMES of its conversations, (ADR-0074
+ * section 3.7) the account's own predecessor keys, and the own profile and
+ * visibility envelopes. It carries no MLS state. A provider snapshot belongs to the device that made it: loaded on
  * another device it clones a leaf (ADR-0050), loaded on the same device after
  * a reinstall it rolls the device back behind commits it already published
  * (ADR-0040) and re-uses ratchet positions (G-34). A restored device keeps
@@ -81,6 +82,22 @@ internal interface BackupRestorePorts {
      *  [RestoredKnownGroups]). */
     fun rememberRestoredGroups(groupIdsHex: List<String>)
 
+    /** Keep the backup's own profile envelope: decode it fail closed (a throw
+     *  changes nothing) and store the name and photo unless this device holds
+     *  something newer. */
+    fun applyOwnProfile(envelope: ByteArray)
+
+    /** The backup's visibility envelope: decode it fail closed and hand it to
+     *  the path an incoming DeviceGroup envelope takes. */
+    fun applyVisibility(envelope: ByteArray)
+
+    /** What this device noted about the Everyone publication is out of date. */
+    fun noteEveryoneUnknown()
+
+    /** The restore finished: the chat list explains an empty list until the
+     *  first conversation arrives (`docs/ux/identity-recovery.md` 7.2). */
+    fun markRestored(knewConversations: Boolean)
+
     /** The merged state is worth uploading again. */
     fun markBackupDirty()
 
@@ -140,6 +157,7 @@ internal suspend fun restoreBackupAndApply(
         is GatedRestoreOutcome.Restored -> fetched.payload
         is GatedRestoreOutcome.NoBackup -> {
             ports.log("backup restore ($route): no backup on the server")
+            runCatching { ports.markRestored(knewConversations = false) }
             ports.setRetryPending(false)
             return BackupRestoreOutcome.NO_BACKUP
         }
@@ -194,6 +212,23 @@ internal suspend fun restoreBackupAndApply(
         ports.log("backup restore ($route): ${groupIdsHex.size} known group(s)")
     } catch (cause: Throwable) {
         ports.log("backup restore ($route): known groups not recorded", cause)
+    }
+    // An empty field, or one that does not decode, changes nothing.
+    try {
+        ports.noteEveryoneUnknown()
+        if (parsed.ownProfile.isNotEmpty()) ports.applyOwnProfile(parsed.ownProfile)
+    } catch (cause: Throwable) {
+        ports.log("backup restore ($route): own profile not restored", cause)
+    }
+    try {
+        if (parsed.visibility.isNotEmpty()) ports.applyVisibility(parsed.visibility)
+    } catch (cause: Throwable) {
+        ports.log("backup restore ($route): visibility not restored", cause)
+    }
+    try {
+        ports.markRestored(knewConversations = parsed.knownGroupIds.isNotEmpty())
+    } catch (cause: Throwable) {
+        ports.log("backup restore ($route): restored marker not set", cause)
     }
     if (predecessors == OwnPredecessorStep.NOT_STORED) {
         // The next backup from this device would leave them out, and nothing
@@ -326,6 +361,7 @@ public object BackupRestoreStore {
     private const val PREFS = "lakko.backup.restore"
     private const val GROUPS_PREFIX = "restored-groups:"
     private const val RETRY_PREFIX = "retry:"
+    private const val RESTORED_CHATS_PREFIX = "restored-chats:"
 
     private fun prefs(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -400,11 +436,63 @@ public object BackupRestoreStore {
         editor.apply()
     }
 
+    /** Record that a restore finished on this device (the phrase or a
+     *  passkey). Read by the chat list ([restoredChatsHint]). */
+    public fun markRestoredChats(context: Context, accountIdB64: String, knewConversations: Boolean) {
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            prefs(context).edit().putBoolean(RESTORED_CHATS_PREFIX + accountIdB64, knewConversations).apply()
+        }
+    }
+
+    /** `null` when no restore is waiting for its first conversation, else
+     *  whether the backup named at least one. */
+    public fun restoredChats(context: Context, accountIdB64: String): Boolean? {
+        val key = RESTORED_CHATS_PREFIX + accountIdB64
+        val held = prefs(context)
+        return if (held.contains(key)) held.getBoolean(key, false) else null
+    }
+
+    /** The first conversation arrived: the hint is gone for good. */
+    public fun clearRestoredChats(context: Context, accountIdB64: String) {
+        prefs(context).edit().remove(RESTORED_CHATS_PREFIX + accountIdB64).apply()
+    }
+
     /** Forget device / Delete account: everything of [accountIdB64]. */
     public fun clear(context: Context, accountIdB64: String) {
         prefs(context).edit()
             .remove(GROUPS_PREFIX + accountIdB64)
             .remove(RETRY_PREFIX + accountIdB64)
+            .remove(RESTORED_CHATS_PREFIX + accountIdB64)
             .apply()
     }
+}
+
+/** What the chat list says after a restore (`docs/ux/identity-recovery.md` 7.2). */
+public enum class RestoredChatsHint {
+    /** The ordinary list. */
+    NONE,
+
+    /** The card on the empty list, with a button to Contacts. */
+    CARD,
+
+    /** The line that another device is adding this one. */
+    BANNER,
+}
+
+/**
+ * @param knewConversations [BackupRestoreStore.restoredChats]: `null` when no
+ *        restore is waiting for its first conversation.
+ * @param listEmpty no conversation on this device yet.
+ * @param otherDevice whether another device of the account is signed in;
+ *        `null` until that was read.
+ */
+public fun restoredChatsHint(
+    knewConversations: Boolean?,
+    listEmpty: Boolean,
+    otherDevice: Boolean?,
+): RestoredChatsHint = when {
+    knewConversations == null || !listEmpty || otherDevice == null -> RestoredChatsHint.NONE
+    otherDevice -> RestoredChatsHint.BANNER
+    knewConversations -> RestoredChatsHint.CARD
+    else -> RestoredChatsHint.NONE
 }

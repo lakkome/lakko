@@ -187,7 +187,7 @@ public enum class CallDirectionGlyph { OUTGOING, INCOMING, MISSED }
 public fun callDirectionGlyph(outcome: CallOutcome): CallDirectionGlyph = when (outcome) {
     CallOutcome.OUTGOING -> CallDirectionGlyph.OUTGOING
     CallOutcome.INCOMING -> CallDirectionGlyph.INCOMING
-    CallOutcome.MISSED, CallOutcome.DECLINED -> CallDirectionGlyph.MISSED
+    CallOutcome.MISSED, CallOutcome.DECLINED, CallOutcome.FAILED -> CallDirectionGlyph.MISSED
 }
 
 /**
@@ -195,4 +195,4 @@ public fun callDirectionGlyph(outcome: CallOutcome): CallDirectionGlyph = when (
  * spoke. Never the only signal: the label says it too.
  */
 public fun callHistoryIsUnanswered(outcome: CallOutcome): Boolean =
-    outcome == CallOutcome.MISSED || outcome == CallOutcome.DECLINED
+    outcome == CallOutcome.MISSED || outcome == CallOutcome.DECLINED || outcome == CallOutcome.FAILED

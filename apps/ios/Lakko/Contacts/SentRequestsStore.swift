@@ -97,9 +97,16 @@ public enum SentRequests {
     public static func holds(
         _ sent: [SentContactRequest], accountKey: Data, accountId: Data?
     ) -> Bool {
+        row(sent, accountKey: accountKey, accountId: accountId) != nil
+    }
+
+    /// The newest row of this person, by account key or account id.
+    public static func row(
+        _ sent: [SentContactRequest], accountKey: Data, accountId: Data?
+    ) -> SentContactRequest? {
         let keyB64 = base64Encode(accountKey)
         let idB64 = accountId.map { base64Encode($0) }
-        return sent.contains { row in
+        return sent.last { row in
             row.recipientKeyB64 == keyB64 || row.recipientAccountIdB64 == idB64
         }
     }

@@ -44,6 +44,7 @@ import {
   type MenuAnchor,
 } from "./MessageMenu";
 import { forwardLineLabel } from "./forward";
+import { MessageText } from "./MessageText";
 import { membershipSentences } from "./membership-rows";
 import { ownPersonKeyB64 } from "./person-key";
 import { replyQuoteLabel, replyQuoteLines } from "./reply-snapshot";
@@ -364,7 +365,11 @@ export function TimelineBubble(
 const BUBBLE_CONTROLS = "button, a, input, textarea, video, [role='slider']";
 
 function startsOnControl(target: EventTarget | null): boolean {
-  return target instanceof Element && target.closest(BUBBLE_CONTROLS) !== null;
+  if (!(target instanceof Element)) return false;
+  // A long press on a link in the text is the message's menu: the link opens
+  // on a tap (`docs/ux/message-links.md` section 2).
+  if (target.closest(".lk-text-link") !== null) return false;
+  return target.closest(BUBBLE_CONTROLS) !== null;
 }
 
 /**
@@ -844,7 +849,7 @@ function ChatBubbleBody(
                 </Show>
                 <Show when={displayText().length > 0 && callInvite() === null}>
                   <div class="lk-bubble-text">
-                    {displayText()}
+                    <MessageText text={displayText()} />
                     <Show when={isEdited()}>
                       <span class="lk-bubble-edited">{t("chat.message.edited")}</span>
                     </Show>

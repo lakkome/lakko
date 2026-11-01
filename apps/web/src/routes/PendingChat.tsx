@@ -163,6 +163,8 @@ export default function PendingChat(): JSX.Element {
               </button>
             </div>
           </header>
+          <div class="lk-chat-body">
+            <div class="lk-chat-scroll">
           <ol class="lk-timeline">
             <li class="lk-day-sep" role="status">
               <span>
@@ -196,6 +198,7 @@ export default function PendingChat(): JSX.Element {
               )}
             </For>
           </ol>
+            </div>
           <form class="lk-composer" onSubmit={(e) => void onSend(e)}>
             <textarea
               class="lk-composer-input"
@@ -221,6 +224,7 @@ export default function PendingChat(): JSX.Element {
               <Icon name="send" size={20} />
             </button>
           </form>
+          </div>
         </article>
       )}
     </Show>

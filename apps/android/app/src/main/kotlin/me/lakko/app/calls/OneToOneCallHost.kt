@@ -1271,6 +1271,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
             answered = if (s.call.incoming) s.accepted else s.dialed,
             declinedHere = s.declinedHere,
             declinedByPeer = s.declinedByPeer,
+            connected = s.connectedAtMs != null,
         )
         recordCall(
             groupIdHex = s.call.groupIdHex,

@@ -155,9 +155,13 @@ public fun callSettingsDevices(
     cameras: List<String>,
     outputs: List<CallAudioOutput>,
     strings: Strings = Localization.strings.value,
+    /** Leave out a kind with one device: nothing to choose there. */
+    onlyChoices: Boolean = true,
 ): List<SettingsDevice> = buildList {
+    val offered: (List<SettingsDevice>) -> List<SettingsDevice> =
+        if (onlyChoices) ::choosableDevices else { all -> all }
     addAll(
-        choosableDevices(
+        offered(
             inputs.map { input ->
                 SettingsDevice(
                     id = input.id.toString(),
@@ -170,12 +174,12 @@ public fun callSettingsDevices(
         ),
     )
     addAll(
-        choosableDevices(
+        offered(
             cameras.map { name -> SettingsDevice(id = name, label = "", kind = SettingsDeviceKind.VIDEO_INPUT) },
         ),
     )
     addAll(
-        choosableDevices(
+        offered(
             outputs.map { output ->
                 SettingsDevice(
                     id = output.id.toString(),
@@ -187,6 +191,22 @@ public fun callSettingsDevices(
             },
         ),
     )
+}
+
+/**
+ * What the sheet lists: the devices worth a choice, or, on a phone with one of
+ * everything, those single devices, so a sheet opened with both permissions
+ * granted does not say that no devices were reported.
+ */
+public fun callSettingsSheetDevices(
+    inputs: List<CallAudioInput>,
+    cameras: List<String>,
+    outputs: List<CallAudioOutput>,
+    strings: Strings = Localization.strings.value,
+): List<SettingsDevice> {
+    val choosable = callSettingsDevices(inputs, cameras, outputs, strings)
+    if (choosable.isNotEmpty()) return choosable
+    return callSettingsDevices(inputs, cameras, outputs, strings, onlyChoices = false)
 }
 
 /**

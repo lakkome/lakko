@@ -51,6 +51,7 @@ import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { paths } from "./paths";
 import { t } from "../l10n";
+import { callFailureText } from "../calls/call-errors";
 import { createLiveText } from "../l10n/live-text";
 
 export default function Calls(): JSX.Element {
@@ -160,8 +161,8 @@ export default function Calls(): JSX.Element {
     // A call that could not start (also: no session the person's devices
     // are in exists here yet, ADR-0073 R.12) reads as it does in the chat.
     setStartError(null);
-    callHost.dial(row.groupIdB64, row.entry.video).catch(() => {
-      setStartError(() => t("chat.call.error.start"));
+    callHost.dial(row.groupIdB64, row.entry.video).catch((err: unknown) => {
+      setStartError(callFailureText(err, () => t("chat.call.error.start")));
     });
   };
 
@@ -169,6 +170,7 @@ export default function Calls(): JSX.Element {
     switch (row.entry.outcome) {
       case "missed":
       case "declined":
+      case "failed":
         return "missed";
       case "incoming":
         return "incoming";

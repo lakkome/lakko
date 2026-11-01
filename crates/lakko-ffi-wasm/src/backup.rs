@@ -184,6 +184,7 @@ const GROUP_ID_LEN: usize = 32;
 /// multiple of 32, a `synced_state` the fold refuses, or any other
 /// [`BackupPayload::encode`] failure mode.
 #[wasm_bindgen(js_name = buildBackupPayload)]
+#[allow(clippy::too_many_arguments)]
 pub fn build_backup_payload(
     account_id: &[u8],
     created_at_ms: u64,
@@ -201,6 +202,10 @@ pub fn build_backup_payload(
     // Omitted for an account that never rotated.
     own_predecessor_seeds: Option<Vec<u8>>,
     own_predecessor_adopted_at_ms: Option<Vec<u64>>,
+    // The account's own profile and "who can find me" envelopes, so a device
+    // restored with no other device alive learns them.
+    own_profile: Option<Vec<u8>>,
+    visibility: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, JsError> {
     if account_id.len() != 16 {
         return Err(JsError::new("account_id must be 16 bytes"));
@@ -255,6 +260,8 @@ pub fn build_backup_payload(
             .collect(),
         synced_state: synced_state.unwrap_or_default(),
         own_predecessors,
+        own_profile: own_profile.unwrap_or_default(),
+        visibility: visibility.unwrap_or_default(),
     };
     payload.encode().map_err(err_to_js)
 }
@@ -343,6 +350,19 @@ impl ParsedBackupPayload {
             .iter()
             .map(|p| p.adopted_at_ms)
             .collect()
+    }
+
+    /// The account's own profile envelope; empty when none was set.
+    #[wasm_bindgen(getter, js_name = ownProfile)]
+    pub fn own_profile(&self) -> Vec<u8> {
+        self.inner.own_profile.clone()
+    }
+
+    /// The account's own "who can find me" envelope; empty when none was
+    /// chosen.
+    #[wasm_bindgen(getter)]
+    pub fn visibility(&self) -> Vec<u8> {
+        self.inner.visibility.clone()
     }
 }
 
@@ -749,6 +769,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
@@ -786,6 +808,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
@@ -810,8 +834,19 @@ mod tests {
         let account_id = vec![0xCDu8; 16];
         let seed = vec![0x77u8; 32];
         let contacts = vec![sample_contact()];
-        let payload =
-            build_backup_payload(&account_id, 99, &seed, contacts, &[], None, None, None).unwrap();
+        let payload = build_backup_payload(
+            &account_id,
+            99,
+            &seed,
+            contacts,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let envelope = seal_backup(phrase, &payload).unwrap();
         let opened = open_backup(phrase, &envelope).unwrap();
         let parsed = parse_backup_payload(&opened).unwrap();
@@ -836,6 +871,8 @@ mod tests {
             Some(state.clone()),
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
@@ -846,8 +883,19 @@ mod tests {
 
     #[test]
     fn the_built_payload_is_wire_v7() {
-        let wire =
-            build_backup_payload(&[0u8; 16], 0, &[0u8; 32], vec![], &[], None, None, None).unwrap();
+        let wire = build_backup_payload(
+            &[0u8; 16],
+            0,
+            &[0u8; 32],
+            vec![],
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(wire[0], 7);
         assert_eq!(wire[0], lakko_backup::PAYLOAD_VERSION);
     }

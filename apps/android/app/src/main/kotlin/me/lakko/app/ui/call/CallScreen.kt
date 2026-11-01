@@ -108,7 +108,7 @@ import me.lakko.app.calls.CallDeviceSelection
 import me.lakko.app.calls.SettingsSectionKind
 import me.lakko.app.calls.SettingsSelection
 import me.lakko.app.calls.callPlaysOnLoudspeaker
-import me.lakko.app.calls.callSettingsDevices
+import me.lakko.app.calls.callSettingsSheetDevices
 import me.lakko.app.calls.callSettingsSections
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -1068,7 +1068,7 @@ private fun InCallView(
             val chosenInput by state.devices.audioInput.collectAsState()
             CallSettingsSheet(
                 sections = callSettingsSections(
-                    devices = callSettingsDevices(inputs, cameras, outputs, strings),
+                    devices = callSettingsSheetDevices(inputs, cameras, outputs, strings),
                     selection = SettingsSelection(
                         audioInput = chosenInput?.toString(),
                         videoInput = chosenCamera,

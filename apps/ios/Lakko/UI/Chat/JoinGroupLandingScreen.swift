@@ -24,8 +24,7 @@ import SwiftUI
 /// amendment of 2026-09-27): the ledger id is no longer a hash of the
 /// capability, and the preview key - bound to the capability's group id and
 /// issuer - is the one check that the capability the server returned is the
-/// one the link was made for. The issuer fingerprint stays at the foot of
-/// every card as the one thing the inviter cannot fake.
+/// one the link was made for.
 ///
 /// **The wait is TWO-stage since ADR-0045 S7, and the copy says so.** An
 /// admin's approve no longer admits anyone by itself: it publishes an `Add`
@@ -81,9 +80,6 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     /// capability verifies and never cleared while the card is up, so it stays
     /// on the card through the wait.
     @Published public private(set) var preview: GroupInviteFacts?
-
-    /// The issuer's key fingerprint - the foot of every card.
-    @Published public private(set) var fingerprint: String?
 
     private let slug: String
     private let linkKeyFragment: String?
@@ -182,7 +178,6 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         // The PLAINTEXT capability: what the consume's joiner tag and the join
         // attribution are computed over.
         resolved = (cap.wire(), located.blobId)
-        fingerprint = cap.issuerFingerprint()
         state = .ready
     }
 
@@ -451,17 +446,16 @@ public struct JoinGroupLandingScreen: View {
         .accessibilityElement(children: .combine)
     }
 
-    /// `Invited by <fingerprint>` - small, muted, one line, so a person who was
-    /// told the digits out of band can still compare them.
+    /// `Invited by <name>`, from the sealed preview: small, muted, one line.
+    /// With no name the line is gone: digits never appear here.
     @ViewBuilder
     private var footer: some View {
-        if let fingerprint = viewModel.fingerprint {
-            Text(GroupInviteHeadline.footer(fingerprint: fingerprint))
+        if let line = GroupInviteHeadline.footer(inviterName: viewModel.preview?.inviterName) {
+            Text(line)
                 .font(.caption)
                 .foregroundStyle(Color.lakkoTextMuted)
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
-                .textSelection(.enabled)
         }
     }
 }

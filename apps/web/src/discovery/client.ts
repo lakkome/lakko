@@ -183,6 +183,12 @@ export type RevokeInviteResult =
   | { readonly kind: "revoked" }
   | { readonly kind: "not-found-or-not-owner" };
 
+/** One row of a link ledger: the sealed blob and whether its uses ran out. */
+export interface LedgerLinkRow {
+  readonly sealed: Uint8Array;
+  readonly usedUp: boolean;
+}
+
 /** Programmer error — empty / invalid inputs caught before any
  *  network round-trip. Distinct from HTTP errors so the UI can
  *  surface a form-validation message. */
@@ -1097,6 +1103,13 @@ export class DiscoveryClient {
    * `DiscoveryRateLimitedError` on 429 (per-address rate limit).
    */
   async fetchInvite(blobId: Uint8Array): Promise<Uint8Array | null> {
+    return (await this.fetchInviteRow(blobId))?.sealed ?? null;
+  }
+
+  /** [`fetchInvite`] with the ledger's `used_up` flag: no uses left. A page
+   *  with no session reads such a link as dead; a signed-in client still
+   *  opens it, since only the consume can tell a person who used it. */
+  async fetchInviteRow(blobId: Uint8Array): Promise<LedgerLinkRow | null> {
     await requireLedgerId(blobId);
     const slug = base64UrlEncodeNoPad(blobId);
     const url = `${this.baseUrl}/discovery/invite/${slug}`;
@@ -1117,7 +1130,7 @@ export class DiscoveryClient {
       );
     }
     const raw = (await response.json()) as InviteFetchResponse;
-    return base64Decode(raw.sealed);
+    return { sealed: base64Decode(raw.sealed), usedUp: raw.used_up === true };
   }
 
   /**
@@ -1325,6 +1338,12 @@ export class DiscoveryClient {
    * 429 (per-address rate limit).
    */
   async fetchGroupInvite(blobId: Uint8Array): Promise<Uint8Array | null> {
+    return (await this.fetchGroupInviteRow(blobId))?.sealed ?? null;
+  }
+
+  /** [`fetchGroupInvite`] with the ledger's `used_up` flag (see
+   *  [`fetchInviteRow`]). */
+  async fetchGroupInviteRow(blobId: Uint8Array): Promise<LedgerLinkRow | null> {
     await requireLedgerId(blobId);
     const slug = base64UrlEncodeNoPad(blobId);
     const url = `${this.baseUrl}/discovery/group-invite/${slug}`;
@@ -1345,7 +1364,7 @@ export class DiscoveryClient {
       );
     }
     const raw = (await response.json()) as InviteFetchResponse;
-    return base64Decode(raw.sealed);
+    return { sealed: base64Decode(raw.sealed), usedUp: raw.used_up === true };
   }
 
   /**

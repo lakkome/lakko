@@ -198,4 +198,27 @@ class EveryonePublicationTest {
         assertEquals(EveryoneAction.NONE, everyoneAction(false, false, null, before))
         assertEquals(EveryoneAction.NOTE_WITHDRAWN, everyoneAction(false, null, null, before))
     }
+
+    @Test
+    fun `a rotation changes the publish key, so the record naming the old mailbox is replaced`() {
+        val before = everyonePublishKey("Anna", "anna", certificate, ByteArray(97) { 1 })
+        val after = everyonePublishKey("Anna", "anna", certificate, ByteArray(97) { 2 })
+        assertEquals(EveryoneAction.PUT, everyoneAction(true, true, before, after))
+    }
+
+    @Test
+    fun `the first refresh of a session in Everyone sends even with a matching note`() {
+        val key = everyonePublishKey("Anna", "anna", certificate)
+        assertEquals(EveryoneAction.PUT, everyoneActionForRefresh(true, true, key, key, firstOfSession = true))
+        assertEquals(EveryoneAction.NONE, everyoneActionForRefresh(true, true, key, key, firstOfSession = false))
+        // Outside Everyone nothing is forced: the note decides.
+        assertEquals(EveryoneAction.NONE, everyoneActionForRefresh(false, false, null, key, firstOfSession = true))
+    }
+
+    @Test
+    fun `an Everyone note after a restore sends whatever the setting says`() {
+        val restored = ReachDoc(publishedPublic = true, publishedKey = "old").withUnknownEveryoneNote()
+        assertEquals(EveryoneAction.PUT, everyoneAction(true, restored.publishedPublic, restored.publishedKey, "k"))
+        assertEquals(EveryoneAction.PUT, everyoneAction(false, restored.publishedPublic, restored.publishedKey, "k"))
+    }
 }

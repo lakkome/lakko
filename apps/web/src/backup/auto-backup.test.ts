@@ -4,6 +4,7 @@
 import { type DeviceCipher } from "../auth/device-cipher";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { MemoryStorage } from "../test/fake-storage";
 import { startAutoBackup } from "./auto-backup-driver";
 import { clearBackupRestoreOwed, markBackupRestoreOwed } from "./restore-owed";
 import {
@@ -18,6 +19,7 @@ import {
   runDueBackup,
   saveAutoBackupState,
   type AutoBackupDeps,
+  ownStateChanged,
 } from "./auto-backup";
 
 const ACCOUNT = "YWNjb3VudC1pZA==";
@@ -40,27 +42,27 @@ beforeEach(() => {
 
 describe("backupVerdict", () => {
   it("is clean while nothing has changed", () => {
-    expect(backupVerdict({ lastUploadAtMs: 1000, dirtySinceMs: null, lastGroupsKey: null }, 9e9)).toBe("clean");
+    expect(backupVerdict({ lastUploadAtMs: 1000, dirtySinceMs: null, lastGroupsKey: null, lastOwnStateKey: null }, 9e9)).toBe("clean");
   });
 
   it("is due the first time, however recently the account was created", () => {
-    expect(backupVerdict({ lastUploadAtMs: 0, dirtySinceMs: 10, lastGroupsKey: null }, 20)).toBe("due");
+    expect(backupVerdict({ lastUploadAtMs: 0, dirtySinceMs: 10, lastGroupsKey: null, lastOwnStateKey: null }, 20)).toBe("due");
   });
 
   it("throttles a second upload inside the interval", () => {
-    const state = { lastUploadAtMs: 1_000_000, dirtySinceMs: 1_000_001, lastGroupsKey: null };
+    const state = { lastUploadAtMs: 1_000_000, dirtySinceMs: 1_000_001, lastGroupsKey: null, lastOwnStateKey: null };
     expect(backupVerdict(state, 1_000_000 + MIN_BACKUP_INTERVAL_MS - 1)).toBe("throttled");
   });
 
   it("is due once the interval has passed", () => {
-    const state = { lastUploadAtMs: 1_000_000, dirtySinceMs: 1_000_001, lastGroupsKey: null };
+    const state = { lastUploadAtMs: 1_000_000, dirtySinceMs: 1_000_001, lastGroupsKey: null, lastOwnStateKey: null };
     expect(backupVerdict(state, 1_000_000 + MIN_BACKUP_INTERVAL_MS)).toBe("due");
   });
 
   it("is due when the clock has moved backwards, rather than wedging off forever", () => {
     // A `lastUploadAtMs` in the future would make every later `now - last`
     // negative, so a naive comparison would suppress backups permanently.
-    const state = { lastUploadAtMs: 9_000_000, dirtySinceMs: 1_000, lastGroupsKey: null };
+    const state = { lastUploadAtMs: 9_000_000, dirtySinceMs: 1_000, lastGroupsKey: null, lastOwnStateKey: null };
     expect(backupVerdict(state, 1_000_000)).toBe("due");
   });
 });
@@ -84,14 +86,15 @@ describe("markedUploaded", () => {
       lastUploadAtMs: 777,
       dirtySinceMs: null,
       lastGroupsKey: null,
+      lastOwnStateKey: null,
     });
   });
 });
 
 describe("persistence", () => {
   it("round-trips through localStorage", () => {
-    saveAutoBackupState(ACCOUNT, { lastUploadAtMs: 5, dirtySinceMs: 7, lastGroupsKey: "g1" });
-    expect(loadAutoBackupState(ACCOUNT)).toEqual({ lastUploadAtMs: 5, dirtySinceMs: 7, lastGroupsKey: "g1" });
+    saveAutoBackupState(ACCOUNT, { lastUploadAtMs: 5, dirtySinceMs: 7, lastGroupsKey: "g1", lastOwnStateKey: null });
+    expect(loadAutoBackupState(ACCOUNT)).toEqual({ lastUploadAtMs: 5, dirtySinceMs: 7, lastGroupsKey: "g1", lastOwnStateKey: null });
   });
 
   it("answers clean for an unknown account", () => {
@@ -165,6 +168,7 @@ describe("runDueBackup", () => {
       lastUploadAtMs: 10_000_000,
       dirtySinceMs: null,
       lastGroupsKey: null,
+      lastOwnStateKey: null,
     });
   });
 
@@ -362,5 +366,22 @@ describe("startAutoBackup (the driver's own wiring)", () => {
     // Still dirty: the held-back upload goes out once the restore ran.
     expect(state.dirtySinceMs).not.toBeNull();
     expect(state.lastUploadAtMs).toBe(0);
+  });
+});
+
+describe("the own profile and setting", () => {
+  const ACCOUNT = "own-state";
+  beforeEach(() => {
+    (globalThis as unknown as Record<string, unknown>)["localStorage"] = new MemoryStorage();
+  });
+  afterEach(() => {
+    delete (globalThis as unknown as Record<string, unknown>)["localStorage"];
+  });
+
+  it("the first report counts as a change, an unchanged key does not, a moved stamp does", () => {
+    expect(ownStateChanged(ACCOUNT, "5:7")).toBe(true);
+    expect(ownStateChanged(ACCOUNT, "5:7")).toBe(false);
+    expect(ownStateChanged(ACCOUNT, "6:7")).toBe(true);
+    expect(ownStateChanged(ACCOUNT, "6:8")).toBe(true);
   });
 });

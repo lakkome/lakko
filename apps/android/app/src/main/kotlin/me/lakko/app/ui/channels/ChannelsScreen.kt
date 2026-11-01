@@ -258,6 +258,7 @@ public fun NewChannelScreen(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<UiText?>(null) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     Scaffold(topBar = { ChannelTopBar(title = t("channels.new.title"), onBack = onBack) }) { inner ->
         Column(
@@ -301,8 +302,12 @@ public fun NewChannelScreen(
                     if (busy || name.trim().isEmpty()) return@Button
                     busy = true
                     error = null
-                    val id = ChannelsComposer.freshChannelIdHex()
                     val wantedHandle = handle.trim().removePrefix("@")
+                    val claims = me.lakko.app.channels.ChannelHandleClaims.on(context)
+                    val claimAccount = state.boundAccount.orEmpty()
+                    // A retry of a failed create reuses the id its handle was
+                    // claimed for.
+                    val id = claims.idFor(claimAccount, wantedHandle)
                     scope.launch {
                         try {
                             val publisher = state.publisher
@@ -343,6 +348,8 @@ public fun NewChannelScreen(
                                 } catch (e: DiscoveryHttpError) {
                                     Log.w(TAG, "handle registration failed: ${e.status}", e)
                                     error = if (e.status == 409) {
+                                        // Bound to another channel id: not ours.
+                                        claims.forget(claimAccount, wantedHandle)
                                         UiText(
                                             "channels.new.error.handle_taken",
                                             texts = mapOf("handle" to "@$wantedHandle"),
@@ -392,6 +399,7 @@ public fun NewChannelScreen(
                                 ),
                             )
                             state.setKeys(id, keys)
+                            claims.forget(claimAccount, wantedHandle)
                             // ADR-0051 §4 — the metadata record is the first
                             // post: subscribers title the channel from it. A
                             // failed post leaves the channel created; the next
@@ -724,8 +732,8 @@ private fun OwnerChannelView(
     // channel is open (or its Manage screen is): the same 5 s fan-out as before.
     SubscriberFanoutEffect(channelId = channelId, state = state, client = client)
 
-    suspend fun refresh() {
-        loading = true
+    suspend fun refresh(quiet: Boolean = false) {
+        if (!quiet) loading = true
         loadError = null
         try {
             val fetched = client.fetchPosts(channelId, 0u)
@@ -770,6 +778,12 @@ private fun OwnerChannelView(
         // ADR-0060 section 3 — publishers upload a member card like anyone
         // else, under a subscriber key registered on the channel.
         me.lakko.app.channels.ChannelMemberCards.refreshPublisherCard(context, state, client, channelId)
+        // A co-publisher's post appears here without reopening, as a reader's
+        // list does.
+        while (true) {
+            kotlinx.coroutines.delay(OPEN_CHANNEL_REFRESH_MS)
+            refresh(quiet = true)
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -937,7 +951,13 @@ private fun PostList(
     val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
     val ordered = remember(posts) { posts.sortedByDescending { it.serverTsMs } }
     val visible = ordered.filter { renderOf(it) != PostRender.Hidden }
-    val now = System.currentTimeMillis()
+    // "5 min ago" moves on while the screen stays open.
+    val now by androidx.compose.runtime.produceState(System.currentTimeMillis()) {
+        while (true) {
+            kotlinx.coroutines.delay(RELATIVE_TIME_TICK_MS)
+            value = System.currentTimeMillis()
+        }
+    }
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     val readable = visible.filter { renderOf(it) is PostRender.Plain }.map { it.cursor.toLong() }.toSet()
     if (onShown != null) {
@@ -1232,10 +1252,11 @@ private fun PostCard(time: String, render: PostRender?) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                is PostRender.Plain -> Text(
-                    render.value,
+                is PostRender.Plain -> me.lakko.app.ui.components.MessageLinkText(
+                    text = render.value,
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurface,
+                    linkColor = MaterialTheme.colorScheme.primary,
                 )
                 PostRender.Hidden -> Unit
             }
@@ -1524,6 +1545,8 @@ private fun StatusLine(text: String) {
 private const val SUBSCRIBERS_POLL_INTERVAL_MS: Long = 5_000L
 private const val SEED_WAIT_MS: Long = 3_000L
 private const val READER_REFRESH_MS: Long = 5_000L
+private const val OPEN_CHANNEL_REFRESH_MS: Long = 5_000L
+private const val RELATIVE_TIME_TICK_MS: Long = 30_000L
 private const val EPOCH_RECHECK_EVERY_TICKS: Int = 6
 
 /**

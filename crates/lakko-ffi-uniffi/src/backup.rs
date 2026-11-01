@@ -127,6 +127,13 @@ pub struct ParsedBackupPayload {
     /// conversation binding under the first. Empty for an account that never
     /// rotated.
     pub own_predecessors: Vec<BackupOwnPredecessor>,
+    /// The account's own profile envelope (`composeProfileEnvelope`). A
+    /// restored device takes the person's name and photo from it. Empty when
+    /// none was set.
+    pub own_profile: Vec<u8>,
+    /// The account's own "who can find me" envelope
+    /// (`composeVisibilityEnvelope`). Empty when none was chosen.
+    pub visibility: Vec<u8>,
 }
 
 // ============================================================================
@@ -146,7 +153,13 @@ pub struct ParsedBackupPayload {
 ///   `ed25519_seed` (≠ 32), wrong-length contact pubkey
 ///   (must be 32 bytes each), over-cap display name, an over-long
 ///   `group_id`, or a `synced_state` the fold refuses.
-#[uniffi::export(default(synced_state = None, own_predecessors = None))]
+#[uniffi::export(default(
+    synced_state = None,
+    own_predecessors = None,
+    own_profile = None,
+    visibility = None
+))]
+#[allow(clippy::too_many_arguments)]
 pub fn build_backup_payload(
     account_id: Vec<u8>,
     created_at_ms: u64,
@@ -162,6 +175,10 @@ pub fn build_backup_payload(
     // ADR-0074 section 3.7: the keys the conversations still name, oldest
     // first. `None` / empty for an account that never rotated.
     own_predecessors: Option<Vec<BackupOwnPredecessor>>,
+    // The account's own profile and "who can find me" envelopes, so a device
+    // restored with no other device alive learns them.
+    own_profile: Option<Vec<u8>>,
+    visibility: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, FfiError> {
     if account_id.len() != 16 {
         return Err(FfiError::Backup("account_id must be 16 bytes".into()));
@@ -257,6 +274,8 @@ pub fn build_backup_payload(
         known_group_ids,
         synced_state: synced_state.unwrap_or_default(),
         own_predecessors,
+        own_profile: own_profile.unwrap_or_default(),
+        visibility: visibility.unwrap_or_default(),
     };
     Ok(payload.encode()?)
 }
@@ -297,6 +316,8 @@ pub fn parse_backup_payload(wire: Vec<u8>) -> Result<ParsedBackupPayload, FfiErr
                 adopted_at_ms: p.adopted_at_ms,
             })
             .collect(),
+        own_profile: inner.own_profile,
+        visibility: inner.visibility,
     })
 }
 
@@ -597,6 +618,8 @@ mod tests {
             Vec::new(),
             None,
             None,
+            None,
+            None,
         )
         .expect("build");
         let parsed = parse_backup_payload(wire).expect("parse");
@@ -624,6 +647,8 @@ mod tests {
             Vec::new(),
             None,
             None,
+            None,
+            None,
         );
         assert!(err.is_err(), "an 8-byte account_id must be rejected");
     }
@@ -639,6 +664,8 @@ mod tests {
             seed.clone(),
             contacts,
             Vec::new(),
+            None,
+            None,
             None,
             None,
         )
@@ -676,6 +703,8 @@ mod tests {
             Vec::new(),
             None,
             None,
+            None,
+            None,
         )
         .expect("build");
         let envelope = seal_backup(phrase.clone(), payload).expect("seal");
@@ -693,6 +722,8 @@ mod tests {
             vec![0u8; 32],
             vec![],
             Vec::new(),
+            None,
+            None,
             None,
             None,
         )
@@ -719,6 +750,8 @@ mod tests {
             ids.clone(),
             None,
             None,
+            None,
+            None,
         )
         .expect("build");
         let parsed = parse_backup_payload(wire).expect("parse");
@@ -737,6 +770,8 @@ mod tests {
             ids.clone(),
             Some(state.clone()),
             None,
+            None,
+            None,
         )
         .expect("build");
         let parsed = parse_backup_payload(wire).expect("parse");
@@ -753,6 +788,8 @@ mod tests {
             vec![0u8; 32],
             vec![],
             Vec::new(),
+            None,
+            None,
             None,
             None,
         )
@@ -791,6 +828,8 @@ mod tests {
             vec![vec![0u8; lakko_backup::payload::MAX_GROUP_ID_LEN + 1]],
             None,
             None,
+            None,
+            None,
         )
         .expect_err("over-long group id accepted");
         assert!(format!("{err}").contains("group_id length"));
@@ -804,6 +843,8 @@ mod tests {
             vec![0u8; 32],
             vec![],
             Vec::new(),
+            None,
+            None,
             None,
             None,
         )

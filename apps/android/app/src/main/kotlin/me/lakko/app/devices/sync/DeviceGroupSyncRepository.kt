@@ -1219,18 +1219,19 @@ public class DeviceGroupSyncRepository(
     ): Long =
         publishRecorded(uniffi.lakko_ffi_uniffi.composeLinkClaimEnvelope(linkId, requesterKey), beforePublish)
 
-    private suspend fun publishRecorded(envelope: ByteArray, beforePublish: (String) -> Boolean): Long {
-        check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
-        val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
-        val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
-        val accountIdB64 = activeAccountIdB64.get() ?: error("DeviceGroupSync not bootstrapped")
-        val wireBytes = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
-        check(beforePublish(me.lakko.app.contacts.LinkClaims.hex(wireBytes))) { "link row not recorded" }
-        persistHandleOrThrow(id, accountIdB64)
-        return DsClient().use { ds ->
-            ds.publishGroup(g.groupId(), DeviceGroupJournalEnvelope.encode(wireBytes, null)).id
+    private suspend fun publishRecorded(envelope: ByteArray, beforePublish: (String) -> Boolean): Long =
+        onHandleCaughtUp {
+            check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
+            val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
+            val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
+            val accountIdB64 = activeAccountIdB64.get() ?: error("DeviceGroupSync not bootstrapped")
+            val wireBytes = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
+            check(beforePublish(me.lakko.app.contacts.LinkClaims.hex(wireBytes))) { "link row not recorded" }
+            persistHandleOrThrow(id, accountIdB64)
+            DsClient().use { ds ->
+                ds.publishGroup(g.groupId(), DeviceGroupJournalEnvelope.encode(wireBytes, null)).id
+            }
         }
-    }
 
     /** ADR-0079 - this device's DeviceGroup leaf key and the current
      *  roster's leaf keys, the inputs of the claim decision. `null` while no
@@ -1653,43 +1654,67 @@ public class DeviceGroupSyncRepository(
     }
 
     private suspend fun sendBody(body: DeviceGroupBody, hlc: ULong) {
-        check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
-        val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
-        val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
-        val accountIdB64 = activeAccountIdB64.get()
-            ?: error("DeviceGroupSync not bootstrapped")
-        val wireBytes = g.createDevicegroupMessage(id, body, hlc)
-        val groupId = g.groupId()
-        // ADR-0081 decision 3 — the ratchet step this message took is on disk
-        // before the ciphertext is published, or nothing is published.
-        persistHandleOrThrow(id, accountIdB64)
-        // G-13 (ADR-0015): wrap in the journal envelope (application messages
-        // carry no attestation).
-        val envelope = DeviceGroupJournalEnvelope.encode(wireBytes, null)
-        DsClient().use { ds ->
-            ds.publishGroup(groupId, envelope)
+        onHandleCaughtUp {
+            check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
+            val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
+            val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
+            val accountIdB64 = activeAccountIdB64.get()
+                ?: error("DeviceGroupSync not bootstrapped")
+            val wireBytes = g.createDevicegroupMessage(id, body, hlc)
+            val groupId = g.groupId()
+            // ADR-0081 decision 3 — the ratchet step this message took is on disk
+            // before the ciphertext is published, or nothing is published.
+            persistHandleOrThrow(id, accountIdB64)
+            // G-13 (ADR-0015): wrap in the journal envelope (application messages
+            // carry no attestation).
+            val envelope = DeviceGroupJournalEnvelope.encode(wireBytes, null)
+            DsClient().use { ds ->
+                ds.publishGroup(groupId, envelope)
+            }
         }
     }
 
     /**
+     * Run one send, and once more when the held handle turned out to be behind
+     * the disk ([DeviceGroupSnapshotStore.SnapshotChanged]: another handle of
+     * this device wrote since). The first attempt sealed on the stale handle
+     * and nothing of it was published, so the retry on the reopened handle
+     * reuses no ratchet position. Not cancellable, because the reopen cancels
+     * the poll job a send may be running in.
+     */
+    private suspend fun <T> onHandleCaughtUp(send: suspend () -> T): T =
+        retryOnceAfterSnapshotChanged(
+            send = send,
+            catchUp = { reopenBehindDisk() },
+            again = { withContext(NonCancellable) { send() } },
+        )
+
+    /** Reopen the held handle from the disk unless another caller already
+     *  did. One at a time: two sends can lose the same race. */
+    private fun reopenBehindDisk() {
+        synchronized(reopenLock) {
+            val accountIdB64 = activeAccountIdB64.get() ?: return
+            if (handleGeneration == DeviceGroupSnapshotStore.generation(accountIdB64)) return
+            reopenAfterLocalChange()
+        }
+    }
+
+    private val reopenLock = Any()
+
+    /**
      * ADR-0081 decision 3 — persist the held handle, FAIL-CLOSED and
      * conditional on the generation it read. A handle another one wrote past
-     * (a commit of this device made N+1 current) is reopened from disk and the
-     * write throws: nothing built on the stale handle is published.
+     * (a commit of this device made N+1 current) makes the write throw: nothing
+     * built on the stale handle is published. A send catches up and runs again
+     * ([onHandleCaughtUp]); the poll reopens and reads on.
      */
     private fun persistHandleOrThrow(id: Identity, accountIdB64: String) {
-        try {
-            handleGeneration = DeviceGroupLifecycle.persistSnapshotOrThrow(
-                context = applicationContext,
-                identity = id,
-                accountIdB64 = accountIdB64,
-                expectedGeneration = handleGeneration,
-            )
-        } catch (changed: DeviceGroupSnapshotStore.SnapshotChanged) {
-            Log.w(LOG_TAG, "the DeviceGroup snapshot moved under this handle; reopening")
-            scope.launch { reopenAfterLocalChange() }
-            throw changed
-        }
+        handleGeneration = DeviceGroupLifecycle.persistSnapshotOrThrow(
+            context = applicationContext,
+            identity = id,
+            accountIdB64 = accountIdB64,
+            expectedGeneration = handleGeneration,
+        )
     }
 
     /**
@@ -2077,6 +2102,7 @@ public class DeviceGroupSyncRepository(
                             saveAdmissions(accountIdB64)
                             rosterChange.onPersisted()
                         } catch (_: DeviceGroupSnapshotStore.SnapshotChanged) {
+                            scope.launch { reopenBehindDisk() }
                             return
                         } catch (cause: Throwable) {
                             Log.w(LOG_TAG, "DeviceGroup snapshot persist failed (${cause.javaClass.simpleName})")
@@ -2590,15 +2616,17 @@ public class DeviceGroupSyncRepository(
      * never lets a later handle reuse this message's ratchet position.
      */
     private suspend fun sendServiceEnvelope(envelope: ByteArray) {
-        check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
-        val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
-        val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
-        val accountIdB64 = activeAccountIdB64.get()
-            ?: error("DeviceGroupSync not bootstrapped")
-        val wireBytes = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
-        persistHandleOrThrow(id, accountIdB64)
-        DsClient().use { ds ->
-            ds.publishGroup(g.groupId(), DeviceGroupJournalEnvelope.encode(wireBytes, null))
+        onHandleCaughtUp {
+            check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
+            val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
+            val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
+            val accountIdB64 = activeAccountIdB64.get()
+                ?: error("DeviceGroupSync not bootstrapped")
+            val wireBytes = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
+            persistHandleOrThrow(id, accountIdB64)
+            DsClient().use { ds ->
+                ds.publishGroup(g.groupId(), DeviceGroupJournalEnvelope.encode(wireBytes, null))
+            }
         }
     }
 
@@ -2717,15 +2745,23 @@ public class DeviceGroupSyncRepository(
      * [me.lakko.app.devices.removeThenAnnounce] decides that.
      */
     public fun sealKeyRotation(envelope: ByteArray): Pair<ByteArray, ULong> {
-        check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
-        val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
-        val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
-        val accountIdB64 = activeAccountIdB64.get() ?: error("DeviceGroupSync not bootstrapped")
-        val wire = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
-        persistHandleOrThrow(id, accountIdB64)
-        val sealedAt = uniffi.lakko_ffi_uniffi.epochOfMessage(wire)
-            ?: error("the sealed message carries no epoch")
-        return wire to sealedAt
+        val seal = {
+            check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
+            val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
+            val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
+            val accountIdB64 = activeAccountIdB64.get() ?: error("DeviceGroupSync not bootstrapped")
+            val wire = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
+            persistHandleOrThrow(id, accountIdB64)
+            val sealedAt = uniffi.lakko_ffi_uniffi.epochOfMessage(wire)
+                ?: error("the sealed message carries no epoch")
+            wire to sealedAt
+        }
+        return try {
+            seal()
+        } catch (_: DeviceGroupSnapshotStore.SnapshotChanged) {
+            reopenBehindDisk()
+            seal()
+        }
     }
 
     /** Publish a message [sealKeyRotation] made into THIS account's

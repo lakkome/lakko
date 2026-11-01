@@ -33,7 +33,7 @@ public struct RotateBatchEntry: Encodable {
 /// ## Default base URL
 ///
 /// `<LakkoApiBaseUrl>/channels` (``ApiEndpoints``); with no API
-/// base URL, `http://localhost:8090` — iOS simulator loopback +
+/// base URL, `http://localhost:8086` — iOS simulator loopback +
 /// the `services/channels` dev bind.
 public final class ChannelsClient {
 

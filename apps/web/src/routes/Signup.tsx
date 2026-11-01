@@ -15,9 +15,10 @@
  * for as long as `auth.protectStepOwed()` (`auth/phrase-gate.ts`).
  */
 import { createSignal, onCleanup, Show, type JSX } from "solid-js";
-import { A, useSearchParams } from "@solidjs/router";
+import { A, useLocation, useSearchParams } from "@solidjs/router";
 import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
+import { buildAuthUrlWithReturn, readReturnUrl } from "../auth/return-url";
 import { isSignupRateLimited, signupErrorMessage } from "../auth/auth-error-copy";
 import { isAbortError } from "../auth/pow";
 import { signupWorkingLine, signupWorkingTitle } from "../auth/signup-working";
@@ -48,6 +49,9 @@ export default function Signup(): JSX.Element {
   // screen to open as soon as signup (and its protect step) is done,
   // through the `?return=` the auth guards already honour.
   const [search, setSearch] = useSearchParams<{ return?: string }>();
+  const location = useLocation();
+  // Log in keeps the way back to the invite this page was reached from.
+  const loginHref = (): string => buildAuthUrlWithReturn(paths.login, readReturnUrl(location));
   const privacyAfterSignup = (): boolean => search.return === paths.settingsSection("privacy");
   // An invite landing's `?return=` is not overwritten: losing the invite the
   // person came for would be worse than one link fewer.
@@ -271,7 +275,7 @@ export default function Signup(): JSX.Element {
       </form>
       <p class="lk-auth-foot">
         {tRich("auth.signup.have_account", {
-          link: <A href={paths.login}>{t("auth.login.submit")}</A>,
+          link: <A href={loginHref()}>{t("auth.login.submit")}</A>,
         })}
       </p>
       <PasswordExplainer />

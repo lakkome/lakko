@@ -1532,6 +1532,70 @@ public final class ChatRepository: ObservableObject {
         return welcomeOwed ? .welcomeOwed(groupIdHex: groupIdHex) : .delivered(groupIdHex: groupIdHex)
     }
 
+    /// Found a group with nobody else in it (`docs/ux/new-group.md`): this
+    /// account's own devices only, so people are added afterwards as in any
+    /// group. The founder claims the journal before anything else, as
+    /// ``foundGroup(recipientAccountId:recipientSignaturePubkey:kind:recipientPlan:answeringRequest:)``
+    /// does. A Welcome to this account's own mailbox that fails does not undo
+    /// the group: the re-admission check brings those devices in.
+    public func foundGroupWithNobodyElse() async throws -> String {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
+        }
+        let bound = binding.capture()
+        let ownDevices = await ownOtherDevices(identity: identity)
+        try bound.require()
+        let group: Group
+        let welcome: Data?
+        let joinSigner: DsProofSigner
+        do {
+            group = try Group.create(identity: identity, kind: .group)
+            welcome = ownDevices.isEmpty
+                ? nil
+                : try group.addMembersFromWire(
+                    identity: identity, keyPackages: ownDevices.map { $0.keyPackage }).welcome
+            joinSigner = try group.dsAccessSigner(identity: identity)
+        } catch {
+            throw ChatError.wrapped("the group was not created", underlying: error)
+        }
+        let groupId = try group.groupId()
+        let groupIdHex = DsClient.pseudonymHex(groupId)
+        do {
+            try await JournalOwnership.claim(
+                root: try journalRootSigner(groupId: groupId),
+                journalId: groupId,
+                epoch: joinSigner.epoch(),
+                epochKey: joinSigner.verifyingKey(),
+                ds: dsClient)
+        } catch {
+            throw ChatError.wrapped("DS journal claim failed", underlying: error)
+        }
+        try bound.require()
+        if let accountIdB64 = currentAccountIdB64 {
+            registrarSeeds.markRootHeld(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        }
+        _ = try persistFoundingOrThrow(groupIdHex: groupIdHex)
+        if let welcome, let own = ReachCenter.shared.ownAccountKey {
+            do {
+                try await deliverWelcome(
+                    welcome: welcome, toAccountKey: own, plan: ReachCenter.shared.writePlan(toAccountKey: own))
+            } catch {
+                NSLog("New group: the Welcome to this account's other devices did not land")
+            }
+            try bound.require()
+        }
+        groups[groupIdHex] = GroupRecord(group: group, groupId: groupId)
+        mirrorLineage()
+        dsSigners.observe(journal: groupIdHex, signer: joinSigner)
+        claimedGroupsThisSession.insert(groupIdHex)
+        persistKnownGroupBestEffort(groupIdHex: groupIdHex)
+        persistSnapshotBestEffort()
+        state = state.with(threads: buildThreadList())
+        subscribeGroupUnderPushGid(groupIdHex: groupIdHex)
+        reconcileJournalRegistrarsSoon(groupIdHex: groupIdHex)
+        return groupIdHex
+    }
+
     /// The founding of an accept, on record in the outbox every owed Welcome
     /// lives in. A failed write throws: the accept then failed.
     private func recordOwedAnswer(
@@ -2457,6 +2521,16 @@ public final class ChatRepository: ObservableObject {
         markProfileResendOwed()
         try? await Task.sleep(
             nanoseconds: UInt64.random(in: 0...UInt64(ProfilePublisher.maxJitterMs)) * 1_000_000)
+        await retryOwedProfileResend()
+    }
+
+    /// A backup restore owes the own profile to every conversation this
+    /// device holds, as any change of the name does. Marked here, sent by the
+    /// retry that runs after it (the session start, or the caller below).
+    public func republishProfileAfterRestore() async {
+        guard state.bootstrapped, let accountIdB64 = currentAccountIdB64,
+              RestoredDeviceStore.takeProfileRepublish(accountIdB64: accountIdB64) else { return }
+        markProfileResendOwed()
         await retryOwedProfileResend()
     }
 

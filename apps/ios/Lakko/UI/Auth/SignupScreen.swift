@@ -201,7 +201,17 @@ struct SignupProtectScreen: View {
         case .phrase:
             VStack(spacing: 0) {
                 SavePhraseScreen(
-                    authRepository: authRepository, center: center, rotation: rotation, onDone: onDone)
+                    authRepository: authRepository, center: center, rotation: rotation,
+                    // ADR-0075 section 3 — a phrase that was sealed in an
+                    // email vault on this step needs the key rotation, which
+                    // needs the DeviceGroup and the chats: nothing of the
+                    // session is mounted here, so the app opens on the same
+                    // screen in Settings.
+                    rotationNeedsSession: {
+                        center.savePhraseRequested = true
+                        onDone()
+                    },
+                    onDone: onDone)
                 AuthLinkRow(title: l10n.t("common.back"), action: { step = .protect })
                     .padding(.bottom, 16)
             }

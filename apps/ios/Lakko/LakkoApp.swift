@@ -1439,6 +1439,11 @@ private final class SessionModels: ObservableObject {
                     || PendingContacts.holds(
                         contacts.invited, accountKey: person.accountKey, accountId: person.accountId)
             },
+            sentRow: { person in
+                SentRequests.row(
+                    contacts.state.sent, accountKey: person.accountKey, accountId: person.accountId)
+            },
+            dismissSent: { contacts.dismissSentRequest($0) },
             heldGrants: { ReachCenter.shared.searchGrants(forAccountKeyB64: $0.base64EncodedString()) },
             isContact: { person in
                 contacts.state.accepted.contains {
@@ -1569,7 +1574,9 @@ private struct SessionRoot: View, Equatable {
                             setSettingsPath([.recoveryFactors])
                         }),
                     keysUpdatingLabel: KeysUpdatingLabel(authRepository: authRepository),
-                    peopleSearch: models.chatsPeopleSearch
+                    peopleSearch: models.chatsPeopleSearch,
+                    accountIdB64: account.accountIdB64,
+                    onOpenContacts: { selectedTab = .contacts }
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .chats) }
             }
@@ -1688,6 +1695,12 @@ private struct SessionRoot: View, Equatable {
             selectedTab = .settings
             setSettingsPath([.secureAccount])
         }
+        .onReceive(services.accountProtection.$savePhraseRequested) { requested in
+            guard requested else { return }
+            services.accountProtection.savePhraseRequested = false
+            selectedTab = .settings
+            setSettingsPath([.savePhrase])
+        }
         .onReceive(NewDeviceNoticeCenter.shared.$openDevicesRequested) { requested in
             guard requested else { return }
             NewDeviceNoticeCenter.shared.openDevicesRequested = false
@@ -1742,6 +1755,10 @@ private struct SessionRoot: View, Equatable {
         // `identitySecrets` first, so the read below sees them. Runs on every
         // login/signup/recover AND on a relaunch that restored the session from
         // the Keychain; bootstrap is idempotent for the same account id.
+        // A restore that finished after the session started (it was owed).
+        .onReceive(NotificationCenter.default.publisher(for: .lakkoBackupRestored)) { _ in
+            Task { await services.chatRepository.republishProfileAfterRestore() }
+        }
         // Keep the encrypted backup current. Until this ran, the blob was
         // written exactly twice in an account's life - an empty baseline at
         // signup and one at recover - so a restore on a new device landed the
@@ -1842,6 +1859,9 @@ private struct SessionRoot: View, Equatable {
                                 .fetchUsernameCertificate()
                             guard bound.isCurrent else { return }
                             ReachCenter.shared.setOwnUsernameCertificate(cert)
+                            // Everyone was published without the username
+                            // until the certificate landed.
+                            ReachCenter.shared.sync()
                             if cert != nil { await chatRepository.publishOwnProfileToAllGroups() }
                         } catch {
                             NSLog("ADR-0060: username certificate not fetched: \(error)")
@@ -1885,6 +1905,8 @@ private struct SessionRoot: View, Equatable {
                     await removal.resumeOwed()
                     rotation.reload()
                     await rotation.resumeOwed()
+                    // A restored backup owes the profile as any change does.
+                    await services.chatRepository.republishProfileAfterRestore()
                     // ADR-0074 section 3.5a rules 3 and 5 — what a key change
                     // left owed on this device (a kept device, or any device
                     // after a restart) is retried at each session start.

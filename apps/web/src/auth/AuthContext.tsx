@@ -224,6 +224,9 @@ import {
 } from "./device-restore-name-check";
 import { bootstrapBackupFromPhraseString } from "../backup/bootstrap";
 import { startAutoBackup } from "../backup/auto-backup-driver";
+import { registerBackupUsernameSource } from "../backup/own-state";
+import { loadOwnProfile } from "../profile/own-profile";
+import { visibilitySetting } from "../reach/visibility-store";
 import { markBackupDirty } from "../backup/auto-backup";
 import {
   readDevicePhrase,
@@ -1955,6 +1958,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     else if (action.kind === "adopt") void applyOwnUsername(accountIdB64, action.username);
   });
 
+  // The username a backup's own profile names.
+  onCleanup(
+    registerBackupUsernameSource((accountIdB64) => {
+      const s = state();
+      return s.kind === "session" && s.account.accountId === accountIdB64 && s.account.username.length > 0
+        ? s.account.username
+        : null;
+    }),
+  );
+
   // Keep the encrypted backup current. Until this ran, the blob was written
   // exactly twice in an account's life - an empty baseline at signup and one
   // at recover - so a restore on a new device landed the person back at
@@ -1975,6 +1988,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           base64Encode(id),
           chats.groups().map((g) => g.groupIdB64),
         );
+      },
+      // A change of name, photo or "who can find me", here or adopted from
+      // another device: the stamps move, the backup goes out.
+      ownStateKey: (accountIdB64) => {
+        const setting = visibilitySetting();
+        if (setting === null) return null;
+        return `${loadOwnProfile(accountIdB64).updatedAtMs}:${setting.updatedAtMs.toString()}`;
       },
       accountIdB64: () => {
         const id = identitySecrets()?.accountId;

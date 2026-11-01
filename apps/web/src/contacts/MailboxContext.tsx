@@ -16,9 +16,8 @@
  * This provider owns both halves now:
  *
  *   * a long-poll loop (`ds/long-poll-loop.ts`) that runs while a session
- *     with identity secrets exists, paused while the tab is hidden (the web
- *     push service worker covers the background, as the native clients' push
- *     does), stopped on sign-out;
+ *     with identity secrets exists, parked only while the tab is hidden and a
+ *     push wake reaches it (`chat/receive-activity.ts`), stopped on sign-out;
  *   * the dispatch — requests into the shared pending list the Contacts route
  *     renders, acks into the local address book, Welcomes into joined groups —
  *     behind `mailbox-poller.ts`, which is what keeps the loop and the Refresh
@@ -33,6 +32,8 @@
  * and a failed attempt may have consumed it too. See
  * `chat/keypackage-publisher.ts`.
  */
+import { mayParkReceive } from "../chat/receive-activity";
+import { createPushWakeReach } from "../push/wake-reach";
 import {
   createContext,
   createEffect,
@@ -1250,8 +1251,23 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   // nothing claims or polls one (its old cursor key `lakko.contacts.device-
   // mailbox.v1` is only wiped).
 
-  function isHidden(): boolean {
-    return globalThis.document?.visibilityState === "hidden";
+  /** Whether a push wake can reach this tab at all (`push/wake-reach.ts`). */
+  const pushWakeReach = createPushWakeReach();
+
+  /**
+   * `chat/receive-activity.ts`: the loop sleeps only where a push wake reaches
+   * it. Parking on `hidden` alone meant a closed window of the desktop app, and
+   * a tab with notifications refused, took no contact request and no Welcome at
+   * all: nothing else could wake them. This provider sits above the call host,
+   * so it cannot see a call; a hidden tab push reaches parks during one as it
+   * did.
+   */
+  function mayPark(): boolean {
+    return mayParkReceive({
+      documentHidden: globalThis.document?.visibilityState === "hidden",
+      callInProgress: false,
+      pushWake: pushWakeReach.read(),
+    });
   }
 
   function start(accountIdB64: string): void {
@@ -1287,7 +1303,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     loopAbort = controller;
     void runLongPollLoop(controller.signal, {
       shouldContinue: () => true,
-      isPaused: isHidden,
+      isPaused: mayPark,
       waitUntilResumed: (signal) => resume.wait(signal),
       tick: async (signal) => {
         // Long-poll the account mailbox (ADR-0060: the one inbound mailbox).

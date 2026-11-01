@@ -62,6 +62,7 @@ import {
   loadRestoredKnownGroups,
 } from "../backup/restored-known-groups";
 import { isBackupRestoreOwed, markBackupRestoreOwed } from "../backup/restore-owed";
+import { markRestoreFinished } from "../backup/restored-marker";
 import { localStorageAnswerLog } from "../devices/device-link";
 import { saveAppointmentRecord } from "../ds/appointments";
 import { recordRegistrarListEntry } from "../ds/registrar-list";
@@ -267,6 +268,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   );
   put(`lakko.reset-continuity.v1.${acct}`, JSON.stringify({ moved: { G: 1 }, resent: {} }));
   put(`lakko.channels.orphaned-by-reset.v1.${acct}`, JSON.stringify(["ch1"]));
+  put(`lakko.channels.claimed-handles.v1.${acct}`, JSON.stringify({ news: "ch2" }));
   put(`lakko.conversation-kind.v1.${acct}`, JSON.stringify({ [G]: "group" }));
   selectTab(acct, "folder-1");
   writeFeedSelection(acct, "custom:feed-1");
@@ -288,6 +290,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   saveKnownGroupIds([G], acct);
   addRestoredKnownGroups(acct, [G]);
   markBackupRestoreOwed(acct);
+  markRestoreFinished(acct, 1);
   put(`lakko.channels.rotation-state.v2.${acct}.c0ffee`, "{}");
   saveCounter("c0ffee", 42n, acct);
   put(`lakko/publisher-group-unclaimed/v2/${acct}/c0ffee`, "1");
@@ -634,6 +637,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.contacts.verified-bindings.v1.": "account",
   "lakko.reset-continuity.v1.": "account",
   "lakko.channels.orphaned-by-reset.v1": "account",
+  "lakko.channels.claimed-handles.v1.": "account",
   "lakko.conversation-kind.v1.": "account",
   "lakko.folderTab.": "account",
   "lakko.feed.selection.": "account",
@@ -650,6 +654,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.backup.auto.": "account",
   "lakko.backup.restored-groups.v1.": "account",
   "lakko.backup.restore-owed.v1.": "account",
+  "lakko.backup.restored-marker.v1.": "account",
   "lakko.ds.knock-cursor.v2:": "account",
   "lakko.pairing.known-groups.v2.": "account",
   "lakko.channels.rotation-state.v2.": "account",

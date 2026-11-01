@@ -124,6 +124,10 @@ public enum NoticeSelection {
         return abs(notice.atMs - didAtMs) <= ownActionWindowMs
     }
 
+    /// A device with no cursor is new: everything the server lists happened
+    /// before it was here, so nothing is shown and the newest id becomes its
+    /// cursor. Its own markers are still spent.
+    ///
     /// - Parameters:
     ///   - fetched: every notice the server listed for the query.
     ///   - cursor: the stored seen cursor, or `nil` on a device without one.
@@ -148,7 +152,7 @@ public enum NoticeSelection {
             newestOfKind[kind] = notice
         }
         return Outcome(
-            shown: newestOfKind.values.sorted { $0.id < $1.id },
+            shown: cursor == nil ? [] : newestOfKind.values.sorted { $0.id < $1.id },
             cursor: max(floor, fresh.last?.id ?? floor),
             spentMarkers: spent)
     }

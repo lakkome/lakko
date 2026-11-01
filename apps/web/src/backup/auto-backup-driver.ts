@@ -8,6 +8,7 @@ import { isBackupRestoreOwed } from "./restore-owed";
 import {
   knownGroupsChanged,
   markBackupDirty,
+  ownStateChanged,
   runDueBackup,
   type AutoBackupDeps,
   type AutoBackupOutcome,
@@ -17,13 +18,15 @@ import {
  * Run the automatic backup: watch for changes worth keeping, and flush them on
  * a slow tick.
  *
- * Two halves of "worth keeping" reach this from single choke points rather
+ * Three parts of "worth keeping" reach this from single choke points rather
  * than from every mutation site, because a rule spread across call sites is a
  * rule that drifts:
  *
  *   * the address book, through `subscribeAcceptedChanged`, which already
  *     fires for every accept, removal and rename;
- *   * group membership, compared at each tick against the set last reported.
+ *   * group membership, compared at each tick against the set last reported;
+ *   * the person's own name, photo and "who can find me" setting, compared at
+ *     each tick by their stamps, the same way.
  *
  * Membership is checked HERE rather than hooked into the chat layer's snapshot
  * write, which is where it first went. That hook only fires after an MLS
@@ -49,6 +52,9 @@ export interface AutoBackupDriverInputs {
    *  `null` before the chat layer has loaded them, which is not the same as
    *  "no groups" and must not be read as a departure from every one of them. */
   readonly knownGroupIds: () => readonly string[] | null;
+  /** The stamps of the own profile and the setting as one key, `null` before
+   *  they are loaded (asked again at the next tick). */
+  readonly ownStateKey?: (accountIdB64: string) => string | null;
   readonly accountIdB64: () => string | null;
   readonly ed25519Seed: () => Uint8Array | null;
   readonly deviceKey: () => Promise<DeviceCipher | null>;
@@ -103,6 +109,10 @@ export function startAutoBackup(inputs: AutoBackupDriverInputs): () => void {
     const accountIdB64 = inputs.accountIdB64();
     const groups = accountIdB64 === null ? null : inputs.knownGroupIds();
     if (accountIdB64 !== null && groups !== null && knownGroupsChanged(accountIdB64, groups)) {
+      markBackupDirty(accountIdB64);
+    }
+    const own = accountIdB64 === null ? null : (inputs.ownStateKey?.(accountIdB64) ?? null);
+    if (accountIdB64 !== null && own !== null && ownStateChanged(accountIdB64, own)) {
       markBackupDirty(accountIdB64);
     }
     running = true;

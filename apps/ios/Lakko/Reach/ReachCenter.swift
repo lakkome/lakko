@@ -424,6 +424,11 @@ public final class ReachCenter: ObservableObject {
         }
     }
 
+    /// ``sync()`` when `accountIdB64` is the active account.
+    func sync(forAccount accountIdB64: String) {
+        if self.accountIdB64 == accountIdB64 { sync() }
+    }
+
     /// One registration pass, awaited. Returns whether it applied.
     @discardableResult
     public func syncNow() async -> Bool {
@@ -601,9 +606,62 @@ public final class ReachCenter: ObservableObject {
         setting = stamped
         record.settingEnvelopeB64 = envelope.base64EncodedString()
         persist()
+        // The backup carries the setting.
+        if let accountIdB64 {
+            AutoBackupStore.markDirty(accountIdB64: accountIdB64, nowMs: Int64(clamping: Self.nowMs()))
+        }
         onDeviceEnvelope?(envelope)
         rotateClasses(narrowed ? [.group, .channel, .fof] : [.group, .channel], sync: true)
         return narrowed
+    }
+
+    /// The setting as the envelope a backup carries for `accountIdB64`, or
+    /// `nil` for the untouched default. Read from the stored record, so it
+    /// works before this account is active.
+    func backupSettingEnvelope(accountIdB64: String) -> Data? {
+        let held = self.accountIdB64 == accountIdB64 ? record : persistence.load(accountIdB64: accountIdB64)
+        guard let bytes = held?.settingEnvelopeB64.flatMap({ Data(base64Encoded: $0) }),
+              let decoded = try? decodeVisibilityEnvelope(plaintext: bytes),
+              decoded.updatedAtMs > 0 else { return nil }
+        return bytes
+    }
+
+    /// The setting a restored backup carried. For the active account it takes
+    /// the path of a setting from another device (``adoptSetting(envelope:)``:
+    /// keys, the mailbox, Everyone, the profiles). A route restores before
+    /// its session lands, so for an account not active yet it goes into the
+    /// account's stored record when strictly newer, and ``activate(accountIdB64:accountIdentity:)``
+    /// and the first ``sync()`` of the session act on it. Fail closed: bytes
+    /// the core refuses change nothing.
+    @discardableResult
+    func adoptRestoredSetting(envelope: Data, accountIdB64: String) -> Bool {
+        guard let incoming = try? decodeVisibilityEnvelope(plaintext: envelope) else { return false }
+        if isActive, self.accountIdB64 == accountIdB64 { return adoptSetting(envelope: envelope) }
+        var held = persistence.load(accountIdB64: accountIdB64) ?? ReachRecord()
+        let stored = held.settingEnvelopeB64
+            .flatMap { Data(base64Encoded: $0) }
+            .flatMap { try? decodeVisibilityEnvelope(plaintext: $0) }
+        guard visibilityIsNewer(
+            incomingUpdatedAtMs: incoming.updatedAtMs, storedUpdatedAtMs: stored?.updatedAtMs ?? 0)
+        else { return false }
+        held.settingEnvelopeB64 = envelope.base64EncodedString()
+        persistence.save(held, accountIdB64: accountIdB64)
+        return true
+    }
+
+    /// A backup was restored for `accountIdB64`: what this device noted about
+    /// the Everyone publication says nothing about the server any more, so
+    /// the next ``sync()`` publishes again.
+    func forgetPublishedEveryone(accountIdB64: String) {
+        if self.accountIdB64 == accountIdB64 {
+            publishedEveryoneFor = nil
+            guard record.publishedEveryone != nil else { return }
+            record.publishedEveryone = nil
+            persist()
+        } else if var held = persistence.load(accountIdB64: accountIdB64), held.publishedEveryone != nil {
+            held.publishedEveryone = nil
+            persistence.save(held, accountIdB64: accountIdB64)
+        }
     }
 
     /// Accept a setting another of this account's devices sent, when strictly
@@ -1703,28 +1761,48 @@ public final class ReachCenter: ObservableObject {
 
     // MARK: - Everyone (ADR-0060 section 5)
 
-    /// What this device last published in Everyone (name, username and
-    /// certificate), to republish when any of them changes. In memory only, so
-    /// every session start republishes once.
+    /// What this device last published in Everyone (name, username,
+    /// certificate and the key and mailbox the record names), to republish
+    /// when any of them changes. In memory only, so every session start
+    /// republishes once.
     private var publishedEveryoneFor: String?
 
     /// Enter or leave Everyone in discovery to match the setting (ADR-0060
-    /// section 5): on entering (and on a name, username or certificate change
-    /// while in it) the lookup key of every `nameSearchTerms` term and the
-    /// public record sealed under the OPRF outputs of those terms and the
+    /// section 5): on entering (and on a name, username, certificate or key
+    /// change while in it) the lookup key of every `nameSearchTerms` term and
+    /// the public record sealed under the OPRF outputs of those terms and the
     /// username; on leaving `public: false`. Best effort; retried on the next
-    /// sync.
+    /// sync. A stop that leaves the person unfindable shows on the setting's
+    /// screen (``status``), with its Try again.
     public func applyEveryone(discovery: DiscoveryClient? = nil) async {
-        guard isActive, let token = sessionTokenProvider(), let accountIdB64 else { return }
+        guard isActive, let accountIdB64 else { return }
         let wantPublic = setting.mode == .everyone
+        guard let token = sessionTokenProvider() else {
+            if wantPublic { everyoneStopped("no session") }
+            return
+        }
         let own = ownNameProvider()
+        let client = discovery ?? DiscoveryClient(sessionToken: token)
+        // A device that holds no certificate (a restore, a fresh install)
+        // gets it here: a record with no username is not found by it.
+        if wantPublic, own.username != nil, ownUsernameCertificate == nil {
+            do {
+                let fetched = try await client.fetchUsernameCertificate()
+                guard self.accountIdB64 == accountIdB64 else { return }
+                if let fetched { setOwnUsernameCertificate(fetched) }
+            } catch {
+                guard self.accountIdB64 == accountIdB64 else { return }
+                NSLog("ADR-0060: username certificate not fetched for Everyone: \(type(of: error))")
+            }
+        }
         let name = own.displayName ?? ""
         let cert = own.username == nil ? nil : ownUsernameCertificate
-        let publishKey = "\(name)|\(own.username ?? "")|\(cert?.base64EncodedString() ?? "")"
+        let publishKey = ReachRules.everyonePublishKey(
+            displayName: name, username: own.username, certificate: cert,
+            accountKey: ownAccountKey, mailboxBinding: ownMailbox?.binding)
         if record.publishedEveryone == wantPublic, !wantPublic || publishedEveryoneFor == publishKey {
             return
         }
-        let client = discovery ?? DiscoveryClient(sessionToken: token)
         do {
             var nameTermLookupKeys: [Data] = []
             var publicRecord: Data?
@@ -1749,7 +1827,7 @@ public final class ReachCenter: ObservableObject {
                 guard let identityPk = ownAccountKey, let binding = ownMailbox?.binding,
                       let accountId = own.accountId, accountId.count == 16,
                       !recordTermOutputs.isEmpty else {
-                    NSLog("ADR-0060: Everyone not published: no identity, account id or search term")
+                    everyoneStopped("no identity, account id or search term")
                     return
                 }
                 let payload = FfiIntroductionPayload(
@@ -1777,6 +1855,13 @@ public final class ReachCenter: ObservableObject {
             NSLog("ADR-0060: Everyone publish failed: \(error)")
             if status == .applied { status = Self.isOffline(error) ? .pendingOffline : .failed }
         }
+    }
+
+    /// The person chose Everyone and nothing was published: said on the
+    /// setting's screen, with its Try again, never only in a log line.
+    private func everyoneStopped(_ reason: String) {
+        NSLog("ADR-0060: Everyone not published: \(reason)")
+        status = .failed
     }
 
     // MARK: - Contacts of contacts: this account's own record (section 4)

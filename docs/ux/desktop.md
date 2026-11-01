@@ -237,12 +237,11 @@ app.
 - A page cannot tell whether the app opened. With no app installed the web page
   keeps working as today; pressing the button in Safari shows that browser's
   message and nothing else.
-- Inside the app, the create menu has **Open a link**: it takes a pasted
-  Lakko link (`https://lakko.me/i/`, `/c/`, `/g/`) and shows its screen. This
-  is the route that always works. Anything else stays in the dialog with "This
-  is not a Lakko link. Check it and try again."
-- A link that is not a Lakko link is never opened inside Lakko; links in
-  messages open in the system's default browser.
+- Nobody is asked to bring a link into the app by hand: a link is opened by
+  clicking it. There is no "Open a link" item in any menu (maintainer,
+  2026-11-01). A link in a message opens its screen in place, and any other link
+  in a message opens in the system's default browser
+  ([`message-links.md`](message-links.md)).
 
 ## 8. Updates
 

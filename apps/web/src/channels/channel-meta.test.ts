@@ -18,7 +18,7 @@ import {
   CHANNEL_NEEDS_NAME,
   newestChannelMeta,
 } from "./channel-meta";
-import { isHiddenPostDecode, toPostDecode, type PostDecode, type PostPlaintextClassifier } from "./PostCard";
+import { isHiddenPostDecode, toPostDecode, type PostDecode, type PostPlaintextClassifier } from "./post-decode";
 
 const isNewer = (a: bigint, b: bigint): boolean => a > b;
 

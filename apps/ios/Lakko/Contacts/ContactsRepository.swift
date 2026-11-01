@@ -2173,22 +2173,31 @@ public final class ContactsRepository: ObservableObject {
     /// the fragment's secret. The ledger GET needs no session; nothing is
     /// spent and nothing is sent. A missing or malformed fragment is a
     /// damaged link (ADR-0028 amendment 2026-09-28).
-    private func fetchAndOpenLink(token: String, client: DiscoveryClient) async -> LinkFetch {
+    private func fetchAndOpenLink(
+        token: String, client: DiscoveryClient, hasSession: Bool = true
+    ) async -> LinkFetch {
         let parts = InviteLinkSecret.split(token)
         guard let blobId = Self.parseInviteSlug(parts.base),
               let linkSecret = InviteLinkSecret.read(parts.fragment) else { return .dead }
-        let sealed: Data?
+        let row: (sealed: Data, usedUp: Bool)?
         do {
-            sealed = try await client.fetchInvite(blobId: blobId)
+            row = try await client.fetchInviteRow(blobId: blobId)
         } catch {
             if DiscoveryClientError.isRateLimited(error) { return .rateLimited }
             return .failed((error as? LocalizedError)?.errorDescription ?? "fetch failed")
         }
-        guard let sealed,
-              let capability = try? InviteCapability.openLink(sealed: sealed, linkSecret: linkSecret),
+        guard let row, !Self.usedUpReadsDead(usedUp: row.usedUp, hasSession: hasSession),
+              let capability = try? InviteCapability.openLink(sealed: row.sealed, linkSecret: linkSecret),
               capability.isValidNow(nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
         else { return .dead }
         return .opened(blobId: blobId, linkSecret: linkSecret, capability: capability)
+    }
+
+    /// A used-up link is dead to a visitor with no session. With a session
+    /// the flag is ignored: this person may be one who already used the link,
+    /// bound for "already in your contacts", and only the consume can say.
+    static func usedUpReadsDead(usedUp: Bool, hasSession: Bool) -> Bool {
+        usedUp && !hasSession
     }
 
     /// The signed-out invite page (`docs/ux/contact-invite-link.md` section
@@ -2198,7 +2207,7 @@ public final class ContactsRepository: ObservableObject {
     /// and nothing is sent. Signing in or creating an account then lands on
     /// the default page through the parked link.
     public func previewInviteLink(slug token: String) async -> InvitePreviewResult {
-        switch await fetchAndOpenLink(token: token, client: discoveryClientFactory()) {
+        switch await fetchAndOpenLink(token: token, client: discoveryClientFactory(), hasSession: false) {
         case .opened(_, _, let capability):
             return .preview(InvitePreview(
                 displayName: capability.inviterDisplayName(), username: capability.inviterUsername(),

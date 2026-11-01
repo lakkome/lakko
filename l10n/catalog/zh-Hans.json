@@ -191,7 +191,7 @@
       "status": "machine"
     },
     "auth.signup.lede": {
-      "text": "你的密码永远不会离开你的设备。接下来你会获得一个需要抄写下来的恢复短语。",
+      "text": "你的密码绝不会离开你的设备。",
       "status": "machine"
     },
     "auth.signup.name.hint": {
@@ -964,6 +964,10 @@
     },
     "call.log.declined": {
       "text": "已拒绝",
+      "status": "machine"
+    },
+    "call.log.failed": {
+      "text": "通话失败",
       "status": "machine"
     },
     "call.log.incoming": {
@@ -3462,6 +3466,14 @@
       "text": "{name}：{text}",
       "status": "machine"
     },
+    "chats.restored.banner_other_devices": {
+      "text": "你的其他设备正在把这台设备加入聊天。",
+      "status": "machine"
+    },
+    "chats.restored.card": {
+      "text": "你的密钥已恢复。联系人打开 Lakko 后，你的聊天会回来。之前的消息不会恢复。",
+      "status": "machine"
+    },
     "chats.row.actions": {
       "text": "对话操作",
       "status": "machine"
@@ -3834,6 +3846,10 @@
       "text": "请先发送一条消息，才能发起通话。",
       "status": "machine"
     },
+    "contacts.detail.chat_starting": {
+      "text": "正在准备你的聊天。",
+      "status": "machine"
+    },
     "contacts.detail.gone_body": {
       "text": "此人已不在你的联系人中。",
       "status": "machine"
@@ -4052,6 +4068,10 @@
     },
     "contacts.scan_qr.not_a_link": {
       "text": "这不是 Lakko 链接。请换一个二维码。",
+      "status": "machine"
+    },
+    "contacts.search.ask_again": {
+      "text": "再次请求",
       "status": "machine"
     },
     "desktop.capture.body": {
@@ -5771,7 +5791,7 @@
       "status": "machine"
     },
     "group.join.wait_secondary": {
-      "text": "两个步骤都没有时间限制。如果一直没有进展，你可以重新发送请求。",
+      "text": "如果没有动静，你可以再次发送请求。",
       "status": "machine"
     },
     "guest.claim.error.generic": {
@@ -6059,7 +6079,7 @@
       "status": "machine"
     },
     "invite.group.invited_by": {
-      "text": "邀请人：{fingerprint}",
+      "text": "邀请人：{name}",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {
@@ -6443,7 +6463,7 @@
       "status": "machine"
     },
     "new_group.no_contacts": {
-      "text": "请先添加联系人；群组从你已认识的人开始。",
+      "text": "群组可以只有你一个人。现在或以后再添加成员。",
       "status": "machine"
     },
     "new_group.subtitle": {
@@ -6723,7 +6743,7 @@
       "status": "machine"
     },
     "protect.phrase.body": {
-      "text": "只有你保管的 12 个词。更安全，且与邮箱无关。",
+      "text": "只有你保管的 12 个单词。最可靠的找回方式。",
       "status": "machine"
     },
     "protect.phrase.save.body": {

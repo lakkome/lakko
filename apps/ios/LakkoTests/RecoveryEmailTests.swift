@@ -197,11 +197,11 @@ final class RecoveryEmailTests: XCTestCase {
         XCTAssertEqual(NoticeQuery.sinceMs(5).queryItem, "since_ms=5")
         XCTAssertEqual(NoticeQuery.after(5).queryItem, "after=5")
 
-        // What comes back is shown, not adopted silently.
+        // A device with no cursor is new: nothing older is shown (D29).
         let outcome = NoticeSelection.select(
             fetched: [notice(41, .passwordChangedByEmail), notice(40, .emailAdded)], cursor: nil, ownActions: [:])
-        XCTAssertEqual(outcome.shown.map(\.id), [40, 41])
-        XCTAssertEqual(outcome.cursor, 41, "then a cursor is kept")
+        XCTAssertEqual(outcome.shown, [])
+        XCTAssertEqual(outcome.cursor, 41, "the newest id becomes its cursor")
         // Nothing came back: the cursor is kept all the same.
         XCTAssertEqual(NoticeSelection.select(fetched: [], cursor: nil, ownActions: [:]).cursor, 0)
     }
@@ -336,16 +336,16 @@ final class RecoveryEmailTests: XCTestCase {
     func testNoticesAreShownOnceAndAnsweredOnesAreNotFetchedAgain() async {
         let store = AccountProtectionStore(defaults: defaults())
         let server = Server(status(enabled: true, vault: true, phraseSaved: false))
-        // No cursor on this device: the last 30 days, then by id.
-        let first = NoticeQuery.sinceMs(server.now - NoticeQuery.lookbackMs)
-        server.pages[first] = AccountNoticePage(
+        // A kept cursor below the notices: they are new to this device.
+        store.setNoticeCursor(0, accountIdB64: "acct")
+        server.pages[.after(0)] = AccountNoticePage(
             notices: [notice(1, .emailAdded), notice(2, .passwordChangedByEmail)], nextAfter: 2, more: true)
         server.pages[.after(2)] = AccountNoticePage(
             notices: [notice(3, .accountOpenedByEmail)], nextAfter: 3, more: false)
         let center = center(server, store: store)
         await center.land(accountIdB64: "acct")
 
-        XCTAssertEqual(server.noticeReads, [first, .after(2)])
+        XCTAssertEqual(server.noticeReads, [.after(0), .after(2)])
         XCTAssertEqual(center.notices.map(\.id), [1, 2, 3], "shown, not adopted silently")
         // Nothing answered yet: all of them are read again at the next
         // landing, and a cursor is kept from here on.
@@ -364,6 +364,28 @@ final class RecoveryEmailTests: XCTestCase {
         center.acknowledge(center.notices[0])
         XCTAssertEqual(center.notices, [])
         XCTAssertEqual(store.noticeCursor(accountIdB64: "acct"), 3)
+    }
+
+    func testANewDeviceShowsNothingOlderAndKeepsTheNewestIdAsItsCursor() async {
+        let store = AccountProtectionStore(defaults: defaults())
+        let server = Server(status(enabled: true, vault: true, phraseSaved: false))
+        let first = NoticeQuery.sinceMs(server.now - NoticeQuery.lookbackMs)
+        server.pages[first] = AccountNoticePage(
+            notices: [notice(1, .emailAdded), notice(2, .phraseSaved)], nextAfter: 2, more: true)
+        server.pages[.after(2)] = AccountNoticePage(
+            notices: [notice(3, .accountOpenedByEmail)], nextAfter: 3, more: false)
+        let center = center(server, store: store)
+        await center.land(accountIdB64: "acct")
+
+        XCTAssertEqual(center.notices, [])
+        XCTAssertEqual(store.noticeCursor(accountIdB64: "acct"), 3)
+        XCTAssertEqual(server.statusReads, 2, "a phrase saved elsewhere is still read again")
+
+        // The next one after the cursor is a real notice.
+        server.pages[.after(3)] = AccountNoticePage(
+            notices: [notice(4, .emailRemoved)], nextAfter: 4, more: false)
+        await center.loadNotices()
+        XCTAssertEqual(center.notices.map(\.id), [4])
     }
 
     func testARecoveryOnAFreshDeviceIsNotToldAboutItself() async {
@@ -1367,7 +1389,9 @@ final class SavePhraseFlowTests: XCTestCase {
         func note(_ event: String) { events.append(event) }
     }
 
-    private func flow(_ world: World) -> SavePhraseFlow {
+    private func flow(
+        _ world: World, rotationNeedsSession: (@MainActor () -> Void)? = nil
+    ) -> SavePhraseFlow {
         SavePhraseFlow(ports: SavePhraseFlow.Ports(
             accountIdB64: { "acct" },
             sessionToken: { "tok" },
@@ -1395,7 +1419,7 @@ final class SavePhraseFlowTests: XCTestCase {
             },
             rotationWords: { world.rotationWords },
             proofExpired: { world.note("proof-expired") }
-        ))
+        ), rotationNeedsSession: rotationNeedsSession)
     }
 
     private func http(_ status: Int, _ body: String) -> Error {
@@ -1429,6 +1453,30 @@ final class SavePhraseFlowTests: XCTestCase {
             world.events, ["read", "own-action", "post", "phrase-saved"],
             "the own action is marked before the server writes the notice")
         XCTAssertFalse(world.events.contains("rotate"))
+    }
+
+    /// D40: on the sign-up step nothing of the session runs, so the rotation
+    /// cannot: the screen hands over to the app instead of failing.
+    func testOnTheSignUpStepARotationLeavesForTheApp() async {
+        let world = World()
+        world.status = .success(AccountPhraseStatus(saved: false, rotationNeeded: true))
+        var handedOver = 0
+        let flow = flow(world, rotationNeedsSession: { handedOver += 1 })
+
+        await flow.open()
+        XCTAssertEqual(handedOver, 1)
+        XCTAssertFalse(world.events.contains("rotate"))
+    }
+
+    func testOnTheSignUpStepHeldWordsStayOnTheStep() async {
+        let world = World()
+        var handedOver = 0
+        let flow = flow(world, rotationNeedsSession: { handedOver += 1 })
+
+        await flow.open()
+        await flow.primary()
+        XCTAssertEqual(flow.state, .heldWords("held words"))
+        XCTAssertEqual(handedOver, 0)
     }
 
     func testRotationNeededKeepsTheRotationPath() async {

@@ -189,10 +189,18 @@ public fun ChatListScreen(
      *  app has not answered yet, listed in All chats at once. */
     invited: List<me.lakko.app.contacts.PendingContact> = emptyList(),
     onOpenPendingChat: (accountIdHex: String) -> Unit = {},
+    /** `docs/ux/identity-recovery.md` 7.2 — what the list says after a restore. */
+    restoredChats: me.lakko.app.backup.RestoredChatsHint = me.lakko.app.backup.RestoredChatsHint.NONE,
+    onOpenContacts: () -> Unit = {},
 ) {
     val state by repository.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val knownChannels = channels?.channels?.collectAsStateWithLifecycle()?.value.orEmpty()
+    val knownChannelName: (String) -> String? = { id ->
+        knownChannels.firstOrNull { it.id.equals(id, ignoreCase = true) }
+            ?.let { it.sharedName.ifEmpty { it.localName } }
+    }
     val flagsState = deviceGroupSync?.flags?.collectAsStateWithLifecycle()
     val flagsMap: Map<String, FlagsState> = flagsState?.value ?: emptyMap()
     var refreshing by remember { mutableStateOf(false) }
@@ -382,6 +390,14 @@ public fun ChatListScreen(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                     )
                 }
+                if (restoredChats == me.lakko.app.backup.RestoredChatsHint.BANNER) {
+                    Text(
+                        t("chats.restored.banner_other_devices"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    )
+                }
                 // docs/ux/chat-folders.md 2.1 — the bar exists once one folder
                 // does; a search hides it and searches everything (2.4).
                 if (showBar) {
@@ -414,7 +430,11 @@ public fun ChatListScreen(
                     // (docs/ux/navigation.md section 4, "Also with an empty
                     // list").
                     showsEmptyConversationState(rows.isEmpty() && invited.isEmpty(), query) && !showBar ->
-                        EmptyPanel(onStart = { createMenuOpen = true })
+                        if (restoredChats == me.lakko.app.backup.RestoredChatsHint.CARD) {
+                            RestoredChatsPanel(onOpenContacts = onOpenContacts)
+                        } else {
+                            EmptyPanel(onStart = { createMenuOpen = true })
+                        }
                     // UX who-can-find-me 6.1 — the people half of the search
                     // field replaces the plain lookup row when it is wired.
                     searching && foundNoRow && peopleSearch != null && peopleSession != null -> Column(
@@ -427,6 +447,7 @@ public fun ChatListScreen(
                             service = peopleSearch,
                             session = peopleSession,
                             conversationMatches = 0,
+                            channelName = knownChannelName,
                             onOpenChannel = { id, handle ->
                                 query = ""
                                 onSubscribeToChannel(id, handle)
@@ -453,6 +474,7 @@ public fun ChatListScreen(
                                     service = peopleSearch,
                                     session = peopleSession,
                                     conversationMatches = visible.size + visibleInvited.size,
+                                    channelName = knownChannelName,
                                     onOpenChannel = { id, handle ->
                                         query = ""
                                         onSubscribeToChannel(id, handle)
@@ -478,7 +500,11 @@ public fun ChatListScreen(
                         val folder = folders.getOrNull(page - 1)
                         if (folder == null) {
                             if (rows.isEmpty() && invited.isEmpty()) {
-                                EmptyPanel(onStart = { createMenuOpen = true })
+                                if (restoredChats == me.lakko.app.backup.RestoredChatsHint.CARD) {
+                                    RestoredChatsPanel(onOpenContacts = onOpenContacts)
+                                } else {
+                                    EmptyPanel(onStart = { createMenuOpen = true })
+                                }
                             } else {
                                 ConversationList(
                                     rows = rows,
@@ -1482,6 +1508,28 @@ private fun EmptyPanel(onStart: () -> Unit) {
             )
             Spacer(Modifier.height(12.dp))
             Button(onClick = onStart) { Text(t("chats.empty.action")) }
+        }
+    }
+}
+
+/** The empty list of a device restored with no other device left
+ *  (`docs/ux/identity-recovery.md` 7.2). Not a loading state: no spinner. */
+@Composable
+private fun RestoredChatsPanel(onOpenContacts: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = t("chats.restored.card"),
+                style = MaterialTheme.typography.bodyLarge,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+            Spacer(Modifier.height(12.dp))
+            Button(onClick = onOpenContacts) { Text(t("nav.contacts")) }
         }
     }
 }

@@ -77,7 +77,13 @@ describe("inviteHeadline", () => {
 });
 
 describe("invitedByLine", () => {
-  it("prefixes the fingerprint with `Invited by`", () => {
-    expect(invitedByLine("12345 67890")).toBe("Invited by 12345 67890");
+  it("names the inviter from the preview", () => {
+    expect(invitedByLine({ inviterName: " Anna ", memberCount: 2 })).toBe("Invited by Anna");
+  });
+
+  it("is gone with no name, so no digits can stand in for one", () => {
+    expect(invitedByLine({ memberCount: 2 })).toBeNull();
+    expect(invitedByLine({ inviterName: "  ", memberCount: 2 })).toBeNull();
+    expect(invitedByLine(null)).toBeNull();
   });
 });

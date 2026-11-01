@@ -195,6 +195,7 @@ class CallHistoryTest {
     fun `the danger tint is exactly the outcomes where nobody spoke`() {
         assertTrue(callHistoryIsUnanswered(CallOutcome.MISSED))
         assertTrue(callHistoryIsUnanswered(CallOutcome.DECLINED))
+        assertTrue(callHistoryIsUnanswered(CallOutcome.FAILED))
         assertFalse(callHistoryIsUnanswered(CallOutcome.OUTGOING))
         assertFalse(callHistoryIsUnanswered(CallOutcome.INCOMING))
     }

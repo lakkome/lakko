@@ -139,9 +139,12 @@ public struct GroupInviteHeadline: Equatable {
         return GroupInviteHeadline(lead: lead, groupName: group, members: members)
     }
 
-    /// The foot of the card: the one thing on it the inviter cannot fake.
-    public static func footer(fingerprint: String) -> String {
-        Localization.text("invite.group.invited_by", texts: ["fingerprint": fingerprint])
+    /// The foot of the card: who invites, from the sealed preview. `nil`
+    /// with no name: the line is gone, digits never appear.
+    public static func footer(inviterName: String?) -> String? {
+        nonBlank(inviterName).map {
+            Localization.text("invite.group.invited_by", texts: ["name": $0])
+        }
     }
 
     private static func nonBlank(_ value: String?) -> String? {

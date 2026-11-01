@@ -12,6 +12,24 @@ package me.lakko.app.devices.sync
  * here is noticing that the DeviceGroup grew and naming who was a member
  * before it did, which is the input that rule takes.
  */
+/**
+ * One DeviceGroup send, run once more when the held handle was behind the disk:
+ * [catchUp] reopens it, [again] seals and publishes on the reopened handle. A
+ * second refusal is passed on: something else is wrong, and the caller's own
+ * failure path (pending flag, log) takes it.
+ */
+internal suspend fun <T> retryOnceAfterSnapshotChanged(
+    send: suspend () -> T,
+    catchUp: () -> Unit,
+    again: suspend () -> T,
+): T =
+    try {
+        send()
+    } catch (_: me.lakko.app.devices.DeviceGroupSnapshotStore.SnapshotChanged) {
+        catchUp()
+        again()
+    }
+
 internal object SyncCatchUp {
 
     /** The longest the growth re-send waits, so a new device's own first

@@ -57,6 +57,7 @@ import { searchPeople } from "./people-search";
 import { candidatesMatching, ReachVerdicts } from "./reach-verdicts";
 import {
   heldStateAfter,
+  mayAskAgain,
   outgoingOf,
   rowSendState,
   rowView,
@@ -116,6 +117,8 @@ export function PeopleSearch(props: {
   readonly noMatchLine?: () => string | null;
   /** The route of the one-to-one with a person, or `null` (Chats). */
   readonly chatHrefOf?: (personKeyB64: string) => string | null;
+  /** A channel's name when this device knows one, `null` otherwise. */
+  readonly channelNameOf?: (channelIdHex: string) => string | null;
 }): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
@@ -261,8 +264,7 @@ export function PeopleSearch(props: {
     // contradict the person standing there.
     return outcome === null ? null : peopleLineOf(outcome.state, merged().length);
   };
-  const showsPeople = (): boolean =>
-    people().length > 0 || channel() !== null || searching() || message() !== null;
+  const showsPeople = (): boolean => people().length > 0 || searching() || message() !== null;
 
   /** The line that nothing matches, when nothing stands in the field. */
   const noMatchLine = (): string | null => {
@@ -299,18 +301,6 @@ export function PeopleSearch(props: {
             />
           )}
         </For>
-        <Show when={channel()}>
-          {(c) => (
-            <button
-              type="button"
-              class="lk-pane-lookup"
-              onClick={() => props.onOpenChannel?.(c().idHex, c().handle)}
-            >
-              <Icon name="channels" size={16} />
-              {t("search.people.channel_result", { handle: `@${c().handle}` })}
-            </button>
-          )}
-        </Show>
         <Show when={message()}>
           {(line) => (
             <p class="lk-pane-nomatch" role="status">
@@ -318,6 +308,21 @@ export function PeopleSearch(props: {
             </p>
           )}
         </Show>
+      </Show>
+      <Show when={channel()}>
+        {(c) => (
+          <>
+            <div class="lk-section-label">{t("nav.channels")}</div>
+            <button
+              type="button"
+              class="lk-pane-lookup"
+              onClick={() => props.onOpenChannel?.(c().idHex, c().handle)}
+            >
+              <Icon name="channels" size={16} />
+              {props.channelNameOf?.(c().idHex) ?? `@${c().handle}`}
+            </button>
+          </>
+        )}
       </Show>
     </>
   );
@@ -345,7 +350,8 @@ function PersonRow(props: {
     props.person.reach === "contact"
       ? "idle"
       : rowSendState(props.person, rowStateOf(props.person.keyHex), props.outgoing());
-  const view = () => rowView(state(), canAddContact(props.person));
+  const view = () =>
+    rowView(state(), canAddContact(props.person), mayAskAgain(props.person, props.outgoing()));
   /** A refusal takes the grant away, and with it what the row may show; the
    *  row keeps the username its card still has while it says so. The next
    *  text asks again, and a person who cannot be reached is a name alone. */
@@ -450,6 +456,12 @@ function PersonRow(props: {
           <span class="lk-row-sub" role="status">
             {REQUEST_SENT()}
           </span>
+        </Show>
+        {/* A decline is silent: nothing else says the first one is over. */}
+        <Show when={view().askAgain}>
+          <button type="button" class="lk-pane-lookup" style={{ width: "auto" }} onClick={() => void send()}>
+            {t("contacts.search.ask_again")}
+          </button>
         </Show>
       </div>
       <Show when={view().message}>

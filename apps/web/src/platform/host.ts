@@ -345,6 +345,21 @@ export async function openHostPrivacy(what: PrivacyPage): Promise<void> {
   }
 }
 
+/** Open an `http` or `https` link in the system's default browser. Never
+ *  throws. */
+export async function openHostUrl(url: string): Promise<void> {
+  if (!isDesktop()) return;
+  try {
+    await fetch(`${HOST_APP_PATH}/open-url`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+  } catch {
+    // The link is still on screen.
+  }
+}
+
 /** Bounce the Dock icon once / flash the taskbar. Never throws. */
 export async function requestHostAttention(): Promise<void> {
   if (!isDesktop()) return;

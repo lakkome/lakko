@@ -70,7 +70,7 @@ export function OpenInApp(): JSX.Element {
   return (
     <Show when={offered && link() !== null}>
       <div class="lk-open-in-app">
-        <button type="button" onClick={() => void open()}>
+        <button type="button" class="primary" onClick={() => void open()}>
           {t("open_in_app.button")}
         </button>
         <Show when={copied()}>

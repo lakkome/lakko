@@ -89,7 +89,19 @@ public class PeopleSearchService(
         search = ::search,
         send = ::send,
         reachCheck = { keyB64, wire -> reachCheckWith(Base64.getDecoder().decode(keyB64), wire) },
+        dismissSent = ::dismissSentTo,
     )
+
+    /** Contacts > Sent > Dismiss for this person, by key or by account id. */
+    private fun dismissSentTo(person: PersonResult) {
+        val sent = contacts.state.value.sent.filter { request ->
+            request.recipientKeyB64 == person.keyB64 ||
+                person.accountIdHex?.let { hex ->
+                    runCatching { searchHex(Base64.getDecoder().decode(request.recipientAccountIdB64)) }.getOrNull() == hex
+                } == true
+        }
+        sent.forEach(contacts::dismissSentRequest)
+    }
 
     /** The address book: account key base64 -> account id hex (or `null`). */
     private fun contactKeys(): Map<String, String?> =

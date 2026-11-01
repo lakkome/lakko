@@ -59,6 +59,7 @@ import type { OprfPair } from "../discovery/oprf-pair";
 import { introductionOffersTick, loadIntroductions, takeIntroductionAsks } from "./scoped-intake";
 import { visibilitySetting } from "./visibility-store";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
+import { subscribeOwnStateRestored } from "../profile/own-profile-sync";
 
 /** How often the runtime re-checks without a trigger (a contact's offer that
  *  arrived, a new one-to-one). Chosen, not measured. */
@@ -165,7 +166,10 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
     const name = profiles.ownProfile().displayName;
     const username = profiles.ownUsername();
 
-    const certificate = username === null ? null : profiles.ownUsernameCertificate();
+    // Fetched here too: on a device that has written nothing yet (a restore,
+    // a new account with no conversation) no profile has asked for it, and a
+    // record with no certificate cannot show the username to a finder.
+    const certificate = username === null ? null : await profiles.fetchOwnUsernameCertificate();
 
     /** A term to evaluate: its cache key and the OPRF round that yields it. */
     type Term = { readonly key: string; readonly evaluate: () => Promise<OprfPair> };
@@ -202,7 +206,12 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
     //    name terms, and the public record sealed under the OUTPUTS of the
     //    name terms plus the username.
     const everyone = setting.mode === wasm.VisibilityMode.Everyone;
-    const pubKey = everyoneKey(name, username, certificate === null ? null : base64Encode(certificate));
+    const pubKey = everyoneKey(
+      name,
+      username,
+      certificate === null ? null : base64Encode(certificate),
+      session.accountKeyHex,
+    );
     const action = everyoneAction(state.everyone, everyone, pubKey);
     if (action.kind === "publish") {
       const names = nameTerms(name);
@@ -210,8 +219,9 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
       if (all.length === 0) {
         // A public record needs a term, and discovery refuses Everyone
         // without one: nothing to publish until a name or a username exists.
+        // Said out loud: this person stays unfindable while it holds.
         // eslint-disable-next-line no-console
-        console.warn("[reach] Everyone not published: no name and no username yet");
+        console.warn("[reach] Everyone not published: no name and no username yet; this account cannot be found");
       } else {
         const outputs = await outputsOf(all);
         const nameLookupKeys = lookupKeysOf(outputs.slice(0, names.length));
@@ -331,7 +341,10 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
   const onOnline = (): void => trigger();
   if (typeof window !== "undefined") window.addEventListener("online", onOnline);
   const tick = setInterval(trigger, TICK_MS);
+  // A restore dropped the note of what was published.
+  const unsubscribeRestored = subscribeOwnStateRestored(trigger);
   onCleanup(() => {
+    unsubscribeRestored();
     clearInterval(tick);
     if (typeof window !== "undefined") window.removeEventListener("online", onOnline);
   });

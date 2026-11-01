@@ -33,9 +33,13 @@
 //!              (empty = no synced state held)
 //! u8           own_predecessors_count (<= MAX_OWN_PREDECESSORS)
 //! [..]         own_predecessors_count × { [64 bytes] seed, u64be adopted_at_ms }
+//! u32be        own_profile_length (<= MAX_OWN_ENVELOPE_LEN)
+//! [..]         own_profile_length bytes: the account's own profile envelope
+//! u32be        visibility_length (<= MAX_OWN_ENVELOPE_LEN)
+//! [..]         visibility_length bytes: its "who can find me" envelope
 //! ```
 //!
-//! Nothing may follow the own predecessors: trailing bytes are refused.
+//! Nothing may follow the visibility: trailing bytes are refused.
 //!
 //! Each [`AcceptedContactRecord`]:
 //!
@@ -68,6 +72,11 @@
 //!     conversation order), so a restore with no other device alive seeds
 //!     the fold from it. Validated on encode and decode through
 //!     `lakko_sync::SyncedState::from_bytes`, fail closed.
+//!   - `own_profile`, `visibility` — the person's own name and photo
+//!     references, and who can find them, as the envelopes
+//!     `lakko_contacts` defines. A restored device with no other device
+//!     alive has nowhere else to learn them. Opaque here and bounded by
+//!     length; the client decodes them fail closed.
 //!
 //! Not stored (intentional):
 //!   - MLS state is not stored: no OpenMLS provider snapshot, whole or
@@ -105,6 +114,11 @@ pub const PREDECESSOR_SEED_LEN: usize = 64;
 
 /// Most own predecessors a backup carries: the pairing state bundle's bound.
 pub const MAX_OWN_PREDECESSORS: usize = 8;
+
+/// Hard cap on the own profile and visibility envelopes. A visibility setting
+/// names up to 1024 scopes and 4096 contacts, so this sits above the largest
+/// one `lakko_contacts` composes.
+pub const MAX_OWN_ENVELOPE_LEN: usize = 256 * 1024;
 
 /// One key the account rotated away from (ADR-0074 section 3.7).
 ///
@@ -204,6 +218,14 @@ pub struct BackupPayload {
     /// The account's own predecessors, oldest first, at most
     /// [`MAX_OWN_PREDECESSORS`]. Empty for an account that never rotated.
     pub own_predecessors: Vec<OwnPredecessor>,
+    /// The account's own profile envelope (`lakko_contacts::profile`). Empty
+    /// when the person set no name. Opaque here, at most
+    /// [`MAX_OWN_ENVELOPE_LEN`] bytes.
+    pub own_profile: Vec<u8>,
+    /// The account's own "who can find me" envelope
+    /// (`lakko_contacts::visibility`). Empty when none was chosen. Opaque
+    /// here, at most [`MAX_OWN_ENVELOPE_LEN`] bytes.
+    pub visibility: Vec<u8>,
 }
 
 impl BackupPayload {
@@ -232,7 +254,11 @@ impl BackupPayload {
                 + 4
                 + self.synced_state.len()
                 + 1
-                + self.own_predecessors.len() * (PREDECESSOR_SEED_LEN + 8),
+                + self.own_predecessors.len() * (PREDECESSOR_SEED_LEN + 8)
+                + 4
+                + self.own_profile.len()
+                + 4
+                + self.visibility.len(),
         );
 
         out.push(PAYLOAD_VERSION);
@@ -299,6 +325,9 @@ impl BackupPayload {
             out.extend_from_slice(&predecessor.seed);
             out.extend_from_slice(&predecessor.adopted_at_ms.to_be_bytes());
         }
+
+        put_own_envelope(&mut out, "own_profile", &self.own_profile)?;
+        put_own_envelope(&mut out, "visibility", &self.visibility)?;
 
         Ok(out)
     }
@@ -396,6 +425,9 @@ impl BackupPayload {
             });
         }
 
+        let own_profile = take_own_envelope(&mut cur, "own_profile")?;
+        let visibility = take_own_envelope(&mut cur, "visibility")?;
+
         if !cur.is_empty() {
             return Err(BackupError::InvalidPayload(format!(
                 "{} trailing bytes after payload tail",
@@ -411,8 +443,37 @@ impl BackupPayload {
             known_group_ids,
             synced_state,
             own_predecessors,
+            own_profile,
+            visibility,
         })
     }
+}
+
+/// Write one length-prefixed own envelope, refusing one over its cap.
+fn put_own_envelope(out: &mut Vec<u8>, field: &str, bytes: &[u8]) -> Result<()> {
+    if bytes.len() > MAX_OWN_ENVELOPE_LEN {
+        return Err(BackupError::InvalidPayload(format!(
+            "{field} length {} exceeds {MAX_OWN_ENVELOPE_LEN}",
+            bytes.len(),
+        )));
+    }
+    let len = u32::try_from(bytes.len())
+        .map_err(|_| BackupError::InvalidPayload(format!("{field} length overflows u32")))?;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+/// Read one length-prefixed own envelope, checking the cap before the read.
+fn take_own_envelope(cur: &mut &[u8], field: &str) -> Result<Vec<u8>> {
+    let len =
+        u32::from_be_bytes(take_n(cur, 4)?.try_into().expect("take_n(4) length pinned")) as usize;
+    if len > MAX_OWN_ENVELOPE_LEN {
+        return Err(BackupError::InvalidPayload(format!(
+            "{field} length {len} exceeds {MAX_OWN_ENVELOPE_LEN}",
+        )));
+    }
+    Ok(take_n(cur, len)?.to_vec())
 }
 
 /// Refuse synced-state bytes the fold would refuse. Empty is "none held".
@@ -550,6 +611,8 @@ mod tests {
             known_group_ids: vec![vec![7u8; 32], vec![9u8; 32]],
             synced_state: Vec::new(),
             own_predecessors: Vec::new(),
+            own_profile: Vec::new(),
+            visibility: Vec::new(),
         }
     }
 
@@ -652,7 +715,7 @@ mod tests {
 
         payload.own_predecessors.truncate(MAX_OWN_PREDECESSORS);
         let mut wire = payload.encode().unwrap();
-        let count_at = wire.len() - MAX_OWN_PREDECESSORS * (PREDECESSOR_SEED_LEN + 8) - 1;
+        let count_at = wire.len() - 8 - MAX_OWN_PREDECESSORS * (PREDECESSOR_SEED_LEN + 8) - 1;
         wire[count_at] = u8::try_from(MAX_OWN_PREDECESSORS + 1).unwrap();
         assert!(BackupPayload::decode(&wire).is_err());
     }
@@ -666,6 +729,39 @@ mod tests {
         }];
         let wire = payload.encode().unwrap();
         assert!(BackupPayload::decode(&wire[..wire.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn the_own_name_and_visibility_round_trip() {
+        let mut payload = sample_payload();
+        payload.own_profile = vec![1, 2, 3];
+        payload.visibility = vec![4, 5];
+        let decoded = BackupPayload::decode(&payload.encode().unwrap()).unwrap();
+        assert_eq!(decoded.own_profile, payload.own_profile);
+        assert_eq!(decoded.visibility, payload.visibility);
+    }
+
+    #[test]
+    fn an_own_envelope_over_its_cap_is_refused_both_ways() {
+        let mut payload = sample_payload();
+        payload.visibility = vec![0; MAX_OWN_ENVELOPE_LEN + 1];
+        assert!(payload.encode().is_err());
+
+        payload.visibility = Vec::new();
+        let mut wire = payload.encode().unwrap();
+        let tail = wire.len() - 4;
+        let too_long = u32::try_from(MAX_OWN_ENVELOPE_LEN + 1).unwrap();
+        wire[tail..].copy_from_slice(&too_long.to_be_bytes());
+        assert!(BackupPayload::decode(&wire).is_err());
+    }
+
+    #[test]
+    fn a_length_past_the_end_of_an_own_envelope_is_refused() {
+        let payload = sample_payload();
+        let mut wire = payload.encode().unwrap();
+        let tail = wire.len() - 4;
+        wire[tail..].copy_from_slice(&[0, 0, 0, 1]);
+        assert!(BackupPayload::decode(&wire).is_err());
     }
 
     #[test]
@@ -695,6 +791,8 @@ mod tests {
                 seed: [0x77; PREDECESSOR_SEED_LEN],
                 adopted_at_ms: 0x1112_1314_1516_1718,
             }],
+            own_profile: vec![0xAA, 0xAB],
+            visibility: vec![0xBB],
         };
         let mut expected = vec![7u8];
         expected.extend_from_slice(&[0xA1; ACCOUNT_ID_LEN]);
@@ -714,6 +812,8 @@ mod tests {
         expected.push(1);
         expected.extend_from_slice(&[0x77; PREDECESSOR_SEED_LEN]);
         expected.extend_from_slice(&[0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18]);
+        expected.extend_from_slice(&[0, 0, 0, 2, 0xAA, 0xAB]);
+        expected.extend_from_slice(&[0, 0, 0, 1, 0xBB]);
         assert_eq!(payload.encode().unwrap(), expected);
         assert_eq!(BackupPayload::decode(&expected).unwrap(), payload);
     }
@@ -824,9 +924,11 @@ mod tests {
         let mut good = sample_payload();
         good.synced_state = Vec::new();
         let mut wire = good.encode().unwrap();
-        wire.truncate(wire.len() - 4);
+        // The state's length, the predecessor count, two empty envelopes.
+        wire.truncate(wire.len() - 13);
         wire.extend_from_slice(&3u32.to_be_bytes());
         wire.extend_from_slice(&[9, 9, 9]);
+        wire.extend_from_slice(&[0; 9]);
         assert!(BackupPayload::decode(&wire).is_err());
     }
 
@@ -882,6 +984,8 @@ mod tests {
             known_group_ids: Vec::new(),
             synced_state: Vec::new(),
             own_predecessors: Vec::new(),
+            own_profile: Vec::new(),
+            visibility: Vec::new(),
         };
         let wire = payload.encode().unwrap();
         let decoded = BackupPayload::decode(&wire).unwrap();
@@ -926,6 +1030,8 @@ mod tests {
             known_group_ids: Vec::new(),
             synced_state: Vec::new(),
             own_predecessors: Vec::new(),
+            own_profile: Vec::new(),
+            visibility: Vec::new(),
         };
         let err = payload.encode().unwrap_err();
         assert!(matches!(err, BackupError::InvalidPayload(_)));
@@ -946,6 +1052,8 @@ mod tests {
             known_group_ids: Vec::new(),
             synced_state: Vec::new(),
             own_predecessors: Vec::new(),
+            own_profile: Vec::new(),
+            visibility: Vec::new(),
         };
         let wire = payload.encode().unwrap();
         let decoded = BackupPayload::decode(&wire).unwrap();

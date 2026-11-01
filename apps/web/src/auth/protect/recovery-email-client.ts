@@ -307,10 +307,7 @@ export class RecoveryEmailClient {
    *  a device that has no cursor yet. */
   async notices(sessionToken: string, query: NoticeQuery): Promise<NoticePage> {
     const endpoint = "/account/notices";
-    const param =
-      query.kind === "after"
-        ? `after=${encodeURIComponent(String(query.after))}`
-        : `since_ms=${encodeURIComponent(String(query.sinceMs))}`;
+    const param = `after=${encodeURIComponent(String(query.after))}`;
     const page = parseNoticePage(
       await this.send("GET", `${endpoint}?${param}`, undefined, sessionToken),
     );

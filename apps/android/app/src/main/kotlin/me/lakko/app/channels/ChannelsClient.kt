@@ -51,7 +51,7 @@ import kotlinx.serialization.json.Json
  *
  * ## Default base URL
  *
- * `http://10.0.2.2:8090` — Android-emulator loopback
+ * `http://10.0.2.2:8086` — Android-emulator loopback
  * alias + the services/channels dev bind. Override on
  * physical devices (LAN IP) and in production
  * (Cloudflare tunnel URL).
@@ -864,7 +864,7 @@ public class ChannelsClient(
         }
 
         /** `<LAKKO_API_BASE_URL>/channels` ([ApiEndpoints]), or
-         *  `http://10.0.2.2:8090` without an API base URL. */
+         *  `http://10.0.2.2:8086` without an API base URL. */
         public val DEFAULT_BASE_URL: String
             get() = ApiEndpoints.baseUrlFor(ApiService.CHANNELS)
 

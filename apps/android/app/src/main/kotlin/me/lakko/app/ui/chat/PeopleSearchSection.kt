@@ -40,6 +40,7 @@ import me.lakko.app.search.PeopleSearchState
 import me.lakko.app.search.PersonResult
 import me.lakko.app.search.RowAction
 import me.lakko.app.search.RowSendState
+import me.lakko.app.search.channelResultLabel
 import me.lakko.app.search.keptGrantsToCheck
 import me.lakko.app.search.mergePeople
 import me.lakko.app.search.peopleRows
@@ -83,6 +84,8 @@ internal fun PeopleSearchSection(
     /** The people whose one-to-one is among the conversations above (standard
      *  base64 account keys): a contact among them is left out. */
     chatPeersB64: Set<String> = emptySet(),
+    /** The name of a channel this device knows, by its id; `null` when none. */
+    channelName: (channelIdHex: String) -> String? = { null },
 ) {
     val context = LocalContext.current
     val profileVersion by me.lakko.app.profile.ProfileDirectory.get(context).version.collectAsState()
@@ -126,20 +129,23 @@ internal fun PeopleSearchSection(
             )
         }
         val line = peopleSectionMessage(state, people.size)
-        if (showsPeopleHeading(people.size, channel != null, view.searching, line != null)) {
-            Heading(searching = view.searching)
+        if (showsPeopleHeading(people.size, view.searching, line != null)) {
+            Heading(t("search.people.heading"), searching = view.searching)
         }
         for (person in people) {
             PersonRow(
                 person = person,
                 send = rowSendState(person, sends[person.keyHex], outgoing),
+                canAskAgain = outgoing.canAskAgain(person),
                 onAdd = { session.add(person) },
+                onAskAgain = { session.askAgain(person) },
                 onOpenContact = onOpenContact,
             )
         }
         if (channel != null) {
+            Heading(t("nav.channels"), searching = false)
             ChannelRow(
-                label = t("search.people.channel_result", mapOf("handle" to "@${channel.handle}")),
+                label = channelResultLabel(channelName(channel.idHex), channel.handle),
                 onClick = { onOpenChannel(channel.idHex, channel.handle) },
             )
         }
@@ -155,13 +161,13 @@ internal fun PeopleSearchSection(
 }
 
 @Composable
-private fun Heading(searching: Boolean) {
+private fun Heading(title: String, searching: Boolean) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            t("search.people.heading"),
+            title,
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -196,10 +202,12 @@ private fun ChannelRow(label: String, onClick: () -> Unit) {
 private fun PersonRow(
     person: PersonResult,
     send: RowSendState?,
+    canAskAgain: Boolean,
     onAdd: () -> Unit,
+    onAskAgain: () -> Unit,
     onOpenContact: (String) -> Unit,
 ) {
-    val row = personRowView(person, send)
+    val row = personRowView(person, send, canAskAgain)
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
@@ -234,6 +242,8 @@ private fun PersonRow(
                     TextButton(onClick = onAdd) { Text(t("search.people.add_contact")) }
                 RowAction.ADDING ->
                     TextButton(onClick = {}, enabled = false) { Text(t("search.people.add_contact")) }
+                RowAction.ASK_AGAIN ->
+                    TextButton(onClick = onAskAgain) { Text(t("contacts.search.ask_again")) }
                 RowAction.NONE -> Unit
             }
         }

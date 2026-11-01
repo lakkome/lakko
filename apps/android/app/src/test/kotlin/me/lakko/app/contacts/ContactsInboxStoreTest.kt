@@ -261,6 +261,25 @@ class ContactsInboxStoreTest {
     }
 
     @Test
+    fun accepting_someone_retires_the_request_sent_to_them() {
+        val them = request(messageId = 1L, pubkeyByte = 5, accountId = ByteArray(16) { 45 })
+        assertEquals(listOf(sentTo(6)), sentAfterAccepting(listOf(sentTo(5), sentTo(6)), listOf(them)))
+    }
+
+    @Test
+    fun an_ack_from_a_rotated_key_of_a_known_contact_adds_no_second_row() {
+        val known = accepted(1)
+        val applied = applyContactAcks(
+            accepted = listOf(known),
+            sent = emptyList(),
+            acks = listOf(ack(5)),
+            samePerson = { a, b -> a[0].toInt() in setOf(1, 5) && b[0].toInt() in setOf(1, 5) },
+        )
+        assertEquals(1, applied.accepted.size)
+        assertTrue(applied.accepted.single().request.fromPubkey.contentEquals(known.request.fromPubkey))
+    }
+
+    @Test
     fun an_ack_fills_the_missing_account_id_of_a_known_contact() {
         val known = AcceptedContact(request = request(messageId = 1L, pubkeyByte = 5, accountId = null))
         val applied = applyContactAcks(accepted = listOf(known), sent = emptyList(), acks = listOf(ack(5)))

@@ -1778,10 +1778,11 @@ public class ContactsRepository(
                     }
                     var dropped: List<IncomingContactRequest> = emptyList()
                     var acceptedChanged = false
+                    val ackerIsPerson = provenSamePerson()
                     mutableState.update { state ->
                         // Someone accepted one of this device's requests: they are
                         // a contact here too, with their account id.
-                        val applied = applyContactAcks(state.accepted, state.sent, acks)
+                        val applied = applyContactAcks(state.accepted, state.sent, acks, ackerIsPerson)
                         // A Welcome from the person asked answers the
                         // request; the ack may never come. They become a
                         // contact in the step that retires the Sent entry.
@@ -1897,10 +1898,12 @@ public class ContactsRepository(
             state.copy(
                 pending = remaining,
                 accepted = acceptingRequests(state.accepted, accepted, groupIdHex, onePerson),
+                sent = sentAfterAccepting(state.sent, accepted),
             )
         }
         persistAccepted()
         persistInboxPending()
+        persistSent()
     }
 
     /** One accept at a time: the retry of an owed one must not run beside the
@@ -2230,14 +2233,19 @@ public class ContactsRepository(
         val secret = me.lakko.app.discovery.inviteLinkSecretOf(link.fragment) ?: return InvitePreviewResult.Dead
         // Every link is a ledger pointer; any other slug is a dead link.
         val blobId = me.lakko.app.discovery.decodeInviteBlobId(link.slug) ?: return InvitePreviewResult.Dead
-        val sealed: ByteArray = try {
+        val row = try {
             // Deliberately the bare client: no session token is attached.
-            discoveryClientFactory().use { discovery -> discovery.fetchInvite(blobId) }
+            discoveryClientFactory().use { discovery -> discovery.fetchInviteRow(blobId) }
         } catch (e: Throwable) {
             me.lakko.app.rethrowIfCancelled(e)
             if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return InvitePreviewResult.RateLimited
             return InvitePreviewResult.Failed
         } ?: return InvitePreviewResult.Dead
+        // No session here, so nobody this link already made a contact: every
+        // use spent reads as a dead link. A signed-in visitor goes through
+        // consume, which tells "already used by you" from "used up".
+        if (row.usedUp) return InvitePreviewResult.Dead
+        val sealed: ByteArray = row.sealed
         val cap = try {
             me.lakko.app.discovery.openSealedInviteLink(sealed, secret) { bytes, key ->
                 InviteCapability.openLink(bytes, key)

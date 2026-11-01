@@ -98,8 +98,8 @@ vi.mock("../l10n/live-text", async () => {
 });
 vi.mock("../channels/own-member-card", () => ({ useOwnMemberCard: () => undefined }));
 vi.mock("../channels/channel-row", () => ({ channelTitle: () => "", displayHandle: () => "" }));
-vi.mock("../channels/PostCard", () => ({
-  PostCard: () => null,
+vi.mock("../channels/PostCard", () => ({ PostCard: () => null }));
+vi.mock("../channels/post-decode", () => ({
   isHiddenPostDecode: () => false,
   toPostDecode: vi.fn(),
 }));

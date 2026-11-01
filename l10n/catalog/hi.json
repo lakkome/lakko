@@ -191,7 +191,7 @@
       "status": "machine"
     },
     "auth.signup.lede": {
-      "text": "आपका पासवर्ड कभी आपके डिवाइस से बाहर नहीं जाता। इसके बाद आपको लिखकर रखने के लिए एक रिकवरी फ़्रेज़ मिलेगी।",
+      "text": "आपका पासवर्ड कभी आपके डिवाइस से बाहर नहीं जाता।",
       "status": "machine"
     },
     "auth.signup.name.hint": {
@@ -964,6 +964,10 @@
     },
     "call.log.declined": {
       "text": "अस्वीकार की गई",
+      "status": "machine"
+    },
+    "call.log.failed": {
+      "text": "कॉल विफल रहा",
       "status": "machine"
     },
     "call.log.incoming": {
@@ -3462,6 +3466,14 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
+    "chats.restored.banner_other_devices": {
+      "text": "आपके दूसरे डिवाइस इसे आपकी चैट में जोड़ रहे हैं।",
+      "status": "machine"
+    },
+    "chats.restored.card": {
+      "text": "आपकी कुंजियाँ बहाल हो गईं। जब आपके संपर्क Lakko खोलेंगे, आपकी चैट लौट आएँगी। पुराने संदेश बहाल नहीं होते।",
+      "status": "machine"
+    },
     "chats.row.actions": {
       "text": "बातचीत के विकल्प",
       "status": "machine"
@@ -3834,6 +3846,10 @@
       "text": "कॉल शुरू करने के लिए पहले एक मैसेज भेजें।",
       "status": "machine"
     },
+    "contacts.detail.chat_starting": {
+      "text": "आपकी चैट तैयार हो रही है।",
+      "status": "machine"
+    },
     "contacts.detail.gone_body": {
       "text": "यह व्यक्ति अब आपके संपर्कों में नहीं है।",
       "status": "machine"
@@ -4052,6 +4068,10 @@
     },
     "contacts.scan_qr.not_a_link": {
       "text": "यह कोड Lakko लिंक नहीं है। कोई दूसरा कोड आज़माएँ।",
+      "status": "machine"
+    },
+    "contacts.search.ask_again": {
+      "text": "फिर से पूछें",
       "status": "machine"
     },
     "desktop.capture.body": {
@@ -5771,7 +5791,7 @@
       "status": "machine"
     },
     "group.join.wait_secondary": {
-      "text": "किसी भी चरण की कोई समय-सीमा नहीं है। अगर कुछ न हो, तो आप अनुरोध फिर से भेज सकते हैं।",
+      "text": "अगर कुछ नहीं होता, तो आप अनुरोध दोबारा भेज सकते हैं।",
       "status": "machine"
     },
     "guest.claim.error.generic": {
@@ -6059,7 +6079,7 @@
       "status": "machine"
     },
     "invite.group.invited_by": {
-      "text": "{fingerprint} ने इनवाइट किया",
+      "text": "{name} ने इनवाइट किया",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {
@@ -6443,7 +6463,7 @@
       "status": "machine"
     },
     "new_group.no_contacts": {
-      "text": "पहले संपर्क जोड़ें; ग्रुप उन लोगों से शुरू होता है जिन्हें आप पहले से जानते हैं।",
+      "text": "ग्रुप सिर्फ़ आपसे भी शुरू हो सकता है। लोगों को अभी या बाद में जोड़ें।",
       "status": "machine"
     },
     "new_group.subtitle": {
@@ -6723,7 +6743,7 @@
       "status": "machine"
     },
     "protect.phrase.body": {
-      "text": "12 शब्द जो सिर्फ़ आपके पास रहते हैं। ज़्यादा मज़बूत, और ईमेल से कोई संबंध नहीं।",
+      "text": "12 शब्द जो सिर्फ़ आपके पास रहते हैं। वापस आने का सबसे मज़बूत तरीका।",
       "status": "machine"
     },
     "protect.phrase.save.body": {

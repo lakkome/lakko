@@ -1464,6 +1464,18 @@ a.lk-row.active {
     --lk-phrase-columns: 4;
   }
 }
+/* The grid sits in a narrow card on the sign-in pages of a wide window, where
+   four columns cut words in half: the card decides, not the window. */
+.lk-phrase-block,
+.lk-phrase-input {
+  container-type: inline-size;
+}
+@container (max-width: 459px) {
+  .lk-phrase-cols,
+  .lk-phrase-grid {
+    --lk-phrase-columns: 3;
+  }
+}
 
 /* A checkbox with its sentence. */
 .lk-check {
@@ -2451,15 +2463,21 @@ input.lk-sas-code {
 .lk-menu button.danger-item {
   color: var(--danger);
 }
+/* docs/ux/desktop.md section 7: under the card, where a person is looking. In
+   Safari and on Windows and Linux this button is the only way into the app. */
 .lk-open-in-app {
   position: fixed;
-  inset-block-end: 16px;
-  inset-inline-end: 16px;
+  inset-block-end: 32px;
+  inset-inline: 16px;
   z-index: 10;
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
-  gap: 4px;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+.lk-open-in-app > * {
+  pointer-events: auto;
 }
 
 .lk-menu-sep {
@@ -3635,6 +3653,18 @@ a.ghost.small:hover {
 }
 .lk-bubble-text {
   white-space: pre-wrap;
+}
+/* docs/ux/message-links.md: underlined, so a link does not rest on colour
+   alone. On an outgoing bubble the accent is the background, so the link keeps
+   the bubble's text colour there. */
+.lk-text-link {
+  color: var(--accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+.lk-bubble.outgoing .lk-text-link {
+  color: inherit;
 }
 /* ADR-0052 / section 3.1 — the quote block inside a reply's bubble: the
    same rule, the name on the first line, the excerpt on the second, both
@@ -5755,6 +5785,8 @@ button.lk-call-chip:focus-visible {
   inset: 0;
   z-index: 12;
   display: flex;
+  flex-direction: column;
+  gap: 4px;
   align-items: center;
   justify-content: center;
   background: color-mix(in srgb, var(--surface-bg) 72%, transparent);
@@ -5765,6 +5797,9 @@ button.lk-call-chip:focus-visible {
   font-size: 17px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
+}
+.lk-call-ended p.lk-call-ended-title {
+  font-weight: 600;
 }
 
 

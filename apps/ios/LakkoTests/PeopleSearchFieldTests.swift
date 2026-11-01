@@ -124,6 +124,16 @@ final class PeopleSearchFieldTests: XCTestCase {
                 rec.requested.insert(person.accountKey)
             },
             alreadyRequested: { rec.requested.contains($0.accountKey) },
+            sentRow: { person in
+                rec.requested.contains(person.accountKey)
+                    ? SentContactRequest(
+                        recipientUsername: "", recipientAccountIdB64: "", messageId: 1, createdAt: "",
+                        recipientKeyB64: base64Encode(person.accountKey))
+                    : nil
+            },
+            dismissSent: { row in
+                rec.requested = rec.requested.filter { base64Encode($0) != row.recipientKeyB64 }
+            },
             heldGrants: { key in
                 rec.held?[key] ?? rec.candidates.first { $0.accountKey == key }?.known.keptGrants ?? []
             },
@@ -703,6 +713,55 @@ final class PeopleSearchFieldTests: XCTestCase {
         rec.requested = []
         XCTAssertEqual(shared.requestState(for: person(1)), .idle)
         XCTAssertTrue(shared.requestState(for: person(1)).offersAdd)
+    }
+
+    /// D2: a decline tells the sender nothing, so the row keeps "Request
+    /// sent" and offers Ask again: Dismiss and Add contact in one tap.
+    func testAskAgainDismissesTheRowAndSendsOnceMore() async {
+        let rec = Recorder()
+        let shared = session(rec)
+        XCTAssertFalse(shared.canAskAgain(person(1)), "nothing was asked yet")
+        await shared.addContact(person(1))
+        XCTAssertEqual(rec.sent.count, 1)
+        XCTAssertTrue(shared.canAskAgain(person(1)))
+
+        await shared.askAgain(person(1))
+
+        XCTAssertEqual(rec.sent.count, 2, "sent again, at once")
+        XCTAssertEqual(shared.requestState(for: person(1)), .sent)
+    }
+
+    func testAskAgainThatFailsLeavesAddContact() async {
+        let rec = Recorder()
+        let shared = session(rec)
+        await shared.addContact(person(1))
+        rec.sendError = Offline()
+
+        await shared.askAgain(person(1))
+
+        XCTAssertEqual(shared.requestState(for: person(1)), .failed)
+        XCTAssertTrue(shared.requestState(for: person(1)).offersAdd)
+    }
+
+    func testARowOfThePersonIsFoundByKeyOrByAccountId() {
+        let key = Data(repeating: 1, count: 32)
+        let id = Data(repeating: 2, count: 16)
+        let older = SentContactRequest(
+            recipientUsername: "", recipientAccountIdB64: base64Encode(id), messageId: 1, createdAt: "")
+        let newer = SentContactRequest(
+            recipientUsername: "", recipientAccountIdB64: base64Encode(id), messageId: 2, createdAt: "",
+            recipientKeyB64: base64Encode(key))
+        XCTAssertEqual(SentRequests.row([older, newer], accountKey: key, accountId: nil)?.messageId, 2)
+        XCTAssertEqual(SentRequests.row([older], accountKey: key, accountId: id)?.messageId, 1)
+        XCTAssertNil(SentRequests.row([older], accountKey: key, accountId: nil))
+    }
+
+    /// D6: a found channel reads its name, else its handle, with no prefix.
+    func testAFoundChannelReadsItsNameElseItsHandle() {
+        let channel = FoundChannel(idHex: "aa", handle: "news")
+        XCTAssertEqual(PeopleSearchSection.channelRowTitle(channel, name: "The News"), "The News")
+        XCTAssertEqual(PeopleSearchSection.channelRowTitle(channel, name: nil), "@news")
+        XCTAssertEqual(PeopleSearchSection.channelRowTitle(channel, name: "  "), "@news")
     }
 
     func testTheOutgoingListMatchesByKeyOrByAccountId() {

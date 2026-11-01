@@ -66,6 +66,11 @@ import me.lakko.app.ui.contacts.contactRouteKey
  * A contact without a captured account id (a pre-ADR-0021 record) is listed
  * dimmed and cannot be picked: the create and add paths need the account id.
  */
+/** Create works with a name, a picked person, or both; a group of nobody with
+ *  no name is the one thing it does not start. */
+internal fun canCreateGroup(creating: Boolean, name: String, pickedCount: Int): Boolean =
+    !creating && (pickedCount > 0 || name.isNotBlank())
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 public fun NewGroupScreen(
@@ -128,7 +133,7 @@ public fun NewGroupScreen(
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            t("chats.new_group.no_contacts"),
+                            t("new_group.no_contacts"),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -200,23 +205,27 @@ public fun NewGroupScreen(
                 )
             }
             Button(
-                enabled = !creating && picked.value.isNotEmpty(),
+                enabled = canCreateGroup(creating, name, picked.value.size),
                 onClick = {
                     val chosen: List<AcceptedContact> =
                         selectable.filter { it.request.messageId in picked.value }
-                    if (chosen.isEmpty()) return@Button
                     creating = true
                     error = null
                     scope.launch {
-                        val first = chosen.first()
+                        val first = chosen.firstOrNull()
                         val groupIdHex = try {
-                            chatRepository.startGroupWith(
-                                recipientAccountId = first.request.fromAccountId!!,
-                                recipientSignaturePubkey = first.request.fromPubkey,
-                                // ADR-0062 — a group from the first pick on,
-                                // even while it holds two people.
-                                kind = uniffi.lakko_ffi_uniffi.GroupKind.GROUP,
-                            )
+                            if (first == null) {
+                                // A group with nobody else in it yet.
+                                chatRepository.startGroupAlone()
+                            } else {
+                                chatRepository.startGroupWith(
+                                    recipientAccountId = first.request.fromAccountId!!,
+                                    recipientSignaturePubkey = first.request.fromPubkey,
+                                    // ADR-0062 — a group from the first pick on,
+                                    // even while it holds two people.
+                                    kind = uniffi.lakko_ffi_uniffi.GroupKind.GROUP,
+                                )
+                            }
                         } catch (cause: Throwable) {
                             me.lakko.app.rethrowIfCancelled(cause) {
                                 creating = false

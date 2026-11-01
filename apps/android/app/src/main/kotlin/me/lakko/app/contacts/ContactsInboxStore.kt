@@ -373,6 +373,17 @@ public fun withoutSentTo(
     recipientAccountIdB64: String,
 ): List<SentContactRequest> = sent.filterNot { it.recipientAccountIdB64 == recipientAccountIdB64 }
 
+/** Accepting someone answers a request sent to them too: it leaves Sent. */
+public fun sentAfterAccepting(
+    sent: List<SentContactRequest>,
+    accepted: List<IncomingContactRequest>,
+): List<SentContactRequest> {
+    val encoder = java.util.Base64.getEncoder()
+    return accepted.mapNotNull { it.fromAccountId }.fold(sent) { rest, accountId ->
+        withoutSentTo(rest, encoder.encodeToString(accountId))
+    }
+}
+
 /** How many incoming requests are waiting, as the Contacts list shows them. */
 public fun waitingRequestCount(pending: List<IncomingContactRequest>): Int =
     pending.distinctBy { it.messageId }.size
@@ -407,6 +418,9 @@ public fun applyContactAcks(
     accepted: List<AcceptedContact>,
     sent: List<SentContactRequest>,
     acks: List<IncomingContactAck>,
+    /** Joins the keys of one person across proven rotations (ADR-0074 section
+     *  3.7): an ack from a rotated key is the person, not a second row. */
+    samePerson: (ByteArray, ByteArray) -> Boolean = { a, b -> a.contentEquals(b) },
 ): AppliedContactAcks {
     if (acks.isEmpty()) return AppliedContactAcks(accepted, sent, acceptedChanged = false)
     val encoder = java.util.Base64.getEncoder()
@@ -416,7 +430,7 @@ public fun applyContactAcks(
     for (ack in acks) {
         val accepterAccountIdB64 = encoder.encodeToString(ack.accepterAccountId)
         nextSent = nextSent.filterNot { it.recipientAccountIdB64 == accepterAccountIdB64 }
-        val index = nextAccepted.indexOfFirst { it.request.fromPubkey.contentEquals(ack.accepterPubkey) }
+        val index = nextAccepted.indexOfFirst { samePerson(it.request.fromPubkey, ack.accepterPubkey) }
         if (index >= 0) {
             val known = nextAccepted[index]
             if (known.request.fromAccountId == null) {

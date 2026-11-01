@@ -30,6 +30,8 @@ struct PeopleSearchSection: View {
     let chatPeers: Set<Data>
     let onOpenPerson: (FoundPerson) -> Void
     let onOpenChannel: (_ channelIdHex: String, _ handle: String) -> Void
+    /// The name of a channel this device holds, `nil` when it knows none.
+    let channelName: (_ channelIdHex: String) -> String?
     @ObservedObject private var l10n = Localization.shared
 
     init(
@@ -40,8 +42,10 @@ struct PeopleSearchSection: View {
         listed: Set<Data> = [],
         chatPeers: Set<Data> = [],
         onOpenPerson: @escaping (FoundPerson) -> Void,
-        onOpenChannel: @escaping (String, String) -> Void = { _, _ in }
+        onOpenChannel: @escaping (String, String) -> Void = { _, _ in },
+        channelName: @escaping (String) -> String? = { _ in nil }
     ) {
+        self.channelName = channelName
         self.model = model
         self.session = model.session
         self.includesChannels = includesChannels
@@ -60,9 +64,10 @@ struct PeopleSearchSection: View {
             includesChannels: includesChannels, showsLocalContacts: showsLocalContacts,
             listed: listed, chatPeers: chatPeers)
         // No heading without something under it. Below 3 characters nothing
-        // was asked, so a person row is all that can stand here.
+        // was asked, so a person row is all that can stand here. A channel
+        // found by its handle is not a person: it has its own heading.
         let showsHeading = model.searching || !rows.local.isEmpty || !rows.network.isEmpty
-            || channel != nil || message != nil
+            || message != nil
         VStack(alignment: .leading, spacing: 10) {
             if let emptyText, !model.asksNetwork,
                !model.showsAnything(
@@ -87,20 +92,6 @@ struct PeopleSearchSection: View {
                 ForEach(rows.local) { person in
                     personRow(person)
                 }
-                if let channel {
-                    Button { onOpenChannel(channel.idHex, channel.handle) } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: "megaphone")
-                                .frame(width: 40, height: 40)
-                                .foregroundStyle(Color.lakkoAccent)
-                            Text(l10n.t("search.people.channel_result", texts: ["handle": "@\(channel.handle)"]))
-                                .foregroundStyle(Color.lakkoText)
-                            Spacer()
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
                 ForEach(rows.network) { person in
                     personRow(person)
                 }
@@ -111,7 +102,32 @@ struct PeopleSearchSection: View {
                         .accessibilityAddTraits(.updatesFrequently)
                 }
             }
+            if let channel {
+                Text(l10n.t("nav.channels"))
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .accessibilityAddTraits(.isHeader)
+                Button { onOpenChannel(channel.idHex, channel.handle) } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "megaphone")
+                            .frame(width: 40, height: 40)
+                            .foregroundStyle(Color.lakkoAccent)
+                        Text(Self.channelRowTitle(channel, name: channelName(channel.idHex)))
+                            .foregroundStyle(Color.lakkoText)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
         }
+    }
+
+    /// What a found channel's row reads: its name when one is known, else its
+    /// `@handle`.
+    static func channelRowTitle(_ channel: FoundChannel, name: String?) -> String {
+        let known = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return known.isEmpty ? "@\(channel.handle)" : known
     }
 
     private func personRow(_ person: FoundPerson) -> some View {
@@ -119,6 +135,8 @@ struct PeopleSearchSection: View {
             person: person,
             state: session.requestState(for: person),
             onAdd: { Task { await session.addContact(person) } },
+            onAskAgain: session.canAskAgain(person)
+                ? { Task { await session.askAgain(person) } } : nil,
             onOpen: { onOpenPerson(person) })
     }
 }
@@ -129,6 +147,9 @@ private struct FoundPersonRow: View {
     let person: FoundPerson
     let state: PersonRequestState
     let onAdd: () -> Void
+    /// **Ask again** under "Request sent", `nil` when there is nothing to
+    /// repeat.
+    let onAskAgain: (() -> Void)?
     let onOpen: () -> Void
     @ObservedObject private var l10n = Localization.shared
 
@@ -168,9 +189,15 @@ private struct FoundPersonRow: View {
                 .buttonStyle(.borderless)
         } else if state == .sent {
             // From the outgoing list, whatever the check says of them.
-            Text(l10n.t("search.people.request_sent"))
-                .font(.subheadline)
-                .foregroundStyle(Color.lakkoTextMuted)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(l10n.t("search.people.request_sent"))
+                    .font(.subheadline)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                if let onAskAgain {
+                    Button(l10n.t("contacts.search.ask_again"), action: onAskAgain)
+                        .buttonStyle(.borderless)
+                }
+            }
         } else if person.canAddContact {
             switch state {
             case .idle, .failed:

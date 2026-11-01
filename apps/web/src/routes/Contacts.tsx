@@ -669,6 +669,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
               localName={c().displayName}
               chatHref={chatWith(c())}
               canStartChat={c().accountIdHex !== undefined}
+              acceptedAtMs={c().acceptedAtMs}
               busy={detailBusy}
               error={detailError}
               myPubkey={() => chats.identity()?.signaturePublicKey ?? null}

@@ -541,7 +541,8 @@ final class GroupCallHost: ObservableObject {
         guard let call = releaseSession() else { return }
         let endedAtMs = SfuKeepalive.callEndedAtMs(nowMs: ports.nowMs(), lastInboundMs: lastInbound)
         if let row = GroupCallHostRules.transcriptRow(
-            initiator: call.initiator, connectedAtMs: call.connectedAtMs, endedAtMs: endedAtMs) {
+            initiator: call.initiator, connectedAtMs: call.connectedAtMs, endedAtMs: endedAtMs,
+            video: call.video) {
             ports.recordCall(FinishedCall(
                 groupIdHex: call.groupIdHex,
                 row: row,

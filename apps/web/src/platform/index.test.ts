@@ -16,6 +16,13 @@ describe("publicOriginFor", () => {
     );
   });
 
+  it("takes the local stack the host also takes", () => {
+    expect(publicOriginFor("desktop", "http://127.0.0.1:5173", "lakkoapp://localhost")).toBe(
+      "http://127.0.0.1:5173",
+    );
+    expect(() => publicOriginFor("desktop", "http://127.0.0.2:5173", "lakkoapp://localhost")).toThrow();
+  });
+
   it("refuses on the desktop without a usable host value", () => {
     for (const v of [undefined, "", "lakkoapp://localhost", "http://lakko.me", "https://lakko.me/", 7]) {
       expect(() => publicOriginFor("desktop", v, "lakkoapp://localhost")).toThrow();

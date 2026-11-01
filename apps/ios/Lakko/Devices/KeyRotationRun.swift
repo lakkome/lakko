@@ -1160,6 +1160,9 @@ extension KeyRotationRunner.Ports {
             },
             sendToDeviceGroup: { [weak sync] envelope in
                 guard let sync else { throw SessionNotReady() }
+                // The DeviceGroup of a session that just landed may still be
+                // being founded.
+                await sync.waitForHandle()
                 return try await sync.sendKeyRotationEnvelope(envelope)
             },
             generate: { try KeyRotationMaterial.generate() },
@@ -1331,7 +1334,13 @@ enum KeyRotationChannels {
         guard let secrets = auth.identitySecrets else { throw SessionNotReady() }
         let accountIdB64 = base64Encode(secrets.accountId)
         let channelIds = OwnedChannelGenerations.load(accountIdB64: accountIdB64).keys.sorted()
-        guard !channelIds.isEmpty else { return }
+        guard !channelIds.isEmpty else {
+            // No channel to hand over, and a channel created from here on is
+            // still recorded at the session's new key generation: the state
+            // that records it hears of the rotation here.
+            NotificationCenter.default.post(name: .lakkoAccountKeysRotated, object: nil)
+            return
+        }
         guard let predecessor = auth.ownPredecessorSeeds(accountIdB64: accountIdB64).last else {
             throw SessionNotReady()
         }

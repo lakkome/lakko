@@ -94,7 +94,10 @@ pub(crate) struct RegisterChannelResponse {
 /// hashed `@channelname` to a `channel_id`. First-come-
 /// first-served via UNIQUE on `oprf_hash`. A repeat
 /// registration of the same hash with a different
-/// channel id is **409 Conflict**.
+/// channel id is **409 Conflict**; with the same id it
+/// answers as the first did, so a client whose channel
+/// create failed after the name was claimed can retry
+/// with the id it kept.
 ///
 /// Anonymous: no session names the publisher. Since
 /// ADR-0054 S3 the request spends one `discovery-register`
@@ -121,10 +124,27 @@ pub(crate) async fn register(
             tracing::info!("channel name registered",);
             Ok(Json(RegisterChannelResponse { ok: true }))
         },
-        Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => Err((
-            StatusCode::CONFLICT,
-            "channel name already registered".to_string(),
-        )),
+        Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
+            let held: Option<(Vec<u8>,)> =
+                sqlx::query_as("SELECT channel_id FROM channel_names WHERE oprf_hash = ?")
+                    .bind(&oprf_hash[..])
+                    .fetch_optional(&state.db)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "read channel_names");
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "internal db error".to_string(),
+                        )
+                    })?;
+            if held.is_some_and(|(id,)| id == channel_id) {
+                return Ok(Json(RegisterChannelResponse { ok: true }));
+            }
+            Err((
+                StatusCode::CONFLICT,
+                "channel name already registered".to_string(),
+            ))
+        },
         Err(e) => {
             tracing::error!(error = %e, "insert channel_names");
             Err((

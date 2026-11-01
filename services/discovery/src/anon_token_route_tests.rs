@@ -278,4 +278,33 @@ async fn consumes_and_channel_register_spend_their_own_contexts() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(error_code(&body), "anon-token-spent");
+
+    // A name claimed by a channel create that failed afterwards: the retry
+    // with the same channel id succeeds, another id is refused.
+    let t = mint_header(&m, TokenContext::DiscoveryRegister, now);
+    let (status, body) = send(
+        &app,
+        post("/discovery/channel/register", Some(&t), {
+            serde_json::json!({
+                "oprf_hash": B64.encode(hash),
+                "channel_id": B64.encode(channel),
+            })
+            .to_string()
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let t = mint_header(&m, TokenContext::DiscoveryRegister, now);
+    let (status, _) = send(
+        &app,
+        post("/discovery/channel/register", Some(&t), {
+            serde_json::json!({
+                "oprf_hash": B64.encode(hash),
+                "channel_id": B64.encode([0xEE; 16]),
+            })
+            .to_string()
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
 }

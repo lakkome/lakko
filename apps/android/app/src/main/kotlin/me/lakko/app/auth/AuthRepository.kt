@@ -7073,6 +7073,7 @@ public class AuthRepository(
                             ),
                             syncedState = syncedState,
                             ownPredecessors = predecessors,
+                            personal = me.lakko.app.backup.BackupPersonal.of(applicationContext, accountIdB64),
                         )
                     }
                 } finally {
@@ -7978,6 +7979,27 @@ public class AuthRepository(
         }
     }
 
+    /** Runs when a restore gave this account its name or photo back while
+     *  its session is up: installed by the app shell, which republishes. */
+    @Volatile
+    public var onOwnProfileRestored: (() -> Unit)? = null
+
+    /** The account whose restored profile waits for its session to land. */
+    private val restoredProfileOwed = AtomicReference<String?>(null)
+
+    private fun ownProfileRestored(accountIdB64: String) {
+        if (secretsAreFor(accountIdB64)) {
+            onOwnProfileRestored?.invoke()
+        } else {
+            restoredProfileOwed.set(accountIdB64)
+        }
+    }
+
+    /** Whether a restore that ran before this session landed changed the own
+     *  profile, so the session republishes it. Answers once. */
+    public fun takeRestoredProfileOwed(accountIdB64: String): Boolean =
+        restoredProfileOwed.compareAndSet(accountIdB64, null)
+
     /** The production [me.lakko.app.backup.BackupRestorePorts] for one account.
      *  The caller owns (and wipes) [phraseBytes]. */
     private fun backupRestorePorts(
@@ -8080,6 +8102,31 @@ public class AuthRepository(
                 accountIdB64 = accountIdB64,
                 namedIdsHex = groupIdsHex,
                 heldIdsHex = me.lakko.app.chat.KnownGroupsStore(applicationContext).load(accountIdB64),
+            )
+        }
+
+        override fun applyOwnProfile(envelope: ByteArray) {
+            val incoming = uniffi.lakko_ffi_uniffi.decodeProfileEnvelope(envelope)
+            val adopted = me.lakko.app.profile.OwnProfileStore.update(applicationContext, accountId) { held ->
+                me.lakko.app.profile.adoptOwnProfileFromBackup(held, incoming, accountId)
+            }
+            if (adopted) ownProfileRestored(accountIdB64)
+        }
+
+        override fun applyVisibility(envelope: ByteArray) {
+            uniffi.lakko_ffi_uniffi.decodeVisibilityEnvelope(envelope)
+            me.lakko.app.reach.ReachManager.get(applicationContext).adoptFromBackup(accountIdB64, envelope)
+        }
+
+        override fun noteEveryoneUnknown() {
+            me.lakko.app.reach.ReachManager.get(applicationContext).noteRestoredFromBackup(accountIdB64)
+        }
+
+        override fun markRestored(knewConversations: Boolean) {
+            me.lakko.app.backup.BackupRestoreStore.markRestoredChats(
+                applicationContext,
+                accountIdB64,
+                knewConversations,
             )
         }
 
@@ -8202,6 +8249,7 @@ public class AuthRepository(
                         knownGroupIdsHex = knownGroupIdsForBackup(accountIdB64),
                         syncedState = syncedState,
                         ownPredecessors = predecessors,
+                        personal = me.lakko.app.backup.BackupPersonal.of(applicationContext, accountIdB64),
                     )
                 } finally {
                     predecessors.forEach { it.seed.fill(0) }

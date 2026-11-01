@@ -1137,6 +1137,13 @@ public final class PeopleSearchSession: ObservableObject {
         /// account key or account id: the row then reads "Request sent", and
         /// only then.
         public var alreadyRequested: @MainActor (FoundPerson) -> Bool
+        /// The row of this person under Contacts > Sent, `nil` for none (a
+        /// person added through their invite link waits without one). A
+        /// declined request says nothing to the sender, so this is what
+        /// **Ask again** works from.
+        public var sentRow: @MainActor (FoundPerson) -> SentContactRequest?
+        /// **Dismiss** on that row.
+        public var dismissSent: @MainActor (SentContactRequest) -> Void
         /// Every grant this device holds for an account key NOW, in the order
         /// they are tried. Read fresh: one may have arrived since the row.
         public var heldGrants: @MainActor (Data) -> [KeptGrant]
@@ -1150,9 +1157,13 @@ public final class PeopleSearchSession: ObservableObject {
             reachCheck: @escaping @MainActor (MailboxTarget, Data) async throws -> Bool,
             sendRequest: @escaping @MainActor (FoundPerson) async throws -> Void,
             alreadyRequested: @escaping @MainActor (FoundPerson) -> Bool = { _ in false },
+            sentRow: @escaping @MainActor (FoundPerson) -> SentContactRequest? = { _ in nil },
+            dismissSent: @escaping @MainActor (SentContactRequest) -> Void = { _ in },
             heldGrants: (@MainActor (Data) -> [KeptGrant])? = nil,
             isContact: @escaping @MainActor (FoundPerson) -> Bool = { _ in false }
         ) {
+            self.sentRow = sentRow
+            self.dismissSent = dismissSent
             self.candidates = candidates
             self.ownAccountKey = ownAccountKey
             self.network = network
@@ -1355,6 +1366,21 @@ public final class PeopleSearchSession: ObservableObject {
             requests[person.accountKey] = state
             if state == .refused { recordRefused(person) }
         }
+    }
+
+    /// Whether the row offers **Ask again**: an earlier request stands
+    /// unanswered under Sent. A decline tells the sender nothing, so the row
+    /// keeps "Request sent" and this is the way on.
+    public func canAskAgain(_ person: FoundPerson) -> Bool {
+        person.canAddContact && ports.sentRow(person) != nil
+    }
+
+    /// **Ask again**: what Contacts > Sent > Dismiss and then Add contact do,
+    /// in one tap.
+    public func askAgain(_ person: FoundPerson) async {
+        guard person.canAddContact, let row = ports.sentRow(person) else { return }
+        ports.dismissSent(row)
+        await addContact(person)
     }
 }
 

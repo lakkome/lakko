@@ -63,6 +63,30 @@ function stubFetch(status: number, body: unknown = {}, headers: Record<string, s
   return calls;
 }
 
+describe("a ledger row says whether its uses ran out", () => {
+  const client = new DiscoveryClient("https://d.test");
+
+  it.each([
+    ["contact", (c: DiscoveryClient) => c.fetchInviteRow(ID)],
+    ["group", (c: DiscoveryClient) => c.fetchGroupInviteRow(ID)],
+  ])("%s link: the flag is read and the blob is still served", async (_, run) => {
+    stubFetch(200, { sealed: "AQID", used_up: true });
+    const row = await run(client);
+    expect(row?.usedUp).toBe(true);
+    expect(row?.sealed).toEqual(new Uint8Array([1, 2, 3]));
+  });
+
+  it("a row with no flag reads as uses left", async () => {
+    stubFetch(200, { sealed: "AQID" });
+    expect((await client.fetchInviteRow(ID))?.usedUp).toBe(false);
+  });
+
+  it("an unknown link is no row at all", async () => {
+    stubFetch(404);
+    expect(await client.fetchGroupInviteRow(ID)).toBeNull();
+  });
+});
+
 describe("fetch answers 429: rate limited, never 'not found'", () => {
   const client = new DiscoveryClient("https://d.test");
 

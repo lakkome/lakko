@@ -57,6 +57,7 @@ class PeopleSearchSessionTest {
         val checked = mutableListOf<String>()
         var reach: (String) -> Boolean = { false }
         var reachGate: CompletableDeferred<Unit>? = null
+        val dismissed = mutableListOf<String>()
         val session = PeopleSearchSession(
             scope = scope,
             memory = memory,
@@ -76,6 +77,7 @@ class PeopleSearchSessionTest {
                 reachGate?.await()
                 reach(wire)
             },
+            dismissSent = { p -> dismissed += p.keyHex },
         )
     }
 
@@ -771,5 +773,40 @@ class PeopleSearchSessionTest {
         assertEquals("anna", bareSearchText("  @anna "))
         assertEquals("anna weber", bareSearchText("anna weber"))
         assertEquals(searchCacheKey("anna weber"), searchCacheKey("Anna   Weber"))
+    }
+
+    @Test
+    fun `a row with a standing request reads sent and offers ask again`() {
+        val anna = person("Anna", PersonReach.OPEN, 1).copy(username = "anna")
+        val sent = OutgoingRequests(setOf(anna.keyHex), emptySet())
+        assertTrue(sent.canAskAgain(anna))
+        assertEquals(
+            PersonRowView(RowAction.ASK_AGAIN, REQUEST_SENT),
+            personRowView(anna, RowSendState.SENT, canAskAgain = true),
+        )
+        assertEquals(PersonRowView(RowAction.NONE, REQUEST_SENT), personRowView(anna, RowSendState.SENT))
+    }
+
+    @Test
+    fun `someone added through an invite link is not asked again`() {
+        val anna = person("Anna", PersonReach.OPEN, 1).copy(username = "anna")
+        val id = anna.accountIdHex!!
+        val invited = OutgoingRequests(setOf(anna.keyHex), setOf(id), invitedAccountIdsHex = setOf(id))
+        assertTrue(invited.holds(anna))
+        assertFalse(invited.canAskAgain(anna))
+    }
+
+    @Test
+    fun `ask again dismisses the request and sends it in one tap`() = runTest {
+        val h = Harness(this)
+        val anna = person("Anna", PersonReach.OPEN, 1).copy(username = "anna")
+        h.session.add(anna)
+        runCurrent()
+        assertEquals(RowSendState.SENT, h.session.sendStates.value[anna.keyHex])
+        h.session.askAgain(anna)
+        runCurrent()
+        assertEquals(listOf(anna.keyHex), h.dismissed)
+        assertEquals(listOf(anna.keyHex, anna.keyHex), h.sent)
+        assertEquals(RowSendState.SENT, h.session.sendStates.value[anna.keyHex])
     }
 }

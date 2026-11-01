@@ -9,7 +9,6 @@ import {
   consumeSelfMarks,
   cursorAfterSkipped,
   firstNoticeQuery,
-  FIRST_LANDING_WINDOW_MS,
   noticePasswordOpen,
   NOTICE_PASSWORD_OPEN_MS,
   splitOwnActions,
@@ -148,15 +147,33 @@ describe("one notice per marker (alignment E)", () => {
 });
 
 describe("one landing", () => {
-  it("a device with no cursor asks for the last thirty days (alignment F)", () => {
-    expect(firstNoticeQuery(false, 0, NOW)).toEqual({ kind: "since", sinceMs: NOW - FIRST_LANDING_WINDOW_MS });
-    expect(FIRST_LANDING_WINDOW_MS).toBe(30 * 24 * 60 * 60 * 1000);
-    // A clock near the epoch never asks for a negative time.
-    expect(firstNoticeQuery(false, 0, 5)).toEqual({ kind: "since", sinceMs: 0 });
+  it("a landing asks from the cursor", () => {
+    expect(firstNoticeQuery(12)).toEqual({ kind: "after", after: 12 });
+    expect(firstNoticeQuery(0)).toEqual({ kind: "after", after: 0 });
   });
 
-  it("a device with a cursor asks from it", () => {
-    expect(firstNoticeQuery(true, 12, NOW)).toEqual({ kind: "after", after: 12 });
+  it("a device with no cursor is new: it starts at the newest notice and shows nothing older", () => {
+    const plan = planNotices({
+      cursor: 0,
+      notices: [n(3, "recovery-phrase-saved", NOW - 5000), n(7, "password-changed-by-email", NOW - 1000)],
+      nextAfter: 7,
+      marks: [],
+      firstLanding: true,
+    });
+    expect(plan.show).toEqual([]);
+    expect(plan.cursor).toBe(7);
+  });
+
+  it("a new device with no notices starts at zero and shows the next one", () => {
+    const first = planNotices({ cursor: 0, notices: [], nextAfter: 0, marks: [], firstLanding: true });
+    expect(first.cursor).toBe(0);
+    const next = planNotices({
+      cursor: 0,
+      notices: [n(1, "recovery-email-added", NOW)],
+      nextAfter: 1,
+      marks: [],
+    });
+    expect(next.show.map((x) => x.id)).toEqual([1]);
   });
 
   it("the first landing shows what came back, minus its own action, and keeps a cursor", () => {
