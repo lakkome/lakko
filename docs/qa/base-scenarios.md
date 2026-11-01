@@ -72,12 +72,15 @@ ADR-0087. Add a scenario whenever a defect shows one was missing.
 
 ## Channels
 22. Create a channel; the Chats list stays whole and the channel sits in it.
-23. Open a channel: same screen as a group.
+23. Open a channel: the group's screen shape, no call buttons, a subscriber has no composer.
 24. Post text, photo, file, voice, video note, GIF; a subscriber sees each. (design)
+24b. A subscriber reacts and takes it off on two devices; comments under a post, opens and
+    collapses the thread; a publisher deletes a comment and bans. (design)
 25. Find a channel by @handle and by name; subscribe; unsubscribe. (design)
 26. Invite a person to a channel, public and private. (design)
 27. A subscriber who joins later; one who was offline across a rotation.
-28. Admins of a channel; names in the subscriber list, no machinery. (design)
+28. Publishers of a channel post and moderate, only the owner renames and adds them;
+    names in the subscriber list, no machinery. (design)
 
 ## Lists and navigation
 29. Chats holds one-to-ones, groups and channels; unread, mute, archive, pin, folders.

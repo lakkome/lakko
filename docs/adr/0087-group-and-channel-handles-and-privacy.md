@@ -5,8 +5,9 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0087: Every group and channel has an @name, and is public or private
 
-- **Status:** Proposed (2026-10-31). The product decisions in Context are the
-  maintainer's and are final; the mechanism below is proposed. Nothing is built.
+- **Status:** Proposed (2026-10-31, amended 2026-11-01). The product decisions in Context
+  are the maintainer's and are final; the mechanism below is proposed. Nothing is built,
+  apart from the group of one and the end-of-membership groundwork.
 - **Date:** 2026-10-31
 - **Context:** product, the scale requirement in `CLAUDE.md`, invariants #1, #2,
   #3, #4, #5. UX spec:
@@ -45,8 +46,10 @@ The maintainer decided on 2026-10-31:
 
 And on channels, the same day:
 
-5. A channel is not a different product: it uses the same screen shapes as a
-   group, the same conversation view, composer and info pattern.
+5. A channel uses the same screen shapes as a group. It is not a group (corrected by
+   the maintainer 2026-11-01): the owner and co-publishers post, everyone else comments
+   and reacts, and a channel has no calls. Broadcasts, a kind of call not yet designed,
+   may come later.
 6. A channel post carries what a chat message can.
 7. Owner and admins invite people to a channel, public or private, from a contact
    picker and by link, the way people are added to a group.
@@ -587,7 +590,9 @@ header go; a channel opens in the view a group opens in.
 | Row, ordering, folders | the same | the same |
 | Header, timeline, day separators, media viewer | the same | the same |
 | Composer, attachments, voice, video note, GIF, emoji | the same, for everyone | the same, for the owner and admins; everyone else has no composer and no replacement bar |
-| Message menu | the same | Reply and React are absent; Edit and Delete for the owner and admins |
+| Message menu | the same | Reply is absent; Edit and Delete for the owner and publishers; React as section 13a |
+| Call controls | the same | none |
+| Comments | none | under each post, section 13a |
 | Info screen | `lakko_ui_rules::info` | the same function, section 15 lists the blocks |
 | Owner, admins | the same words | the same words |
 | Only a channel has | | no sender on a post (the channel is the sender), a subscriber count in place of a member list on the header line, Subscribe and Unsubscribe in place of Join and Leave |
@@ -638,13 +643,83 @@ unchanged, since it seals bytes; the `ChannelPost` wire and its signature do not
 - **Edit and delete** are the ADR-0023 ops with the post's server cursor as the target.
   A reader applies one from any publisher key the post signature accepts, so an admin
   can delete another's post, as an admin of a channel should.
-- **Replies, typing and read receipts** do not exist in a channel. A subscriber cannot
-  write: the service requires a publisher proof.
-- **Reactions do not fit, and are left out.** A subscriber's reaction is a write per
-  reaction, and a reader must see a total. Sealed per subscriber, every reader downloads
-  every reaction of every post: 1 MB a post at 10,000 reactions and 100 bytes each,
-  arithmetic. Counted at the server, the server stores which subscriber key reacted to
-  which post and the emoji in the clear. See the open list.
+- **Typing and read receipts** do not exist in a channel, and a post takes no reply: a
+  subscriber writes comments (section 13a).
+
+### 13a. Comments and reactions
+
+A subscriber holds a read key and no MLS leaf, which is what lets a channel have a
+million of them: a leaf per subscriber would send every device a commit per join. So a
+subscriber's write cannot be a group message. A reaction delivered to every subscriber
+would be a thousand reactions times a million devices on one post. It goes to the channel
+service, and readers get a total.
+
+**What the maintainer refused (2026-11-01):** a per-channel subscriber key on every write.
+It would hand the service one person's activity in a channel, and that profile is what an
+IP address and a time link to a person. So nothing here reuses a key from post to post.
+
+**A key per post.** `post_key = BLAKE3-derive-key("lakko/channel/post-key/v1",
+account_seed || channel_id || post_cursor)`, an Ed25519 seed. All the account's devices
+derive the same key, and two posts' keys are not linkable without the seed. A write is
+signed by it.
+
+**Reactions.** A row is `(post, post_key_pub, label)`, unique, so one person gives one
+reaction of a kind. `label = BLAKE3-keyed(reaction_key, target || emoji)`, 16 bytes, where
+`reaction_key` derives from the epoch seed of the post, so the service holds no emoji and
+cannot compare labels between posts. A second press of the same reaction is a signed
+delete of that row. Only the holder of the post key can delete it, which needs no token.
+
+- **Readers** get `{label: count}` for the posts in view, in one batched, cacheable call,
+  and resolve labels by trying a fixed list of 64 emoji in `lakko_ui_rules` (chosen). An
+  unknown label is dropped, so junk from someone with no seed shows nothing. Any emoji, as
+  in a group, would need one sealed name per label, and the first writer would choose it.
+- **The account's own reactions** live in a `lakko-sync` register, shared among its
+  devices over the DeviceGroup and in the backup, and are never asked of the service:
+  a request naming the keys of several posts would link exactly what the per-post keys keep
+  apart. The key itself is derived, so any device can take a reaction off. The register
+  is bounded to the channel's retained posts: a post past its 30 days takes its entries
+  with it.
+
+**Who may write.** One anonymous token per added reaction and per comment, in contexts of
+their own (`channel-react`, `channel-comment`, ADR-0054), so the service learns the writer
+holds a token and not whose. A person out of `channel-react` tokens does not see a failure:
+the reaction is drawn at once and leaves with the next refill. Quotas are chosen with room
+to spare and are not measured. A token does not prove one person one reaction: a modified
+client can use another derivation and add up to its quota. That inflates a counter and is
+accepted.
+
+**Comments.** A row is `(post, cursor, post_key_pub, sealed)`, at most 2,048 bytes.
+`sealed` is an AEAD under a key from the post's epoch seed over the name, an avatar
+reference, the text, a reply target and the signature of a per-channel author key, which
+exists only inside the seal. An author's delete is signed by the post key; a publisher's
+is signed by a publisher proof, as a post's is. Pages are 20 rows, cursor first. Comments
+take no attachments in this version: a file would need a pass and a lifetime of its own.
+
+**Banning.** The service has no key to refuse, by design. In a private channel a ban is
+the existing removal: no seed from the next epoch. In a public channel reading cannot be
+refused: the ban is a sealed, publisher-signed list of author keys, carried like the
+metadata record and re-issued after a rotation, and every reader hides what those keys
+wrote. A public ban hides comments; reactions cannot be banned, because no one knows whose
+they are. Up to 1,024 keys a list (chosen); oldest go first.
+
+**What the service still learns.**
+
+- For a post: how many rows it has, and how they split across labels. Which emoji is
+  hidden, and the post itself is ciphertext. Hiding the split needs additive homomorphic
+  encryption and a zero-knowledge proof per write, or a client adds a thousand at once;
+  that surface is out of proportion to what it hides, and was declined (maintainer,
+  2026-11-01). The total cannot be hidden at all: the service stores each write. It could
+  only be blurred by dummy writes, which makes counters inexact.
+- The address and time of a write, as with every request, until a relay stands in front
+  (ADR-0086's release gate is that relay; the same one takes these writes).
+- In a public channel the read key is public, so an operator who reads it opens comments
+  and labels like any reader. A comment in a public channel is public speech under a name
+  its author typed. It carries no account key, for that reason.
+
+**Budget.** Arithmetic, assumed, not measured. A reaction row is about 64 bytes (16 of
+post id, 32 of key, 16 of label): 640 KB at 10,000 reactions. A reader gets at most 64
+labels with a count, about 2 KB for a post, usually far less. A comment page at the cap is
+41 KB. Nothing a reader does grows with the number of reactions or comments on the post.
 
 ### 14. Inviting people to a channel
 
@@ -682,19 +757,19 @@ one. The only names are ADR-0060 member cards, and a card is a person's choice. 
   scrolled, a page at a time; it is not a roster and cannot be searched past what is
   loaded, and nobody reads the key list. Public channels offer no `Remove`.
 
-**Co-publishers become admins, and that is the honest model with one limit.** An admin
-of a channel posts, renames, invites and removes subscribers; the owner alone adds and
-removes admins and changes the flag. That is a group's division of roles, so a group's
-words apply. The limit: a PublisherGroup seeds no role table, so "only the owner adds an
-admin" is held by the client and by the appointment the service checks, not by every
+**Co-publishers stay co-publishers (corrected 2026-11-01); on the screen they are
+publishers.** A publisher posts as the owner does, edits and deletes posts, deletes
+comments, bans, invites and removes subscribers; the owner alone renames, adds and removes
+publishers and changes the flag. The limit: a PublisherGroup seeds no role table, so "only the owner adds a
+publisher" is held by the client and by the appointment the service checks, not by every
 peer as in a group. An unappointed member would get the seed and could not post. A role
 table in the PublisherGroup would make it a peer rule and is a `lakko-mls` change; it is
 not proposed here.
 
-- `Add admin` (owner) picks a contact and sends a one-use link in the one-to-one; the
+- `Add publisher` (owner) picks a contact and sends a one-use link in the one-to-one; the
   owner's device approves that person's request without asking, since it named them.
   The `Join as co-publisher` menu item goes: a link opens the page.
-- `Remove admin` revokes the appointment, removes the leaf and rotates. `DELETE
+- `Remove publisher` revokes the appointment, removes the leaf and rotates. `DELETE
   .../copublishers/{pk}` exists and no client flow calls it; a member list on the
   PublisherGroup FFI is what it needs.
 
@@ -703,14 +778,14 @@ The info blocks, in `lakko_ui_rules::info`:
 | Block | Who sees it |
 |---|---|
 | Name, @name, header line, description | everyone |
-| Rename, description | owner, admins |
+| Rename, description | owner |
 | Group type (`Who can subscribe`, @name, topic, language) | owner |
-| Invite people, invite links | owner, admins |
-| Subscribers | owner and admins: the exact count; subscribers: the member list as today |
-| Admins | owner; admins read-only |
+| Invite people, invite links | owner, publishers |
+| Subscribers | owner and publishers: the exact count and the ban list; subscribers: the member list as today |
+| Publishers | owner; publishers read-only |
 | `Members can find me` | everyone, per ADR-0060 |
 | Unsubscribe | a subscriber |
-| Delete channel | the owner, when no admin remains |
+| Delete channel | the owner, when no publisher remains |
 
 ### 16. `listed` folds into the flag
 
@@ -902,6 +977,7 @@ one filesystem on one host (`services/storage`), and it will not carry that egre
 - **#5:** improved at two points: `channel_names` loses its clear id, and knock rows
   stop naming the joiner. No table pairs an account with a group or channel.
 
+#5 also holds for section 13a: no key spans two posts, and a write names no account.
 To be indexed when built: a handle row names no account; a private row answers no
 lookup; a seed is sealed to a private channel's subscriber only with a valid ticket;
 the end of a membership is applied only when no leaf of the account remains.
@@ -930,6 +1006,9 @@ wipe.
    listing as the flag.
 7. **Posts and storage:** `classify_post_plaintext` over the chat envelope, `channel_invite`
    in the chat envelope, `idle_days` on a blob.
+7a. **Comments and reactions (section 13a):** post-key derivation, labels, the comment seal,
+   the ban list, the own-reactions register in `lakko-sync`, two token contexts, fuzz targets `channel_comment_open` and
+   `channel_ban_list_decode`; the channels routes for rows and batched counts.
 8. **FFI, then web, iOS and Android:** create forms, info, search rows, cards, requests,
    the backlog, invitations, the wipe, the solo group.
 9. **Channels as conversations, on all three:** the shared view and composer, the info
@@ -950,7 +1029,8 @@ Steps 1 to 5 can land without channels; steps 6 and 7 stand alone behind the fla
 4. A shareable address for a public name. The web client keeps the address bar at the
    origin, and a name in a path reaches a server. Not designed.
 5. Ownership transfer for channels has a server route and no flow.
-6. Reactions on channel posts (section 13).
+6. Decided 2026-11-01 (maintainer): reactions and comments, section 13a. Whether the 64
+   emoji should grow, and whether a contact's comment should be recognisable, stay open.
 7. A role table in the PublisherGroup, so that peers enforce who is an admin (section 15).
 8. Decided 2026-10-31 (maintainer): a public group counts as any group for "Members of
    my groups" (ADR-0060). The person's own setting governs, and it reaches every member

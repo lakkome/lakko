@@ -25,8 +25,9 @@ nothing here is built yet.
 
 On channels, the same day:
 
-5. A channel is not a different product. It uses a group's conversation view,
-   composer and info screen (section 12).
+5. A channel is a channel, not a group. It shares a group's screen shapes, and the
+   difference is who may do what (section 12): the owner and the co-publishers post;
+   everyone else comments and reacts. A channel has no calls.
 6. A post carries what a message can (section 13).
 7. The owner and admins invite people, public or private, from a contact picker and
    by link (section 14).
@@ -39,8 +40,8 @@ public channel and reads at once. No one approves: at a million subscribers an
 approval per subscriber cannot work ([ADR-0087](../adr/0087-group-and-channel-handles-and-privacy.md)
 section 6; decided by the maintainer 2026-10-31).
 
-**A co-publisher is called an admin** from here on, in the same words as a group
-(section 15).
+**Co-publishers stay co-publishers** (corrected by the maintainer 2026-11-01): they post
+as the owner does and moderate; the screen word is **publisher** (section 15).
 
 ## 2. The @name
 
@@ -472,27 +473,31 @@ Only for an owner alone in the group. An owner with others transfers first.
 The row goes with no banner. If the network is down: "Could not reach Lakko. Check your
 connection and try again." and nothing changes.
 
-## 12. A channel is a conversation
+## 12. A channel's screen
 
-**There is one conversation screen.** A channel opens where a group opens, in the same
-view. The channel route, its own list pane, its own header, the post cards and the Manage
-page all go.
+**A channel is not a group, and it does not need a screen shape of its own.** A channel
+opens where a group opens, in the same view. The channel route, its own list pane, its own
+header and the Manage page go. What differs is who may do what, and three things a group
+does not have: comments under a post, no calls, and later broadcasts (section 13.4).
 
 | | In a group | In a channel |
 |---|---|---|
 | Row in Chats, order, folders | the same | the same |
 | Header: avatar, title, one line | `Private group · 12 members` | `Public channel · 10k+ subscribers` |
 | Timeline, day separators, media viewer, search in the conversation | the same | the same |
-| Composer: text, attach, voice, video note, GIF, emoji | everyone | the owner and admins |
-| Message menu | Reply, Forward, React, Pin, Save, Copy, and Edit and Delete on one's own | Forward, Save, Copy, and Edit and Delete for the owner and admins |
+| Composer: text, attach, voice, video note, GIF, emoji | everyone | the owner and publishers |
+| Message menu | Reply, Forward, React, Pin, Save, Copy, and Edit and Delete on one's own | React, Forward, Save, Copy, and Edit and Delete for the owner and publishers |
+| Call buttons | yes | none, for anyone |
 | Info: tap the title | a pushed screen, [`conversation-info.md`](conversation-info.md) section 3 | the same screen |
 
 **The few things only a channel has:**
 
 - A post has no sender line. The channel is the sender: the bubble is an incoming bubble
   with no name, on every device, the owner's included.
-- A subscriber has no composer, and nothing stands in its place: the timeline runs to the
-  bottom of the pane. It is not a disabled field, because nothing is being withheld.
+- A subscriber has no composer at the bottom of the channel: a subscriber writes under a
+  post (section 13.2). The timeline runs to the bottom of the pane; it is not a disabled
+  field, because nothing is being withheld.
+- A post is a card with the width of the pane, because comments hang under it.
 - `Subscribe` and `Unsubscribe` where a group has joining and leaving.
 - A subscriber count on the header line, not a member count. The number follows
   section 15.
@@ -504,7 +509,7 @@ page all go.
 | Channel: name, description | Rows on the info screen, as a group's rename |
 | List in Discover | Part of Channel type (section 4.1): public means Lakko may suggest it |
 | Subscribers | The `Subscribers` row (section 15) |
-| Co-publishers | The `Admins` row (section 15) |
+| Co-publishers | The `Publishers` row (section 15) |
 | Protection, `Refresh now` | Gone. The channel looks after this by itself. Removing someone from a private channel does what it did |
 
 Nothing that kept running because the Manage page was mounted depends on a screen any
@@ -522,18 +527,18 @@ Public channel · 10k+ subscribers
 
 Daily headlines from Berlin.
 
-Invite people                     >   owner, admins
-Invite link                       >   owner, admins
-Subscribers                 12,408 >  owner, admins: exact; everyone else: the band
-Admins                           3 >  owner, admins
+Invite people                     >   owner, publishers
+Invite link                       >   owner, publishers
+Subscribers                 12,408 >  owner, publishers: exact; everyone else: the band
+Publishers                         3 >  owner, publishers
 Channel type                      >   owner
 Members can find me          [on]     everyone, per who-can-find-me section 5
 
 Unsubscribe                           a subscriber
 ```
 
-Rename and the description are edited in place in the header for the owner and admins, as
-a group's name.
+Rename and the description are edited in place in the header by the owner, as a group's
+name.
 
 ## 13. What a post can carry
 
@@ -545,7 +550,7 @@ progress, the failed-upload state and the viewer are the group's.
 |---|---|
 | Publishing | As a message being sent. |
 | Failed | The bubble's failed state, with Retry, as in a chat. |
-| Not an admin any more | "Only the owner and admins can post here." The composer goes. |
+| Not a publisher any more | "Only the owner and publishers can post here." The composer goes. |
 | Older post, no key on this device | "This post isn't available." |
 | File past its life, or deleted | The "no longer available" state of [`saved-messages-and-file-lifetime.md`](saved-messages-and-file-lifetime.md). A post lives 30 days and its file about 45. |
 | Edited | The `edited` mark, as in a chat. |
@@ -560,11 +565,81 @@ The Channel info says neither; the timeline simply starts where it starts, with 
 the top when older posts exist that this device cannot read: "Earlier posts aren't
 available."
 
-**No reactions on a post** in this version; **no replies, no typing, no read marks**.
+**No typing and no read marks** in a channel, for anyone.
+
+### 13.1 Reactions
+
+They look and behave as in a group: chips under the post with a count on each, the
+person's own highlighted. Pressing a reaction adds it, pressing it again takes it off, and
+the same goes for the chip. A reaction on a comment works the same way.
+
+- The set is fixed: the emoji row of the group's quick reactions plus the list in the
+  picker, a fixed list of 64 (chosen). A group's free choice of any emoji needs each reader to
+  be told which emoji a count is for, and a channel has no way to do that cheaply.
+- The reaction shows at once on the person's device. It goes out when it can: if the
+  device is out of tokens it waits and leaves with the next ones. Nothing is refused and no
+  error shows. Taking a reaction off always goes out at once.
+- Offline: as above.
+
+### 13.2 Comments
+
+**Under the post, in place** (maintainer, 2026-11-01). Telegram's move to another screen is
+not used.
+
+```
+[ post ]
+[ reaction chips ]
+Anna  finally
+Igor  works on Android
+Show 16 more comments
+[ Write a comment ]
+```
+
+- Under every post with comments, the first 2 and `Show {n} more comments`. With none, a
+  quiet `Comment` link.
+- `Show more` opens them in place, 20 at a time, oldest first, with `Show more` at the
+  end of the page. A post can be collapsed again by the line at its end. The rest of the
+  channel stays where it was: the scroll position holds on the post.
+- The field appears when the thread is open. It takes text and emoji only in this version.
+- A long press or right-click on a comment: React, Reply, Copy, and Delete for its author
+  and for the owner and publishers. `Reply` quotes it, one level deep, as in a chat.
+- An author is a name and an avatar. A name in a comment is what its author typed, and the
+  screen does not claim it is a contact: no `@username`, no link to a profile.
+- A comment that fails to send stays in the thread with Retry.
+- Newly arrived comments do not move the thread while it is open: a line `{n} new comments`
+  appears at its end.
+
+| State | What it shows |
+|---|---|
+| Loading a thread | A thin line under the post, no spinner in the timeline. |
+| Comments cannot load | "Comments didn't load." `Try again`. |
+| Publisher removed a comment | It goes for everyone, with no trace. |
+| Older post, no key on this device | No comments and no chips: the post itself is unavailable. |
+
+### 13.3 Removing and banning
+
+A person chooses `Ban from comments` on a comment (owner, publishers). The word on the
+screen is the same in both kinds of channel; what happens is not, and the difference
+cannot be hidden.
+
+- **Private channel:** the person is removed, as `Remove` does (section 7.3). They stop
+  reading and stop writing from the next key.
+- **Public channel:** nobody can be kept from reading a public channel. Their comments
+  disappear for everyone and new ones are not shown. A person's reactions cannot be banned:
+  no one can tell whose they are.
+
+`Banned` is a list in the info screen's `Subscribers`, for the owner and publishers, with
+`Unban`. A banned person is told nothing.
+
+### 13.4 Broadcasts
+
+Not in this spec, and not designed. A channel has no calls. A broadcast is a kind of call
+we do not have yet: the organiser speaks and shows video, and can let others speak for a
+while. It needs its own design.
 
 ## 14. Inviting people to a channel
 
-For the owner and admins, public or private. The same row and the same screens as adding
+For the owner and publishers, public or private. The same row and the same screens as adding
 to a group, with one difference, said here so it reads as a decision: a group's add puts
 a person in, and a channel's invitation waits for them to press Subscribe. A read-only
 stream a person never asked for is spam.
@@ -601,29 +676,30 @@ becomes `Open` once subscribed. On a private channel each card is a one-use invi
 expiry and use limit, the list of links and `Revoke`. A public channel has a link too,
 which opens the page of section 7.2 and is not needed to subscribe.
 
-An admin's links are their own to revoke; the owner may revoke any, as far as the links
+A publisher's links are their own to revoke; the owner may revoke any, as far as the links
 sync between one account's devices. Revoking stops new people; section 7.2.
 
-## 15. Subscribers and admins
+## 15. Subscribers and publishers
 
-**The words.** A co-publisher is an **admin**. It posts, renames, invites and removes
-subscribers, and only the owner adds or removes admins and changes the channel's type,
-which is what those words mean in a group.
+**The words.** On the screen a co-publisher is a **publisher**. A publisher posts as the
+owner does, edits and deletes posts, deletes comments, bans, and invites and removes
+subscribers. Only the owner renames the channel, changes its type and adds or removes
+publishers.
 
 ### 15.1 Subscribers
 
 What a person can be told is a number, and the names of people who share one.
 
-**To the owner and admins** the row reads `Subscribers  12,408`. **To everyone else** it
+**To the owner and publishers** the row reads `Subscribers  12,408`. **To everyone else** it
 reads the band, `10k+`, and opens the same list as today.
 
 Opening it shows the group's member screen, with the title `Subscribers (12,408)`:
 
 - One row per person who shares a name: avatar, name, `@username` where they let the
-  channel's members find them, and the role for the owner and admins.
+  channel's members find them, and the role for the owner and publishers.
 - At the end: "{n} others." They are subscribers who share no name. Nothing more can be
   known about them.
-- **Private channels, for the owner and admins:** those others are listed too, one row
+- **Private channels, for the owner and publishers:** those others are listed too, one row
   each, labelled by the link they came through: `From link "Friends"`, with `Remove`. A
   person who came by a contact invitation shows `From an invitation`.
 - **Public channels:** no `Remove`.
@@ -643,19 +719,19 @@ is scrolled, and search on it matches only what has loaded. It is not a roster, 
 does not try to be: nobody can read a million names, and no one is on it who did not
 share theirs.
 
-### 15.2 Admins
+### 15.2 Publishers
 
-The row `Admins` opens a list: the owner, then each admin, with a `Remove admin` for the
+The row `Publishers` opens a list: the owner, then each publisher, with a `Remove publisher` for the
 owner. Everyone else sees no such row. A group's members and roles live in one list; a
-channel's cannot, since a million people are not a roster, so admins have their own row.
+channel's cannot, since a million people are not a roster, so publishers have their own row.
 
-- **Add admin** (owner): the Invite people screen, one pick. The person gets a card in
-  their one-to-one: "{name} invites you to be an admin of {channel}." with `Accept`. When
+- **Add publisher** (owner): the Invite people screen, one pick. The person gets a card in
+  their one-to-one: "{name} invites you to be a publisher of {channel}." with `Accept`. When
   they accept, it applies with no further step, because the owner already named them.
-- **Remove admin** (owner), confirmation: "Remove {name} as admin? They can no longer post
+- **Remove publisher** (owner), confirmation: "Remove {name} as publisher? They can no longer post
   or invite."; they stay subscribed if they were.
 - A copy-paste link for admins and the `Join as co-publisher` menu item go.
-- An admin's own row offers `Step down`, the same action on themselves.
+- A publisher's own row offers `Step down`, the same action on themselves.
 
 ## 16. Copy, the short list
 
@@ -671,6 +747,9 @@ channel's cannot, since a million people are not a roster, so admins have their 
 | Waiting | Waiting for an admin. |
 | Past 7 days | No answer yet. |
 | Removed | You are no longer in {name}. |
+| Comments | Comment / Show {n} more comments / Write a comment / {n} new comments |
+| Comments failed | Comments didn't load. |
+| Moderation | Ban from comments / Banned / Unban |
 
 Never in copy: journal, knock, epoch, record, OPRF, token, key, commit, proposal. No
 statement of what servers cannot see. A public channel carries no lock and no claim of
@@ -696,6 +775,10 @@ privacy.
 - A post as the chat body, with a server cursor as its message id, and the edit and delete
   ops on it.
 - An invitation card in the chat body.
+- Per post a page of counts: reaction, count; a comment count; the first 2 comments. Per thread a page of comments with a cursor.
+- Per account the reactions it gave, shared among its devices and kept on them only, so
+  that a second device knows what the first gave.
+- Per channel a ban list, sealed, folded by every reader.
 
 ## 18. One model, three implementations
 
@@ -718,6 +801,6 @@ record, so a channel cannot grow a screen of its own.
 - Group photos.
 - Telling a person their request was refused.
 - Transferring a channel's ownership.
-- Reactions on channel posts ([ADR-0087](../adr/0087-group-and-channel-handles-and-privacy.md)
-  section 13 says why they do not fit).
+- Attachments in comments.
+- Broadcasts (section 13.4).
 - Pins in a channel.
