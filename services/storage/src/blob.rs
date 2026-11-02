@@ -14,7 +14,7 @@
 //! |---|---|---|
 //! | `POST /blob/pass/upload` | one `blob-upload` anonymous token (`x-lakko-anon-token`) | 200 pass |
 //! | `POST /blob/pass/read` | one `blob-read` anonymous token | 200 pass |
-//! | `PUT /blob/{hex}` | upload pass (`x-lakko-blob-pass`), `x-lakko-blob-delete-key`, `Content-Length` | 201 new / 200 existed |
+//! | `PUT /blob/{hex}` | upload pass (`x-lakko-blob-pass`), `x-lakko-blob-delete-key`, `Content-Length`, optional `x-lakko-blob-idle-days` | 201 new / 200 existed |
 //! | `GET /blob/{hex}` | read pass | 200 streamed |
 //! | `HEAD /blob/{hex}` | read pass | 200, `Content-Length` |
 //! | `POST /blob/keep` | read pass | 204 |
@@ -32,7 +32,9 @@
 //! A download, a keep and a repeated upload are accesses: each raises the
 //! row's last access day to today, written at most once per blob per day. A
 //! `HEAD` is not an access. The daily sweep ([`crate::sweep`]) deletes a blob
-//! whose last access is more than the lifetime (365 days by default) back.
+//! whose last access is more than the lifetime (365 days by default) back,
+//! or more than its own idle life back when its first upload named one in
+//! `x-lakko-blob-idle-days` (ADR-0087 section 13: a channel file sends 45).
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -61,6 +63,11 @@ const HEX_LEN: usize = 64;
 /// without padding of 32 bytes (43 characters).
 pub(crate) const DELETE_KEY_HEADER: &str = "x-lakko-blob-delete-key";
 
+/// The optional upload header naming the blob's own idle life: decimal days,
+/// 1..=255 (ADR-0087 section 13). Absent, the blob lives the default
+/// lifetime.
+pub(crate) const IDLE_DAYS_HEADER: &str = "x-lakko-blob-idle-days";
+
 /// Most ids one `POST /blob/keep` may carry. Chosen, not measured: a
 /// conversation's pinned and saved files fit in one request.
 pub(crate) const MAX_KEEP_IDS: usize = 256;
@@ -80,6 +87,7 @@ pub(crate) const MAX_KEEP_BODY: usize = 32 * 1024;
 /// | 429 | `blob-read-budget-exhausted` | the read pass has no downloads or keeps left |
 /// | 400 | `blob-id-malformed` | the path is not 64 lower-case hex |
 /// | 400 | `blob-delete-key-required` / `blob-delete-key-invalid` | upload without a usable delete key |
+/// | 400 | `blob-idle-days-invalid` | `x-lakko-blob-idle-days` is not a decimal 1..=255 |
 /// | 411 | `blob-length-required` | upload without `Content-Length` |
 /// | 413 | `blob-too-large` | `Content-Length` above the 50 MiB ceiling |
 /// | 400 | `blob-hash-mismatch` | the body does not hash to the path |
@@ -103,6 +111,7 @@ pub(crate) enum ApiError {
     IdMalformed,
     DeleteKeyRequired,
     DeleteKeyInvalid,
+    IdleDaysInvalid,
     LengthRequired,
     TooLarge,
     HashMismatch,
@@ -123,6 +132,7 @@ impl ApiError {
             Self::IdMalformed
             | Self::DeleteKeyRequired
             | Self::DeleteKeyInvalid
+            | Self::IdleDaysInvalid
             | Self::HashMismatch
             | Self::LengthMismatch
             | Self::KeepMalformed => StatusCode::BAD_REQUEST,
@@ -145,6 +155,7 @@ impl ApiError {
             Self::IdMalformed => "blob-id-malformed",
             Self::DeleteKeyRequired => "blob-delete-key-required",
             Self::DeleteKeyInvalid => "blob-delete-key-invalid",
+            Self::IdleDaysInvalid => "blob-idle-days-invalid",
             Self::LengthRequired => "blob-length-required",
             Self::TooLarge => "blob-too-large",
             Self::HashMismatch => "blob-hash-mismatch",
@@ -318,6 +329,22 @@ fn delete_key(headers: &HeaderMap) -> Result<[u8; 32], ApiError> {
     Ok(key)
 }
 
+/// The optional idle life of an upload: `None` when the header is absent,
+/// else decimal digits only (no sign, no space) naming 1..=255 days.
+fn idle_days(headers: &HeaderMap) -> Result<Option<u8>, ApiError> {
+    let Some(value) = headers.get(IDLE_DAYS_HEADER) else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| ApiError::IdleDaysInvalid)?;
+    if value.is_empty() || value.len() > 3 || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(ApiError::IdleDaysInvalid);
+    }
+    match value.parse::<u8>() {
+        Ok(0) | Err(_) => Err(ApiError::IdleDaysInvalid),
+        Ok(d) => Ok(Some(d)),
+    }
+}
+
 fn content_length(headers: &HeaderMap) -> Result<u64, ApiError> {
     headers
         .get(header::CONTENT_LENGTH)
@@ -375,7 +402,8 @@ async fn stream_into(
 /// bytes against the upload pass before the body is read; the charge is not
 /// refunded when the upload then fails. The body must hash to the path and
 /// be exactly `Content-Length` bytes. A first upload writes the row with the
-/// delete key; a repeated upload is an access and keeps the first key.
+/// delete key and the optional idle life; a repeated upload is an access and
+/// keeps the first key and idle life.
 pub(crate) async fn put_blob(
     State(state): State<AppState>,
     AxumPath(hex): AxumPath<String>,
@@ -387,6 +415,7 @@ pub(crate) async fn put_blob(
     take_pass(&state, &headers, PassKind::Upload, 0, 0)?;
     let id = parse_id(&hex)?;
     let key = delete_key(&headers)?;
+    let idle = idle_days(&headers)?;
     let declared = content_length(&headers)?;
     if declared > crate::MAX_BLOB_BYTES as u64 {
         return Err(ApiError::TooLarge);
@@ -433,6 +462,7 @@ pub(crate) async fn put_blob(
             created_day: day,
             last_access_day: day,
             delete_pk: Some(key),
+            idle_days: idle,
         })
         .await?;
     let status = match outcome {

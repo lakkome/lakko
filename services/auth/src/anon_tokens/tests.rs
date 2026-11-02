@@ -198,6 +198,14 @@ fn quota_variables_are_named_after_the_contexts() {
         quota_var(TokenContext::CircleClaim),
         "LAKKO_ANON_TOKEN_QUOTA_CIRCLE_CLAIM"
     );
+    assert_eq!(
+        quota_var(TokenContext::ChannelReact),
+        "LAKKO_ANON_TOKEN_QUOTA_CHANNEL_REACT"
+    );
+    assert_eq!(
+        quota_var(TokenContext::ChannelComment),
+        "LAKKO_ANON_TOKEN_QUOTA_CHANNEL_COMMENT"
+    );
     // Every context has exactly one default, in wire order.
     let listed: Vec<TokenContext> = DEFAULT_QUOTAS.iter().map(|(c, _)| *c).collect();
     assert_eq!(listed, TokenContext::ALL);
@@ -226,6 +234,8 @@ fn the_default_quotas_are_the_documented_ones() {
     assert_eq!(default_quota(TokenContext::MailboxWrite), 50);
     assert_eq!(default_quota(TokenContext::CallJoin), 100);
     assert_eq!(default_quota(TokenContext::CircleClaim), 10);
+    assert_eq!(default_quota(TokenContext::ChannelReact), 500);
+    assert_eq!(default_quota(TokenContext::ChannelComment), 200);
 }
 
 #[test]

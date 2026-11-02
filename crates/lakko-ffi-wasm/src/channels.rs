@@ -663,7 +663,7 @@ impl WasmChannelPostContent {
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn listed(&self) -> Option<bool> {
-        self.meta.as_ref().map(|m| m.listed)
+        self.meta.as_ref().map(|m| m.public)
     }
 
     /// The frozen `ChannelMetaError::code()` when `kind === "malformed"`.
@@ -703,7 +703,9 @@ pub fn compose_channel_meta(
         updated_at_ms,
         topic: topic.unwrap_or(0),
         language: language.unwrap_or_default(),
-        listed: listed.unwrap_or(false),
+        public: listed.unwrap_or(false),
+        // ADR-0087: the handle envelope has no FFI argument yet.
+        handle: None,
     };
     inner_compose_channel_meta(&meta).map_err(channel_meta_error_value)
 }
@@ -715,11 +717,19 @@ pub fn compose_channel_meta(
 #[must_use]
 pub fn classify_channel_post_plaintext(plaintext: &[u8]) -> WasmChannelPostContent {
     match classify_post_plaintext(plaintext) {
-        PostContent::Text(text) => WasmChannelPostContent {
+        // ADR-0087: a post is the chat envelope; the caller parses `text`
+        // with `parseBodyEnvelope` until the FFI carries the body.
+        PostContent::Message { plaintext, .. } => WasmChannelPostContent {
             kind: "text",
-            text: Some(text.to_vec()),
+            text: Some(plaintext.to_vec()),
             meta: None,
             error: None,
+        },
+        PostContent::NotAPost => WasmChannelPostContent {
+            kind: "malformed",
+            text: None,
+            meta: None,
+            error: Some("notAPost".to_string()),
         },
         PostContent::Meta(meta) => WasmChannelPostContent {
             kind: "meta",
@@ -732,6 +742,21 @@ pub fn classify_channel_post_plaintext(plaintext: &[u8]) -> WasmChannelPostConte
             text: None,
             meta: None,
             error: Some(e.code()),
+        },
+        // ADR-0087 section 13a: a ban list is never shown as a post. The FFI
+        // has no ban-list surface yet, so it reaches a client as a dropped
+        // record with its own code.
+        PostContent::BanList(_) => WasmChannelPostContent {
+            kind: "malformed",
+            text: None,
+            meta: None,
+            error: Some("banList".to_string()),
+        },
+        PostContent::MalformedBanList(e) => WasmChannelPostContent {
+            kind: "malformed",
+            text: None,
+            meta: None,
+            error: Some(format!("banList.{}", e.code())),
         },
     }
 }

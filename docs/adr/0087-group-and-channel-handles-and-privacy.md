@@ -245,7 +245,9 @@ fields ‖ sig`, 120 s window, nonce consumed), with no session:
 An answer to a claim carries a **handle certificate**: `lakko_attest` signs
 `(lookup_key, write_pk)` with the discovery key that signs username certificates,
 domain `lakko/handle-cert/v1`. Without it a private group, which no lookup can
-check, could show its members any name it liked.
+check, could show its members any name it liked. As built (2026-11-02) it is 169
+bytes, `version ‖ lookup_key(64) ‖ write_pk(32) ‖ issued_at(8) ‖ sig(64)`; earlier
+drafts of this document said 153.
 
 **The lease.** A handle names no account, so `DELETE /discovery/account` cannot
 find it and nothing else would ever free a dead one. `lease_until` is 180 days
@@ -338,6 +340,10 @@ plain = key_package ‖ reply_grant ‖ profile ‖ capability?
   unchanged: the admin authors an `Add` from the retained package, a committer
   sweeps it, the Welcome goes to the joiner's mailbox under the reply grant (C-69).
   The peers' checks do not move, since they judge the admin's proposal.
+  A second request from a joiner already waiting (same leaf signature key) changes
+  nothing: the package held first stays, and an approve acts on it (decided
+  2026-11-02, `JoinRequestOutcome::AlreadyPending`). What happens to a held package
+  that expires before anyone decides is not designed yet.
 - It closes a class of defects too: a knock row can no longer be a commit, so
   `is_external_join_proposal_for` has nothing left to guard.
 - The co-publisher join moves to the same row. The ADR-0081 rejoin knock keeps its
@@ -352,10 +358,10 @@ without.
 | Layer | Bound |
 |---|---|
 | Requester | one `ds-knock` token per knock (quota 200 a day); a device asks once per group per 7 days |
-| DS, per journal | new cap: 4,096 rows (chosen, not measured), refused with `429 knock-queue-full` before a token is spent |
+| DS, per journal | new cap: 4,096 rows (chosen, not measured), refused with `429 knock-queue-full` before a token is spent. The count and the insert are not one transaction, so knocks arriving on one journal at the same moment can end the queue at most their own payloads (4 per knock) past the cap; locking would give every unclaimed journal a lock row (decided 2026-11-02) |
 | DS, row | 16 KiB, 7 days (existing) |
 | Admin device | 64 retained (`MAX_PENDING_EXTERNAL_JOINS`); **the knock cursor stops while the queue is full**, so the backlog stays on the DS instead of being lost |
-| Admin | new `DELETE /ds/group/{hex}/knocks` (write tier) behind `Reject all` |
+| Admin | new `DELETE /ds/group/{hex}/knocks?through=<id>` (write tier) behind `Reject all`: deletes the rows up to the last one the admin saw, so a request that arrived after it stays; refused on an unclaimed journal |
 
 A device reads at most 64 rows at a time, so at most about 1 MB per drain (64 x
 16 KiB, arithmetic), however large the backlog.
@@ -434,7 +440,17 @@ signature over `(channel_id, subscriber_pk)`. Sealed, so a copy of the table doe
 not show which subscribers came through one link. `admitNewSubscribers` becomes:
 read rows after a cursor (a paged list, new), open each ticket, check the invite key
 is one of this channel's live keys, seal only then. A row with no valid ticket is
-removed. The link records already sync across the owner's devices (ADR-0079);
+removed.
+
+**The admission key (decided 2026-11-02, maintainer).** The key a ticket is sealed to
+is a random seed with a version, minted by the owner, not derived from the owner's
+account seed, so co-publishers can admit subscribers too. The owner hands the seed to
+each co-publisher sealed to that person's account key. The link's preview carries the
+public half and the version. When a co-publisher leaves or is removed, the owner
+mints the next version and hands it to the ones who remain; new links carry it. Older
+versions are kept so tickets from older links still open. A removed co-publisher can
+open those too, which tells it which random subscriber key came by which link it
+already knew: nothing about a person. The link records already sync across the owner's devices (ADR-0079);
 co-publishers' keys are read from the service.
 
 **A revoked invitation.** Revoke deletes the ledger row and the invite key. A new
@@ -568,7 +584,7 @@ picks. Consequences, none of them a new mechanism:
 
 Every member sees the name and the flag. A new envelope
 `lakko/conversation-handle/v1\0 ‖ version ‖ updated_at_ms ‖ flag ‖ handle_len ‖ handle
-‖ cert(153) ‖ sig(64)`, on an ordinary MLS application message. `sig` is by the handle
+‖ cert(169) ‖ sig(64)`, on an ordinary MLS application message. `sig` is by the handle
 key over the group id and the fields, and the certificate binds the name to that key,
 so **any member can relay it**: a newcomer gets it at the growth re-send (ADR-0048
 path) whether or not the owner is online. Strictly newer stamp wins, carried verbatim
@@ -834,7 +850,7 @@ than today.
 
 | One device | Figure | Basis |
 |---|---|---|
-| Held per conversation | at most 60 bytes plus a 153-byte certificate | handle, flag, stamp |
+| Held per conversation | at most 60 bytes plus a 169-byte certificate | handle, flag, stamp |
 | At 10,000 conversations | about 2 MB | arithmetic |
 | Renewals, owner of 10,000 | 56 writes a day, about 17 KB | 300 bytes each, chosen |
 | Ended conversations in synced state | about 500 KB per 10,000 | 50 bytes each, chosen |

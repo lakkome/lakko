@@ -292,3 +292,24 @@ path = "fuzz_targets/sealed_knock_open.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "knock_seed_decode"
+path = "fuzz_targets/knock_seed_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "channel_invite_card_open"
+path = "fuzz_targets/channel_invite_card_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "admission_seed_decode"
+path = "fuzz_targets/admission_seed_decode.rs"
+test = false
+doc = false
+bench = false

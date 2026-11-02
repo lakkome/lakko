@@ -118,6 +118,15 @@ use crate::AppState;
 ///   usernames and channel handles only.
 /// - `circle-claim` (ADR-0086): an account claims one directory, again after a
 ///   key reset or a tree started over. 10 a day is chosen, not measured.
+/// - `channel-react` (ADR-0087 section 13a): one token per reaction added
+///   under a channel post; taking one off spends none. 500 a day is chosen,
+///   not measured, with room to spare: far above the reactions a person gives
+///   in a day, and a person out of tokens sees the reaction drawn at once and
+///   sent at the next refill. A modified client can add up to its quota to a
+///   counter; the ADR accepts that.
+/// - `channel-comment` (ADR-0087 section 13a): one token per comment added;
+///   deleting one's own spends none. 200 a day is chosen, not measured, with
+///   room to spare over what a person writes in a day.
 const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
     (TokenContext::DiscoveryLookup, 300),
     (TokenContext::DiscoveryRegister, 20),
@@ -132,6 +141,8 @@ const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
     (TokenContext::MailboxWrite, 50),
     (TokenContext::CallJoin, 100),
     (TokenContext::CircleClaim, 10),
+    (TokenContext::ChannelReact, 500),
+    (TokenContext::ChannelComment, 200),
 ];
 
 /// The `call-join` quota per epoch of a young account (ADR-0078 section 2,

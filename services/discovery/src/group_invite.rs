@@ -65,13 +65,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 
-/// Server-side ceiling on the sealed blob: the longest sealed `/g/` link the
-/// codec can produce (`lakko_contacts::group_invite::MAX_SEALED_LEN`, the
-/// 908-byte maximal capability plus the 30-byte seal, 938 bytes), derived
-/// rather than written as a literal so a codec change moves it. The
-/// `VARBINARY` width of `group_invites.sealed_capability` (migration
-/// `0031_ownerless_invite_ledgers.sql`) matches it; a test pins both, and another
-/// seals a maximal capability and checks it fits exactly.
+/// Server-side ceiling on the sealed blob: the codec's bound on a sealed `/g/`
+/// link (`lakko_contacts::group_invite::MAX_SEALED_LEN`, the 1794-byte bound
+/// on a capability plus the 30-byte seal, 1824 bytes), derived rather than
+/// written as a literal so a codec change moves it. The `VARBINARY` width of
+/// `group_invites.sealed_capability` (migration
+/// `0036_subscriber_invite_width.sql`) matches it; a test pins both, and
+/// another seals the largest links a client can mint and checks they fit.
 const MAX_SEALED_BYTES: usize = MAX_SEALED_LEN;
 
 /// Sentinel for "unlimited" `max_uses` — matches the SQL CASE expression in the
@@ -644,27 +644,30 @@ mod tests {
         assert_eq!(PRUNE_INTERVAL, std::time::Duration::from_secs(3600));
     }
 
-    /// `MAX_SEALED_BYTES` pins the `group_invites.sealed_capability` width
-    /// declared in `0031_ownerless_invite_ledgers.sql`. Drift surfaces as a test
-    /// failure rather than a silent "everything past N bytes 500s in
+    /// `MAX_SEALED_BYTES` pins the `group_invites.sealed_capability` width,
+    /// declared in `0031_ownerless_invite_ledgers.sql` and widened by
+    /// `0036_subscriber_invite_width.sql` (ADR-0087). Drift surfaces as a
+    /// test failure rather than a silent "everything past N bytes 500s in
     /// production".
     #[test]
     fn max_sealed_bytes_matches_column_width() {
-        let migration = include_str!("../migrations/0031_ownerless_invite_ledgers.sql");
-        let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
+        let widened = include_str!("../migrations/0036_subscriber_invite_width.sql");
+        let normalised = widened.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            normalised.contains(&format!("sealed_capability VARBINARY({MAX_SEALED_BYTES})")),
+            normalised.contains(&format!(
+                "MODIFY sealed_capability VARBINARY({MAX_SEALED_BYTES})"
+            )),
             "MAX_SEALED_BYTES ({MAX_SEALED_BYTES}) must match group_invites.sealed_capability \
-             in 0031_ownerless_invite_ledgers.sql",
+             in 0036_subscriber_invite_width.sql",
         );
     }
 
-    /// The derivation lands where it was computed by hand: the 908-byte
-    /// maximal v2 capability plus the 30-byte seal.
+    /// The derivation lands where it was computed by hand: the 1794-byte
+    /// bound on a v3 capability plus the 30-byte seal.
     #[test]
     fn max_sealed_bytes_is_the_computed_maximum() {
-        assert_eq!(lakko_contacts::group_invite::MAX_WIRE_LEN, 908);
-        assert_eq!(MAX_SEALED_BYTES, 938);
+        assert_eq!(lakko_contacts::group_invite::MAX_WIRE_LEN, 1794);
+        assert_eq!(MAX_SEALED_BYTES, 1824);
     }
 
     fn maximal_capability(expiry_ms: u64, secret: &[u8; 12]) -> Vec<u8> {
@@ -681,27 +684,83 @@ mod tests {
             inviter_name: Some(long_name),
             member_count: u16::MAX,
             channel_id: None,
+            subscriber: None,
         };
         compose_with_preview(
             &SigningKey::from_seed(&[0x61; 32]),
             &vec![0x5a; MAX_GROUP_ID_LEN],
             expiry_ms,
+            Some(&lakko_contacts::group_invite::GroupKnockKey {
+                public_key: [0x4B; 32],
+                version: 1,
+            }),
             &preview,
             secret,
         )
         .expect("maximal capability composes")
     }
 
-    /// The largest capability the codec can compose, sealed, is exactly the
-    /// ceiling, so every link a client can mint fits the ledger.
+    /// The largest subscriber invitation (ADR-0087 section 7: a 16-byte
+    /// channel id, a private channel's keys, the longest name and
+    /// description).
+    fn maximal_subscriber_capability(secret: &[u8; 12]) -> Vec<u8> {
+        use lakko_contacts::group_invite::{
+            compose_with_preview, ChannelAccess, GroupInvitePreview, SubscriberInvite,
+        };
+        use lakko_crypto::signing::SigningKey;
+
+        let channel_id = [0xC7; 16];
+        let preview = GroupInvitePreview {
+            group_name: Some(format!("{}\u{20AC}", "\u{1F600}".repeat(63))),
+            inviter_name: None,
+            member_count: 0,
+            channel_id: Some(channel_id),
+            subscriber: Some(SubscriberInvite {
+                access: ChannelAccess::Private {
+                    invite_seed: [0x11; 32],
+                    admission_public_key: [0x22; 32],
+                    admission_version: u16::MAX,
+                },
+                description: "\u{1F600}".repeat(256),
+            }),
+        };
+        compose_with_preview(
+            &SigningKey::from_seed(&[0x61; 32]),
+            &channel_id,
+            0,
+            None,
+            &preview,
+            secret,
+        )
+        .expect("maximal subscriber capability composes")
+    }
+
+    /// The codec's ceiling is an upper bound: it adds the largest group id
+    /// and the knock key to the largest preview, which only a subscriber
+    /// invitation carries, and a subscriber invitation names a 16-byte
+    /// channel id and no knock key. So the largest subscriber link sits
+    /// exactly that far below the ceiling, and the largest group link fits
+    /// too: every link a client can mint fits the ledger.
     #[test]
-    fn a_maximal_sealed_link_fits_the_ceiling_exactly() {
+    fn a_maximal_sealed_link_fits_the_ceiling() {
         use lakko_contacts::group_invite::{generate_link_key, open_link, seal_link};
+        use lakko_contacts::knock::KNOCK_KEY_LEN;
+        use lakko_contacts::MAX_GROUP_ID_LEN;
+
         let secret = generate_link_key();
-        let wire = maximal_capability(0, &secret);
+        let wire = maximal_subscriber_capability(&secret);
         let sealed = seal_link(&secret, &wire).unwrap();
-        assert_eq!(sealed.len(), MAX_SEALED_BYTES);
+        // The knock field is the key plus its two-byte version.
+        assert_eq!(
+            sealed.len(),
+            MAX_SEALED_BYTES - (MAX_GROUP_ID_LEN - 16) - (KNOCK_KEY_LEN + 2)
+        );
         assert_eq!(open_link(&secret, &sealed).unwrap().1, wire);
+
+        let group_wire = maximal_capability(0, &secret);
+        let group_sealed = seal_link(&secret, &group_wire).unwrap();
+        assert!(group_sealed.len() <= MAX_SEALED_BYTES);
+        assert_eq!(open_link(&secret, &group_sealed).unwrap().1, group_wire);
     }
 
     /// A maximal sealed link survives the real ledger: upload stores it,

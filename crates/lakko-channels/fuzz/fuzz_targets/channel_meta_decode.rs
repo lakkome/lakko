@@ -11,7 +11,9 @@
 //! one-byte and two-byte length prefixes, the version byte and the
 //! UTF-8 / bound checks all run on attacker-chosen input. Since schema
 //! version 2 (ADR-0059 §2) that includes the topic byte, the language
-//! length prefix and code, and the `listed` flag byte.
+//! length prefix and code; since version 3 (ADR-0087) the public flag and
+//! the length-prefixed conversation-handle envelope. A plaintext that is not
+//! a record goes to the chat-envelope parser (`lakko_attachments`).
 //!
 //! Three properties are asserted, not merely exercised:
 //!
@@ -19,8 +21,11 @@
 //! 2. A `Meta` result is within every documented bound (so the record
 //!    the reader stores is one `compose` would have produced) and
 //!    re-composes to the identical bytes — the encoding is canonical.
-//! 3. A `Text` result is the input verbatim — the classifier never
-//!    alters what the text path renders.
+//! 3. A `Message` result carries the input verbatim beside its body.
+//!
+//! Since ADR-0087 section 13a the classifier also recognises the ban list
+//! (its own domain, checked first); a `BanList` result must re-compose to the
+//! input.
 
 #![no_main]
 
@@ -32,9 +37,10 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     match classify_post_plaintext(data) {
-        PostContent::Text(text) => {
-            assert_eq!(text, data, "Text must be the input verbatim");
+        PostContent::Message { plaintext, .. } => {
+            assert_eq!(plaintext, data, "a Message carries the input verbatim");
         },
+        PostContent::NotAPost => {},
         PostContent::Meta(meta) => {
             assert!(
                 data.len() >= CHANNEL_META_MIN_LEN && data.len() <= CHANNEL_META_MAX_LEN,
@@ -51,6 +57,13 @@ fuzz_target!(|data: &[u8]| {
             let recomposed = compose_channel_meta(&meta).expect("a decoded record must re-compose");
             assert_eq!(recomposed, data, "the encoding must be canonical");
         },
-        PostContent::Malformed(_) => {},
+        PostContent::Malformed(_) | PostContent::MalformedBanList(_) => {},
+        PostContent::BanList(list) => {
+            // The ban list has its own target (`channel_ban_list_decode`);
+            // here it is enough that a recognised list re-composes.
+            let recomposed = lakko_channels::compose_ban_list(&list)
+                .expect("a decoded ban list must re-compose");
+            assert_eq!(recomposed, data, "the ban-list encoding must be canonical");
+        },
     }
 });

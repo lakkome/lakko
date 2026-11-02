@@ -24,8 +24,9 @@ use crate::index::{today, BlobId, BlobIndex, BlobRow, IndexError};
 /// Ids taken from the index per sweep round. Chosen.
 const SWEEP_BATCH: usize = 500;
 
-/// Delete every blob on `node` whose last access is before
-/// `today - lifetime_days`. Returns how many were deleted.
+/// Delete every blob on `node` past its life on `today`: its own idle days
+/// when its upload set them (ADR-0087 section 13), else `lifetime_days`.
+/// Returns how many were deleted.
 pub(crate) async fn sweep_once(
     index: &dyn BlobIndex,
     root: &Path,
@@ -33,16 +34,17 @@ pub(crate) async fn sweep_once(
     today: u32,
     lifetime_days: u32,
 ) -> Result<usize, IndexError> {
-    let cutoff = today.saturating_sub(lifetime_days);
     let mut deleted = 0;
     loop {
-        let ids = index.expired(node, cutoff, SWEEP_BATCH).await?;
+        let ids = index
+            .expired(node, today, lifetime_days, SWEEP_BATCH)
+            .await?;
         if ids.is_empty() {
             break;
         }
         let mut progressed = false;
         for id in ids {
-            if !index.remove_if_expired(&id, cutoff).await? {
+            if !index.remove_if_expired(&id, today, lifetime_days).await? {
                 continue;
             }
             progressed = true;
@@ -149,6 +151,7 @@ pub(crate) async fn import_once(
             created_day: day,
             last_access_day: day,
             delete_pk: None,
+            idle_days: None,
         })
         .collect();
     Ok(Some(index.import(rows, node, day).await?))
@@ -186,6 +189,36 @@ mod tests {
         assert!(!blob_path(dir.path(), &old.id).exists());
         assert!(index.get(&edge.id).await.unwrap().is_some());
         assert!(blob_path(dir.path(), &fresh.id).exists());
+    }
+
+    /// ADR-0087 section 13: a blob uploaded with an idle life of 45 days is
+    /// swept 46 days after its last access, not 365.
+    #[tokio::test]
+    async fn the_sweep_honours_a_rows_own_idle_life() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = FileIndex::open(dir.path().join(".lakko-index/blobs.log")).unwrap();
+        let mut channel_file = crate::index::contract::row(4, 1_000, None);
+        channel_file.idle_days = Some(45);
+        let chat_file = crate::index::contract::row(5, 1_000, None);
+        for r in [&channel_file, &chat_file] {
+            put_file(dir.path(), &r.id, b"x");
+            index.record_upload(r.clone()).await.unwrap();
+        }
+        assert_eq!(
+            sweep_once(&index, dir.path(), "local", 1_045, 365)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sweep_once(&index, dir.path(), "local", 1_046, 365)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(index.get(&channel_file.id).await.unwrap(), None);
+        assert!(!blob_path(dir.path(), &channel_file.id).exists());
+        assert!(index.get(&chat_file.id).await.unwrap().is_some());
     }
 
     #[tokio::test]

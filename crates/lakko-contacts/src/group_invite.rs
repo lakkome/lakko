@@ -64,21 +64,36 @@
 //! group's knock journal on the Delivery Service, where it is not encrypted to
 //! anyone, and the names must not appear there.
 //!
-//! ## Wire format (manual codec, v2)
+//! ## The knock key (v3, ADR-0087 section 5)
+//!
+//! A request to join is a sealed knock row (`crate::knock`), sealed to the
+//! group's versioned knock key, so the capability names that key:
+//! `knock_flag(1) ‖ knock_pk(32) ‖ knock_version(2, BE)` when the flag is
+//! `1`, nothing more when it is `0`. A group link and a co-publisher link
+//! carry one; a channel subscriber invitation (preview kind 3) carries none,
+//! because a subscriber never knocks ([`compose_with_preview`] enforces both
+//! ways). The capability is sealed under the link secret on the way to the
+//! joiner, and inside the sealed knock row on the way back, so the key never
+//! sits in a clear row.
+//!
+//! ## Wire format (manual codec, v3)
 //!
 //! ```text
-//! u8           schema version (= 2)
+//! u8           schema version (= 3)
 //! u16be        group_id_len                       — bounded by MAX_GROUP_ID_LEN
 //! [gid_len]    group_id                            — opaque MLS GroupId bytes
 //! [32 bytes]   issuer_signature_pubkey             — Ed25519 verifying key
 //! u64be        expiry_ms                           — UNIX millis; 0 = no expiry
+//! u8           knock_flag                          — 0 = no knock key, 1 = one follows
+//! [32 bytes]   knock_public_key                    — only when knock_flag = 1
+//! u16be        knock_version                       — only when knock_flag = 1
 //! u16be        preview_len                         — 0 = no preview; else <= MAX_SEALED_PREVIEW_LEN
 //! [preview]    sealed preview                      — nonce(12) ‖ ChaCha20-Poly1305 over the plaintext below,
 //!                                                    under preview_key(link secret, group_id, issuer)
 //! [64 bytes]   signature                           — Ed25519 over the above
 //! ```
 //!
-//! Preview plaintext (inside the AEAD), one of two kinds told apart by the
+//! Preview plaintext (inside the AEAD), one of three kinds told apart by the
 //! first byte:
 //!
 //! ```text
@@ -90,7 +105,32 @@
 //! u8   kind (= 2, a channel's co-publisher link, ADR-0078 section 6)
 //! [16] channel_id
 //! u8   channel_name_len ‖ channel_name — UTF-8, the display-name rule, 0 = none
+//!
+//! u8   kind (= 3, a channel subscriber invitation, ADR-0087 sections 7 and 14)
+//! [16] channel_id
+//! u8   access (1 private, 2 public)
+//! private: [32] invite_seed ‖ [32] admission_public_key ‖ u16be admission_version
+//! public:  [32] read_key
+//! u8   channel_name_len ‖ channel_name — the channel-name rule, 1..=255 bytes
+//! u16be description_len ‖ description  — the channel-description rule, 0..=1024
 //! ```
+//!
+//! A subscriber invitation's capability names the channel id as its
+//! `group_id` (16 bytes): a subscriber never joins the PublisherGroup, so its
+//! id has no business in the link. [`compose_with_preview`] and
+//! [`GroupInviteCapability::open_preview`] both refuse a kind-3 preview whose
+//! channel id is not the capability's `group_id`.
+//!
+//! - **`invite_seed`** derives the link's invite key at the channels service
+//!   (`lakko_channels::invite`), with which the subscriber signs the invite
+//!   proof and the admission ticket.
+//! - **`admission_public_key`** is the X25519 key the ticket is sealed to,
+//!   of version **`admission_version`**: a random seed the owner mints and
+//!   hands to every co-publisher (`crate::admission_seed`), re-minted at
+//!   version + 1 when a co-publisher leaves. The ticket names the version so
+//!   a publisher picks the seed.
+//! - **`read_key`** opens a public channel's seed envelopes, and needs no
+//!   invite key (section 14).
 //!
 //! A co-publisher link carries the channel id here, never in the capability:
 //! since ADR-0078 the PublisherGroup id is derived from the owner's seed, so
@@ -100,7 +140,8 @@
 //!
 //! Multi-byte integers are big-endian. The signature covers everything from
 //! the schema-version byte through the sealed preview inclusive. v1 (no
-//! preview field) is refused: there is no deployment to stay compatible with.
+//! preview field) and v2 (no knock key) are refused: there is no deployment
+//! to stay compatible with.
 
 use lakko_crypto::aead::{
     open_with_key, seal_with_key, KEY_LEN as AEAD_KEY_LEN, NONCE_LEN, TAG_LEN,
@@ -111,12 +152,28 @@ use lakko_crypto::signing::{
     Signature, SigningKey, VerifyingKey, PUBLIC_KEY_LEN as ED25519_PUB_LEN, SIGNATURE_LEN,
 };
 
+use crate::channel_text::{check_description, check_name, DESCRIPTION_MAX_BYTES, NAME_MAX_BYTES};
 use crate::error::{ContactError, Result};
 use crate::invite::{BLOB_ID_LEN, NEVER_EXPIRES};
+use crate::knock::KNOCK_KEY_LEN;
 use crate::profile::check_display_name;
 
 /// Current schema version on the wire.
-const SCHEMA_VERSION: u8 = 2;
+const SCHEMA_VERSION: u8 = 3;
+
+/// The group's knock key a link names (ADR-0087 section 5): the X25519
+/// public key of `knock_seed(v)` and its version `v`. A joiner seals its
+/// knock row to it ([`crate::knock::seal_knock`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupKnockKey {
+    /// `crate::knock::knock_public_key(knock_seed(journal_root_seed, version))`.
+    pub public_key: [u8; KNOCK_KEY_LEN],
+    /// The knock-key version the public key belongs to.
+    pub version: u16,
+}
+
+/// Bytes the knock key takes on the wire when present (key + version).
+const KNOCK_FIELD_LEN: usize = KNOCK_KEY_LEN + 2;
 
 /// The link secret: 12 bytes (16 base64url characters) in the URL fragment,
 /// never on a server. Since the 2026-09-28 security pass one secret opens
@@ -138,6 +195,19 @@ const PREVIEW_VERSION: u8 = 1;
 /// section 6): it carries the channel id.
 const PREVIEW_KIND_CHANNEL: u8 = 2;
 
+/// Preview plaintext kind byte of a channel subscriber invitation (ADR-0087
+/// sections 7 and 14).
+const PREVIEW_KIND_SUBSCRIBER: u8 = 3;
+
+/// Access byte of a private subscriber invitation.
+const ACCESS_PRIVATE: u8 = 1;
+
+/// Access byte of a public subscriber invitation.
+const ACCESS_PUBLIC: u8 = 2;
+
+/// Length of an invite seed, an admission public key and a read key.
+pub const SUBSCRIBER_KEY_LEN: usize = 32;
+
 /// Length of the channel id a channel preview carries (ADR-0010).
 pub const PREVIEW_CHANNEL_ID_LEN: usize = 16;
 
@@ -145,14 +215,36 @@ pub const PREVIEW_CHANNEL_ID_LEN: usize = 16;
 /// the display-name rule caps a name at 255 bytes anyway).
 pub const MAX_PREVIEW_NAME_BYTES: usize = 255;
 
-/// Longest preview plaintext: kind, two length-prefixed names, the count.
-const MAX_PREVIEW_PLAINTEXT_LEN: usize =
+/// Longest group preview plaintext: kind, two length-prefixed names, the
+/// count.
+const MAX_GROUP_PREVIEW_PLAINTEXT_LEN: usize =
     1 + 1 + MAX_PREVIEW_NAME_BYTES + 1 + MAX_PREVIEW_NAME_BYTES + 2;
 
-// A channel preview (kind, channel id, one name) fits inside the group
-// preview's bound, so it changes no wire or ledger width.
-const _: () =
-    assert!(1 + PREVIEW_CHANNEL_ID_LEN + 1 + MAX_PREVIEW_NAME_BYTES <= MAX_PREVIEW_PLAINTEXT_LEN);
+/// Longest subscriber-invitation plaintext: kind, channel id, access, two
+/// keys (private), the name and the description.
+const MAX_SUBSCRIBER_PREVIEW_PLAINTEXT_LEN: usize = 1
+    + PREVIEW_CHANNEL_ID_LEN
+    + 1
+    + 2 * SUBSCRIBER_KEY_LEN
+    + 2
+    + 1
+    + NAME_MAX_BYTES
+    + 2
+    + DESCRIPTION_MAX_BYTES;
+
+/// Longest preview plaintext of any kind.
+const MAX_PREVIEW_PLAINTEXT_LEN: usize =
+    if MAX_SUBSCRIBER_PREVIEW_PLAINTEXT_LEN > MAX_GROUP_PREVIEW_PLAINTEXT_LEN {
+        MAX_SUBSCRIBER_PREVIEW_PLAINTEXT_LEN
+    } else {
+        MAX_GROUP_PREVIEW_PLAINTEXT_LEN
+    };
+
+// A co-publisher preview (kind, channel id, one name) fits inside the group
+// preview's bound.
+const _: () = assert!(
+    1 + PREVIEW_CHANNEL_ID_LEN + 1 + MAX_PREVIEW_NAME_BYTES <= MAX_GROUP_PREVIEW_PLAINTEXT_LEN
+);
 
 /// Longest sealed preview on the wire (nonce + ciphertext + tag). A link that
 /// claims more is refused before any allocation.
@@ -189,9 +281,62 @@ pub struct GroupInviteCapability {
     /// (= 0) means no expiry — UI SHOULD surface a non-expiring link as a
     /// standing-exposure note.
     pub expiry_ms: u64,
+    /// The group's knock key the joiner seals its request to (ADR-0087
+    /// section 5). `None` only on a channel subscriber invitation.
+    pub knock: Option<GroupKnockKey>,
     /// The sealed preview (empty = the link carries none). Opaque until
     /// [`GroupInviteCapability::open_preview`] is given the link key.
     pub sealed_preview: Vec<u8>,
+}
+
+/// How a subscriber invitation lets its holder read the channel (ADR-0087
+/// sections 6, 7 and 14).
+#[derive(Clone, PartialEq, Eq)]
+pub enum ChannelAccess {
+    /// A private channel: the holder proves the invitation to the channels
+    /// service with the invite key derived from `invite_seed` and seals an
+    /// admission ticket to `admission_public_key`.
+    Private {
+        /// The link's invite seed (SECRET: whoever holds it can subscribe).
+        invite_seed: [u8; SUBSCRIBER_KEY_LEN],
+        /// The channel's X25519 admission public key.
+        admission_public_key: [u8; SUBSCRIBER_KEY_LEN],
+        /// The version of that admission key.
+        admission_version: u16,
+    },
+    /// A public channel: the read key that opens its public seed envelopes.
+    Public {
+        /// The channel's read key (public by the owner's choice).
+        read_key: [u8; SUBSCRIBER_KEY_LEN],
+    },
+}
+
+impl core::fmt::Debug for ChannelAccess {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Private {
+                admission_public_key,
+                admission_version,
+                ..
+            } => f
+                .debug_struct("Private")
+                .field("admission_public_key", admission_public_key)
+                .field("admission_version", admission_version)
+                .finish_non_exhaustive(),
+            Self::Public { .. } => f.debug_struct("Public").finish_non_exhaustive(),
+        }
+    }
+}
+
+/// What a subscriber invitation carries beyond the channel id and name
+/// (preview kind 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriberInvite {
+    /// Private or public, with the keys each needs.
+    pub access: ChannelAccess,
+    /// The channel description as the inviter's device holds it; may be
+    /// empty. The channel-description rule.
+    pub description: String,
 }
 
 /// What a link shows the person before they ask to join: the issuer's claim
@@ -208,6 +353,11 @@ pub struct GroupInvitePreview {
     /// `group_name` is the channel's name, and `inviter_name` must be `None`
     /// and `member_count` 0 (a channel preview carries neither).
     pub channel_id: Option<[u8; PREVIEW_CHANNEL_ID_LEN]>,
+    /// ADR-0087 section 7: set on a channel subscriber invitation (preview
+    /// kind 3). Then `channel_id` is set, `group_name` is the channel's name
+    /// (required, the channel-name rule), `inviter_name` is `None` and
+    /// `member_count` 0.
+    pub subscriber: Option<SubscriberInvite>,
 }
 
 impl GroupInvitePreview {
@@ -217,6 +367,24 @@ impl GroupInvitePreview {
             return Err(ContactError::InvalidArgument(
                 "a channel group-invite preview carries no inviter name and no member count".into(),
             ));
+        }
+        if let Some(sub) = &self.subscriber {
+            if self.channel_id.is_none() {
+                return Err(ContactError::InvalidArgument(
+                    "a subscriber invitation names its channel".into(),
+                ));
+            }
+            let name = self.group_name.as_deref().unwrap_or("");
+            check_name(name).map_err(|e| {
+                ContactError::InvalidArgument(format!("subscriber invitation name: {}", e.code()))
+            })?;
+            check_description(&sub.description).map_err(|e| {
+                ContactError::InvalidArgument(format!(
+                    "subscriber invitation description: {}",
+                    e.code()
+                ))
+            })?;
+            return Ok(());
         }
         for (what, name) in [
             ("group name", &self.group_name),
@@ -238,6 +406,36 @@ impl GroupInvitePreview {
 
     fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(MAX_PREVIEW_PLAINTEXT_LEN);
+        if let (Some(channel_id), Some(sub)) = (&self.channel_id, &self.subscriber) {
+            out.push(PREVIEW_KIND_SUBSCRIBER);
+            out.extend_from_slice(channel_id);
+            match &sub.access {
+                ChannelAccess::Private {
+                    invite_seed,
+                    admission_public_key,
+                    admission_version,
+                } => {
+                    out.push(ACCESS_PRIVATE);
+                    out.extend_from_slice(invite_seed);
+                    out.extend_from_slice(admission_public_key);
+                    out.extend_from_slice(&admission_version.to_be_bytes());
+                },
+                ChannelAccess::Public { read_key } => {
+                    out.push(ACCESS_PUBLIC);
+                    out.extend_from_slice(read_key);
+                },
+            }
+            // `validate` bounded both; a wrong caller saturates, never overflows.
+            let name = self.group_name.as_deref().map_or(&[][..], str::as_bytes);
+            let name_len = u8::try_from(name.len()).unwrap_or(u8::MAX);
+            out.push(name_len);
+            out.extend_from_slice(&name[..usize::from(name_len)]);
+            let description = sub.description.as_bytes();
+            let description_len = u16::try_from(description.len()).unwrap_or(u16::MAX);
+            out.extend_from_slice(&description_len.to_be_bytes());
+            out.extend_from_slice(&description[..usize::from(description_len)]);
+            return out;
+        }
         if let Some(channel_id) = &self.channel_id {
             out.push(PREVIEW_KIND_CHANNEL);
             out.extend_from_slice(channel_id);
@@ -264,6 +462,9 @@ impl GroupInvitePreview {
         let version = take_u8(&mut cur)?;
         if version == PREVIEW_KIND_CHANNEL {
             return Self::decode_channel(cur);
+        }
+        if version == PREVIEW_KIND_SUBSCRIBER {
+            return Self::decode_subscriber(cur);
         }
         if version != PREVIEW_VERSION {
             return Err(ContactError::InvalidEncoding(format!(
@@ -298,6 +499,7 @@ impl GroupInvitePreview {
             inviter_name,
             member_count: u16::from_be_bytes([count[0], count[1]]),
             channel_id: None,
+            subscriber: None,
         })
     }
 
@@ -330,6 +532,75 @@ impl GroupInvitePreview {
             inviter_name: None,
             member_count: 0,
             channel_id: Some(channel_id),
+            subscriber: None,
+        })
+    }
+
+    /// The rest of a subscriber invitation, after its kind byte.
+    fn decode_subscriber(mut cur: &[u8]) -> Result<Self> {
+        let mut channel_id = [0u8; PREVIEW_CHANNEL_ID_LEN];
+        channel_id.copy_from_slice(take_n(&mut cur, PREVIEW_CHANNEL_ID_LEN)?);
+        let access = match take_u8(&mut cur)? {
+            ACCESS_PRIVATE => {
+                let mut invite_seed = [0u8; SUBSCRIBER_KEY_LEN];
+                invite_seed.copy_from_slice(take_n(&mut cur, SUBSCRIBER_KEY_LEN)?);
+                let mut admission_public_key = [0u8; SUBSCRIBER_KEY_LEN];
+                admission_public_key.copy_from_slice(take_n(&mut cur, SUBSCRIBER_KEY_LEN)?);
+                let version = take_n(&mut cur, 2)?;
+                ChannelAccess::Private {
+                    invite_seed,
+                    admission_public_key,
+                    admission_version: u16::from_be_bytes([version[0], version[1]]),
+                }
+            },
+            ACCESS_PUBLIC => {
+                let mut read_key = [0u8; SUBSCRIBER_KEY_LEN];
+                read_key.copy_from_slice(take_n(&mut cur, SUBSCRIBER_KEY_LEN)?);
+                ChannelAccess::Public { read_key }
+            },
+            other => {
+                return Err(ContactError::InvalidEncoding(format!(
+                    "unknown subscriber invitation access {other}",
+                )))
+            },
+        };
+        let name_len = usize::from(take_u8(&mut cur)?);
+        let name = core::str::from_utf8(take_n(&mut cur, name_len)?).map_err(|_| {
+            ContactError::InvalidEncoding("subscriber invitation name is not UTF-8".into())
+        })?;
+        check_name(name).map_err(|e| {
+            ContactError::InvalidEncoding(format!("subscriber invitation name: {}", e.code()))
+        })?;
+        let description_len = take_n(&mut cur, 2)?;
+        let description_len =
+            usize::from(u16::from_be_bytes([description_len[0], description_len[1]]));
+        let description =
+            core::str::from_utf8(take_n(&mut cur, description_len)?).map_err(|_| {
+                ContactError::InvalidEncoding(
+                    "subscriber invitation description is not UTF-8".into(),
+                )
+            })?;
+        check_description(description).map_err(|e| {
+            ContactError::InvalidEncoding(format!(
+                "subscriber invitation description: {}",
+                e.code()
+            ))
+        })?;
+        if !cur.is_empty() {
+            return Err(ContactError::InvalidEncoding(format!(
+                "trailing {} bytes after group-invite preview",
+                cur.len(),
+            )));
+        }
+        Ok(Self {
+            group_name: Some(name.to_string()),
+            inviter_name: None,
+            member_count: 0,
+            channel_id: Some(channel_id),
+            subscriber: Some(SubscriberInvite {
+                access,
+                description: description.to_string(),
+            }),
         })
     }
 }
@@ -343,11 +614,22 @@ pub fn generate_link_key() -> [u8; LINK_SECRET_LEN] {
 
 /// Longest capability wire the codec can produce: schema version (1) +
 /// `group_id_len` (2) + a [`MAX_GROUP_ID_LEN`] group id + the issuer key +
-/// `expiry_ms` (8) + `preview_len` (2) + a [`MAX_SEALED_PREVIEW_LEN`] sealed
-/// preview + the signature (908 bytes). The `/g/` join attribution carries
-/// the plaintext capability, so this bounds it too.
-pub const MAX_WIRE_LEN: usize =
-    1 + 2 + MAX_GROUP_ID_LEN + ED25519_PUB_LEN + 8 + 2 + MAX_SEALED_PREVIEW_LEN + SIGNATURE_LEN;
+/// `expiry_ms` (8) + the knock flag (1) and key (34) + `preview_len` (2) + a
+/// [`MAX_SEALED_PREVIEW_LEN`] sealed preview + the signature (1794 bytes; an
+/// upper bound, since only a subscriber invitation, whose `group_id` is a
+/// 16-byte channel id, carries the largest preview). The
+/// sealed knock row and the `/g/` join attribution carry the plaintext
+/// capability, so this bounds them too.
+pub const MAX_WIRE_LEN: usize = 1
+    + 2
+    + MAX_GROUP_ID_LEN
+    + ED25519_PUB_LEN
+    + 8
+    + 1
+    + KNOCK_FIELD_LEN
+    + 2
+    + MAX_SEALED_PREVIEW_LEN
+    + SIGNATURE_LEN;
 
 /// Longest sealed `/g/` link blob (what the discovery ledger stores).
 pub const MAX_SEALED_LEN: usize = crate::link_seal::sealed_len(MAX_WIRE_LEN);
@@ -385,6 +667,122 @@ pub fn open_link(
         sealed,
         decode_and_verify,
     )
+}
+
+// ============================================================================
+// The channel invitation card (ADR-0087 section 14)
+// ============================================================================
+
+/// Version byte of a [`ChannelInviteCard`].
+pub const CHANNEL_INVITE_CARD_VERSION_V1: u8 = 0x01;
+
+/// Shortest card: version, ledger id, secret and the smallest sealed blob a
+/// capability fits in.
+pub const CHANNEL_INVITE_CARD_MIN_LEN: usize =
+    1 + BLOB_ID_LEN + LINK_SECRET_LEN + crate::link_seal::sealed_len(1);
+
+/// Longest card: version, ledger id, secret and the longest sealed `/g/`
+/// blob. The chat envelope's `channel_invite` field
+/// (`lakko_attachments::MAX_CHANNEL_INVITE_BYTES`) is at least this.
+pub const CHANNEL_INVITE_CARD_MAX_LEN: usize = 1 + BLOB_ID_LEN + LINK_SECRET_LEN + MAX_SEALED_LEN;
+
+/// The invitation a publisher sends a contact inside their one-to-one: the
+/// whole `/g/` link (its ledger id and its secret) and the sealed capability
+/// the ledger holds, so the card renders with no fetch. It rides the chat
+/// envelope's `channel_invite` field, end-to-end encrypted; `Subscribe`
+/// consumes the ledger row by `ledger_id` as any link does.
+///
+/// ```text
+/// version(1)=0x01 ‖ ledger_id(6) ‖ link_secret(12) ‖ sealed /g/ blob
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+pub struct ChannelInviteCard {
+    /// The discovery ledger id of the link.
+    pub ledger_id: [u8; BLOB_ID_LEN],
+    /// The link secret (SECRET: it opens the capability and the preview).
+    pub link_secret: [u8; LINK_SECRET_LEN],
+    /// The sealed `/g/` blob, as [`seal_link`] produced it.
+    pub sealed: Vec<u8>,
+}
+
+impl core::fmt::Debug for ChannelInviteCard {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ChannelInviteCard")
+            .field("ledger_id", &self.ledger_id)
+            .field("sealed_len", &self.sealed.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChannelInviteCard {
+    /// Encode the card.
+    ///
+    /// # Errors
+    ///
+    /// [`ContactError::InvalidArgument`] when the sealed blob is outside the
+    /// lengths a `/g/` link can have.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let len = 1 + BLOB_ID_LEN + LINK_SECRET_LEN + self.sealed.len();
+        if !(CHANNEL_INVITE_CARD_MIN_LEN..=CHANNEL_INVITE_CARD_MAX_LEN).contains(&len) {
+            return Err(ContactError::InvalidArgument(
+                "channel invitation card sealed blob has a bad length".into(),
+            ));
+        }
+        let mut out = Vec::with_capacity(len);
+        out.push(CHANNEL_INVITE_CARD_VERSION_V1);
+        out.extend_from_slice(&self.ledger_id);
+        out.extend_from_slice(&self.link_secret);
+        out.extend_from_slice(&self.sealed);
+        Ok(out)
+    }
+
+    /// Decode a card. Bounded and fail-closed: a known version and a length
+    /// within the card bounds; the sealed blob is not opened here.
+    ///
+    /// # Errors
+    ///
+    /// [`ContactError::InvalidEncoding`].
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        if !(CHANNEL_INVITE_CARD_MIN_LEN..=CHANNEL_INVITE_CARD_MAX_LEN).contains(&bytes.len()) {
+            return Err(ContactError::InvalidEncoding(
+                "channel invitation card has a bad length".into(),
+            ));
+        }
+        let mut cur = bytes;
+        let version = take_u8(&mut cur)?;
+        if version != CHANNEL_INVITE_CARD_VERSION_V1 {
+            return Err(ContactError::InvalidEncoding(format!(
+                "unknown channel invitation card version {version}",
+            )));
+        }
+        let mut ledger_id = [0u8; BLOB_ID_LEN];
+        ledger_id.copy_from_slice(take_n(&mut cur, BLOB_ID_LEN)?);
+        let mut link_secret = [0u8; LINK_SECRET_LEN];
+        link_secret.copy_from_slice(take_n(&mut cur, LINK_SECRET_LEN)?);
+        Ok(Self {
+            ledger_id,
+            link_secret,
+            sealed: cur.to_vec(),
+        })
+    }
+
+    /// Open the card's link: [`open_link`] under its own secret, then the
+    /// preview, which must be a subscriber invitation.
+    ///
+    /// # Errors
+    ///
+    /// [`ContactError::LinkDamaged`] when the link does not open, and
+    /// [`ContactError::InvalidEncoding`] when it carries no subscriber
+    /// invitation.
+    pub fn open(&self) -> Result<(GroupInviteCapability, GroupInvitePreview)> {
+        let (capability, _) = open_link(&self.link_secret, &self.sealed)?;
+        match capability.open_preview(&self.link_secret)? {
+            Some(preview) if preview.subscriber.is_some() => Ok((capability, preview)),
+            _ => Err(ContactError::InvalidEncoding(
+                "channel invitation card carries no subscriber invitation".into(),
+            )),
+        }
+    }
 }
 
 /// Derive the 32-byte preview AEAD key from the URL-carried link secret:
@@ -444,7 +842,17 @@ impl GroupInviteCapability {
                 "group-invite preview does not open under this key".into(),
             )
         })?;
-        GroupInvitePreview::decode(&plain).map(Some)
+        let preview = GroupInvitePreview::decode(&plain)?;
+        if preview.subscriber.is_some() {
+            check_subscriber_capability(&self.group_id, &preview, self.knock.as_ref()).map_err(
+                |_| {
+                    ContactError::InvalidEncoding(
+                        "subscriber invitation does not match its capability".into(),
+                    )
+                },
+            )?;
+        }
+        Ok(Some(preview))
     }
 
     /// `true` iff the link has not expired at `now_ms`. A [`NEVER_EXPIRES`]
@@ -465,13 +873,44 @@ impl GroupInviteCapability {
     }
 }
 
-/// Compose + sign a group join-ticket capability.
+/// A subscriber invitation names its channel as the capability's `group_id`
+/// and carries no knock key (see the module docs).
+fn check_subscriber_capability(
+    group_id: &[u8],
+    preview: &GroupInvitePreview,
+    knock: Option<&GroupKnockKey>,
+) -> Result<()> {
+    if preview
+        .channel_id
+        .as_ref()
+        .map(<[u8; PREVIEW_CHANNEL_ID_LEN]>::as_slice)
+        != Some(group_id)
+    {
+        return Err(ContactError::InvalidArgument(
+            "a subscriber invitation's group id is its channel id".into(),
+        ));
+    }
+    if knock.is_some() {
+        return Err(ContactError::InvalidArgument(
+            "a subscriber invitation carries no knock key".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Compose + sign a group join-ticket capability naming the group's knock
+/// key.
 ///
 /// # Errors
 ///
 /// - [`ContactError::InvalidArgument`] when `group_id` is empty or longer than
 ///   [`MAX_GROUP_ID_LEN`].
-pub fn compose(issuer_signing: &SigningKey, group_id: &[u8], expiry_ms: u64) -> Result<Vec<u8>> {
+pub fn compose(
+    issuer_signing: &SigningKey,
+    group_id: &[u8],
+    expiry_ms: u64,
+    knock: &GroupKnockKey,
+) -> Result<Vec<u8>> {
     if group_id.is_empty() {
         return Err(ContactError::InvalidArgument(
             "group-invite group_id must be non-empty".into(),
@@ -483,7 +922,7 @@ pub fn compose(issuer_signing: &SigningKey, group_id: &[u8], expiry_ms: u64) -> 
             group_id.len(),
         )));
     }
-    compose_sealed(issuer_signing, group_id, expiry_ms, &[])
+    compose_sealed(issuer_signing, group_id, expiry_ms, Some(knock), &[])
 }
 
 /// Compose + sign a group join-ticket capability that carries a preview,
@@ -491,29 +930,42 @@ pub fn compose(issuer_signing: &SigningKey, group_id: &[u8], expiry_ms: u64) -> 
 /// [`generate_link_key`]). The caller puts the secret in the link's URL
 /// fragment and never anywhere a server reads.
 ///
+/// `knock` is the group's knock key; it must be `Some` for a group or
+/// co-publisher preview and `None` for a subscriber invitation, whose
+/// `group_id` must be its channel id.
+///
 /// # Errors
 ///
-/// - [`ContactError::InvalidArgument`] when `group_id` is out of bounds or a
-///   preview name fails the display-name rule.
+/// - [`ContactError::InvalidArgument`] when `group_id` is out of bounds, a
+///   preview name fails its rule, or `knock` does not fit the preview kind.
 pub fn compose_with_preview(
     issuer_signing: &SigningKey,
     group_id: &[u8],
     expiry_ms: u64,
+    knock: Option<&GroupKnockKey>,
     preview: &GroupInvitePreview,
     link_secret: &[u8; LINK_SECRET_LEN],
 ) -> Result<Vec<u8>> {
     preview.validate()?;
+    if preview.subscriber.is_some() {
+        check_subscriber_capability(group_id, preview, knock)?;
+    } else if knock.is_none() {
+        return Err(ContactError::InvalidArgument(
+            "a group or co-publisher link names the group's knock key".into(),
+        ));
+    }
     let key = preview_key(link_secret, group_id, &issuer_signing.verifying_key())?;
     let sealed = seal_with_key(key.as_bytes(), &preview.encode()).map_err(|e| {
         ContactError::InvalidArgument(format!("group-invite preview could not be sealed: {e}"))
     })?;
-    compose_sealed(issuer_signing, group_id, expiry_ms, &sealed)
+    compose_sealed(issuer_signing, group_id, expiry_ms, knock, &sealed)
 }
 
 fn compose_sealed(
     issuer_signing: &SigningKey,
     group_id: &[u8],
     expiry_ms: u64,
+    knock: Option<&GroupKnockKey>,
     sealed_preview: &[u8],
 ) -> Result<Vec<u8>> {
     if group_id.is_empty() {
@@ -534,7 +986,8 @@ fn compose_sealed(
         )));
     }
     let issuer_pubkey = issuer_signing.verifying_key();
-    let mut wire = encode_signing_prefix(&issuer_pubkey, group_id, expiry_ms, sealed_preview);
+    let mut wire =
+        encode_signing_prefix(&issuer_pubkey, group_id, expiry_ms, knock, sealed_preview);
     let signature = issuer_signing.sign(&wire);
     wire.extend_from_slice(&signature.to_bytes());
     Ok(wire)
@@ -574,6 +1027,23 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<GroupInviteCapability> {
     let group_id = take_n(&mut cur, gid_len)?.to_vec();
     let issuer_pubkey_bytes = take_n(&mut cur, ED25519_PUB_LEN)?;
     let expiry_ms_bytes = take_n(&mut cur, 8)?;
+    let knock = match take_u8(&mut cur)? {
+        0 => None,
+        1 => {
+            let field = take_n(&mut cur, KNOCK_FIELD_LEN)?;
+            let mut public_key = [0u8; KNOCK_KEY_LEN];
+            public_key.copy_from_slice(&field[..KNOCK_KEY_LEN]);
+            Some(GroupKnockKey {
+                public_key,
+                version: u16::from_be_bytes([field[KNOCK_KEY_LEN], field[KNOCK_KEY_LEN + 1]]),
+            })
+        },
+        other => {
+            return Err(ContactError::InvalidEncoding(format!(
+                "group-invite knock flag {other} is neither 0 nor 1"
+            )))
+        },
+    };
     let preview_len_bytes = take_n(&mut cur, 2)?;
     let preview_len = usize::from(u16::from_be_bytes([
         preview_len_bytes[0],
@@ -624,6 +1094,7 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<GroupInviteCapability> {
         group_id,
         issuer_signature_pubkey: issuer_pubkey,
         expiry_ms,
+        knock,
         sealed_preview,
     })
 }
@@ -636,19 +1107,36 @@ fn encode_signing_prefix(
     issuer_signature_pubkey: &VerifyingKey,
     group_id: &[u8],
     expiry_ms: u64,
+    knock: Option<&GroupKnockKey>,
     sealed_preview: &[u8],
 ) -> Vec<u8> {
     // Both lengths were bounded by the caller; a wrong caller still cannot
     // overflow the prefix, it saturates.
     let gid_len_u16 = u16::try_from(group_id.len()).unwrap_or(u16::MAX);
     let preview_len_u16 = u16::try_from(sealed_preview.len()).unwrap_or(u16::MAX);
-    let mut out =
-        Vec::with_capacity(1 + 2 + group_id.len() + ED25519_PUB_LEN + 8 + 2 + sealed_preview.len());
+    let mut out = Vec::with_capacity(
+        1 + 2
+            + group_id.len()
+            + ED25519_PUB_LEN
+            + 8
+            + 1
+            + KNOCK_FIELD_LEN
+            + 2
+            + sealed_preview.len(),
+    );
     out.push(SCHEMA_VERSION);
     out.extend_from_slice(&gid_len_u16.to_be_bytes());
     out.extend_from_slice(group_id);
     out.extend_from_slice(&issuer_signature_pubkey.to_bytes());
     out.extend_from_slice(&expiry_ms.to_be_bytes());
+    match knock {
+        None => out.push(0),
+        Some(k) => {
+            out.push(1);
+            out.extend_from_slice(&k.public_key);
+            out.extend_from_slice(&k.version.to_be_bytes());
+        },
+    }
     out.extend_from_slice(&preview_len_u16.to_be_bytes());
     out.extend_from_slice(sealed_preview);
     out
@@ -663,6 +1151,13 @@ fn encode_signing_prefix(
 pub(crate) fn fuzz_preview_plaintext(plain: &[u8]) -> Option<bool> {
     let preview = GroupInvitePreview::decode(plain).ok()?;
     Some(preview.validate().is_ok() && preview.encode() == plain)
+}
+
+/// Fuzz hook behind [`crate::fuzz_api::channel_invite_card_open`].
+pub(crate) fn fuzz_channel_invite_card(bytes: &[u8]) -> Option<bool> {
+    let card = ChannelInviteCard::decode(bytes).ok()?;
+    let _ = card.open();
+    Some(card.encode().ok().as_deref() == Some(bytes))
 }
 
 fn take_u8(cur: &mut &[u8]) -> Result<u8> {
@@ -742,6 +1237,13 @@ mod tests {
         SigningKey::from_seed(&[0x5A; 32])
     }
 
+    fn knock() -> GroupKnockKey {
+        GroupKnockKey {
+            public_key: [0x4B; KNOCK_KEY_LEN],
+            version: 3,
+        }
+    }
+
     fn fixture_group_id() -> Vec<u8> {
         let mut gid = vec![0x11; 32];
         gid[0] = 0xCA;
@@ -749,8 +1251,10 @@ mod tests {
         gid
     }
 
-    /// A maximal capability is exactly MAX_WIRE_LEN; one secret opens the
-    /// sealed link and then the preview inside it.
+    /// A maximal group capability is the documented size and within
+    /// MAX_WIRE_LEN (the bound adds the largest group id to the largest
+    /// preview, the subscriber invitation's, which a 16-byte channel id
+    /// carries); one secret opens the sealed link and then the preview.
     #[test]
     fn sealed_link_opens_and_the_same_secret_opens_the_preview() {
         let long_name = format!("{}{}", "\u{1F600}".repeat(63), '\u{20AC}');
@@ -759,19 +1263,26 @@ mod tests {
             inviter_name: Some(long_name),
             member_count: 7,
             channel_id: None,
+            subscriber: None,
         };
         let secret = generate_link_key();
         let wire = compose_with_preview(
             &fixture_signing(),
             &vec![0x5a; MAX_GROUP_ID_LEN],
             0,
+            Some(&knock()),
             &preview,
             &secret,
         )
         .unwrap();
-        assert_eq!(wire.len(), MAX_WIRE_LEN);
+        let group_max = MAX_WIRE_LEN - MAX_SEALED_PREVIEW_LEN
+            + NONCE_LEN
+            + MAX_GROUP_PREVIEW_PLAINTEXT_LEN
+            + TAG_LEN;
+        assert_eq!(wire.len(), group_max);
+        assert!(wire.len() <= MAX_WIRE_LEN);
         let sealed = seal_link(&secret, &wire).unwrap();
-        assert_eq!(sealed.len(), MAX_SEALED_LEN);
+        assert!(sealed.len() <= MAX_SEALED_LEN);
         let (cap, opened) = open_link(&secret, &sealed).unwrap();
         assert_eq!(opened, wire);
         assert_eq!(cap.open_preview(&secret).unwrap(), Some(preview));
@@ -784,7 +1295,7 @@ mod tests {
         let secret = generate_link_key();
         let sealed = seal_link(
             &secret,
-            &compose(&fixture_signing(), &fixture_group_id(), 0).unwrap(),
+            &compose(&fixture_signing(), &fixture_group_id(), 0, &knock()).unwrap(),
         )
         .unwrap();
         assert!(matches!(
@@ -793,7 +1304,7 @@ mod tests {
         ));
         let theirs = seal_link(
             &generate_link_key(),
-            &compose(&SigningKey::generate(), &fixture_group_id(), 0).unwrap(),
+            &compose(&SigningKey::generate(), &fixture_group_id(), 0, &knock()).unwrap(),
         )
         .unwrap();
         assert!(matches!(
@@ -811,10 +1322,18 @@ mod tests {
             inviter_name: None,
             member_count: 0,
             channel_id: Some([0xC4; PREVIEW_CHANNEL_ID_LEN]),
+            subscriber: None,
         };
         let secret = generate_link_key();
-        let wire =
-            compose_with_preview(&fixture_signing(), &[0x5a; 32], 0, &preview, &secret).unwrap();
+        let wire = compose_with_preview(
+            &fixture_signing(),
+            &[0x5a; 32],
+            0,
+            Some(&knock()),
+            &preview,
+            &secret,
+        )
+        .unwrap();
         let sealed = seal_link(&secret, &wire).unwrap();
         let (cap, _) = open_link(&secret, &sealed).unwrap();
         let opened = cap.open_preview(&secret).unwrap().expect("preview");
@@ -834,6 +1353,7 @@ mod tests {
             inviter_name: None,
             member_count: 0,
             channel_id: Some([0x01; PREVIEW_CHANNEL_ID_LEN]),
+            subscriber: None,
         };
         let plain = preview.encode();
         assert_eq!(plain.len(), 1 + PREVIEW_CHANNEL_ID_LEN + 1);
@@ -852,11 +1372,13 @@ mod tests {
                 inviter_name: inviter,
                 member_count: count,
                 channel_id: Some([0x01; PREVIEW_CHANNEL_ID_LEN]),
+                subscriber: None,
             };
             assert!(compose_with_preview(
                 &fixture_signing(),
                 &[0x5a; 32],
                 0,
+                Some(&knock()),
                 &preview,
                 &generate_link_key()
             )
@@ -871,6 +1393,7 @@ mod tests {
             inviter_name: None,
             member_count: 0,
             channel_id: Some([0x01; PREVIEW_CHANNEL_ID_LEN]),
+            subscriber: None,
         };
         let plain = preview.encode();
         for cut in 0..plain.len() {
@@ -898,6 +1421,7 @@ mod tests {
             inviter_name: None,
             member_count: 7,
             channel_id: None,
+            subscriber: None,
         };
         let plain = preview.encode();
         assert_eq!(
@@ -936,7 +1460,7 @@ mod tests {
     fn compose_decode_round_trips() {
         let signing = fixture_signing();
         let gid = fixture_group_id();
-        let wire = compose(&signing, &gid, 1_700_000_000_000).unwrap();
+        let wire = compose(&signing, &gid, 1_700_000_000_000, &knock()).unwrap();
         let parsed = decode_and_verify(&wire).unwrap();
         assert_eq!(parsed.group_id, gid);
         assert_eq!(
@@ -950,7 +1474,7 @@ mod tests {
     fn variable_length_group_id_round_trips() {
         for len in [1usize, 16, 32, MAX_GROUP_ID_LEN] {
             let gid = vec![0x7Bu8; len];
-            let wire = compose(&fixture_signing(), &gid, 0).unwrap();
+            let wire = compose(&fixture_signing(), &gid, 0, &knock()).unwrap();
             let parsed = decode_and_verify(&wire).unwrap();
             assert_eq!(parsed.group_id, gid, "len {len}");
         }
@@ -962,6 +1486,7 @@ mod tests {
             &fixture_signing(),
             &fixture_group_id(),
             GROUP_INVITE_NEVER_EXPIRES,
+            &knock(),
         )
         .unwrap();
         let parsed = decode_and_verify(&wire).unwrap();
@@ -971,7 +1496,7 @@ mod tests {
 
     #[test]
     fn expired_link_is_invalid_after_expiry() {
-        let wire = compose(&fixture_signing(), &fixture_group_id(), 1_000).unwrap();
+        let wire = compose(&fixture_signing(), &fixture_group_id(), 1_000, &knock()).unwrap();
         let parsed = decode_and_verify(&wire).unwrap();
         assert!(parsed.is_valid_now(999));
         assert!(!parsed.is_valid_now(1_000));
@@ -980,7 +1505,7 @@ mod tests {
 
     #[test]
     fn tampered_group_id_rejected() {
-        let mut wire = compose(&fixture_signing(), &fixture_group_id(), 0).unwrap();
+        let mut wire = compose(&fixture_signing(), &fixture_group_id(), 0, &knock()).unwrap();
         // Flip a byte inside the group_id region (offset 3 = first gid byte).
         wire[3] ^= 0xFF;
         match decode_and_verify(&wire) {
@@ -993,7 +1518,7 @@ mod tests {
     fn cross_signing_key_rejected() {
         let signing_a = SigningKey::from_seed(&[0xAA; 32]);
         let signing_b = SigningKey::from_seed(&[0xBB; 32]);
-        let mut wire = compose(&signing_a, &fixture_group_id(), 0).unwrap();
+        let mut wire = compose(&signing_a, &fixture_group_id(), 0, &knock()).unwrap();
         // Splice B's pubkey over A's (it sits right after version + len + gid).
         let off = 1 + 2 + fixture_group_id().len();
         wire[off..off + ED25519_PUB_LEN].copy_from_slice(&signing_b.verifying_key().to_bytes());
@@ -1005,13 +1530,13 @@ mod tests {
 
     #[test]
     fn truncated_wire_rejected() {
-        let wire = compose(&fixture_signing(), &fixture_group_id(), 0).unwrap();
+        let wire = compose(&fixture_signing(), &fixture_group_id(), 0, &knock()).unwrap();
         assert!(decode_and_verify(&wire[..wire.len() - SIGNATURE_LEN - 1]).is_err());
     }
 
     #[test]
     fn trailing_bytes_rejected() {
-        let mut wire = compose(&fixture_signing(), &fixture_group_id(), 0).unwrap();
+        let mut wire = compose(&fixture_signing(), &fixture_group_id(), 0, &knock()).unwrap();
         wire.push(0x00);
         match decode_and_verify(&wire) {
             Err(ContactError::InvalidEncoding(msg)) => assert!(msg.contains("trailing"), "{msg}"),
@@ -1021,7 +1546,7 @@ mod tests {
 
     #[test]
     fn unsupported_schema_version_rejected() {
-        let mut wire = compose(&fixture_signing(), &fixture_group_id(), 0).unwrap();
+        let mut wire = compose(&fixture_signing(), &fixture_group_id(), 0, &knock()).unwrap();
         // v1 (the pre-preview layout) is refused too: there is no deployment
         // to stay compatible with, and a v1 wire has no preview field.
         wire[0] = 1;
@@ -1035,14 +1560,14 @@ mod tests {
 
     #[test]
     fn empty_group_id_rejected_at_compose() {
-        let err = compose(&fixture_signing(), &[], 0).unwrap_err();
+        let err = compose(&fixture_signing(), &[], 0, &knock()).unwrap_err();
         assert!(matches!(err, ContactError::InvalidArgument(_)));
     }
 
     #[test]
     fn oversize_group_id_rejected_at_compose() {
         let too_big = vec![0u8; MAX_GROUP_ID_LEN + 1];
-        let err = compose(&fixture_signing(), &too_big, 0).unwrap_err();
+        let err = compose(&fixture_signing(), &too_big, 0, &knock()).unwrap_err();
         assert!(matches!(err, ContactError::InvalidArgument(_)));
     }
 
@@ -1063,13 +1588,15 @@ mod tests {
 
     #[test]
     fn issuer_fingerprint_is_deterministic_per_pubkey() {
-        let cap_a =
-            decode_and_verify(&compose(&fixture_signing(), &fixture_group_id(), 1_000).unwrap())
-                .unwrap();
+        let cap_a = decode_and_verify(
+            &compose(&fixture_signing(), &fixture_group_id(), 1_000, &knock()).unwrap(),
+        )
+        .unwrap();
         let mut other_gid = fixture_group_id();
         other_gid[0] = 0x99;
         let cap_b =
-            decode_and_verify(&compose(&fixture_signing(), &other_gid, 999_999).unwrap()).unwrap();
+            decode_and_verify(&compose(&fixture_signing(), &other_gid, 999_999, &knock()).unwrap())
+                .unwrap();
         assert_eq!(
             cap_a.issuer_fingerprint(),
             cap_b.issuer_fingerprint(),
@@ -1080,11 +1607,23 @@ mod tests {
     #[test]
     fn different_issuers_have_different_fingerprints() {
         let cap_a = decode_and_verify(
-            &compose(&SigningKey::from_seed(&[0xAA; 32]), &fixture_group_id(), 0).unwrap(),
+            &compose(
+                &SigningKey::from_seed(&[0xAA; 32]),
+                &fixture_group_id(),
+                0,
+                &knock(),
+            )
+            .unwrap(),
         )
         .unwrap();
         let cap_b = decode_and_verify(
-            &compose(&SigningKey::from_seed(&[0xBB; 32]), &fixture_group_id(), 0).unwrap(),
+            &compose(
+                &SigningKey::from_seed(&[0xBB; 32]),
+                &fixture_group_id(),
+                0,
+                &knock(),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_ne!(cap_a.issuer_fingerprint(), cap_b.issuer_fingerprint());
@@ -1139,12 +1678,19 @@ mod tests {
             inviter_name: Some("Anna Weber".to_string()),
             member_count: 4,
             channel_id: None,
+            subscriber: None,
         }
     }
 
     #[test]
     fn a_link_without_a_preview_opens_none() {
-        let wire = compose(&fixture_signing(), &fixture_group_id(), NEVER_EXPIRES).unwrap();
+        let wire = compose(
+            &fixture_signing(),
+            &fixture_group_id(),
+            NEVER_EXPIRES,
+            &knock(),
+        )
+        .unwrap();
         let cap = decode_and_verify(&wire).unwrap();
         assert!(cap.sealed_preview.is_empty());
         assert_eq!(cap.open_preview(&generate_link_key()).unwrap(), None);
@@ -1157,6 +1703,7 @@ mod tests {
             &fixture_signing(),
             &fixture_group_id(),
             NEVER_EXPIRES,
+            Some(&knock()),
             &fixture_preview(),
             &key,
         )
@@ -1220,6 +1767,7 @@ mod tests {
             &fixture_signing(),
             &fixture_group_id(),
             NEVER_EXPIRES,
+            Some(&knock()),
             &fixture_preview(),
             &secret,
         )
@@ -1245,11 +1793,13 @@ mod tests {
             inviter_name: None,
             member_count: u16::MAX,
             channel_id: None,
+            subscriber: None,
         };
         let wire = compose_with_preview(
             &fixture_signing(),
             &fixture_group_id(),
             NEVER_EXPIRES,
+            Some(&knock()),
             &preview,
             &key,
         )
@@ -1267,12 +1817,14 @@ mod tests {
                 inviter_name: None,
                 member_count: 1,
                 channel_id: None,
+                subscriber: None,
             };
             assert!(
                 compose_with_preview(
                     &fixture_signing(),
                     &fixture_group_id(),
                     NEVER_EXPIRES,
+                    Some(&knock()),
                     &preview,
                     &key
                 )
@@ -1288,11 +1840,13 @@ mod tests {
             inviter_name: Some("\u{41C}\u{430}\u{440}\u{438}\u{44F}".to_string()),
             member_count: 3,
             channel_id: None,
+            subscriber: None,
         };
         let wire = compose_with_preview(
             &fixture_signing(),
             &fixture_group_id(),
             NEVER_EXPIRES,
+            Some(&knock()),
             &preview,
             &key,
         )
@@ -1313,6 +1867,7 @@ mod tests {
             &fixture_signing(),
             &fixture_group_id(),
             NEVER_EXPIRES,
+            Some(&knock()),
             &fixture_preview(),
             &key,
         )
@@ -1332,6 +1887,7 @@ mod tests {
         prefix.extend_from_slice(&gid);
         prefix.extend_from_slice(&signing.verifying_key().to_bytes());
         prefix.extend_from_slice(&0u64.to_be_bytes());
+        prefix.push(0);
         let mut over = prefix.clone();
         over.extend_from_slice(
             &u16::try_from(MAX_SEALED_PREVIEW_LEN + 1)
@@ -1348,5 +1904,225 @@ mod tests {
         let sig = signing.sign(&short);
         short.extend_from_slice(&sig.to_bytes());
         assert!(decode_and_verify(&short).is_err());
+    }
+
+    // --- ADR-0087: the knock key, the subscriber invitation, the card -----
+
+    fn subscriber_preview(access: ChannelAccess) -> GroupInvitePreview {
+        GroupInvitePreview {
+            group_name: Some("Berlin news".into()),
+            inviter_name: None,
+            member_count: 0,
+            channel_id: Some([0xC7; PREVIEW_CHANNEL_ID_LEN]),
+            subscriber: Some(SubscriberInvite {
+                access,
+                description: "Local news\nevery morning".into(),
+            }),
+        }
+    }
+
+    fn private_access() -> ChannelAccess {
+        ChannelAccess::Private {
+            invite_seed: [0x11; SUBSCRIBER_KEY_LEN],
+            admission_public_key: [0x22; SUBSCRIBER_KEY_LEN],
+            admission_version: 2,
+        }
+    }
+
+    #[test]
+    fn the_knock_key_round_trips_and_is_signed() {
+        let wire = compose(&fixture_signing(), &fixture_group_id(), 0, &knock()).unwrap();
+        let cap = decode_and_verify(&wire).unwrap();
+        assert_eq!(cap.knock, Some(knock()));
+        // The knock version sits right before the preview length; flipping
+        // it breaks the signature.
+        let at = 1 + 2 + fixture_group_id().len() + ED25519_PUB_LEN + 8 + 1 + KNOCK_KEY_LEN;
+        let mut tampered = wire;
+        tampered[at + 1] ^= 1;
+        assert!(decode_and_verify(&tampered).is_err());
+    }
+
+    #[test]
+    fn a_v2_capability_and_a_bad_knock_flag_are_refused() {
+        let mut wire = compose(&fixture_signing(), &fixture_group_id(), 0, &knock()).unwrap();
+        wire[0] = 2;
+        assert!(decode_and_verify(&wire).is_err());
+        let signing = fixture_signing();
+        let gid = fixture_group_id();
+        let mut prefix = vec![SCHEMA_VERSION];
+        prefix.extend_from_slice(&u16::try_from(gid.len()).unwrap().to_be_bytes());
+        prefix.extend_from_slice(&gid);
+        prefix.extend_from_slice(&signing.verifying_key().to_bytes());
+        prefix.extend_from_slice(&0u64.to_be_bytes());
+        prefix.push(2);
+        prefix.extend_from_slice(&0u16.to_be_bytes());
+        let sig = signing.sign(&prefix);
+        prefix.extend_from_slice(&sig.to_bytes());
+        match decode_and_verify(&prefix) {
+            Err(ContactError::InvalidEncoding(msg)) => assert!(msg.contains("knock flag"), "{msg}"),
+            other => panic!("expected a knock-flag refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_group_link_needs_a_knock_key_and_a_subscriber_invitation_has_none() {
+        let secret = generate_link_key();
+        assert!(compose_with_preview(
+            &fixture_signing(),
+            &fixture_group_id(),
+            0,
+            None,
+            &fixture_preview(),
+            &secret
+        )
+        .is_err());
+        let channel = [0xC7; PREVIEW_CHANNEL_ID_LEN];
+        assert!(compose_with_preview(
+            &fixture_signing(),
+            &channel,
+            0,
+            Some(&knock()),
+            &subscriber_preview(private_access()),
+            &secret
+        )
+        .is_err());
+        // A subscriber invitation's group id is its channel id.
+        assert!(compose_with_preview(
+            &fixture_signing(),
+            &fixture_group_id(),
+            0,
+            None,
+            &subscriber_preview(private_access()),
+            &secret
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_subscriber_invitation_round_trips_private_and_public() {
+        let channel = [0xC7; PREVIEW_CHANNEL_ID_LEN];
+        for access in [
+            private_access(),
+            ChannelAccess::Public {
+                read_key: [0x33; SUBSCRIBER_KEY_LEN],
+            },
+        ] {
+            let preview = subscriber_preview(access);
+            let secret = generate_link_key();
+            let wire =
+                compose_with_preview(&fixture_signing(), &channel, 0, None, &preview, &secret)
+                    .unwrap();
+            let sealed = seal_link(&secret, &wire).unwrap();
+            let (cap, _) = open_link(&secret, &sealed).unwrap();
+            assert_eq!(cap.knock, None);
+            assert_eq!(cap.group_id, channel);
+            assert_eq!(cap.open_preview(&secret).unwrap(), Some(preview.clone()));
+            let plain = preview.encode();
+            assert_eq!(fuzz_preview_plaintext(&plain), Some(true));
+            for cut in 0..plain.len() {
+                assert!(
+                    GroupInvitePreview::decode(&plain[..cut]).is_err(),
+                    "cut {cut}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_subscriber_invitation_that_names_another_channel_does_not_open() {
+        // Hand-built: the preview names one channel, the capability another.
+        let secret = generate_link_key();
+        let preview = subscriber_preview(private_access());
+        let other = [0x01; PREVIEW_CHANNEL_ID_LEN];
+        let key = preview_key(&secret, &other, &fixture_signing().verifying_key()).unwrap();
+        let sealed = seal_with_key(key.as_bytes(), &preview.encode()).unwrap();
+        let wire = compose_sealed(&fixture_signing(), &other, 0, None, &sealed).unwrap();
+        let cap = decode_and_verify(&wire).unwrap();
+        assert!(cap.open_preview(&secret).is_err());
+    }
+
+    #[test]
+    fn subscriber_invitation_fields_follow_the_channel_rules() {
+        let mut no_name = subscriber_preview(private_access());
+        no_name.group_name = None;
+        let mut bad_description = subscriber_preview(private_access());
+        if let Some(sub) = bad_description.subscriber.as_mut() {
+            sub.description = "rlo\u{202E}".into();
+        }
+        for preview in [no_name, bad_description] {
+            assert!(preview.validate().is_err());
+        }
+        let mut bad_access = subscriber_preview(private_access()).encode();
+        bad_access[1 + PREVIEW_CHANNEL_ID_LEN] = 9;
+        assert!(GroupInvitePreview::decode(&bad_access).is_err());
+    }
+
+    #[test]
+    fn maximal_lengths_are_the_documented_construction() {
+        assert_eq!(MAX_PREVIEW_PLAINTEXT_LEN, 1366);
+        assert_eq!(MAX_SEALED_PREVIEW_LEN, 1394);
+        assert_eq!(MAX_WIRE_LEN, 1794);
+        assert_eq!(MAX_SEALED_LEN, 1824);
+        assert_eq!(CHANNEL_INVITE_CARD_MAX_LEN, 1843);
+        // The chat envelope keeps a card of up to
+        // `lakko_attachments::MAX_CHANNEL_INVITE_BYTES` (2048) bytes.
+        const { assert!(CHANNEL_INVITE_CARD_MAX_LEN <= 2048) };
+        // A maximal subscriber invitation fills the bound exactly.
+        let preview = GroupInvitePreview {
+            group_name: Some(format!("{}\u{20AC}", "\u{1F600}".repeat(63))),
+            inviter_name: None,
+            member_count: 0,
+            channel_id: Some([0xC7; PREVIEW_CHANNEL_ID_LEN]),
+            subscriber: Some(SubscriberInvite {
+                access: private_access(),
+                description: "\u{1F600}".repeat(256),
+            }),
+        };
+        assert_eq!(preview.encode().len(), MAX_PREVIEW_PLAINTEXT_LEN);
+    }
+
+    #[test]
+    fn a_channel_invite_card_round_trips_and_opens() {
+        let channel = [0xC7; PREVIEW_CHANNEL_ID_LEN];
+        let preview = subscriber_preview(private_access());
+        let secret = generate_link_key();
+        let wire =
+            compose_with_preview(&fixture_signing(), &channel, 0, None, &preview, &secret).unwrap();
+        let card = ChannelInviteCard {
+            ledger_id: [9; BLOB_ID_LEN],
+            link_secret: secret,
+            sealed: seal_link(&secret, &wire).unwrap(),
+        };
+        let bytes = card.encode().unwrap();
+        assert_eq!(ChannelInviteCard::decode(&bytes).unwrap(), card);
+        assert_eq!(fuzz_channel_invite_card(&bytes), Some(true));
+        let (cap, opened) = card.open().unwrap();
+        assert_eq!(cap.group_id, channel);
+        assert_eq!(opened, preview);
+        assert!(!format!("{card:?}").contains(&format!("{secret:?}")));
+
+        // A group link in a card is not a subscriber invitation.
+        let group_wire = compose_with_preview(
+            &fixture_signing(),
+            &fixture_group_id(),
+            0,
+            Some(&knock()),
+            &fixture_preview(),
+            &secret,
+        )
+        .unwrap();
+        let group_card = ChannelInviteCard {
+            sealed: seal_link(&secret, &group_wire).unwrap(),
+            ..card.clone()
+        };
+        assert!(group_card.open().is_err());
+
+        let mut wrong_version = bytes.clone();
+        wrong_version[0] = 2;
+        assert!(ChannelInviteCard::decode(&wrong_version).is_err());
+        assert!(ChannelInviteCard::decode(&bytes[..CHANNEL_INVITE_CARD_MIN_LEN - 1]).is_err());
+        let mut long = bytes;
+        long.resize(CHANNEL_INVITE_CARD_MAX_LEN + 1, 0);
+        assert!(ChannelInviteCard::decode(&long).is_err());
     }
 }

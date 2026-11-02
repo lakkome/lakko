@@ -73,11 +73,18 @@ pub enum TokenContext {
     /// up to a few megabytes under a key anyone can make, so it is rationed
     /// like a vault claim.
     CircleClaim = 13,
+    /// `services/channels`: one reaction added under a channel post
+    /// (ADR-0087 section 13a). Taking a reaction off spends none: only the
+    /// holder of the post key can sign it.
+    ChannelReact = 14,
+    /// `services/channels`: one comment added under a channel post
+    /// (ADR-0087 section 13a). Deleting one's own comment spends none.
+    ChannelComment = 15,
 }
 
 impl TokenContext {
     /// Every context, in wire order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::DiscoveryLookup,
         Self::DiscoveryRegister,
         Self::InviteConsume,
@@ -91,6 +98,8 @@ impl TokenContext {
         Self::MailboxWrite,
         Self::CallJoin,
         Self::CircleClaim,
+        Self::ChannelReact,
+        Self::ChannelComment,
     ];
 
     /// The frozen wire byte.
@@ -119,6 +128,8 @@ impl TokenContext {
             11 => Ok(Self::MailboxWrite),
             12 => Ok(Self::CallJoin),
             13 => Ok(Self::CircleClaim),
+            14 => Ok(Self::ChannelReact),
+            15 => Ok(Self::ChannelComment),
             _ => Err(AnonTokenError::UnknownContext),
         }
     }
@@ -140,6 +151,8 @@ impl TokenContext {
             Self::MailboxWrite => "mailbox-write",
             Self::CallJoin => "call-join",
             Self::CircleClaim => "circle-claim",
+            Self::ChannelReact => "channel-react",
+            Self::ChannelComment => "channel-comment",
         }
     }
 
@@ -190,7 +203,7 @@ mod tests {
             Err(AnonTokenError::UnknownContext)
         );
         assert_eq!(
-            TokenContext::from_u8(14),
+            TokenContext::from_u8(16),
             Err(AnonTokenError::UnknownContext)
         );
         assert_eq!(
@@ -207,14 +220,14 @@ mod tests {
     fn all_lists_every_context_once_in_wire_order() {
         // `ALL` is what `from_name`, the issuer's quota table and both FFI
         // surfaces enumerate: a context missing from it has no name lookup
-        // and no quota. Exactly the bytes 1..=13 parse, and `ALL` is those
+        // and no quota. Exactly the bytes 1..=15 parse, and `ALL` is those
         // contexts in that order.
         let parsed: Vec<TokenContext> = (0..=u8::MAX)
             .filter_map(|b| TokenContext::from_u8(b).ok())
             .collect();
         assert_eq!(parsed, TokenContext::ALL);
         let bytes: Vec<u8> = TokenContext::ALL.iter().map(|c| c.as_u8()).collect();
-        assert_eq!(bytes, (1..=13).collect::<Vec<u8>>());
+        assert_eq!(bytes, (1..=15).collect::<Vec<u8>>());
         let mut names: Vec<&str> = TokenContext::ALL.iter().map(|c| c.name()).collect();
         names.sort_unstable();
         names.dedup();
@@ -236,6 +249,8 @@ mod tests {
         assert_eq!(TokenContext::MailboxWrite.as_u8(), 11);
         assert_eq!(TokenContext::CallJoin.as_u8(), 12);
         assert_eq!(TokenContext::CircleClaim.as_u8(), 13);
+        assert_eq!(TokenContext::ChannelReact.as_u8(), 14);
+        assert_eq!(TokenContext::ChannelComment.as_u8(), 15);
         assert_eq!(TokenContext::DiscoveryLookup.name(), "discovery-lookup");
         assert_eq!(TokenContext::DiscoveryRegister.name(), "discovery-register");
         assert_eq!(TokenContext::InviteConsume.name(), "invite-consume");
@@ -249,6 +264,8 @@ mod tests {
         assert_eq!(TokenContext::MailboxWrite.name(), "mailbox-write");
         assert_eq!(TokenContext::CallJoin.name(), "call-join");
         assert_eq!(TokenContext::CircleClaim.name(), "circle-claim");
+        assert_eq!(TokenContext::ChannelReact.name(), "channel-react");
+        assert_eq!(TokenContext::ChannelComment.name(), "channel-comment");
     }
 
     #[test]

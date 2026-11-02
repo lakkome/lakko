@@ -18,12 +18,14 @@
 //! `fuzz_api::media_metadata_within_bounds`, a property oracle asserted
 //! here: every media field that survives parse is within its bound, and
 //! re-composing the parsed refs then parsing again yields the same refs.
+//! ADR-0087 section 14: the `channel_invite` card is bounded the same way
+//! (`fuzz_api::channel_invite_within_bounds`).
 
 #![no_main]
 
 use lakko_attachments::fuzz_api::{
-    forward_within_bounds, media_metadata_within_bounds, parse_message_body, reply_within_bounds,
-    resend_within_bounds,
+    channel_invite_within_bounds, forward_within_bounds, media_metadata_within_bounds,
+    parse_message_body, reply_within_bounds, resend_within_bounds,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -37,4 +39,7 @@ fuzz_target!(|data: &[u8]| {
     // ADR-0073: a re-send marker survives parse only whole and within its
     // bound, and the bound is idempotent under compose_chat -> parse_body.
     assert!(resend_within_bounds(data));
+    // ADR-0087: a channel invitation card survives parse only within its
+    // bound, and compose_channel_invite -> parse_body keeps it.
+    assert!(channel_invite_within_bounds(data));
 });

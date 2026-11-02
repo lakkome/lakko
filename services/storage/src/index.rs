@@ -24,8 +24,10 @@
 //!
 //! # What a row holds
 //!
-//! Size, storage node, creation day, last access day and the delete public
-//! key. Nothing names an account (invariant #5). Days are unix day numbers
+//! Size, storage node, creation day, last access day, the delete public
+//! key, and an optional idle life in days (ADR-0087 section 13: a channel
+//! file sets 45; a row without one lives the service's default lifetime).
+//! Nothing names an account (invariant #5). Days are unix day numbers
 //! (`unix_secs / 86400`), so nothing finer than the day is recorded about
 //! when a file is read.
 
@@ -43,6 +45,19 @@ const SECS_PER_DAY: u64 = 86_400;
 /// The unix day number of `unix_secs`.
 pub(crate) fn day_of(unix_secs: u64) -> u32 {
     u32::try_from(unix_secs / SECS_PER_DAY).unwrap_or(u32::MAX)
+}
+
+/// Whether a row last accessed on `last_access_day`, with its own idle life
+/// `idle_days` or else `default_lifetime_days`, is past its life on `today`:
+/// its last access is more than its life back.
+pub(crate) fn is_expired(
+    last_access_day: u32,
+    idle_days: Option<u8>,
+    today: u32,
+    default_lifetime_days: u32,
+) -> bool {
+    let life = idle_days.map_or(default_lifetime_days, u32::from);
+    u64::from(last_access_day) + u64::from(life) < u64::from(today)
 }
 
 /// Today's unix day number by the system clock.
@@ -66,6 +81,9 @@ pub(crate) struct BlobRow {
     /// The Ed25519 key a `DELETE` must be signed with; `None` for a row that
     /// cannot be deleted (an imported blob).
     pub(crate) delete_pk: Option<[u8; 32]>,
+    /// The blob's own idle life in days (1..=255), set by its first upload;
+    /// `None` lives the service's default lifetime.
+    pub(crate) idle_days: Option<u8>,
 }
 
 /// What [`BlobIndex::record_upload`] did.
@@ -99,8 +117,8 @@ pub(crate) trait BlobIndex: Send + Sync {
     async fn get(&self, id: &BlobId) -> Result<Option<BlobRow>, IndexError>;
 
     /// Record a stored upload. A new row is written as `row`; an existing
-    /// row keeps its delete key and creation day and has its last access
-    /// raised to `row.last_access_day`.
+    /// row keeps its delete key, creation day and idle life and has its last
+    /// access raised to `row.last_access_day`.
     async fn record_upload(&self, row: BlobRow) -> Result<UploadOutcome, IndexError>;
 
     /// Raise the last access day of each existing id in `ids` to `day`. Ids
@@ -110,19 +128,26 @@ pub(crate) trait BlobIndex: Send + Sync {
     /// Remove the row of `id`. Returns whether a row was removed.
     async fn remove(&self, id: &BlobId) -> Result<bool, IndexError>;
 
-    /// Up to `limit` ids on `node` whose last access day is before
-    /// `cutoff_day`.
+    /// Up to `limit` ids on `node` past their life on `today` ([`is_expired`]:
+    /// a row's own idle days, else `default_lifetime_days`), oldest access
+    /// first.
     async fn expired(
         &self,
         node: &str,
-        cutoff_day: u32,
+        today: u32,
+        default_lifetime_days: u32,
         limit: usize,
     ) -> Result<Vec<BlobId>, IndexError>;
 
-    /// Remove the row of `id` only if its last access day is still before
-    /// `cutoff_day`, so a download that raced the sweep keeps the blob.
-    /// Returns whether a row was removed.
-    async fn remove_if_expired(&self, id: &BlobId, cutoff_day: u32) -> Result<bool, IndexError>;
+    /// Remove the row of `id` only if it is still past its life on `today`,
+    /// so a download that raced the sweep keeps the blob. Returns whether a
+    /// row was removed.
+    async fn remove_if_expired(
+        &self,
+        id: &BlobId,
+        today: u32,
+        default_lifetime_days: u32,
+    ) -> Result<bool, IndexError>;
 
     /// Whether the one-time import has run for `node`.
     async fn import_done(&self, node: &str) -> Result<bool, IndexError>;
@@ -146,6 +171,7 @@ pub(crate) mod contract {
             created_day: day,
             last_access_day: day,
             delete_pk: key.map(|k| [k; 32]),
+            idle_days: None,
         }
     }
 
@@ -191,19 +217,51 @@ pub(crate) mod contract {
         );
 
         index.record_upload(b.clone()).await.unwrap();
-        let expired = index.expired("local", 101, 100).await.unwrap();
+        // Today 111 with a 10-day default life: `b` (access 100) is past it,
+        // `a` (access 110) is not.
+        let expired = index.expired("local", 111, 10, 100).await.unwrap();
         assert!(expired.contains(&b.id));
         assert!(!expired.contains(&a.id));
         assert!(!index
-            .expired("elsewhere", 101, 100)
+            .expired("elsewhere", 111, 10, 100)
             .await
             .unwrap()
             .contains(&b.id));
 
         // The conditional removal spares a row touched since.
-        assert!(!index.remove_if_expired(&a.id, 101).await.unwrap());
-        assert!(index.remove_if_expired(&b.id, 101).await.unwrap());
+        assert!(!index.remove_if_expired(&a.id, 111, 10).await.unwrap());
+        assert!(index.remove_if_expired(&b.id, 111, 10).await.unwrap());
         assert_eq!(index.get(&b.id).await.unwrap(), None);
+
+        // ADR-0087 section 13: a row's own idle life replaces the default,
+        // shorter or longer, and a re-upload keeps the first one.
+        let mut short = row(base.wrapping_add(2), 100, Some(5));
+        short.idle_days = Some(3);
+        let mut long = row(base.wrapping_add(3), 100, None);
+        long.idle_days = Some(200);
+        let _ = index.remove(&short.id).await.unwrap();
+        let _ = index.remove(&long.id).await.unwrap();
+        index.record_upload(short.clone()).await.unwrap();
+        index.record_upload(long.clone()).await.unwrap();
+        assert_eq!(index.get(&short.id).await.unwrap(), Some(short.clone()));
+        let mut again = short.clone();
+        again.idle_days = None;
+        index.record_upload(again).await.unwrap();
+        assert_eq!(
+            index.get(&short.id).await.unwrap().unwrap().idle_days,
+            Some(3)
+        );
+        // Day 103: `short` (100 + 3) is still in its life, day 104 it is not;
+        // `long` outlives the 10-day default.
+        let on_103 = index.expired("local", 103, 10, 100).await.unwrap();
+        assert!(!on_103.contains(&short.id));
+        let on_111 = index.expired("local", 111, 10, 100).await.unwrap();
+        assert!(on_111.contains(&short.id));
+        assert!(!on_111.contains(&long.id));
+        assert!(!index.remove_if_expired(&short.id, 103, 10).await.unwrap());
+        assert!(!index.remove_if_expired(&long.id, 111, 10).await.unwrap());
+        assert!(index.remove_if_expired(&short.id, 104, 10).await.unwrap());
+        assert!(index.remove_if_expired(&long.id, 301, 10).await.unwrap());
 
         assert!(index.remove(&a.id).await.unwrap());
         assert!(!index.remove(&a.id).await.unwrap());

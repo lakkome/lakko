@@ -108,6 +108,7 @@
 
 use thiserror::Error;
 
+use crate::admission_seed::{try_unwrap_admission_seed, AdmissionSeedEnvelope, AdmissionSeedError};
 use crate::call_kp_forward::try_unwrap_call_kp_forward;
 use crate::call_welcome::{try_unwrap_call_welcome, CallWelcomeError};
 use crate::committer_beacon::{try_unwrap_committer_beacon, CommitterBeaconError};
@@ -125,6 +126,7 @@ use crate::introduction::{
     IntroductionsBundle,
 };
 use crate::key_rotation::{try_unwrap_key_rotation, KeyRotation, KeyRotationError};
+use crate::knock_seed::{try_unwrap_knock_seed, KnockSeedEnvelope, KnockSeedError};
 use crate::link_claim::{try_unwrap_link_claim, LinkClaim, LinkClaimError};
 use crate::link_founded::{try_unwrap_link_founded, LinkFounded, LinkFoundedError};
 use crate::media_state::{try_unwrap_media_state, MediaStateError};
@@ -355,6 +357,20 @@ pub enum IncomingEnvelope<'a> {
     /// [`crate::conversation_handle::conversation_handle_is_newer`] than the
     /// stored stamp. No role check: any member may relay it.
     ConversationHandle(ConversationHandle),
+    /// A knock-key seed sealed to one admin (ADR-0087 section 5). Never a
+    /// chat bubble. The receiver keeps it only under the rule in
+    /// [`crate::knock_seed`]: addressed to its own account, for this group,
+    /// sent by the owner or an admin resolved at receipt, received by an
+    /// owner or admin, and opening to a seed that derives the clear public
+    /// key.
+    KnockSeed(KnockSeedEnvelope),
+    /// A private channel's admission-key seed sealed to one co-publisher
+    /// (ADR-0087 section 7). Never a chat bubble. The receiver keeps it only
+    /// under the rule in [`crate::admission_seed`]: on the channel's
+    /// PublisherGroup journal, addressed to its own account, sent by the
+    /// channel's owner resolved at receipt, and opening to a seed that
+    /// derives the clear public key.
+    AdmissionSeed(AdmissionSeedEnvelope),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -441,6 +457,12 @@ pub enum DispatchError {
     /// The conversation-handle domain (ADR-0087) with a malformed payload.
     #[error(transparent)]
     ConversationHandle(#[from] ConversationHandleError),
+    /// The knock-seed domain (ADR-0087) with a malformed payload.
+    #[error(transparent)]
+    KnockSeed(#[from] KnockSeedError),
+    /// The admission-seed domain (ADR-0087) with a malformed payload.
+    #[error(transparent)]
+    AdmissionSeed(#[from] AdmissionSeedError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -541,6 +563,14 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7l. Conversation handle — ADR-0087 section 11.
     if let Some(handle) = try_unwrap_conversation_handle(plaintext)? {
         return Ok(IncomingEnvelope::ConversationHandle(handle));
+    }
+    // 7m. Knock seed — ADR-0087 section 5.
+    if let Some(seed) = try_unwrap_knock_seed(plaintext)? {
+        return Ok(IncomingEnvelope::KnockSeed(seed));
+    }
+    // 7n. Channel admission seed — ADR-0087 section 7.
+    if let Some(seed) = try_unwrap_admission_seed(plaintext)? {
+        return Ok(IncomingEnvelope::AdmissionSeed(seed));
     }
     // 8. Plain intro message — ADR-0005 scenario A.
     if let Some(record) = try_unwrap_introduction_offer(plaintext)? {

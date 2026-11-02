@@ -71,6 +71,15 @@
 //!   `mime: text/html` is a file.
 //! - [`WIRE_VERSION`] stays 1.
 //!
+//! # Channel invitation (ADR-0087 section 14)
+//!
+//! `channel_invite` carries an invitation card a channel's owner or
+//! publisher sends a contact inside their one-to-one: standard base64 of the
+//! card bytes (`lakko_contacts::group_invite::ChannelInviteCard`), opaque
+//! here, kept only when it decodes to 1 to [`MAX_CHANNEL_INVITE_BYTES`]
+//! bytes. Like a reply it rides beside `text` and is surfaced on the `Chat`
+//! classification only; `WIRE_VERSION` stays 1.
+//!
 //! # Reply (ADR-0052)
 //!
 //! `reply_to` / `reply_author` / `reply_excerpt` are v1.x additions in the
@@ -155,6 +164,12 @@ pub const MAX_FORWARD_ORIGIN_GROUP_BYTES: usize = 128;
 /// group, since both name a group id. Over it, the marker is dropped as a
 /// whole on parse and not carried on compose.
 pub const MAX_RESEND_ORIGIN_GROUP_BYTES: usize = MAX_FORWARD_ORIGIN_GROUP_BYTES;
+
+/// ADR-0087 section 14: the longest channel invitation card, in decoded
+/// bytes, a chat envelope keeps. At least
+/// `lakko_contacts::group_invite::CHANNEL_INVITE_CARD_MAX_LEN` (1843, pinned
+/// by a test there); a larger value is dropped alone.
+pub const MAX_CHANNEL_INVITE_BYTES: usize = 2048;
 
 /// ADR-0047 — the wire value of [`AttachmentRef::kind`] for a voice
 /// message.
@@ -1054,6 +1069,15 @@ pub struct Envelope {
         deserialize_with = "lenient"
     )]
     pub resend_origin_message: Option<i64>,
+    /// ADR-0087 section 14 — a channel invitation card, standard base64,
+    /// opaque here. Dropped alone when it does not decode or decodes to more
+    /// than [`MAX_CHANNEL_INVITE_BYTES`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
+    pub channel_invite: Option<String>,
 }
 
 impl Envelope {
@@ -1080,7 +1104,16 @@ impl Envelope {
             forward_origin_message: None,
             resend_origin_group: None,
             resend_origin_message: None,
+            channel_invite: None,
         }
+    }
+
+    /// The channel invitation card this envelope carries, decoded: present
+    /// only when it is valid base64 of 1 to [`MAX_CHANNEL_INVITE_BYTES`]
+    /// bytes.
+    #[must_use]
+    fn channel_invite(&self) -> Option<Vec<u8>> {
+        decode_channel_invite(self.channel_invite.as_deref()?)
     }
 
     /// The reply this envelope carries, with each snapshot string dropped
@@ -1138,6 +1171,17 @@ impl Envelope {
             message_id,
         })
     }
+}
+
+/// The bytes of a `channel_invite` field, when it is within bounds. The
+/// encoded length is checked before decoding so an oversized field costs no
+/// allocation.
+fn decode_channel_invite(encoded: &str) -> Option<Vec<u8>> {
+    if encoded.is_empty() || encoded.len() > MAX_CHANNEL_INVITE_BYTES.div_ceil(3) * 4 {
+        return None;
+    }
+    let bytes = B64.decode(encoded).ok()?;
+    (!bytes.is_empty() && bytes.len() <= MAX_CHANNEL_INVITE_BYTES).then_some(bytes)
 }
 
 /// A snapshot string as the parser keeps it: present only if non-empty and
@@ -1250,6 +1294,10 @@ pub enum MessageBody {
         /// copy of one sent earlier in another conversation. Like `reply`,
         /// on the `Chat` classification only.
         resend: Option<ResendOrigin>,
+        /// ADR-0087 section 14 — the channel invitation card bytes, if any,
+        /// for `lakko_contacts::group_invite::ChannelInviteCard::decode`.
+        /// Like `reply`, on the `Chat` classification only.
+        channel_invite: Option<Vec<u8>>,
     },
     /// Replace the target message's body with `text`.
     Edit {
@@ -1329,6 +1377,7 @@ impl Envelope {
         let reply = self.reply();
         let forward = self.forward();
         let resend = self.resend();
+        let channel_invite = self.channel_invite();
         let op_count = u8::from(self.edit_of.is_some())
             + u8::from(self.delete_of.is_some())
             + u8::from(self.react_to.is_some())
@@ -1363,6 +1412,7 @@ impl Envelope {
                     reply,
                     forward,
                     resend,
+                    channel_invite,
                 };
             }
         }
@@ -1372,6 +1422,7 @@ impl Envelope {
             reply,
             forward,
             resend,
+            channel_invite,
         }
     }
 }
@@ -1491,6 +1542,30 @@ pub fn compose_chat(
         ..Envelope::base()
     };
     serde_json::to_vec(&envelope).map_err(|e| AttachmentError::WireFormat(format!("compose: {e}")))
+}
+
+/// Encode a CHANNEL INVITATION (ADR-0087 section 14): an ordinary message
+/// whose `card` is a `ChannelInviteCard` the receiver renders with
+/// `Subscribe`. `text` may be empty.
+///
+/// # Errors
+///
+/// [`AttachmentError::WireFormat`] when `card` is empty or longer than
+/// [`MAX_CHANNEL_INVITE_BYTES`], or if serialisation fails.
+pub fn compose_channel_invite(text: &str, card: &[u8]) -> Result<Vec<u8>, AttachmentError> {
+    if card.is_empty() || card.len() > MAX_CHANNEL_INVITE_BYTES {
+        return Err(AttachmentError::WireFormat(format!(
+            "compose_channel_invite: card length {} not in 1..={MAX_CHANNEL_INVITE_BYTES}",
+            card.len()
+        )));
+    }
+    let envelope = Envelope {
+        text: text.to_string(),
+        channel_invite: Some(B64.encode(card)),
+        ..Envelope::base()
+    };
+    serde_json::to_vec(&envelope)
+        .map_err(|e| AttachmentError::WireFormat(format!("compose_channel_invite: {e}")))
 }
 
 /// Encode an EDIT of the message whose DS `messageId` is `target`,
@@ -1644,6 +1719,7 @@ pub fn parse_body(bytes: &[u8]) -> MessageBody {
             reply: None,
             forward: None,
             resend: None,
+            channel_invite: None,
         },
     }
 }
@@ -1683,11 +1759,11 @@ pub enum AttachmentError {
 #[doc(hidden)]
 pub mod fuzz_api {
     use super::{
-        compose, compose_chat, compose_forward, compose_reply, parse, parse_body, AttachmentRef,
-        MediaKind, MessageBody, MAX_FORWARDED_FROM_BYTES, MAX_FORWARD_ORIGIN_GROUP_BYTES,
-        MAX_MEDIA_DIMENSION, MAX_REPLY_AUTHOR_BYTES, MAX_REPLY_EXCERPT_BYTES,
-        MAX_RESEND_ORIGIN_GROUP_BYTES, MAX_THUMB_BYTES, MAX_VIDEO_NOTE_DURATION_MS,
-        MAX_VOICE_DURATION_MS, MAX_WAVEFORM_BYTES,
+        compose, compose_channel_invite, compose_chat, compose_forward, compose_reply, parse,
+        parse_body, AttachmentRef, MediaKind, MessageBody, MAX_CHANNEL_INVITE_BYTES,
+        MAX_FORWARDED_FROM_BYTES, MAX_FORWARD_ORIGIN_GROUP_BYTES, MAX_MEDIA_DIMENSION,
+        MAX_REPLY_AUTHOR_BYTES, MAX_REPLY_EXCERPT_BYTES, MAX_RESEND_ORIGIN_GROUP_BYTES,
+        MAX_THUMB_BYTES, MAX_VIDEO_NOTE_DURATION_MS, MAX_VOICE_DURATION_MS, MAX_WAVEFORM_BYTES,
     };
 
     /// ADR-0052 property oracle over attacker-controlled bytes.
@@ -1772,6 +1848,7 @@ pub mod fuzz_api {
             reply,
             forward,
             resend: Some(resend),
+            ..
         } = parse_body(bytes)
         else {
             return true;
@@ -1791,6 +1868,29 @@ pub mod fuzz_api {
             return false;
         };
         matches!(parse_body(&recomposed), MessageBody::Chat { resend: Some(again), .. } if again == resend)
+    }
+
+    /// ADR-0087 section 14 property oracle over attacker-controlled bytes: a
+    /// channel invitation card that survives [`parse_body`] is 1 to
+    /// [`MAX_CHANNEL_INVITE_BYTES`] bytes, and composing it again yields the
+    /// same card.
+    #[must_use]
+    pub fn channel_invite_within_bounds(bytes: &[u8]) -> bool {
+        let MessageBody::Chat {
+            text,
+            channel_invite: Some(card),
+            ..
+        } = parse_body(bytes)
+        else {
+            return true;
+        };
+        if card.is_empty() || card.len() > MAX_CHANNEL_INVITE_BYTES {
+            return false;
+        }
+        let Ok(recomposed) = compose_channel_invite(&text, &card) else {
+            return false;
+        };
+        matches!(parse_body(&recomposed), MessageBody::Chat { channel_invite: Some(again), .. } if again == card)
     }
 
     /// ADR-0047 property oracle over attacker-controlled bytes.
@@ -2100,6 +2200,7 @@ mod tests {
                 reply: None,
                 forward: None,
                 resend: None,
+                channel_invite: None,
             }
         );
     }
@@ -3073,10 +3174,12 @@ mod forward_tests {
 #[cfg(test)]
 mod resend_tests {
     use super::{
-        compose, compose_chat, compose_forward, compose_reply, encrypt_attachment, fuzz_api,
-        parse_body, AttachmentRef, Forward, ForwardOrigin, MessageBody, Reply, ResendOrigin,
+        compose, compose_channel_invite, compose_chat, compose_forward, compose_reply,
+        encrypt_attachment, fuzz_api, parse_body, AttachmentRef, Forward, ForwardOrigin,
+        MessageBody, Reply, ResendOrigin, B64, MAX_CHANNEL_INVITE_BYTES,
         MAX_RESEND_ORIGIN_GROUP_BYTES,
     };
+    use base64::Engine as _;
 
     fn chat_resend(bytes: &[u8]) -> Option<ResendOrigin> {
         match parse_body(bytes) {
@@ -3207,6 +3310,7 @@ mod resend_tests {
                 reply: Some(reply),
                 forward: Some(forward),
                 resend: Some(marker()),
+                channel_invite: None,
             }
         );
         assert!(fuzz_api::resend_within_bounds(&bytes));
@@ -3259,5 +3363,56 @@ mod resend_tests {
             }
             assert!(fuzz_api::resend_within_bounds(json));
         }
+    }
+
+    // --- ADR-0087: channel invitation -------------------------------------
+
+    #[test]
+    fn a_channel_invitation_round_trips_beside_its_text() {
+        let card = vec![0x5A; 300];
+        let bytes = compose_channel_invite("Join us", &card).unwrap();
+        match parse_body(&bytes) {
+            MessageBody::Chat {
+                text,
+                channel_invite,
+                ..
+            } => {
+                assert_eq!(text, "Join us");
+                assert_eq!(channel_invite, Some(card));
+            },
+            other => panic!("expected Chat, got {other:?}"),
+        }
+        assert!(fuzz_api::channel_invite_within_bounds(&bytes));
+        let at_bound = vec![1u8; MAX_CHANNEL_INVITE_BYTES];
+        assert!(compose_channel_invite("", &at_bound).is_ok());
+        assert!(compose_channel_invite("", &[]).is_err());
+        assert!(compose_channel_invite("", &vec![1u8; MAX_CHANNEL_INVITE_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn a_bad_channel_invitation_is_dropped_alone() {
+        let over = B64.encode(vec![1u8; MAX_CHANNEL_INVITE_BYTES + 1]);
+        for field in [
+            r#""not base64!""#.to_string(),
+            r#""""#.to_string(),
+            "42".to_string(),
+            format!("\"{over}\""),
+        ] {
+            let json = format!(r#"{{"v":1,"text":"hi","channel_invite":{field}}}"#);
+            match parse_body(json.as_bytes()) {
+                MessageBody::Chat {
+                    text,
+                    channel_invite,
+                    ..
+                } => {
+                    assert_eq!(text, "hi", "{field}");
+                    assert_eq!(channel_invite, None, "{field}");
+                },
+                other => panic!("expected Chat, got {other:?}"),
+            }
+        }
+        // An op that also carries a card is that op.
+        let json = br#"{"v":1,"delete_of":4,"channel_invite":"AQ=="}"#;
+        assert_eq!(parse_body(json), MessageBody::Delete { target: 4 });
     }
 }

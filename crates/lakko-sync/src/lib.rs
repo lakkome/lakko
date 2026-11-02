@@ -128,7 +128,34 @@ pub mod fuzz_api {
             && own_username_envelope_holds(bytes)
             && link_record_envelope_holds(bytes)
             && device_ack_envelope_holds(bytes)
+            && channel_reaction_envelope_holds(bytes)
             && persisted_state_holds(bytes)
+    }
+
+    /// The own channel-reaction envelope (ADR-0087 section 13a): canonical,
+    /// within its bounds, folds to exactly its registers, is carried back by
+    /// `channel_reaction_envelopes`, does not apply twice, and a prune far
+    /// past every post leaves none of it.
+    fn channel_reaction_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(entries) = crate::synced::decode_channel_reaction_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        let held = crate::synced::compose_channel_reaction_envelope(&entries).as_deref()
+            == Ok(bytes)
+            && bytes.len() <= crate::synced::CHANNEL_REACTION_ENVELOPE_MAX_LEN
+            && entries.iter().all(|e| e.value.validate().is_ok())
+            && state.apply_channel_reaction_envelope(bytes) == Ok(true)
+            && state.channel_reaction_envelopes() == vec![bytes.to_vec()]
+            && state.apply_channel_reaction_envelope(bytes) == Ok(false)
+            && entries.iter().all(|e| {
+                state.has_channel_reaction(&e.value.channel_id, e.value.post_cursor, &e.value.emoji)
+                    == e.value.reacted
+            });
+        held && {
+            let n = state.len();
+            state.prune_channel_reactions(u64::MAX) == n && state.is_empty()
+        }
     }
 
     /// The device-acknowledgement envelope (identity-recovery 17.5):
@@ -242,6 +269,20 @@ pub mod fuzz_api {
             if rebuilt.apply_link_record_envelope(&envelope).is_err() {
                 return false;
             }
+        }
+        for envelope in state.channel_reaction_envelopes() {
+            if rebuilt.apply_channel_reaction_envelope(&envelope).is_err() {
+                return false;
+            }
+        }
+        let reactions = |s: &SyncedState| {
+            s.entries()
+                .into_iter()
+                .filter(|(_, e)| matches!(e, SyncEntry::ChannelReaction(_)))
+                .collect::<Vec<_>>()
+        };
+        if reactions(&rebuilt) != reactions(&state) {
+            return false;
         }
         rebuilt.all_lineage() == state.all_lineage()
             && rebuilt.all_link_records() == state.all_link_records()
@@ -461,6 +502,15 @@ mod fuzz_api_tests {
             .unwrap();
         let links = removed.link_record_envelopes().remove(0);
         let persisted_links = removed.to_bytes();
+        let reacted = removed
+            .set_channel_reaction(10, [3; 16], 7, "\u{1F44D}", true, 1_000)
+            .unwrap()
+            .unwrap();
+        let unreacted = removed
+            .set_channel_reaction(11, [3; 16], 7, "\u{1F44D}", false, 1_000)
+            .unwrap()
+            .unwrap();
+        let persisted_reactions = removed.to_bytes();
         for wire in [
             &envelope,
             &persisted,
@@ -472,6 +522,9 @@ mod fuzz_api_tests {
             &persisted_unnamed,
             &links,
             &persisted_links,
+            &reacted,
+            &unreacted,
+            &persisted_reactions,
         ] {
             assert!(decode_synced_and_check(wire));
             for i in 0..wire.len() {

@@ -50,9 +50,13 @@
 //!   (ADR-0076) travels in between the account's devices.
 //! - [`device_ack`] — the device-acknowledgement register (identity-recovery
 //!   17.5: the added-device warning was seen) and its envelope.
+//! - [`channel_reaction`] — the account's own reactions under channel posts
+//!   (ADR-0087 section 13a), bounded to the posts the channel service still
+//!   holds, and their envelope.
 //! - [`state`] — the fold ([`SyncedState`]), its queries, its persistence
 //!   codec, and [`should_send_snapshot`].
 
+pub mod channel_reaction;
 pub mod device_ack;
 pub mod entry;
 pub mod lineage;
@@ -61,6 +65,15 @@ pub mod own_username;
 pub mod recovery_email;
 pub mod state;
 
+pub use channel_reaction::{
+    compose_channel_reaction_envelope, decode_channel_reaction_envelope,
+    is_channel_reaction_envelope, ChannelReactionEntry, ChannelReactionEnvelopeError,
+    CHANNEL_REACTIONS_MAX_CLIENT, CHANNEL_REACTION_CHANNEL_ID_LEN,
+    CHANNEL_REACTION_EMOJI_MAX_BYTES, CHANNEL_REACTION_ENVELOPE_DOMAIN_V1,
+    CHANNEL_REACTION_ENVELOPE_MAX_ENTRIES, CHANNEL_REACTION_ENVELOPE_MAX_LEN,
+    CHANNEL_REACTION_ENVELOPE_MIN_LEN, CHANNEL_REACTION_ENVELOPE_VERSION_V1,
+    CHANNEL_REACTION_RETENTION_MS,
+};
 pub use device_ack::{
     compose_device_ack_envelope, decode_device_ack_envelope, is_device_ack_envelope,
     DeviceAckEntry, DeviceAckEnvelopeError, DEVICE_ACK_ENVELOPE_DOMAIN_V1,

@@ -15,18 +15,34 @@
 //! seed; this module adds no cryptography of its own. The server relays an
 //! opaque post and learns nothing (invariants #1, #2).
 //!
-//! A post plaintext today carries **no content discriminator** — readers
-//! decode it as UTF-8 and render it. This module is therefore the
-//! discriminator: a reader runs [`classify_post_plaintext`] **before** the
-//! text path, and the record's domain separator is what tells the two apart.
+//! Every other post's plaintext is the **chat envelope**
+//! (`lakko_attachments`, ADR-0087 section 13): text and attachment
+//! references, ADR-0047 metadata included, and the ADR-0023 edit and delete
+//! ops. A reader runs [`classify_post_plaintext`] on every decrypted post:
+//! the record's domain separator is checked first, and anything else goes to
+//! `lakko_attachments::parse_body`, so a post and a chat message share one
+//! codec, one bound set and one inline-media rule.
 //!
-//! ## Why a UTF-8 text post cannot collide with the record
+//! ## Why a chat envelope cannot collide with the record
 //!
-//! [`CHANNEL_META_DOMAIN_V1`] ends in a NUL byte. A text post whose first
-//! bytes happen to spell `lakko/channel-meta/v1` is still text unless the
-//! next byte is `0x00`, which no post composed from a string a person typed
-//! contains. The domain bytes are frozen: the in-payload version byte is the
-//! knob that moves.
+//! [`CHANNEL_META_DOMAIN_V1`] ends in a NUL byte, and a chat envelope is JSON
+//! that opens with `{`. The domain bytes are frozen: the in-payload version
+//! byte is the knob that moves.
+//!
+//! ## The ban list beside it
+//!
+//! A public channel's ban list ([`crate::ban_list`], ADR-0087 section 13a)
+//! travels the same way under its own NUL-terminated domain, and
+//! [`classify_post_plaintext`] recognises it before the metadata domain:
+//! [`PostContent::BanList`] or [`PostContent::MalformedBanList`], never shown
+//! as a post.
+//!
+//! ## What a channel does not take
+//!
+//! Typing signals, read receipts and chat reactions do not exist in a
+//! channel (reactions are ADR-0087 section 13a, at the channel service). A
+//! post whose body is one of those is [`PostContent::NotAPost`] and is
+//! dropped. A reply's quote is not read either: the reader shows the post.
 //!
 //! ## What readers do with it
 //!
@@ -35,7 +51,8 @@
 //!   titles the channel from it. A record is never shown as a post.
 //! * A domain match that fails any bound is [`PostContent::Malformed`]; the
 //!   caller **drops** it and never renders it as text (fail-closed).
-//! * No domain match is [`PostContent::Text`], returned verbatim.
+//! * No domain match is [`PostContent::Message`] with the parsed body (or
+//!   [`PostContent::NotAPost`]).
 //!
 //! ## When the publisher (re-)issues it
 //!
@@ -46,20 +63,20 @@
 //! lesson): re-stamping at send time would let a re-issue outrank a newer
 //! edit from a co-publisher.
 //!
-//! ## Wire shape (schema version 2, ADR-0059 section 2)
+//! ## Wire shape (schema version 3, ADR-0087 sections 11 and 16)
 //!
 //! ```text
 //!   CHANNEL_META_DOMAIN_V1 || version || updated_at_ms || name_len || name || description_len || description
-//!   └── 22 bytes, ASCII ──┘ └─ 0x02 ─┘ └── 8 B, BE ───┘ └─ 1 B ──┘ └ .. ┘ └───── 2 B, BE ─────┘ └──── .. ────┘
+//!   └── 22 bytes, ASCII ──┘ └─ 0x03 ─┘ └── 8 B, BE ───┘ └─ 1 B ──┘ └ .. ┘ └───── 2 B, BE ─────┘ └──── .. ────┘
 //!
-//!     || topic || language_len || language || listed
-//!        └ 1 B ┘ └─── 1 B ────┘ └ 0/2/3 B ┘ └ 1 B ┘
+//!     || topic || language_len || language || public || handle_len || handle
+//!        └ 1 B ┘ └─── 1 B ────┘ └ 0/2/3 B ┘ └ 1 B ─┘ └── 2 B ───┘ └ 0 or a conversation-handle envelope ┘
 //!
 //!                     "lakko/channel-meta/v1\x00"
 //! ```
 //!
-//! Version 2 is a **flag day**: version `0x01` is refused like any other
-//! unknown version (no production data exists, ADR-0059 "Consequences").
+//! Version 3 is a **flag day**: versions `0x01` and `0x02` are refused like
+//! any other unknown version (no production data exists).
 //!
 //! * `topic` — a [`crate::listing::TOPICS`] id. Any byte decodes; a byte
 //!   the reader does not know is shown as "Other"
@@ -71,12 +88,19 @@
 //!   metadata record admits an unset language because a channel that is not
 //!   listed has no need to state one; the public listing
 //!   ([`crate::listing`]) requires it.
-//! * `listed` — `0x00` or `0x01`, any other byte refuses the record. It
-//!   tells every subscriber, end-to-end encrypted, whether the owner lists
-//!   the channel in the directory, which is what lets a member share only
-//!   listed channels in a group (ADR-0059 section 6). It is not coupled to
-//!   the language here: whether a listing exists is the directory's fact,
-//!   this flag is the owner's statement.
+//! * `public` — `0x00` private or `0x01` public, any other byte refuses the
+//!   record. ADR-0087 section 16 folds ADR-0059's `listed` into it: a public
+//!   channel is found by name and listed, a private one is neither, so a
+//!   member shares only public channels in a group.
+//! * `handle` — the channel's `@name` as a complete conversation-handle
+//!   envelope (`lakko_contacts::conversation_handle`, ADR-0087 section 11),
+//!   signed by the owner's handle key over the **channel id** (16 bytes) in
+//!   the place of a group id, and carried verbatim by a co-publisher's
+//!   re-issue. Empty while the channel has no name (a lapsed lease). Its
+//!   flag must equal `public`. The reader verifies the certificate and the
+//!   signature as for a group (one OPRF evaluation over the name, then
+//!   `ConversationHandle::verify_signature(channel_id, handle_key)`); this
+//!   module only frames it.
 //!
 //! Total length is between [`CHANNEL_META_MIN_LEN`] and
 //! [`CHANNEL_META_MAX_LEN`].
@@ -115,6 +139,13 @@ use core::result::Result as CoreResult;
 
 use thiserror::Error;
 
+use lakko_attachments::{parse_body, MessageBody};
+use lakko_contacts::conversation_handle::{
+    compose_conversation_handle, decode_conversation_handle, ConversationHandle,
+    ConversationHandleError, CONVERSATION_HANDLE_ENVELOPE_MAX_LEN,
+    CONVERSATION_HANDLE_ENVELOPE_MIN_LEN,
+};
+
 use crate::listing::{check_language, LanguageError, LANGUAGE_MAX_LEN};
 
 pub use lakko_contacts::channel_text::{
@@ -132,25 +163,26 @@ pub use lakko_contacts::channel_text::{
 pub const CHANNEL_META_DOMAIN_V1: &[u8] = b"lakko/channel-meta/v1\x00";
 
 /// Schema-version byte carried first after the separator. Today the sole
-/// accepted value (ADR-0059 section 2; version `0x01` is refused).
-pub const CHANNEL_META_VERSION_V2: u8 = 0x02;
+/// accepted value (ADR-0087; versions `0x01` and `0x02` are refused).
+pub const CHANNEL_META_VERSION_V3: u8 = 0x03;
 
 /// Bytes after the separator that every record carries: version,
 /// `updated_at_ms`, `name_len`, `description_len`, `topic`,
-/// `language_len`, `listed`.
-const FIXED_PAYLOAD_LEN: usize = 1 + 8 + 1 + 2 + 1 + 1 + 1;
+/// `language_len`, `public`, `handle_len`.
+const FIXED_PAYLOAD_LEN: usize = 1 + 8 + 1 + 2 + 1 + 1 + 1 + 2;
 
 /// Shortest well-formed record: a one-byte name, no description, no
 /// language.
 pub const CHANNEL_META_MIN_LEN: usize = CHANNEL_META_DOMAIN_V1.len() + FIXED_PAYLOAD_LEN + 1;
 
-/// Longest well-formed record: a maximal name, a maximal description and a
-/// three-letter language.
+/// Longest well-formed record: a maximal name, a maximal description, a
+/// three-letter language and a maximal handle envelope.
 pub const CHANNEL_META_MAX_LEN: usize = CHANNEL_META_DOMAIN_V1.len()
     + FIXED_PAYLOAD_LEN
     + NAME_MAX_BYTES
     + DESCRIPTION_MAX_BYTES
-    + LANGUAGE_MAX_LEN;
+    + LANGUAGE_MAX_LEN
+    + CONVERSATION_HANDLE_ENVELOPE_MAX_LEN;
 
 /// A channel's name and description, as the publisher stated them.
 ///
@@ -173,8 +205,13 @@ pub struct ChannelMeta {
     /// ISO 639 language code, 2 or 3 ASCII lowercase letters, or **empty
     /// for "not set"**.
     pub language: String,
-    /// Whether the owner lists the channel in the directory (ADR-0059).
-    pub listed: bool,
+    /// Public (found by name, listed, read by anyone who subscribes) or
+    /// private (ADR-0087 sections 6, 7 and 16).
+    pub public: bool,
+    /// The channel's `@name`, as the owner's handle key signed it for this
+    /// channel id; `None` while it has none. Its flag must equal
+    /// [`Self::public`].
+    pub handle: Option<ConversationHandle>,
 }
 
 impl ChannelMeta {
@@ -188,11 +225,20 @@ impl ChannelMeta {
     ///   bound.
     /// * [`ChannelMetaError::Language`] — the language is neither empty nor
     ///   2-3 ASCII lowercase letters.
+    /// * [`ChannelMetaError::Handle`] — the handle envelope does not compose.
+    /// * [`ChannelMetaError::HandleFlagMismatch`] — the handle's flag is not
+    ///   [`Self::public`].
     pub fn validate(&self) -> CoreResult<(), ChannelMetaError> {
         check_name(&self.name).map_err(ChannelMetaError::Name)?;
         check_description(&self.description).map_err(ChannelMetaError::Description)?;
         if !self.language.is_empty() {
             check_language(&self.language).map_err(ChannelMetaError::Language)?;
+        }
+        if let Some(handle) = &self.handle {
+            compose_conversation_handle(handle).map_err(ChannelMetaError::Handle)?;
+            if handle.public != self.public {
+                return Err(ChannelMetaError::HandleFlagMismatch);
+            }
         }
         Ok(())
     }
@@ -215,12 +261,19 @@ pub enum ChannelMetaError {
         /// How many bytes followed the description.
         count: usize,
     },
-    /// The version byte is not [`CHANNEL_META_VERSION_V2`].
+    /// The version byte is not [`CHANNEL_META_VERSION_V3`].
     #[error("channel-meta record carries unknown schema version {0:#04x}")]
     UnknownVersion(u8),
-    /// The `listed` byte is neither `0x00` nor `0x01`.
-    #[error("channel-meta record carries an invalid listed flag {0:#04x}")]
-    ListedFlag(u8),
+    /// The `public` byte is neither `0x00` nor `0x01`.
+    #[error("channel-meta record carries an invalid public flag {0:#04x}")]
+    PublicFlag(u8),
+    /// The handle envelope is malformed, or its length is outside the
+    /// envelope bounds.
+    #[error("invalid channel handle: {0}")]
+    Handle(ConversationHandleError),
+    /// The handle envelope's flag is not the record's `public` flag.
+    #[error("channel handle flag does not match the record")]
+    HandleFlagMismatch,
     /// The language is neither empty nor an ISO 639 code.
     #[error("invalid channel language: {0}")]
     Language(LanguageError),
@@ -244,7 +297,9 @@ impl ChannelMetaError {
             Self::Truncated => "truncated".to_string(),
             Self::TrailingBytes { .. } => "trailingBytes".to_string(),
             Self::UnknownVersion(_) => "unknownVersion".to_string(),
-            Self::ListedFlag(_) => "listedFlag".to_string(),
+            Self::PublicFlag(_) => "publicFlag".to_string(),
+            Self::Handle(e) => format!("handle.{}", e.code()),
+            Self::HandleFlagMismatch => "handleFlagMismatch".to_string(),
             Self::Language(e) => format!("language.{}", e.code()),
             Self::Name(e) => format!("name.{}", e.code()),
             Self::Description(e) => format!("description.{}", e.code()),
@@ -255,13 +310,29 @@ impl ChannelMetaError {
 /// What a decrypted post plaintext turned out to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PostContent<'a> {
-    /// Not a metadata record: the plaintext, verbatim, for the text path.
-    Text(&'a [u8]),
+    /// A post: the chat envelope parsed by `lakko_attachments::parse_body`
+    /// (`Chat`, `Edit`, `Delete`, or the never-rendered `ServiceEnvelope` /
+    /// `Unsupported`), with the plaintext verbatim beside it.
+    Message {
+        /// The decrypted plaintext, as given.
+        plaintext: &'a [u8],
+        /// What it parsed to.
+        body: MessageBody,
+    },
     /// A well-formed, in-bounds metadata record.
     Meta(ChannelMeta),
     /// The domain separator matched but the record is malformed or out of
     /// bounds. The caller drops it and never renders it as text.
     Malformed(ChannelMetaError),
+    /// A chat envelope a channel does not take: a typing signal, a read
+    /// receipt or a chat reaction. Dropped.
+    NotAPost,
+    /// A well-formed ban list ([`crate::ban_list`], ADR-0087 section 13a).
+    /// Never shown as a post.
+    BanList(crate::ban_list::BanList),
+    /// The ban-list domain matched but the list is malformed or out of
+    /// bounds. Dropped.
+    MalformedBanList(crate::ban_list::BanListError),
 }
 
 /// `true` when a record stamped `incoming_updated_at_ms` must replace one
@@ -308,7 +379,7 @@ pub fn compose_channel_meta(meta: &ChannelMeta) -> CoreResult<Vec<u8>, ChannelMe
             + meta.language.len(),
     );
     out.extend_from_slice(CHANNEL_META_DOMAIN_V1);
-    out.push(CHANNEL_META_VERSION_V2);
+    out.push(CHANNEL_META_VERSION_V3);
     out.extend_from_slice(&meta.updated_at_ms.to_be_bytes());
     out.push(name_len);
     out.extend_from_slice(name);
@@ -322,7 +393,16 @@ pub fn compose_channel_meta(meta: &ChannelMeta) -> CoreResult<Vec<u8>, ChannelMe
             .map_err(|_| ChannelMetaError::Language(LanguageError::BadLength))?,
     );
     out.extend_from_slice(language);
-    out.push(u8::from(meta.listed));
+    out.push(u8::from(meta.public));
+    let handle = match &meta.handle {
+        Some(h) => compose_conversation_handle(h).map_err(ChannelMetaError::Handle)?,
+        None => Vec::new(),
+    };
+    // A composed envelope is at most CONVERSATION_HANDLE_ENVELOPE_MAX_LEN.
+    let handle_len = u16::try_from(handle.len())
+        .map_err(|_| ChannelMetaError::Handle(ConversationHandleError::BadLength))?;
+    out.extend_from_slice(&handle_len.to_be_bytes());
+    out.extend_from_slice(&handle);
     Ok(out)
 }
 
@@ -339,7 +419,7 @@ pub fn compose_channel_meta(meta: &ChannelMeta) -> CoreResult<Vec<u8>, ChannelMe
 /// * [`ChannelMetaError::Truncated`] — the payload ends before a declared
 ///   field (a bare separator included).
 /// * [`ChannelMetaError::UnknownVersion`] — the version byte is not
-///   [`CHANNEL_META_VERSION_V1`].
+///   [`CHANNEL_META_VERSION_V3`].
 /// * [`ChannelMetaError::TrailingBytes`] — bytes remain after the
 ///   description.
 /// * [`ChannelMetaError::Name`] / [`ChannelMetaError::Description`] — a
@@ -351,17 +431,31 @@ pub fn decode_channel_meta(bytes: &[u8]) -> CoreResult<ChannelMeta, ChannelMetaE
     decode_payload(payload)
 }
 
-/// Reader-side classifier: run this on every decrypted post plaintext
-/// **before** the text path.
+/// Reader-side classifier: run this on every decrypted post plaintext.
 ///
-/// The domain prefix is checked first. No match is [`PostContent::Text`]
-/// with the input verbatim; a match that decodes within every bound is
-/// [`PostContent::Meta`]; a match that fails any bound is
-/// [`PostContent::Malformed`], which the caller drops.
+/// The two record domains are checked first. A metadata match that decodes
+/// within every bound is [`PostContent::Meta`]; a match that fails any bound
+/// is [`PostContent::Malformed`], which the caller drops. A ban-list match
+/// ([`crate::ban_list`]) is [`PostContent::BanList`] or
+/// [`PostContent::MalformedBanList`], likewise never shown. No match goes to
+/// `lakko_attachments::parse_body`: [`PostContent::Message`], or
+/// [`PostContent::NotAPost`] for a typing signal, a read receipt or a chat
+/// reaction.
 #[must_use]
 pub fn classify_post_plaintext(plaintext: &[u8]) -> PostContent<'_> {
+    if let Some(payload) = plaintext.strip_prefix(crate::ban_list::BAN_LIST_DOMAIN_V1) {
+        return match crate::ban_list::decode_payload(payload) {
+            Ok(list) => PostContent::BanList(list),
+            Err(e) => PostContent::MalformedBanList(e),
+        };
+    }
     let Some(payload) = plaintext.strip_prefix(CHANNEL_META_DOMAIN_V1) else {
-        return PostContent::Text(plaintext);
+        return match parse_body(plaintext) {
+            MessageBody::Typing { .. }
+            | MessageBody::ReadReceipt { .. }
+            | MessageBody::Reaction { .. } => PostContent::NotAPost,
+            body => PostContent::Message { plaintext, body },
+        };
     };
     match decode_payload(payload) {
         Ok(meta) => PostContent::Meta(meta),
@@ -373,7 +467,7 @@ fn decode_payload(payload: &[u8]) -> CoreResult<ChannelMeta, ChannelMetaError> {
     let mut cur = payload;
 
     let version = take_u8(&mut cur)?;
-    if version != CHANNEL_META_VERSION_V2 {
+    if version != CHANNEL_META_VERSION_V3 {
         return Err(ChannelMetaError::UnknownVersion(version));
     }
     let updated_at_bytes: [u8; 8] = take(&mut cur, 8)?
@@ -391,11 +485,22 @@ fn decode_payload(payload: &[u8]) -> CoreResult<ChannelMeta, ChannelMetaError> {
     let topic = take_u8(&mut cur)?;
     let language_len = usize::from(take_u8(&mut cur)?);
     let language_bytes = take(&mut cur, language_len)?;
-    let listed = match take_u8(&mut cur)? {
+    let public = match take_u8(&mut cur)? {
         0 => false,
         1 => true,
-        other => return Err(ChannelMetaError::ListedFlag(other)),
+        other => return Err(ChannelMetaError::PublicFlag(other)),
     };
+    let handle_len_bytes: [u8; 2] = take(&mut cur, 2)?
+        .try_into()
+        .map_err(|_| ChannelMetaError::Truncated)?;
+    let handle_len = usize::from(u16::from_be_bytes(handle_len_bytes));
+    if handle_len != 0
+        && !(CONVERSATION_HANDLE_ENVELOPE_MIN_LEN..=CONVERSATION_HANDLE_ENVELOPE_MAX_LEN)
+            .contains(&handle_len)
+    {
+        return Err(ChannelMetaError::Handle(ConversationHandleError::BadLength));
+    }
+    let handle_bytes = take(&mut cur, handle_len)?;
     if !cur.is_empty() {
         return Err(ChannelMetaError::TrailingBytes { count: cur.len() });
     }
@@ -408,13 +513,20 @@ fn decode_payload(payload: &[u8]) -> CoreResult<ChannelMeta, ChannelMetaError> {
     let language = core::str::from_utf8(language_bytes)
         .map_err(|_| ChannelMetaError::Language(LanguageError::NotLowercaseAscii))?;
 
+    let handle = if handle_bytes.is_empty() {
+        None
+    } else {
+        Some(decode_conversation_handle(handle_bytes).map_err(ChannelMetaError::Handle)?)
+    };
+
     let meta = ChannelMeta {
         name: name.to_string(),
         description: description.to_string(),
         updated_at_ms,
         topic,
         language: language.to_string(),
-        listed,
+        public,
+        handle,
     };
     meta.validate()?;
     Ok(meta)
@@ -450,7 +562,8 @@ mod tests {
             updated_at_ms: at,
             topic: 0,
             language: String::new(),
-            listed: false,
+            public: false,
+            handle: None,
         }
     }
 
@@ -464,8 +577,8 @@ mod tests {
         out.extend_from_slice(name);
         out.extend_from_slice(&u16::try_from(description.len()).unwrap().to_be_bytes());
         out.extend_from_slice(description);
-        // topic, empty language, not listed
-        out.extend_from_slice(&[0, 0, 0]);
+        // topic, empty language, private, no handle
+        out.extend_from_slice(&[0, 0, 0, 0, 0]);
         out
     }
 
@@ -500,44 +613,46 @@ mod tests {
         let sep = CHANNEL_META_DOMAIN_V1.len();
         assert_eq!(sep, 22);
         assert_eq!(&wire[..sep], b"lakko/channel-meta/v1\x00");
-        assert_eq!(wire[sep], CHANNEL_META_VERSION_V2);
+        assert_eq!(wire[sep], CHANNEL_META_VERSION_V3);
         assert_eq!(&wire[sep + 1..sep + 9], &[1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(wire[sep + 9], 2);
         assert_eq!(&wire[sep + 10..sep + 12], b"Al");
         assert_eq!(&wire[sep + 12..sep + 14], &[0, 3]);
         assert_eq!(&wire[sep + 14..sep + 17], b"abc");
-        assert_eq!(&wire[sep + 17..], &[0, 0, 0]);
+        assert_eq!(&wire[sep + 17..], &[0, 0, 0, 0, 0]);
 
-        let v2 = ChannelMeta {
+        let v3 = ChannelMeta {
             topic: 9,
             language: "fil".to_string(),
-            listed: true,
+            public: true,
             ..meta("Al", "", 0)
         };
-        let wire = compose_channel_meta(&v2).unwrap();
-        assert_eq!(&wire[sep + 14..], &[9, 3, b'f', b'i', b'l', 1]);
-        assert_eq!(decode_channel_meta(&wire).unwrap(), v2);
+        let wire = compose_channel_meta(&v3).unwrap();
+        assert_eq!(&wire[sep + 14..], &[9, 3, b'f', b'i', b'l', 1, 0, 0]);
+        assert_eq!(decode_channel_meta(&wire).unwrap(), v3);
     }
 
     #[test]
-    fn version_one_is_refused_after_the_flag_day() {
+    fn versions_one_and_two_are_refused_after_the_flag_day() {
         let wire = compose_channel_meta(&meta("Lakko", "", 1)).unwrap();
-        let mut v1 = wire;
-        v1[CHANNEL_META_DOMAIN_V1.len()] = 0x01;
-        assert_eq!(
-            decode_channel_meta(&v1),
-            Err(ChannelMetaError::UnknownVersion(0x01))
-        );
+        for old in [0x01, 0x02] {
+            let mut v = wire.clone();
+            v[CHANNEL_META_DOMAIN_V1.len()] = old;
+            assert_eq!(
+                decode_channel_meta(&v),
+                Err(ChannelMetaError::UnknownVersion(old))
+            );
+        }
     }
 
     #[test]
-    fn listed_flag_and_language_are_bounded() {
+    fn public_flag_and_language_are_bounded() {
         let mut wire = compose_channel_meta(&meta("Lakko", "", 1)).unwrap();
-        let last = wire.len() - 1;
-        wire[last] = 2;
+        let flag_at = wire.len() - 3;
+        wire[flag_at] = 2;
         assert_eq!(
             decode_channel_meta(&wire),
-            Err(ChannelMetaError::ListedFlag(2))
+            Err(ChannelMetaError::PublicFlag(2))
         );
         for (language, code) in [
             ("e", "language.badLength"),
@@ -561,8 +676,11 @@ mod tests {
 
     #[test]
     fn length_bounds_are_the_documented_construction() {
-        assert_eq!(CHANNEL_META_MIN_LEN, 22 + 15 + 1);
-        assert_eq!(CHANNEL_META_MAX_LEN, 22 + 15 + 255 + 1024 + 3);
+        assert_eq!(CHANNEL_META_MIN_LEN, 22 + 17 + 1);
+        assert_eq!(
+            CHANNEL_META_MAX_LEN,
+            22 + 17 + 255 + 1024 + 3 + CONVERSATION_HANDLE_ENVELOPE_MAX_LEN
+        );
         let min = compose_channel_meta(&meta("a", "", 0)).unwrap();
         assert_eq!(min.len(), CHANNEL_META_MIN_LEN);
         // A maximal record: 255 bytes of name in exactly 64 chars (63
@@ -575,6 +693,8 @@ mod tests {
         assert_eq!(description.len(), DESCRIPTION_MAX_BYTES);
         let max = compose_channel_meta(&ChannelMeta {
             language: "eng".to_string(),
+            public: true,
+            handle: Some(handle(true, &"n".repeat(32))),
             ..meta(&name, &description, 0)
         })
         .unwrap();
@@ -628,7 +748,7 @@ mod tests {
 
     #[test]
     fn unknown_versions_are_refused() {
-        for v in [0x00, 0x01, 0x03, 0xFF] {
+        for v in [0x00, 0x01, 0x02, 0x04, 0xFF] {
             assert_eq!(
                 decode_channel_meta(&raw(v, 0, b"x", b"")),
                 Err(ChannelMetaError::UnknownVersion(v))
@@ -639,11 +759,11 @@ mod tests {
     #[test]
     fn non_utf8_fields_are_refused() {
         assert_eq!(
-            decode_channel_meta(&raw(2, 0, &[0xFF, 0xFE], b"")),
+            decode_channel_meta(&raw(3, 0, &[0xFF, 0xFE], b"")),
             Err(ChannelMetaError::Name(ChannelMetaFieldError::NotUtf8))
         );
         assert_eq!(
-            decode_channel_meta(&raw(2, 0, b"x", &[0xC3, 0x28])),
+            decode_channel_meta(&raw(3, 0, b"x", &[0xC3, 0x28])),
             Err(ChannelMetaError::Description(
                 ChannelMetaFieldError::NotUtf8
             ))
@@ -653,13 +773,13 @@ mod tests {
     #[test]
     fn an_out_of_bounds_field_rejects_the_whole_record() {
         assert_eq!(
-            decode_channel_meta(&raw(2, 0, "Lakko\u{202E}".as_bytes(), b"fine")),
+            decode_channel_meta(&raw(3, 0, "Lakko\u{202E}".as_bytes(), b"fine")),
             Err(ChannelMetaError::Name(
                 ChannelMetaFieldError::ControlOrFormatCharacter
             ))
         );
         assert_eq!(
-            decode_channel_meta(&raw(2, 0, b"Fine", "bad\u{202E}".as_bytes())),
+            decode_channel_meta(&raw(3, 0, b"Fine", "bad\u{202E}".as_bytes())),
             Err(ChannelMetaError::Description(
                 ChannelMetaFieldError::ControlOrFormatCharacter
             ))
@@ -689,19 +809,19 @@ mod tests {
         for &(name, description) in cases {
             let compose_err = compose_channel_meta(&meta(name, description, 0)).unwrap_err();
             let decode_err =
-                decode_channel_meta(&raw(2, 0, name.as_bytes(), description.as_bytes()))
+                decode_channel_meta(&raw(3, 0, name.as_bytes(), description.as_bytes()))
                     .unwrap_err();
             assert_eq!(compose_err, decode_err, "{name:?} / {description:?}");
         }
         let long_name = "a".repeat(NAME_MAX_CHARS + 1);
         assert_eq!(
             compose_channel_meta(&meta(&long_name, "", 0)).unwrap_err(),
-            decode_channel_meta(&raw(2, 0, long_name.as_bytes(), b"")).unwrap_err()
+            decode_channel_meta(&raw(3, 0, long_name.as_bytes(), b"")).unwrap_err()
         );
         let long_description = "a".repeat(DESCRIPTION_MAX_CHARS + 1);
         assert_eq!(
             compose_channel_meta(&meta("x", &long_description, 0)).unwrap_err(),
-            decode_channel_meta(&raw(2, 0, b"x", long_description.as_bytes())).unwrap_err()
+            decode_channel_meta(&raw(3, 0, b"x", long_description.as_bytes())).unwrap_err()
         );
     }
 
@@ -818,39 +938,122 @@ mod tests {
     // --- classifier ----------------------------------------------------------
 
     #[test]
-    fn classify_returns_text_verbatim_for_a_non_record() {
+    fn a_non_record_is_parsed_as_the_chat_envelope() {
+        let post = lakko_attachments::compose("hello channel", Vec::new()).unwrap();
+        match classify_post_plaintext(&post) {
+            PostContent::Message {
+                plaintext,
+                body: MessageBody::Chat { text, .. },
+            } => {
+                assert_eq!(plaintext, post.as_slice());
+                assert_eq!(text, "hello channel");
+            },
+            other => panic!("expected a chat post, got {other:?}"),
+        }
+        let edit = lakko_attachments::compose_edit(7, "fixed").unwrap();
+        assert!(matches!(
+            classify_post_plaintext(&edit),
+            PostContent::Message {
+                body: MessageBody::Edit { target: 7, .. },
+                ..
+            }
+        ));
+        let delete = lakko_attachments::compose_delete(7).unwrap();
+        assert!(matches!(
+            classify_post_plaintext(&delete),
+            PostContent::Message {
+                body: MessageBody::Delete { target: 7 },
+                ..
+            }
+        ));
+        // Bytes that are not the record's domain plus NUL are a post, not a
+        // record.
         for text in [
-            &b"hello channel"[..],
-            b"",
-            &[0xFF, 0x00, 0x01],
-            b"lakko/channel-meta/v2\x00",
+            &b"lakko/channel-meta/v2\x00"[..],
             b"lakko/channel-meta/v",
+            b"lakko/channel-meta/v1 is the record domain",
         ] {
-            assert_eq!(classify_post_plaintext(text), PostContent::Text(text));
+            assert!(matches!(
+                classify_post_plaintext(text),
+                PostContent::Message { .. }
+            ));
         }
     }
 
     #[test]
-    fn text_starting_with_the_printable_domain_but_no_nul_is_text() {
-        // A person typing the domain string as a post. Without the NUL the
-        // separator does not match and the post renders as text.
-        let text = b"lakko/channel-meta/v1 is the record domain";
-        assert_eq!(classify_post_plaintext(text), PostContent::Text(text));
-        let exact = b"lakko/channel-meta/v1";
-        assert_eq!(classify_post_plaintext(exact), PostContent::Text(exact));
+    fn typing_receipts_and_chat_reactions_are_not_posts() {
+        for bytes in [
+            lakko_attachments::compose_typing(true).unwrap(),
+            lakko_attachments::compose_read_receipt(3).unwrap(),
+            lakko_attachments::compose_reaction(3, "\u{1F44D}").unwrap(),
+        ] {
+            assert_eq!(classify_post_plaintext(&bytes), PostContent::NotAPost);
+        }
+    }
+
+    fn handle(public: bool, name: &str) -> ConversationHandle {
+        ConversationHandle::sign(
+            &[0x5E; 32],
+            &[0x0C; crate::CHANNEL_ID_LEN],
+            9,
+            public,
+            name,
+            [0x7A; lakko_contacts::conversation_handle::CONVERSATION_HANDLE_CERT_LEN],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_handle_rides_the_record_and_its_flag_must_match() {
+        let with = ChannelMeta {
+            public: true,
+            handle: Some(handle(true, "berlin_news")),
+            ..meta("Berlin news", "", 5)
+        };
+        let wire = compose_channel_meta(&with).unwrap();
+        let back = decode_channel_meta(&wire).unwrap();
+        assert_eq!(back, with);
+        let key = lakko_crypto::signing::SigningKey::from_seed(&[0x5E; 32])
+            .verifying_key()
+            .to_bytes();
+        assert!(back
+            .handle
+            .unwrap()
+            .verify_signature(&[0x0C; crate::CHANNEL_ID_LEN], &key)
+            .is_ok());
+
+        let mismatch = ChannelMeta {
+            public: false,
+            ..with
+        };
+        assert_eq!(
+            compose_channel_meta(&mismatch),
+            Err(ChannelMetaError::HandleFlagMismatch)
+        );
+
+        // A handle length outside the envelope bounds is refused before the
+        // envelope is read.
+        let mut short = compose_channel_meta(&meta("Lakko", "", 1)).unwrap();
+        let len_at = short.len() - 2;
+        short[len_at..].copy_from_slice(&5u16.to_be_bytes());
+        short.extend_from_slice(&[0; 5]);
+        assert!(matches!(
+            decode_channel_meta(&short),
+            Err(ChannelMetaError::Handle(_))
+        ));
     }
 
     #[test]
     fn classify_returns_malformed_for_a_matching_domain_out_of_bounds() {
         assert_eq!(
-            classify_post_plaintext(&raw(2, 0, b"", b"")),
+            classify_post_plaintext(&raw(3, 0, b"", b"")),
             PostContent::Malformed(ChannelMetaError::Name(ChannelMetaFieldError::Empty))
         );
         assert_eq!(
             classify_post_plaintext(&raw(1, 0, b"x", b"")),
             PostContent::Malformed(ChannelMetaError::UnknownVersion(1))
         );
-        let mut trailing = raw(2, 0, b"x", b"");
+        let mut trailing = raw(3, 0, b"x", b"");
         trailing.push(9);
         assert_eq!(
             classify_post_plaintext(&trailing),
@@ -899,7 +1102,7 @@ mod tests {
     fn error_messages_never_echo_the_text() {
         let err = check_name("Secret\u{202E}Name").unwrap_err();
         assert!(!err.to_string().contains("Secret"));
-        let err = decode_channel_meta(&raw(2, 0, "Secret\u{202E}".as_bytes(), b"")).unwrap_err();
+        let err = decode_channel_meta(&raw(3, 0, "Secret\u{202E}".as_bytes(), b"")).unwrap_err();
         assert!(!err.to_string().contains("Secret"));
         assert!(!format!("{err:?}").contains("Secret"));
     }
@@ -920,5 +1123,27 @@ mod tests {
         assert!(!is_refused_format_char('\u{200D}'), "ZWJ is permitted");
         assert!(!is_refused_format_char('a'));
         assert!(!is_refused_format_char(' '));
+    }
+
+    #[test]
+    fn classify_recognises_a_ban_list_before_the_text_path() {
+        use crate::ban_list::{compose_ban_list, BanList, BanListError};
+        let list = BanList {
+            updated_at_ms: 4,
+            authors: vec![[7; 32]],
+        };
+        let wire = compose_ban_list(&list).unwrap();
+        assert_eq!(classify_post_plaintext(&wire), PostContent::BanList(list));
+        let mut bad = wire;
+        bad.push(0);
+        assert_eq!(
+            classify_post_plaintext(&bad),
+            PostContent::MalformedBanList(BanListError::TrailingBytes)
+        );
+        // A bare separator is a malformed list, never a chat message.
+        assert_eq!(
+            classify_post_plaintext(crate::ban_list::BAN_LIST_DOMAIN_V1),
+            PostContent::MalformedBanList(BanListError::Truncated)
+        );
     }
 }

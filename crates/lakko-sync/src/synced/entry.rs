@@ -259,6 +259,13 @@ pub enum BoundsError {
     /// (including the unspecified `0`).
     #[error("unknown conversation end state")]
     UnknownConversationEndState,
+    /// An own channel reaction's emoji was empty or longer than 64 bytes
+    /// (ADR-0087 section 13a).
+    #[error("channel reaction emoji length is out of bounds")]
+    ChannelReactionEmoji,
+    /// An own channel reaction's state byte was neither reacted nor removed.
+    #[error("unknown channel reaction state")]
+    ChannelReactionState,
 }
 
 /// Which kind of conversation a [`ConversationRef`] names.
@@ -982,8 +989,11 @@ pub enum SyncEntry {
     /// section 9). Appended last.
     ConversationEnd(ConversationEnd),
     /// A device of the account the person has seen the added-device
-    /// warning for (identity-recovery 17.5). Appended last.
+    /// warning for (identity-recovery 17.5).
     DeviceAck(super::device_ack::DeviceAckEntry),
+    /// One of the account's own reactions under a channel post, or its
+    /// removal (ADR-0087 section 13a). Appended last.
+    ChannelReaction(super::channel_reaction::ChannelReactionEntry),
 }
 
 /// Which register an entry writes.
@@ -1023,8 +1033,15 @@ pub enum RegisterKey {
     /// The conversation-end register of this conversation (ADR-0087 section
     /// 9). Appended last.
     ConversationEnd(ConversationRef),
-    /// The acknowledgement register of this device key. Appended last.
+    /// The acknowledgement register of this device key.
     DeviceAck([u8; super::device_ack::DEVICE_ACK_KEY_LEN]),
+    /// The own-reaction register of this emoji under this channel post.
+    /// Appended last.
+    ChannelReaction(
+        [u8; super::channel_reaction::CHANNEL_REACTION_CHANNEL_ID_LEN],
+        u64,
+        String,
+    ),
 }
 
 impl RegisterKey {
@@ -1057,6 +1074,7 @@ const TAG_OWN_USERNAME: u8 = 13;
 const TAG_LINK_RECORD: u8 = 14;
 const TAG_CONVERSATION_END: u8 = 15;
 const TAG_DEVICE_ACK: u8 = 16;
+const TAG_CHANNEL_REACTION: u8 = 17;
 
 impl SyncEntry {
     /// The register this entry writes.
@@ -1079,6 +1097,9 @@ impl SyncEntry {
             Self::LinkRecord(r) => RegisterKey::LinkRecord(r.link_id),
             Self::ConversationEnd(e) => RegisterKey::ConversationEnd(e.conversation.clone()),
             Self::DeviceAck(a) => RegisterKey::DeviceAck(a.device_key),
+            Self::ChannelReaction(r) => {
+                RegisterKey::ChannelReaction(r.channel_id, r.post_cursor, r.emoji.clone())
+            },
         }
     }
 
@@ -1104,6 +1125,7 @@ impl SyncEntry {
             Self::Saved(m) => m.validate(),
             Self::LinkRecord(r) => r.validate(),
             Self::ConversationEnd(e) => e.validate(),
+            Self::ChannelReaction(r) => r.validate(),
             Self::FolderRemoved(_)
             | Self::Flags(_)
             | Self::ReadCursor(_)
@@ -1211,6 +1233,12 @@ impl SyncEntry {
             Self::DeviceAck(a) => {
                 out.push(TAG_DEVICE_ACK);
                 a.encode_body(&mut out);
+            },
+            // The key comes first and the state byte directly after it, so
+            // on an exact stamp tie a removal beats a reaction.
+            Self::ChannelReaction(r) => {
+                out.push(TAG_CHANNEL_REACTION);
+                r.encode_body(&mut out);
             },
             // The key (reference, message id) comes first and the state
             // byte directly after it, so on an exact stamp tie the two
@@ -1365,6 +1393,9 @@ impl SyncEntry {
             TAG_DEVICE_ACK => {
                 Self::DeviceAck(super::device_ack::DeviceAckEntry::take_body(&mut cur)?)
             },
+            TAG_CHANNEL_REACTION => Self::ChannelReaction(
+                super::channel_reaction::ChannelReactionEntry::take_body(&mut cur)?,
+            ),
             _ => return Err(CodecError::UnknownTag),
         };
         if !cur.is_empty() {

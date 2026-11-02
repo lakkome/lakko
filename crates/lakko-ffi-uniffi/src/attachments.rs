@@ -643,6 +643,7 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             reply,
             forward,
             resend,
+            ..
         } => ParsedBody {
             kind: MessageBodyKind::Chat,
             text,

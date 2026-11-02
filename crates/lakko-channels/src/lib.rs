@@ -65,6 +65,24 @@
 //!   member-card requests and, converted to X25519, receives the seed
 //!   envelope.
 //!
+//! ## What's also here (ADR-0087)
+//!
+//! - [`meta`] is at schema version 3: the public/private flag replaces
+//!   `listed`, the `@name` rides as a conversation-handle envelope, and every
+//!   other post's plaintext is the chat envelope (`lakko_attachments`),
+//!   classified by [`classify_post_plaintext`].
+//! - [`public_seed`] — a public channel's one seed envelope per epoch,
+//!   sealed under the read key its public record carries.
+//! - [`invite`] — a private channel's invite key, the invite proof the
+//!   service checks, and the sealed admission ticket the publisher checks.
+//!
+//! - [`post_key`], [`reaction`], [`comment`], [`ban_list`] — comments and
+//!   reactions (section 13a): the per-post key a subscriber write is signed
+//!   by and its proof, reaction labels a reader resolves against the fixed
+//!   emoji list of `lakko_ui_rules::reaction`, the sealed comment with its
+//!   per-channel author key, and the publisher's ban list, carried as a post
+//!   like the metadata record.
+//!
 //! ## What's NOT here yet
 //!
 //! - **Rotation distribution wire (4c).** The fanout
@@ -105,19 +123,36 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod ban_list;
+pub mod comment;
 pub mod copublisher;
 pub mod epoch;
 pub mod error;
+pub mod invite;
 pub mod listing;
 pub mod member_card;
 pub mod meta;
 pub mod owner;
 pub mod post;
+pub mod post_key;
+pub mod public_seed;
+pub mod reaction;
 pub mod rotation_policy;
 pub mod seed;
 pub mod subscribe;
 pub mod unsubscribe;
 
+pub use ban_list::{
+    ban_list_is_newer, compose_ban_list, decode_ban_list, AuthorKey, BanList, BanListError,
+    BAN_LIST_DOMAIN_V1, BAN_LIST_MAX_KEYS, BAN_LIST_MAX_LEN, BAN_LIST_MIN_LEN, BAN_LIST_VERSION_V1,
+};
+pub use comment::{
+    check_comment_text, comment_author_seed, comment_signed_bytes, open_comment, seal_comment,
+    Comment, CommentAuthor, CommentError, CommentPlace, CommentTextError, OpenedComment,
+    COMMENT_AUTHOR_KEY_DOMAIN, COMMENT_AUTHOR_KEY_LEN, COMMENT_KEY_INFO_V1,
+    COMMENT_SEALED_CODEC_MAX_LEN, COMMENT_SEALED_MAX_LEN, COMMENT_SEALED_MIN_LEN,
+    COMMENT_SIG_DOMAIN_V1, COMMENT_TEXT_MAX_BYTES, COMMENT_VERSION_V1,
+};
 pub use copublisher::{
     channel_copublisher_seed, compose_copublisher_binding, decode_copublisher_binding,
     verify_copublisher_proof, ChannelCoPublisherSigner, CoPublisherBinding,
@@ -127,6 +162,13 @@ pub use copublisher::{
 };
 pub use epoch::{EpochId, EPOCH_ID_LEN};
 pub use error::{ChannelError, Result};
+pub use invite::{
+    admission_public_key, generate_admission_seed, invite_proof_canonical_bytes,
+    invite_signing_seed, open_admission_ticket, ticket_admission_version, verify_invite_proof,
+    AdmissionTicketError, ChannelInviteSigner, InviteProof, ADMISSION_SEED_LEN,
+    ADMISSION_TICKET_DOMAIN, ADMISSION_TICKET_LEN, ADMISSION_TICKET_VERSION_V1, INVITE_KEY_DOMAIN,
+    INVITE_KEY_LEN, INVITE_PROOF_DOMAIN, INVITE_PROOF_HEADER_NAME, INVITE_PROOF_MAX_HEADER_LEN,
+};
 pub use listing::{
     check_language, compose_channel_listing, decode_channel_listing, is_known_topic,
     listing_is_newer, topic_name, ChannelListing, ChannelListingError, LanguageError,
@@ -144,7 +186,7 @@ pub use member_card::{
 pub use meta::{
     channel_meta_is_newer, classify_post_plaintext, compose_channel_meta, decode_channel_meta,
     ChannelMeta, ChannelMetaError, ChannelMetaFieldError, PostContent, CHANNEL_META_DOMAIN_V1,
-    CHANNEL_META_MAX_LEN, CHANNEL_META_MIN_LEN, CHANNEL_META_VERSION_V2,
+    CHANNEL_META_MAX_LEN, CHANNEL_META_MIN_LEN, CHANNEL_META_VERSION_V3,
 };
 pub use owner::{
     channel_owner_seed, owner_handover_body, parse_owner_handover_body, verify_owner_proof,
@@ -155,6 +197,18 @@ pub use owner::{
 pub use post::{
     compose_post, decode_post, verify_and_decrypt, ChannelPost, MAX_PLAINTEXT_LEN,
     POST_SIG_DOMAIN_V1,
+};
+pub use post_key::{
+    channel_post_key_seed, post_key_proof_canonical_bytes, verify_post_key_proof, ChannelPostKey,
+    PostKeyProof, PostKeyProofError, PostKeyStatement, SubscriberWrite, POST_KEY_DOMAIN,
+    POST_KEY_LEN, POST_KEY_PROOF_DOMAIN, POST_KEY_PROOF_HEADER_NAME, POST_KEY_PROOF_WINDOW_MS,
+};
+pub use public_seed::{
+    channel_read_key, open_public_seed, public_seed_epoch, seal_public_seed,
+    PUBLIC_SEED_ENVELOPE_LEN, READ_KEY_DOMAIN, READ_KEY_LEN,
+};
+pub use reaction::{
+    ReactionKey, ReactionLabel, ReactionLabels, REACTION_KEY_INFO_V1, REACTION_LABEL_LEN,
 };
 pub use rotation_policy::{RotationPolicy, RotationState, DEFAULT_INTERVAL_MS, DEFAULT_MAX_POSTS};
 pub use seed::{ContentKeySeed, CONTENT_KEY_SEED_LEN, EXPORTER_LABEL_V1};
@@ -183,5 +237,45 @@ pub mod fuzz_api {
         crate::member_card::verify_binding(plaintext, &[0x0C; crate::CHANNEL_ID_LEN], &[0x5B; 32])
             .ok()
             .map(|opened| opened.profile.len())
+    }
+
+    /// Parse `value` as an invite-proof header (ADR-0087 section 7) and
+    /// verify it for a fixed row. `None` when it does not parse; `Some(true)`
+    /// when it re-encodes to the same text.
+    #[must_use]
+    pub fn channel_invite_proof_parse(value: &str) -> Option<bool> {
+        crate::invite::fuzz_parse_proof(value)
+    }
+
+    /// Open `ticket` as an admission ticket under a fixed admission seed and
+    /// row, and feed it to the ticket plaintext check directly. `true` when
+    /// either accepted, which a fuzzer cannot cause.
+    #[must_use]
+    pub fn admission_ticket_open(ticket: &[u8]) -> bool {
+        crate::invite::fuzz_open_ticket(ticket)
+    }
+
+    /// Parse `value` as a post key proof header (ADR-0087 section 13a) and
+    /// verify it for a fixed write. `None` when it does not parse;
+    /// `Some(true)` when it re-encodes to the same text.
+    #[must_use]
+    pub fn post_key_proof_parse(value: &str) -> Option<bool> {
+        crate::post_key::fuzz_parse_proof(value)
+    }
+
+    /// Open `sealed` as a comment (ADR-0087 section 13a) at a fixed place
+    /// under a fixed seed, and run the plaintext and body parsers on the same
+    /// bytes. `true` when every property holds (see the oracle).
+    #[must_use]
+    pub fn channel_comment_open(sealed: &[u8]) -> bool {
+        crate::comment::fuzz_open(sealed)
+    }
+
+    /// Open `wire` as a public seed envelope (ADR-0087 section 6) under a
+    /// fixed read key. `None` when it has the wrong shape; `Some(true)` when
+    /// the open refused, which it must since a fuzzer cannot forge the tag.
+    #[must_use]
+    pub fn public_seed_open(wire: &[u8]) -> Option<bool> {
+        crate::public_seed::fuzz_open(wire)
     }
 }

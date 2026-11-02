@@ -104,6 +104,12 @@ pub enum ChannelError {
     /// (ADR-0060 section 3, [`crate::unsubscribe`]).
     #[error("unsubscribe request is outside its freshness window")]
     StaleRequest,
+
+    /// A reaction emoji is not in the fixed list a channel post takes
+    /// (ADR-0087 section 13a, `lakko_ui_rules::reaction`); its label could
+    /// never be read, so none is made.
+    #[error("emoji is not a channel reaction")]
+    UnknownReactionEmoji,
 }
 
 impl From<lakko_crypto::error::Error> for ChannelError {

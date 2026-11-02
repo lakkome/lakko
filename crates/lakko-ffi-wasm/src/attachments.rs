@@ -945,6 +945,7 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             reply,
             forward,
             resend,
+            ..
         } => ParsedBody {
             kind: "chat",
             text,

@@ -3,7 +3,7 @@
 
 //! Fuzz target — the byte decoders of the synced state (`lakko-sync`).
 //!
-//! Six decoders run on bytes this device did not write:
+//! Seven decoders run on bytes this device did not write:
 //!
 //! * `decode_lineage_envelope` (ADR-0073 R.5): a conversation-lineage
 //!   envelope another device of the same account sent over the DeviceGroup's
@@ -28,10 +28,17 @@
 //!   whose added-device warning was seen, sent the same way. Domain,
 //!   version, a bounded count, fixed-size entries, strictly ascending keys,
 //!   no trailing bytes; an accepted envelope folds to exactly its keys.
+//! * `decode_channel_reaction_envelope` (ADR-0087 section 13a): the
+//!   account's own reactions under channel posts, sent the same way. Domain,
+//!   version, a bounded count, a one-byte emoji length checked against its
+//!   bound before any copy, UTF-8, a state byte, strictly ascending keys, no
+//!   trailing bytes; an accepted envelope folds to exactly its registers,
+//!   does not apply twice, and a prune past every post removes it all.
 //! * `SyncedState::from_bytes` (ADR-0058): the persisted fold, which is also
 //!   what the backup payload carries, so a hostile storage tier chooses it.
-//!   Version 7 since the conversation-end register (ADR-0087 section 9),
-//!   whose tag, reference, state byte and epoch this decoder reads.
+//!   Version 8 since the own channel-reaction register (ADR-0087 section
+//!   13a), whose tag and body this decoder reads beside the conversation-end
+//!   register's (version 7, section 9).
 //!
 //! The harness asserts none panics, that an accepted envelope is canonical
 //! (re-encodes to the identical bytes) and folds to exactly its own

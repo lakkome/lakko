@@ -2647,8 +2647,10 @@ version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
  "hex",
+ "lakko-attachments",
  "lakko-contacts",
  "lakko-crypto",
+ "lakko-ui-rules",
  "thiserror 1.0.69",
  "tracing",
 ]

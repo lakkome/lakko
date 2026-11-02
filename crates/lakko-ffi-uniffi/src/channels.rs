@@ -679,7 +679,7 @@ impl From<ChannelMeta> for FfiChannelMeta {
             updated_at_ms: m.updated_at_ms,
             topic: m.topic,
             language: m.language,
-            listed: m.listed,
+            listed: m.public,
         }
     }
 }
@@ -692,7 +692,9 @@ impl From<FfiChannelMeta> for ChannelMeta {
             updated_at_ms: m.updated_at_ms,
             topic: m.topic,
             language: m.language,
-            listed: m.listed,
+            public: m.listed,
+            // ADR-0087: the handle envelope has no FFI field yet.
+            handle: None,
         }
     }
 }
@@ -748,11 +750,19 @@ pub fn compose_channel_meta(meta: FfiChannelMeta) -> Result<Vec<u8>, FfiError> {
 #[must_use]
 pub fn classify_channel_post_plaintext(plaintext: Vec<u8>) -> FfiChannelPostContent {
     match classify_post_plaintext(&plaintext) {
-        PostContent::Text(text) => FfiChannelPostContent {
+        // ADR-0087: a post is the chat envelope; the caller parses `text`
+        // with `parseBodyEnvelope` until the FFI carries the body.
+        PostContent::Message { plaintext, .. } => FfiChannelPostContent {
             kind: FfiChannelPostKind::Text,
-            text: Some(text.to_vec()),
+            text: Some(plaintext.to_vec()),
             meta: None,
             error: None,
+        },
+        PostContent::NotAPost => FfiChannelPostContent {
+            kind: FfiChannelPostKind::Malformed,
+            text: None,
+            meta: None,
+            error: Some("notAPost".to_string()),
         },
         PostContent::Meta(meta) => FfiChannelPostContent {
             kind: FfiChannelPostKind::Meta,
@@ -765,6 +775,21 @@ pub fn classify_channel_post_plaintext(plaintext: Vec<u8>) -> FfiChannelPostCont
             text: None,
             meta: None,
             error: Some(e.code()),
+        },
+        // ADR-0087 section 13a: a ban list is never shown as a post. The FFI
+        // has no ban-list surface yet, so it reaches a client as a dropped
+        // record with its own code.
+        PostContent::BanList(_) => FfiChannelPostContent {
+            kind: FfiChannelPostKind::Malformed,
+            text: None,
+            meta: None,
+            error: Some("banList".to_string()),
+        },
+        PostContent::MalformedBanList(e) => FfiChannelPostContent {
+            kind: FfiChannelPostKind::Malformed,
+            text: None,
+            meta: None,
+            error: Some(format!("banList.{}", e.code())),
         },
     }
 }

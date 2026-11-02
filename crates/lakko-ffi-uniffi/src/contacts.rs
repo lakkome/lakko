@@ -70,7 +70,7 @@ use lakko_contacts::group_invite::{
     decode_and_verify as rust_group_invite_decode, generate_link_key as rust_generate_link_key,
     group_sign_revocation as rust_group_sign_revocation, open_link as rust_group_invite_open_link,
     seal_link as rust_group_invite_seal_link, GroupInviteCapability as RustGroupInviteCapability,
-    GroupInvitePreview as RustGroupInvitePreview,
+    GroupInvitePreview as RustGroupInvitePreview, GroupKnockKey as RustGroupKnockKey,
     LINK_SECRET_B64URL_LEN as GROUP_INVITE_LINK_SECRET_B64URL_LEN,
     LINK_SECRET_LEN as GROUP_INVITE_LINK_SECRET_LEN, MAX_GROUP_ID_LEN,
 };
@@ -2506,6 +2506,14 @@ pub enum FfiIncomingEnvelopeKind {
     /// whole envelope; the typed decode and the signature check are the FFI
     /// step of ADR-0087. Never render it. Appended last.
     ConversationHandle,
+    /// A knock-key seed sealed to one admin (ADR-0087 section 5). `payload`
+    /// is the whole envelope; the typed decode and open are the FFI step of
+    /// ADR-0087. Never render it. Appended last.
+    KnockSeed,
+    /// A private channel's admission seed sealed to one co-publisher
+    /// (ADR-0087 section 7). `payload` is the whole envelope; the typed
+    /// decode and open are the FFI step. Never render it. Appended last.
+    AdmissionSeed,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2603,6 +2611,7 @@ pub struct FfiIncomingEnvelope {
 ///   KP-forward minimum floor, or an invalid media-state
 ///   payload).
 #[uniffi::export]
+#[allow(clippy::too_many_lines)] // one arm per envelope kind
 pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvelope, FfiError> {
     use FfiIncomingEnvelopeKind as K;
     let parsed = rust_dispatch_incoming_envelope(&plaintext)
@@ -2696,6 +2705,14 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         IncomingEnvelope::ConversationHandle(_) => FfiIncomingEnvelope {
             payload: plaintext.clone(),
             ..FfiIncomingEnvelope::of(K::ConversationHandle)
+        },
+        IncomingEnvelope::KnockSeed(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::KnockSeed)
+        },
+        IncomingEnvelope::AdmissionSeed(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::AdmissionSeed)
         },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),
@@ -3329,12 +3346,18 @@ pub fn committer_beacon_envelope_len() -> u32 {
 ///
 /// [`FfiError::Contacts`] for a wrong-length seed, an empty / oversized
 /// `group_id`, or a compose failure.
+///
+/// `knock_public_key` / `knock_version` are the group's knock key the joiner
+/// seals its request to (ADR-0087 section 5, capability v3).
 #[uniffi::export]
 pub fn compose_group_invite_capability(
     issuer_signing_seed: Vec<u8>,
     group_id: Vec<u8>,
     expiry_ms: u64,
+    knock_public_key: Vec<u8>,
+    knock_version: u16,
 ) -> Result<InviteLinkMint, FfiError> {
+    let knock = group_knock_key(&knock_public_key, knock_version)?;
     if issuer_signing_seed.len() != 32 {
         return Err(FfiError::Contacts(
             "issuerSigningSeed must be 32 bytes".to_string(),
@@ -3348,7 +3371,7 @@ pub fn compose_group_invite_capability(
             "groupId must be 1..={MAX_GROUP_ID_LEN} bytes",
         )));
     }
-    let wire = rust_group_invite_compose(&signing, &group_id, expiry_ms)?;
+    let wire = rust_group_invite_compose(&signing, &group_id, expiry_ms, &knock)?;
     seal_mint(
         &signing,
         |secret| rust_group_invite_seal_link(secret, &wire),
@@ -3456,7 +3479,10 @@ pub fn compose_group_invite_capability_with_preview(
     group_name: Option<String>,
     inviter_name: Option<String>,
     member_count: u16,
+    knock_public_key: Vec<u8>,
+    knock_version: u16,
 ) -> Result<InviteLinkMint, FfiError> {
+    let knock = group_knock_key(&knock_public_key, knock_version)?;
     if issuer_signing_seed.len() != 32 {
         return Err(FfiError::Contacts(
             "issuerSigningSeed must be 32 bytes".to_string(),
@@ -3475,10 +3501,16 @@ pub fn compose_group_invite_capability_with_preview(
         inviter_name: rust_normalize_display_name(inviter_name.as_deref().unwrap_or(""))?,
         member_count,
         channel_id: None,
+        subscriber: None,
     };
     let link_key = rust_generate_link_key();
     let wire = rust_group_invite_compose_with_preview(
-        &signing, &group_id, expiry_ms, &preview, &link_key,
+        &signing,
+        &group_id,
+        expiry_ms,
+        Some(&knock),
+        &preview,
+        &link_key,
     )?;
     seal_mint(
         &signing,
@@ -3507,7 +3539,10 @@ pub fn compose_co_publisher_invite_capability(
     expiry_ms: u64,
     channel_id: Vec<u8>,
     channel_name: Option<String>,
+    knock_public_key: Vec<u8>,
+    knock_version: u16,
 ) -> Result<InviteLinkMint, FfiError> {
+    let knock = group_knock_key(&knock_public_key, knock_version)?;
     let seed: [u8; 32] = issuer_signing_seed
         .as_slice()
         .try_into()
@@ -3527,16 +3562,33 @@ pub fn compose_co_publisher_invite_capability(
         inviter_name: None,
         member_count: 0,
         channel_id: Some(channel),
+        subscriber: None,
     };
     let link_key = rust_generate_link_key();
     let wire = rust_group_invite_compose_with_preview(
-        &signing, &group_id, expiry_ms, &preview, &link_key,
+        &signing,
+        &group_id,
+        expiry_ms,
+        Some(&knock),
+        &preview,
+        &link_key,
     )?;
     seal_mint(
         &signing,
         |secret| rust_group_invite_seal_link(secret, &wire),
         link_key,
     )
+}
+
+/// The 32-byte knock public key and its version (ADR-0087 section 5).
+fn group_knock_key(public_key: &[u8], version: u16) -> Result<RustGroupKnockKey, FfiError> {
+    let public_key: [u8; 32] = public_key
+        .try_into()
+        .map_err(|_| FfiError::Contacts("knockPublicKey must be 32 bytes".to_string()))?;
+    Ok(RustGroupKnockKey {
+        public_key,
+        version,
+    })
 }
 
 #[derive(uniffi::Object)]
@@ -3914,7 +3966,9 @@ mod tests {
     #[test]
     fn group_join_attribution_carries_the_reply_grant() {
         let seed = vec![0x33u8; 32];
-        let cap = compose_group_invite_capability(seed.clone(), vec![7u8; 32], 0).unwrap();
+        let cap =
+            compose_group_invite_capability(seed.clone(), vec![7u8; 32], 0, vec![0x4B; 32], 1)
+                .unwrap();
         let wire = GroupInviteCapability::open_link(cap.sealed, cap.link_secret)
             .unwrap()
             .wire();
@@ -5247,6 +5301,8 @@ mod tests {
             Some("  Weekend plans ".to_string()),
             Some("Anna".to_string()),
             4,
+            vec![0x4B; 32],
+            1,
         )
         .expect("mint");
         let cap = GroupInviteCapability::open_link(mint.sealed.clone(), mint.link_secret.clone())
@@ -5269,7 +5325,8 @@ mod tests {
         ));
         // The join attribution carries the plaintext capability.
         assert!(GroupInviteCapability::decode_and_verify(cap.wire()).is_ok());
-        let plain = compose_group_invite_capability(seed, vec![1, 2, 3, 4], 0).expect("plain");
+        let plain = compose_group_invite_capability(seed, vec![1, 2, 3, 4], 0, vec![0x4B; 32], 1)
+            .expect("plain");
         let cap = GroupInviteCapability::open_link(plain.sealed, plain.link_secret).expect("open");
         assert!(!cap.has_preview());
         assert_eq!(cap.open_preview(mint.link_secret).expect("open"), None);
@@ -5283,6 +5340,8 @@ mod tests {
             0,
             vec![0xC4; 16],
             Some("Daily notes".to_string()),
+            vec![0x4B; 32],
+            1,
         )
         .expect("mint");
         let cap = GroupInviteCapability::open_link(mint.sealed.clone(), mint.link_secret.clone())
@@ -5301,7 +5360,9 @@ mod tests {
             vec![0x5A; 32],
             0,
             vec![0xC4; 15],
-            None
+            None,
+            vec![0x4B; 32],
+            1,
         )
         .is_err());
     }

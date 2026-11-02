@@ -31,6 +31,15 @@ lakko-crypto.workspace = true
 # on `thiserror` and `lakko-crypto`, both already here.
 lakko-contacts.workspace = true
 
+# A post's plaintext is the chat envelope (ADR-0087 section 13): one codec,
+# one bound set and one inline-media rule with chat messages.
+lakko-attachments.workspace = true
+
+# The fixed list of 64 reaction emoji a channel post takes (ADR-0087 section
+# 13a): one definition the label resolution here and the clients' pickers
+# share. `lakko-ui-rules` depends only on `lakko-contacts`, already here.
+lakko-ui-rules.workspace = true
+
 # Base64url-no-pad for the owner request-proof header (ADR-0059 section 1),
 # the same version `lakko-ds-proof` already pins.
 base64 = "0.22"

@@ -17,6 +17,7 @@ use lakko_anon_token_server::{
 };
 use lakko_channels::copublisher::{ChannelCoPublisherSigner, COPUBLISHER_PROOF_HEADER_NAME};
 use lakko_channels::owner::{ChannelOwnerSigner, OwnerRequest, OWNER_PROOF_HEADER_NAME};
+use lakko_channels::ChannelInviteSigner;
 use lakko_svc_channels::{router, AppState, Config, InMemoryChannelStore};
 use serde_json::json;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -2322,4 +2323,463 @@ async fn a_bad_body_still_answers_as_before_once_the_proof_passes() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     assert_eq!(code_of(resp).await, "bad-channel-id");
+}
+
+// ----------------------------------------------------------------------------
+// ADR-0087 sections 6, 7 and 15: public seeds, the flag, invite keys, the
+// invite door, the paged list, the counter and removal by a publisher.
+// ----------------------------------------------------------------------------
+
+const PRIVATE_CHANNEL_HEX: &str = "a1a2a3a4a5a6a7a8a9aaabacadaeafa0";
+
+fn channel_bytes(hex_id: &str) -> [u8; 16] {
+    hex::decode(hex_id).unwrap().try_into().unwrap()
+}
+
+fn subscriber_key() -> [u8; 32] {
+    let mut seed = [0u8; 32];
+    lakko_crypto::random::fill(&mut seed);
+    lakko_crypto::signing::SigningKey::from_seed(&seed)
+        .verifying_key()
+        .to_bytes()
+}
+
+fn invite_proof(signer: &ChannelInviteSigner, channel_hex: &str, sub: &[u8; 32]) -> String {
+    signer
+        .sign_proof_at(&channel_bytes(channel_hex), sub, now_ms(), fresh_nonce())
+        .encode()
+}
+
+fn ticket_b64() -> String {
+    URL_SAFE_NO_PAD.encode([0x5A; lakko_svc_channels::SEALED_TICKET_LEN])
+}
+
+async fn create_private(client: &reqwest::Client, addr: SocketAddr, channel_hex: &str) {
+    let mut body = create_body_for(channel_hex);
+    body["private"] = json!(true);
+    let resp = client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+}
+
+async fn subscribe_with(
+    client: &reqwest::Client,
+    addr: SocketAddr,
+    channel_hex: &str,
+    sub: &[u8; 32],
+    ticket: Option<String>,
+    proof: Option<String>,
+    token: &str,
+) -> reqwest::Response {
+    let mut body = json!({ "subscriber_pubkey_hex": hex::encode(sub) });
+    if let Some(t) = ticket {
+        body["sealed_ticket_b64"] = json!(t);
+    }
+    let mut req = client
+        .post(format!(
+            "http://{addr}/v1/channels/{channel_hex}/subscribers"
+        ))
+        .header(TOKEN_HEADER, token)
+        .json(&body);
+    if let Some(p) = proof {
+        req = req.header(lakko_channels::INVITE_PROOF_HEADER_NAME, p);
+    }
+    req.send().await.unwrap()
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One walk through the flow, in order.
+async fn a_private_channel_admits_only_through_an_invite_key() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    let ch = PRIVATE_CHANNEL_HEX;
+    create_private(&client, addr, ch).await;
+    let base = format!("http://{addr}/v1/channels/{ch}");
+    let signer = ChannelInviteSigner::from_invite_seed(&[0x33; 32]);
+    let invite_pk = hex::encode(signer.verifying_key().to_bytes());
+    let alice = subscriber_key();
+
+    // No ticket: refused before anything else.
+    let tok = subscribe_token();
+    let resp = subscribe_with(&client, addr, ch, &alice, None, None, &tok).await;
+    assert_eq!(resp.status(), 400);
+    assert_eq!(code_of(resp).await, "sealed-ticket-required");
+    let resp = subscribe_with(&client, addr, ch, &alice, Some("AAAA".into()), None, &tok).await;
+    assert_eq!(code_of(resp).await, "bad-sealed-ticket");
+
+    // No proof, then a proof by a key nobody registered: one refusal, and the
+    // token is not spent (it buys the subscribe below).
+    let resp = subscribe_with(&client, addr, ch, &alice, Some(ticket_b64()), None, &tok).await;
+    assert_eq!(resp.status(), 401);
+    assert_eq!(code_of(resp).await, "invite-proof-required");
+    let proof = invite_proof(&signer, ch, &alice);
+    let resp = subscribe_with(
+        &client,
+        addr,
+        ch,
+        &alice,
+        Some(ticket_b64()),
+        Some(proof),
+        &tok,
+    )
+    .await;
+    assert_eq!(code_of(resp).await, "invite-proof-required");
+
+    // The publisher registers a one-use key (unsigned: refused).
+    let key_url = format!("{base}/invite-keys/{invite_pk}");
+    let terms = json!({ "expiry_ms": 0, "max_uses": 0 });
+    let resp = client.put(&key_url).json(&terms).send().await.unwrap();
+    assert_eq!(code_of(resp).await, "owner-proof-required");
+    let resp = client
+        .put(&key_url)
+        .json(&terms)
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    let resp = client
+        .put(format!("{base}/invite-keys/{}", "00".repeat(32)))
+        .json(&terms)
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(code_of(resp).await, "bad-invite-key");
+
+    // A proof over another subscriber key does not verify.
+    let bob = subscriber_key();
+    let resp = subscribe_with(
+        &client,
+        addr,
+        ch,
+        &alice,
+        Some(ticket_b64()),
+        Some(invite_proof(&signer, ch, &bob)),
+        &tok,
+    )
+    .await;
+    assert_eq!(code_of(resp).await, "invite-proof-required");
+
+    let proof = invite_proof(&signer, ch, &alice);
+    let resp = subscribe_with(
+        &client,
+        addr,
+        ch,
+        &alice,
+        Some(ticket_b64()),
+        Some(proof.clone()),
+        &tok,
+    )
+    .await;
+    assert_eq!(resp.status(), 201);
+    // The same proof again: its nonce is spent.
+    let resp = subscribe_with(
+        &client,
+        addr,
+        ch,
+        &alice,
+        Some(ticket_b64()),
+        Some(proof),
+        &subscribe_token(),
+    )
+    .await;
+    assert_eq!(code_of(resp).await, "invite-proof-required");
+    // A retry after a lost answer works with the used-up key.
+    let resp = subscribe_with(
+        &client,
+        addr,
+        ch,
+        &alice,
+        Some(ticket_b64()),
+        Some(invite_proof(&signer, ch, &alice)),
+        &subscribe_token(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201);
+    // The key's one use is gone for anyone new.
+    let resp = subscribe_with(
+        &client,
+        addr,
+        ch,
+        &bob,
+        Some(ticket_b64()),
+        Some(invite_proof(&signer, ch, &bob)),
+        &subscribe_token(),
+    )
+    .await;
+    assert_eq!(code_of(resp).await, "invite-proof-required");
+
+    // The publisher reads the keys, the page with the tickets and the count.
+    let resp = client
+        .get(format!("{base}/invite-keys"))
+        .owner_send()
+        .await
+        .unwrap();
+    let keys: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(keys["invite_keys"][0]["invite_pk_hex"], invite_pk);
+    assert_eq!(keys["invite_keys"][0]["used_count"], 1);
+    let resp = client
+        .get(format!("{base}/subscribers?after=0&limit=10"))
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let page: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(page["entries"][0]["subscriber_id"], hex::encode(alice));
+    assert_eq!(page["entries"][0]["sealed_ticket_b64"], ticket_b64());
+    let next = page["next_after"].as_u64().unwrap();
+    assert_eq!(page["entries"][0]["seq"].as_u64().unwrap(), next);
+    let resp = client
+        .get(format!("{base}/subscribers?after={next}"))
+        .owner_send()
+        .await
+        .unwrap();
+    let empty: serde_json::Value = resp.json().await.unwrap();
+    assert!(empty["entries"].as_array().unwrap().is_empty());
+    assert_eq!(empty["next_after"].as_u64().unwrap(), next);
+    let resp = client
+        .get(format!("{base}/subscribers/count"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(code_of(resp).await, "owner-proof-required");
+    let resp = client
+        .get(format!("{base}/subscribers/count"))
+        .owner_send()
+        .await
+        .unwrap();
+    let count: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(count["count"], 1);
+
+    // The publisher removes alice: her envelope read then says so.
+    let resp = client
+        .delete(format!("{base}/subscribers/{}", hex::encode(alice)))
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    let resp = client
+        .get(format!(
+            "{base}/subscribers/{}/envelope",
+            hex::encode(alice)
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 410);
+    assert_eq!(code_of(resp).await, "subscriber-removed");
+    let resp = client
+        .get(format!(
+            "{base}/subscribers/{}/envelopes",
+            hex::encode(alice)
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(code_of(resp).await, "subscriber-removed");
+    // A key that was never registered still reads as unknown.
+    let resp = client
+        .get(format!("{base}/subscribers/{}/envelope", hex::encode(bob)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(code_of(resp).await, "unknown-subscriber");
+    let resp = client
+        .get(format!("{base}/subscribers/count"))
+        .owner_send()
+        .await
+        .unwrap();
+    let count: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(count["count"], 0);
+
+    // A revoked key admits nobody, even with uses left.
+    let unlimited = json!({ "expiry_ms": 0, "max_uses": u32::MAX });
+    let resp = client
+        .put(&key_url)
+        .json(&unlimited)
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    let resp = client.delete(&key_url).owner_send().await.unwrap();
+    assert_eq!(resp.status(), 204);
+    let resp = subscribe_with(
+        &client,
+        addr,
+        ch,
+        &bob,
+        Some(ticket_b64()),
+        Some(invite_proof(&signer, ch, &bob)),
+        &subscribe_token(),
+    )
+    .await;
+    assert_eq!(code_of(resp).await, "invite-proof-required");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One walk through the flow, in order.
+async fn a_public_channel_serves_its_seed_openly_and_going_private_withdraws_it() {
+    use lakko_channels::{seal_public_seed, ContentKeySeed, EpochId};
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create(&client, addr, CHANNEL_HEX).await;
+    let base = format!("http://{addr}/v1/channels/{CHANNEL_HEX}");
+    let read_key = [0x44; 32];
+    let seal = |epoch: u32| {
+        seal_public_seed(
+            &read_key,
+            &channel_bytes(CHANNEL_HEX),
+            EpochId::new(epoch),
+            &ContentKeySeed::from_bytes_for_test([0x77; 32]),
+        )
+        .unwrap()
+    };
+    let envelope = seal(0);
+
+    let resp = client
+        .put(format!("{base}/public-seed/0"))
+        .body(envelope.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(code_of(resp).await, "owner-proof-required");
+    let resp = client
+        .put(format!("{base}/public-seed/1"))
+        .body(envelope.to_vec())
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(code_of(resp).await, "public-seed-epoch-mismatch");
+    let resp = client
+        .put(format!("{base}/public-seed/0"))
+        .body(vec![0; 63])
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(code_of(resp).await, "bad-public-seed");
+    let resp = client
+        .put(format!("{base}/public-seed/0"))
+        .body(envelope.to_vec())
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    // The same bytes again are accepted; another seal is not.
+    let resp = client
+        .put(format!("{base}/public-seed/0"))
+        .body(envelope.to_vec())
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    let resp = client
+        .put(format!("{base}/public-seed/0"))
+        .body(seal(0).to_vec())
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(code_of(resp).await, "public-seed-exists");
+    let resp = client
+        .put(format!("{base}/public-seed/2"))
+        .body(seal(2).to_vec())
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(code_of(resp).await, "public-seed-epoch-in-future");
+
+    let resp = client
+        .get(format!("{base}/public-seed/0"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()["cache-control"],
+        "public, max-age=31536000, immutable"
+    );
+    assert_eq!(resp.bytes().await.unwrap().as_ref(), envelope.as_slice());
+    let resp = client
+        .get(format!("{base}/public-seed/1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    assert_eq!(resp.headers()["cache-control"], "no-store");
+    let resp = client
+        .get(format!("{base}/public-seed/x1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(code_of(resp).await, "bad-epoch");
+
+    // A public channel's subscribers cannot be removed.
+    let sub = subscriber_key();
+    let resp = subscribe_with(
+        &client,
+        addr,
+        CHANNEL_HEX,
+        &sub,
+        None,
+        None,
+        &subscribe_token(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201);
+    let resp = client
+        .delete(format!("{base}/subscribers/{}", hex::encode(sub)))
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(code_of(resp).await, "channel-public");
+
+    // Only the owner changes the flag; going private deletes the seed.
+    let resp = client
+        .put(format!("{base}/access"))
+        .json(&json!({ "private": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(code_of(resp).await, "owner-proof-required");
+    let resp = client
+        .put(format!("{base}/access"))
+        .json(&json!({ "private": true }))
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    let resp = client
+        .get(format!("{base}/public-seed/0"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let resp = client
+        .put(format!("{base}/public-seed/0"))
+        .body(envelope.to_vec())
+        .owner_send()
+        .await
+        .unwrap();
+    assert_eq!(code_of(resp).await, "channel-private");
+    // A subscribe now needs an invitation; the row already there stays.
+    let resp = subscribe_with(
+        &client,
+        addr,
+        CHANNEL_HEX,
+        &subscriber_key(),
+        Some(ticket_b64()),
+        None,
+        &subscribe_token(),
+    )
+    .await;
+    assert_eq!(code_of(resp).await, "invite-proof-required");
+    let resp = client
+        .get(format!("{base}/subscribers/count"))
+        .owner_send()
+        .await
+        .unwrap();
+    let count: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(count["count"], 1);
 }

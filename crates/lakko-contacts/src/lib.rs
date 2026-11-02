@@ -66,7 +66,10 @@
 //!   ADR-0087: the handle key of a group or channel and the statements it
 //!   signs to discovery, the public record of a public group or channel, the
 //!   envelope that tells members the `@name` and its flag, and the sealed
-//!   knock row (a request to join with no epoch).
+//!   knock row (a request to join with no epoch); [`knock_seed`], the
+//!   envelope that hands an admin one version of the knock seed;
+//!   [`admission_seed`], the envelope that hands a co-publisher one version
+//!   of a private channel's admission seed.
 //! - [`registrar_seed`] — the ADR-0057 registrar-seed envelope (a journal
 //!   root hands one member its Delivery Service registrar seed, sealed to
 //!   that member's account X25519 key, with the registrar public key in the
@@ -102,6 +105,7 @@
 #![warn(missing_docs)]
 
 pub mod ack;
+pub mod admission_seed;
 pub mod call_invite;
 pub mod call_kp_forward;
 pub mod call_welcome;
@@ -124,6 +128,7 @@ pub mod invite;
 pub mod journal_epoch;
 pub mod key_rotation;
 pub mod knock;
+pub mod knock_seed;
 pub mod link_claim;
 pub mod link_founded;
 pub mod link_refusal;
@@ -145,6 +150,11 @@ pub mod username;
 pub mod visibility;
 
 pub use ack::{compose_ack, decode_and_verify_ack, ContactAck};
+pub use admission_seed::{
+    admission_seed_public_key, compose_admission_seed, decode_admission_seed,
+    try_unwrap_admission_seed, AdmissionSeedEnvelope, AdmissionSeedError,
+    ADMISSION_SEED_ENVELOPE_DOMAIN_V1, ADMISSION_SEED_ENVELOPE_LEN, ADMISSION_SEED_VERSION_V1,
+};
 pub use call_invite::{
     call_revoke_canonical_bytes, call_sign_revocation, compose as compose_call_invite,
     decode_and_verify as decode_and_verify_call_invite, CallInviteCapability, CallInviteMedia,
@@ -199,9 +209,10 @@ pub use group_closed::{
 };
 pub use group_invite::{
     compose as compose_group_invite, decode_and_verify as decode_and_verify_group_invite,
-    group_revoke_canonical_bytes, group_sign_revocation, GroupInviteCapability,
-    GROUP_INVITE_NEVER_EXPIRES, GROUP_INVITE_REVOKE_DOMAIN_V1,
-    GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS, MAX_GROUP_ID_LEN,
+    group_revoke_canonical_bytes, group_sign_revocation, ChannelAccess, ChannelInviteCard,
+    GroupInviteCapability, GroupInvitePreview, GroupKnockKey, SubscriberInvite,
+    CHANNEL_INVITE_CARD_MAX_LEN, CHANNEL_INVITE_CARD_MIN_LEN, GROUP_INVITE_NEVER_EXPIRES,
+    GROUP_INVITE_REVOKE_DOMAIN_V1, GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS, MAX_GROUP_ID_LEN,
 };
 pub use group_join_attribution::{
     compose_attribution as compose_group_join_attribution,
@@ -252,6 +263,10 @@ pub use key_rotation::{
 pub use knock::{
     is_knock_row_len, knock_public_key, knock_row_version, knock_seed, open_knock, seal_knock,
     KnockError, KnockRequest, KNOCK_LARGE_ROW_LEN, KNOCK_SMALL_ROW_LEN,
+};
+pub use knock_seed::{
+    compose_knock_seed, decode_knock_seed, try_unwrap_knock_seed, KnockSeedEnvelope,
+    KnockSeedError, KNOCK_SEED_ENVELOPE_DOMAIN_V1, KNOCK_SEED_ENVELOPE_LEN, KNOCK_SEED_VERSION_V1,
 };
 pub use link_claim::{
     compose_link_claim, decode_link_claim, link_claim_answered_elsewhere, link_claim_outcome,
@@ -515,6 +530,42 @@ pub mod fuzz_api {
             Ok(crate::incoming_envelope::IncomingEnvelope::ConversationHandle(_))
         );
         Some(ok && dispatched)
+    }
+
+    /// Decode `bytes` as a knock-seed envelope (ADR-0087 section 5) and check
+    /// the dispatcher agrees. `None` when the decoder refuses; `Some(true)`
+    /// when it re-encodes to the same bytes at the fixed length and
+    /// dispatches as the same envelope.
+    #[must_use]
+    pub fn knock_seed_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::knock_seed::fuzz_decode(bytes)?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::KnockSeed(_))
+        );
+        Some(ok && dispatched)
+    }
+
+    /// Decode `bytes` as an admission-seed envelope (ADR-0087 section 7) and
+    /// check the dispatcher agrees. `None` when the decoder refuses;
+    /// `Some(true)` when it re-encodes to the same bytes at the fixed length
+    /// and dispatches as the same envelope.
+    #[must_use]
+    pub fn admission_seed_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::admission_seed::fuzz_decode(bytes)?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::AdmissionSeed(_))
+        );
+        Some(ok && dispatched)
+    }
+
+    /// Decode `bytes` as a channel invitation card (ADR-0087 section 14) and
+    /// try to open it. `None` when the decoder refuses; `Some(true)` when
+    /// what decoded re-encodes to the same bytes (opening never panicked).
+    #[must_use]
+    pub fn channel_invite_card_open(bytes: &[u8]) -> Option<bool> {
+        crate::group_invite::fuzz_channel_invite_card(bytes)
     }
 
     /// Open `row` as a sealed knock (ADR-0087 section 5) under a fixed seed.

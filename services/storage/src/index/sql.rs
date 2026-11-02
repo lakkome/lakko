@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The MariaDB blob index (`storage_blobs`, migration `0001`).
+//! The MariaDB blob index (`storage_blobs`, migrations `0001` and `0003`).
 
 use async_trait::async_trait;
 use sqlx::{MySqlPool, QueryBuilder, Row as _};
@@ -23,6 +23,13 @@ impl SqlIndex {
     }
 }
 
+/// The last access day before which a row without its own idle life is
+/// expired: `last_access + lifetime < today`, i.e. `last_access < today -
+/// lifetime`. Saturates at 0 (nothing is expired).
+const fn default_cutoff(today: u32, default_lifetime_days: u32) -> u32 {
+    today.saturating_sub(default_lifetime_days)
+}
+
 fn row_from(r: &sqlx::mysql::MySqlRow) -> Result<BlobRow, IndexError> {
     let id: Vec<u8> = r.try_get("blob_id")?;
     let id: BlobId = id
@@ -41,6 +48,7 @@ fn row_from(r: &sqlx::mysql::MySqlRow) -> Result<BlobRow, IndexError> {
         created_day: r.try_get("created_day")?,
         last_access_day: r.try_get("last_access_day")?,
         delete_pk,
+        idle_days: r.try_get("idle_days")?,
     })
 }
 
@@ -48,8 +56,8 @@ fn row_from(r: &sqlx::mysql::MySqlRow) -> Result<BlobRow, IndexError> {
 impl BlobIndex for SqlIndex {
     async fn get(&self, id: &BlobId) -> Result<Option<BlobRow>, IndexError> {
         let row = sqlx::query(
-            "SELECT blob_id, size_bytes, node, created_day, last_access_day, delete_pk \
-             FROM storage_blobs WHERE blob_id = ?",
+            "SELECT blob_id, size_bytes, node, created_day, last_access_day, delete_pk, \
+             idle_days FROM storage_blobs WHERE blob_id = ?",
         )
         .bind(&id[..])
         .fetch_optional(&self.pool)
@@ -61,8 +69,8 @@ impl BlobIndex for SqlIndex {
         let key = row.delete_pk.map(|k| k.to_vec());
         let inserted = sqlx::query(
             "INSERT IGNORE INTO storage_blobs \
-             (blob_id, size_bytes, node, created_day, last_access_day, delete_pk) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+             (blob_id, size_bytes, node, created_day, last_access_day, delete_pk, idle_days) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id[..])
         .bind(row.size)
@@ -70,6 +78,7 @@ impl BlobIndex for SqlIndex {
         .bind(row.created_day)
         .bind(row.last_access_day)
         .bind(key)
+        .bind(row.idle_days)
         .execute(&self.pool)
         .await?
         .rows_affected();
@@ -110,16 +119,26 @@ impl BlobIndex for SqlIndex {
     async fn expired(
         &self,
         node: &str,
-        cutoff_day: u32,
+        today: u32,
+        default_lifetime_days: u32,
         limit: usize,
     ) -> Result<Vec<BlobId>, IndexError> {
         let limit = u64::try_from(limit).unwrap_or(u64::MAX);
+        // Two arms so the default arm keeps the `last_access_day` index; the
+        // own-life arm is bounded by `last_access_day < today` (a life is at
+        // least one day). The `+` is on unsigned columns widened to BIGINT.
         let rows = sqlx::query(
             "SELECT blob_id FROM storage_blobs \
-             WHERE node = ? AND last_access_day < ? ORDER BY last_access_day LIMIT ?",
+             WHERE node = ? AND ( \
+                 (idle_days IS NULL AND last_access_day < ?) \
+              OR (idle_days IS NOT NULL AND last_access_day < ? \
+                  AND CAST(last_access_day AS UNSIGNED) + idle_days < ?) \
+             ) ORDER BY last_access_day LIMIT ?",
         )
         .bind(node)
-        .bind(cutoff_day)
+        .bind(default_cutoff(today, default_lifetime_days))
+        .bind(today)
+        .bind(today)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -131,13 +150,25 @@ impl BlobIndex for SqlIndex {
             .collect()
     }
 
-    async fn remove_if_expired(&self, id: &BlobId, cutoff_day: u32) -> Result<bool, IndexError> {
-        let n = sqlx::query("DELETE FROM storage_blobs WHERE blob_id = ? AND last_access_day < ?")
-            .bind(&id[..])
-            .bind(cutoff_day)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
+    async fn remove_if_expired(
+        &self,
+        id: &BlobId,
+        today: u32,
+        default_lifetime_days: u32,
+    ) -> Result<bool, IndexError> {
+        let n = sqlx::query(
+            "DELETE FROM storage_blobs WHERE blob_id = ? AND ( \
+                 (idle_days IS NULL AND last_access_day < ?) \
+              OR (idle_days IS NOT NULL \
+                  AND CAST(last_access_day AS UNSIGNED) + idle_days < ?) \
+             )",
+        )
+        .bind(&id[..])
+        .bind(default_cutoff(today, default_lifetime_days))
+        .bind(today)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
         Ok(n == 1)
     }
 
@@ -154,7 +185,8 @@ impl BlobIndex for SqlIndex {
         for chunk in rows.chunks(IMPORT_BATCH) {
             let mut q = QueryBuilder::new(
                 "INSERT IGNORE INTO storage_blobs \
-                 (blob_id, size_bytes, node, created_day, last_access_day, delete_pk) ",
+                 (blob_id, size_bytes, node, created_day, last_access_day, delete_pk, \
+                 idle_days) ",
             );
             q.push_values(chunk, |mut b, r| {
                 b.push_bind(r.id.to_vec())
@@ -162,7 +194,8 @@ impl BlobIndex for SqlIndex {
                     .push_bind(r.node.clone())
                     .push_bind(r.created_day)
                     .push_bind(r.last_access_day)
-                    .push_bind(r.delete_pk.map(|k| k.to_vec()));
+                    .push_bind(r.delete_pk.map(|k| k.to_vec()))
+                    .push_bind(r.idle_days);
             });
             inserted += q.build().execute(&self.pool).await?.rows_affected();
         }
@@ -238,6 +271,7 @@ pub(crate) mod tests {
             created_day: 10,
             last_access_day: 10,
             delete_pk: None,
+            idle_days: None,
         };
         assert!(!index.import_done(&node).await.unwrap());
         assert_eq!(index.import(vec![row.clone()], &node, 10).await.unwrap(), 1);

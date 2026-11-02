@@ -80,6 +80,21 @@
 //! never in [`StateSnapshot`]. Adding the register added a tag and changed
 //! no existing layout, so it did not change the persistence version.
 //!
+//! ## Own channel reactions (ADR-0087 section 13a)
+//!
+//! One register per `(channel, post, emoji)` the account reacted with or took
+//! off, folded by the rule above (a removal is a kept tombstone; on an exact
+//! stamp tie the removal wins). Carried by
+//! [`SyncedState::channel_reaction_envelopes`] /
+//! [`SyncedState::apply_channel_reaction_envelope`], persisted with the rest
+//! (so the backup carries it), never in [`StateSnapshot`]. Unlike the other
+//! registers it is **pruned**: [`SyncedState::prune_channel_reactions`] drops
+//! every register whose post has left the channel service
+//! ([`super::channel_reaction::CHANNEL_REACTION_RETENTION_MS`]). That is safe
+//! where pruning a conversation end is not: once the post is gone there is
+//! nothing a stale register could show or take back, so a register a late
+//! envelope brings back changes nothing and goes at the next prune.
+//!
 //! ## Saved messages (ADR-0065 section 4)
 //!
 //! A saved message is one more register, keyed `(conversation, message
@@ -123,6 +138,11 @@
 
 use std::collections::BTreeMap;
 
+use super::channel_reaction::{
+    compose_channel_reaction_envelope, decode_channel_reaction_envelope, ChannelReactionEntry,
+    ChannelReactionEnvelopeError, CHANNEL_REACTIONS_MAX_CLIENT, CHANNEL_REACTION_CHANNEL_ID_LEN,
+    CHANNEL_REACTION_ENVELOPE_MAX_ENTRIES,
+};
 use super::device_ack::{
     compose_device_ack_envelope, decode_device_ack_envelope, DeviceAckEntry,
     DeviceAckEnvelopeError, DEVICE_ACK_ENVELOPE_MAX_ENTRIES, DEVICE_ACK_KEY_LEN,
@@ -160,11 +180,12 @@ use super::recovery_email::{
 /// (2026-10-26), `6` since a saved-message snapshot carries the message's
 /// own time (`SavedSnapshot::sent_at_ms`; the two branches that made the
 /// last two changes had each called theirs `5`), `7` since the
-/// conversation-end register (ADR-0087 section 9). Older
+/// conversation-end register (ADR-0087 section 9), `8` since the
+/// own channel-reaction register (ADR-0087 section 13a). Older
 /// versions are refused rather than read: nothing is deployed, and a build
 /// that silently accepted an older layout would be a second decoder nobody
 /// tests.
-const STATE_VERSION: u8 = 7;
+const STATE_VERSION: u8 = 8;
 
 /// A stored register value with its stamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,7 +403,8 @@ impl SyncedState {
                 | SyncEntry::RecoveryEmail(_)
                 | SyncEntry::OwnUsername(_)
                 | SyncEntry::LinkRecord(_)
-                | SyncEntry::DeviceAck(_) => {},
+                | SyncEntry::DeviceAck(_)
+                | SyncEntry::ChannelReaction(_) => {},
                 other => {
                     let _ = snap.folders.push(h.hlc, other.clone());
                 },
@@ -819,6 +841,170 @@ impl SyncedState {
                 .into_iter()
                 .map(|s| (s.hlc, SyncEntry::DeviceAck(s.value))),
         ))
+    }
+
+    // -----------------------------------------------------------------
+    // Own channel reactions (ADR-0087 section 13a).
+    // -----------------------------------------------------------------
+
+    /// Record that the account reacted to (`reacted`) or took its reaction
+    /// off (`!reacted`) the post at `post_cursor` in `channel_id` with
+    /// `emoji`, stamped `hlc`. `post_at_ms` is the post's server time.
+    ///
+    /// Returns the envelope to send to the account's other devices, or
+    /// `None` when nothing was written: the register already says so, or a
+    /// new reaction would pass [`CHANNEL_REACTIONS_MAX_CLIENT`] (a removal of
+    /// a held reaction is always written).
+    ///
+    /// # Errors
+    ///
+    /// [`super::entry::BoundsError::ChannelReactionEmoji`].
+    pub fn set_channel_reaction(
+        &mut self,
+        hlc: u64,
+        channel_id: [u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+        emoji: &str,
+        reacted: bool,
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, super::entry::BoundsError> {
+        let value = ChannelReactionEntry {
+            channel_id,
+            post_cursor,
+            emoji: emoji.to_string(),
+            reacted,
+            post_at_ms,
+        };
+        value.validate()?;
+        let held = self.channel_reaction_register(&channel_id, post_cursor, emoji);
+        match &held {
+            Some(h) if h.value.reacted == reacted => return Ok(None),
+            None if !reacted => return Ok(None),
+            None if self.channel_reaction_count() >= CHANNEL_REACTIONS_MAX_CLIENT => {
+                return Ok(None);
+            },
+            _ => {},
+        }
+        if self.apply(hlc, SyncEntry::ChannelReaction(value.clone()))? != ApplyOutcome::Applied {
+            return Ok(None);
+        }
+        Ok(compose_channel_reaction_envelope(&[Stamped { hlc, value }]).ok())
+    }
+
+    fn channel_reaction_register(
+        &self,
+        channel_id: &[u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+        emoji: &str,
+    ) -> Option<Stamped<ChannelReactionEntry>> {
+        match self.registers.get(&RegisterKey::ChannelReaction(
+            *channel_id,
+            post_cursor,
+            emoji.to_string(),
+        )) {
+            Some(Held {
+                hlc,
+                entry: SyncEntry::ChannelReaction(r),
+            }) => Some(Stamped {
+                hlc: *hlc,
+                value: r.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn channel_reaction_count(&self) -> usize {
+        self.registers
+            .keys()
+            .filter(|k| matches!(k, RegisterKey::ChannelReaction(..)))
+            .count()
+    }
+
+    /// Whether the account's reaction `emoji` stands on the post.
+    #[must_use]
+    pub fn has_channel_reaction(
+        &self,
+        channel_id: &[u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+        emoji: &str,
+    ) -> bool {
+        self.channel_reaction_register(channel_id, post_cursor, emoji)
+            .is_some_and(|r| r.value.reacted)
+    }
+
+    /// The emoji the account's reactions on the post stand with, in byte
+    /// order of the emoji.
+    #[must_use]
+    pub fn channel_reactions_on(
+        &self,
+        channel_id: &[u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+    ) -> Vec<String> {
+        self.registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::ChannelReaction(r)
+                    if r.reacted && r.channel_id == *channel_id && r.post_cursor == post_cursor =>
+                {
+                    Some(r.emoji.clone())
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every held own-reaction register (tombstones included) with its
+    /// original stamp, as envelopes of at most
+    /// [`CHANNEL_REACTION_ENVELOPE_MAX_ENTRIES`] entries: the catch-up a
+    /// device sends on DeviceGroup growth, and the re-send it owes when a
+    /// live send did not go out.
+    #[must_use]
+    pub fn channel_reaction_envelopes(&self) -> Vec<Vec<u8>> {
+        let held: Vec<Stamped<ChannelReactionEntry>> = self
+            .registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::ChannelReaction(r) => Some(Stamped {
+                    hlc: h.hlc,
+                    value: r.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        held.chunks(CHANNEL_REACTION_ENVELOPE_MAX_ENTRIES)
+            .filter_map(|chunk| compose_channel_reaction_envelope(chunk).ok())
+            .collect()
+    }
+
+    /// Decode a channel-reaction envelope and fold every register in with
+    /// its original stamp. Fail closed. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`ChannelReactionEnvelopeError`].
+    pub fn apply_channel_reaction_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<bool, ChannelReactionEnvelopeError> {
+        let entries = decode_channel_reaction_envelope(bytes)?;
+        Ok(self.apply_all(
+            entries
+                .into_iter()
+                .map(|s| (s.hlc, SyncEntry::ChannelReaction(s.value))),
+        ))
+    }
+
+    /// Drop every own-reaction register whose post has left the channel
+    /// service at `now_ms` (its time plus
+    /// [`super::channel_reaction::CHANNEL_REACTION_RETENTION_MS`] is in the
+    /// past). Returns how many went.
+    pub fn prune_channel_reactions(&mut self, now_ms: u64) -> usize {
+        let before = self.registers.len();
+        self.registers.retain(|_, h| match &h.entry {
+            SyncEntry::ChannelReaction(r) => !r.expired_at(now_ms),
+            _ => true,
+        });
+        before - self.registers.len()
     }
 
     // -----------------------------------------------------------------
@@ -1958,15 +2144,15 @@ mod tests {
         let mut s = SyncedState::new();
         s.apply(3, SyncEntry::FolderRemoved(fid(2))).ok();
         let mut old = s.to_bytes();
-        assert_eq!(old[0], 7);
-        for version in [1u8, 2, 3, 4, 5, 6] {
+        assert_eq!(old[0], 8);
+        for version in [1u8, 2, 3, 4, 5, 6, 7] {
             old[0] = version;
             assert_eq!(
                 SyncedState::from_bytes(&old),
                 Err(CodecError::UnknownVersion)
             );
         }
-        assert_eq!(SyncedState::new().to_bytes(), vec![7, 0, 0, 0, 0]);
+        assert_eq!(SyncedState::new().to_bytes(), vec![8, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -2244,6 +2430,126 @@ mod tests {
             Err(CodecError::Bounds(
                 super::super::entry::BoundsError::RecoveryEmailLength
             ))
+        );
+    }
+
+    fn channel_reaction(c: u8, cursor: u64, emoji: &str, reacted: bool) -> SyncEntry {
+        SyncEntry::ChannelReaction(ChannelReactionEntry {
+            channel_id: [c; 16],
+            post_cursor: cursor,
+            emoji: emoji.to_string(),
+            reacted,
+            post_at_ms: 1_000_u64.saturating_add(cursor),
+        })
+    }
+
+    #[test]
+    fn an_own_reaction_is_set_taken_off_carried_and_persisted() {
+        let ch = [4u8; 16];
+        let thumbs = "\u{1F44D}";
+        let mut a = SyncedState::new();
+        assert!(!a.has_channel_reaction(&ch, 7, thumbs));
+        // Taking off a reaction never given writes nothing.
+        assert_eq!(
+            a.set_channel_reaction(1, ch, 7, thumbs, false, 500),
+            Ok(None)
+        );
+        let sent = a
+            .set_channel_reaction(2, ch, 7, thumbs, true, 500)
+            .unwrap()
+            .unwrap();
+        assert!(a.has_channel_reaction(&ch, 7, thumbs));
+        assert_eq!(a.channel_reactions_on(&ch, 7), vec![thumbs.to_string()]);
+        assert!(a.channel_reactions_on(&ch, 8).is_empty());
+        // The same state again writes nothing.
+        assert_eq!(
+            a.set_channel_reaction(3, ch, 7, thumbs, true, 500),
+            Ok(None)
+        );
+        // Another device folds it in, idempotently.
+        let mut b = SyncedState::new();
+        assert_eq!(b.apply_channel_reaction_envelope(&sent), Ok(true));
+        assert_eq!(b.apply_channel_reaction_envelope(&sent), Ok(false));
+        assert!(b.has_channel_reaction(&ch, 7, thumbs));
+        // Taken off on b; the tombstone reaches a and beats the older add.
+        let off = b
+            .set_channel_reaction(4, ch, 7, thumbs, false, 500)
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.apply_channel_reaction_envelope(&off), Ok(true));
+        assert!(!a.has_channel_reaction(&ch, 7, thumbs));
+        // The older add, arriving late, does not bring it back.
+        assert_eq!(a.apply_channel_reaction_envelope(&sent), Ok(false));
+        assert!(!a.has_channel_reaction(&ch, 7, thumbs));
+        // Never in the snapshot, but persisted and re-sent.
+        assert!(a.snapshot().folders.is_empty());
+        let back = SyncedState::from_bytes(&a.to_bytes()).unwrap_or_default();
+        assert_eq!(back.entries(), a.entries());
+        assert_eq!(a.channel_reaction_envelopes(), vec![off]);
+        assert_eq!(
+            a.set_channel_reaction(5, ch, 7, "", true, 500),
+            Err(super::super::entry::BoundsError::ChannelReactionEmoji)
+        );
+    }
+
+    #[test]
+    fn on_an_equal_stamp_taking_a_reaction_off_wins_in_either_order() {
+        let add = channel_reaction(1, 7, "a", true);
+        let off = channel_reaction(1, 7, "a", false);
+        let mut x = SyncedState::new();
+        x.apply(5, add.clone()).ok();
+        x.apply(5, off.clone()).ok();
+        let mut y = SyncedState::new();
+        y.apply(5, off).ok();
+        y.apply(5, add).ok();
+        assert_eq!(x, y);
+        assert!(!x.has_channel_reaction(&[1; 16], 7, "a"));
+    }
+
+    #[test]
+    fn a_post_past_its_retention_takes_its_reactions_with_it() {
+        use super::super::channel_reaction::CHANNEL_REACTION_RETENTION_MS;
+        let mut s = SyncedState::new();
+        s.set_channel_reaction(1, [1; 16], 7, "a", true, 1_000).ok();
+        s.set_channel_reaction(2, [1; 16], 8, "a", true, 9_000).ok();
+        s.set_channel_reaction(3, [1; 16], 8, "b", false, 9_000)
+            .ok();
+        s.acknowledge_device(4, [9; 32], 0);
+        assert_eq!(
+            s.prune_channel_reactions(1_000 + CHANNEL_REACTION_RETENTION_MS),
+            0
+        );
+        assert_eq!(
+            s.prune_channel_reactions(1_001 + CHANNEL_REACTION_RETENTION_MS),
+            1
+        );
+        assert!(!s.has_channel_reaction(&[1; 16], 7, "a"));
+        assert!(s.has_channel_reaction(&[1; 16], 8, "a"));
+        assert_eq!(s.prune_channel_reactions(u64::MAX), 1);
+        // Other registers are untouched.
+        assert!(s.is_device_acknowledged(&[9; 32]));
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn the_client_limit_stops_a_new_reaction_and_never_a_removal() {
+        use super::super::channel_reaction::CHANNEL_REACTIONS_MAX_CLIENT;
+        let mut s = SyncedState::new();
+        for cursor in 0..CHANNEL_REACTIONS_MAX_CLIENT as u64 {
+            s.apply(1, channel_reaction(1, cursor, "a", true)).ok();
+        }
+        assert_eq!(
+            s.set_channel_reaction(2, [1; 16], u64::MAX, "a", true, 0),
+            Ok(None)
+        );
+        assert!(s
+            .set_channel_reaction(2, [1; 16], 0, "a", false, 0)
+            .unwrap()
+            .is_some());
+        // The fold itself never refuses.
+        assert_eq!(
+            s.apply(2, channel_reaction(1, u64::MAX, "a", true)),
+            Ok(ApplyOutcome::Applied)
         );
     }
 
@@ -2688,8 +2994,21 @@ mod tests {
                 .prop_map(|(h, id, uses, revoked, label)| (h, link(id, uses, revoked, label))),
             // Conversation ends: few conversations and epochs, so ends and
             // joins meet on one epoch and on one stamp often.
-            (hlc, c, 0u64..3, any::<bool>())
+            (hlc.clone(), c.clone(), 0u64..3, any::<bool>())
                 .prop_map(|(h, c, epoch, ended)| (h, conversation_end(c, epoch, ended))),
+            // Own channel reactions: two posts x two emoji, so a reaction and
+            // its removal meet on one stamp often.
+            (
+                hlc,
+                c,
+                0u64..2,
+                prop::sample::select(vec!["a", "b"]),
+                any::<bool>()
+            )
+                .prop_map(|(h, c, cursor, e, reacted)| (
+                    h,
+                    channel_reaction(c, cursor, e, reacted)
+                )),
         ]
     }
 
@@ -2708,6 +3027,9 @@ mod tests {
         }
         for envelope in from.link_record_envelopes() {
             into.apply_link_record_envelope(&envelope).unwrap();
+        }
+        for envelope in from.channel_reaction_envelopes() {
+            into.apply_channel_reaction_envelope(&envelope).unwrap();
         }
     }
 
