@@ -36,7 +36,13 @@ pub(crate) async fn delete_account(
     // The username binding and the published identity bundle are keyed on
     // `account_id`; so is everything `purge_owned_rows` removes.
     for sql in [
-        // Every row, current and retired (ADR-0076), and the rename time.
+        // The one-namespace claims of its names (ADR-0087), while the rows
+        // still say which names they are; then every row, current and
+        // retired (ADR-0076). The handles of groups and channels the account
+        // owns are not found here (a handle names no account): the client
+        // retires them before deleting the account.
+        "DELETE FROM name_claims WHERE lookup_key IN \
+           (SELECT oprf_hash FROM usernames WHERE account_id = ?)",
         "DELETE FROM usernames WHERE account_id = ?",
         "DELETE FROM identity_bundles WHERE account_id = ?",
     ] {
@@ -65,8 +71,8 @@ async fn purge_owned_rows(
         "DELETE FROM keypackages WHERE account_id = ?",
         // ADR-0074 - the tombstones of device ids deleted from the directory.
         "DELETE FROM keypackage_tombstones WHERE account_id = ?",
-        "DELETE FROM display_names WHERE account_id = ?",
-        "DELETE FROM public_records WHERE account_id = ?",
+        "DELETE FROM search_terms WHERE kind = 1 AND target = ?",
+        "DELETE FROM public_records WHERE kind = 1 AND target = ?",
     ] {
         sqlx::query(sql)
             .bind(account_id.as_slice())

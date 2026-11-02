@@ -266,6 +266,33 @@ pub fn deserialize(bytes: &[u8]) -> Result<KeyPackageIn> {
     KeyPackageIn::tls_deserialize(&mut slice).map_err(|e| Error::Codec(format!("{e:?}")))
 }
 
+/// Decode a wire-form KeyPackage that must fill `bytes` exactly.
+///
+/// [`deserialize`] stops where the KeyPackage ends and ignores what follows,
+/// which is right for a caller that frames its own input. A request to join
+/// ([`crate::Group::retain_join_request`], ADR-0087 section 5) hands over the
+/// KeyPackage alone, so anything after it, or an empty input, is refused.
+///
+/// # Errors
+///
+/// Returns [`Error::Codec`] on parse failure, an empty input or trailing
+/// bytes.
+pub(crate) fn deserialize_exact(bytes: &[u8]) -> Result<KeyPackageIn> {
+    if bytes.is_empty() {
+        return Err(Error::Codec("empty KeyPackage".into()));
+    }
+    let mut slice = bytes;
+    let kp_in =
+        KeyPackageIn::tls_deserialize(&mut slice).map_err(|e| Error::Codec(format!("{e:?}")))?;
+    if !slice.is_empty() {
+        return Err(Error::Codec(format!(
+            "{} bytes after the KeyPackage",
+            slice.len()
+        )));
+    }
+    Ok(kp_in)
+}
+
 /// Extract the leaf (Ed25519 signature) public key from a wire-form KeyPackage,
 /// without validating it against the active ciphersuite.
 ///

@@ -607,6 +607,62 @@ pub enum Incoming {
     },
 }
 
+/// The most requests to join a group holds awaiting a decision (ADR-0027,
+/// ADR-0087 section 5). A reader of the knock queue reads at most this many
+/// rows at a time and stops its cursor while the queue is full, so the backlog
+/// stays on the Delivery Service instead of being lost.
+pub const MAX_PENDING_JOIN_REQUESTS: usize = MAX_PENDING_EXTERNAL_JOINS;
+
+/// What [`Group::retain_join_request`] did with one request to join
+/// ([ADR-0087] section 5).
+///
+/// A refusal that changes no state is data, not an error, as for
+/// [`Incoming::ExternalJoinProposal`]: the reader of the knock queue needs to
+/// tell "drop this row" from "stop reading", and only [`Self::QueueFull`] is
+/// the second.
+///
+/// [ADR-0087]: ../../../docs/adr/0087-group-and-channel-handles-and-privacy.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinRequestOutcome {
+    /// Kept. An approve can act on it.
+    Retained,
+    /// The same joiner (by leaf signature key) was already waiting. Nothing
+    /// changed and an approve can still act on the request held.
+    AlreadyPending,
+    /// The joiner's leaf is already in the group. Nothing kept.
+    AlreadyMember,
+    /// [`MAX_PENDING_JOIN_REQUESTS`] requests are already waiting. Nothing
+    /// kept: the reader stops its knock cursor before this row, so the row
+    /// stays on the Delivery Service and is read again once a request is
+    /// decided.
+    QueueFull,
+    /// The request can never join this group: the group is a one-to-one, the
+    /// leaf credential resolves to no account (ADR-0050), or the leaf cannot
+    /// live in this group (ciphersuite, capabilities, required extensions,
+    /// lifetime). Nothing kept; the row is dropped.
+    NotAdmissible,
+}
+
+impl JoinRequestOutcome {
+    /// `true` when an approve can act on the request: it was kept now or was
+    /// already held.
+    #[must_use]
+    pub const fn is_retained(self) -> bool {
+        matches!(self, Self::Retained | Self::AlreadyPending)
+    }
+}
+
+/// The answer of [`Group::retain_join_request`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoinRequest {
+    /// The joiner's leaf signature public key: the handle
+    /// [`Group::approve_external_join`] and [`Group::reject_external_join`]
+    /// take, and what [`Group::pending_external_joins`] lists.
+    pub joiner_signature_key: Vec<u8>,
+    /// What was done with the request.
+    pub outcome: JoinRequestOutcome,
+}
+
 impl Group {
     /// Create a new MLS group with the given identity as the founding member.
     ///
@@ -1776,6 +1832,117 @@ impl Group {
             joiner_signature_key,
             retained,
         })
+    }
+
+    /// Retain a request to join carried as a bare KeyPackage ([ADR-0087]
+    /// section 5), for an owner or admin to decide.
+    ///
+    /// The ADR-0087 knock row is a KeyPackage sealed to the group's knock key,
+    /// with no MLS message around it. A KeyPackage has no epoch, so a request
+    /// kept here survives every commit the group makes while it waits, unlike
+    /// the external proposal of ADR-0027, which OpenMLS accepts only at the
+    /// epoch it was framed for. Opening the sealed row is the caller's
+    /// (`lakko-contacts`); this takes the KeyPackage it carried.
+    ///
+    /// What is checked, in order:
+    ///
+    /// 1. `key_package` is exactly one wire KeyPackage (nothing after it) that
+    ///    validates: leaf and package signatures, protocol version, init key
+    ///    distinct from the encryption key, lifetime. Anything else is an
+    ///    error, so a commit, an application message, a Welcome or an external
+    ///    proposal written into a knock row is refused before any group state
+    ///    is read or written.
+    /// 2. It can join this group: not a one-to-one (ADR-0062), a leaf
+    ///    credential that resolves to an account (the ADR-0050 binding,
+    ///    verified), and a leaf the group can carry (the same check the sweep
+    ///    runs before it commits an `Add`). Otherwise
+    ///    [`JoinRequestOutcome::NotAdmissible`].
+    /// 3. The joiner is not already a member, is not already waiting, and the
+    ///    queue has room ([`MAX_PENDING_JOIN_REQUESTS`]).
+    ///
+    /// A kept request goes into the same quarantine an external proposal does,
+    /// persisted the same way, so [`Self::approve_external_join`] (ordinary
+    /// group, an `Add` proposal the admin authors) and
+    /// [`crate::PublisherGroup::approve_external_join`] (a direct commit)
+    /// approve it unchanged, and peers judge the admin's proposal as before.
+    ///
+    /// [ADR-0087]: ../../../docs/adr/0087-group-and-channel-handles-and-privacy.md
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Codec`] when the bytes are not exactly one KeyPackage,
+    /// [`Error::KeyPackage`] when it does not validate, [`Error::Identity`]
+    /// when the storage lock is poisoned. Nothing is changed on any error.
+    pub fn retain_join_request(
+        &mut self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<JoinRequest> {
+        let key_package = crate::key_package::deserialize_exact(key_package)?
+            .validate(identity.provider.crypto(), GROUP_PROTOCOL_VERSION)
+            .map_err(|e| Error::KeyPackage(format!("join request validate: {e:?}")))?;
+        let leaf = key_package.leaf_node();
+        let joiner_signature_key = leaf.signature_key().as_slice().to_vec();
+        let answer = |outcome| JoinRequest {
+            joiner_signature_key: joiner_signature_key.clone(),
+            outcome,
+        };
+
+        let binding_resolves = crate::device_binding::account_key_of_credential(
+            leaf.credential().serialized_content(),
+            &joiner_signature_key,
+        )
+        .is_some();
+        if self.group_kind() == Some(GroupKind::OneToOne)
+            || !binding_resolves
+            || !leaf_fits_group(&self.admission_requirements(&[]), identity, &key_package)
+        {
+            return Ok(answer(JoinRequestOutcome::NotAdmissible));
+        }
+
+        let before = self.pending_external_joins.len();
+        self.reap_joined_external_joins();
+        let reaped = self.pending_external_joins.len() != before;
+
+        let outcome = if self.joiner_is_already_a_member(&joiner_signature_key) {
+            JoinRequestOutcome::AlreadyMember
+        } else if self
+            .pending_external_joins
+            .iter()
+            .any(|p| p.joiner_signature_key == joiner_signature_key)
+        {
+            JoinRequestOutcome::AlreadyPending
+        } else if self.pending_external_joins.len() >= MAX_PENDING_EXTERNAL_JOINS {
+            JoinRequestOutcome::QueueFull
+        } else {
+            self.pending_external_joins.push(PendingExternalJoin {
+                joiner_signature_key: joiner_signature_key.clone(),
+                key_package,
+            });
+            JoinRequestOutcome::Retained
+        };
+        if reaped || outcome == JoinRequestOutcome::Retained {
+            if let Err(e) = self.persist_pending_external_joins(identity) {
+                // Keep "nothing is changed on any error": the working copy
+                // must not hold what the durable copy does not.
+                if outcome == JoinRequestOutcome::Retained {
+                    self.pending_external_joins.pop();
+                }
+                return Err(e);
+            }
+        }
+        Ok(answer(outcome))
+    }
+
+    /// How many more requests to join this group can hold now
+    /// ([`MAX_PENDING_JOIN_REQUESTS`] minus those waiting). A reader of the
+    /// knock queue reads at most this many rows and reads none at zero
+    /// ([ADR-0087] section 5: the cursor stops while the queue is full).
+    ///
+    /// [ADR-0087]: ../../../docs/adr/0087-group-and-channel-handles-and-privacy.md
+    #[must_use]
+    pub fn join_request_room(&self) -> usize {
+        MAX_PENDING_EXTERNAL_JOINS.saturating_sub(self.pending_external_joins().len())
     }
 
     /// `true` when `signature_key` already sits in this group's roster.
@@ -4720,7 +4887,18 @@ fn sweep_keeps(ctx: &SweepContext<'_>, state: &mut SweepState, qp: &QueuedPropos
 ///   near-expiry KeyPackage and predates this filter; excluding an
 ///   already-expired one strictly narrows the window rather than opening it.
 fn added_leaf_can_join(ctx: &SweepContext<'_>, key_package: &KeyPackage) -> bool {
-    let admission = ctx.admission;
+    leaf_fits_group(ctx.admission, ctx.identity, key_package)
+}
+
+/// The body of [`added_leaf_can_join`], over the group's admission snapshot
+/// alone, so [`Group::retain_join_request`] asks the same question when it
+/// keeps a request that the sweep asks when it commits one (ADR-0087 section
+/// 5): a request no committer could ever carry is never shown for approval.
+fn leaf_fits_group(
+    admission: &GroupAdmission,
+    identity: &Identity,
+    key_package: &KeyPackage,
+) -> bool {
     // ValSem105, first half. The second half (protocol version) is not readable
     // from a `KeyPackage` — `KeyPackage::protocol_version` is `pub(crate)` — and
     // is covered by the re-validation below, which takes the version as its
@@ -4739,7 +4917,7 @@ fn added_leaf_can_join(ctx: &SweepContext<'_>, key_package: &KeyPackage) -> bool
         .ok()
         .and_then(|kp_in| {
             kp_in
-                .validate(ctx.identity.provider.crypto(), admission.protocol_version)
+                .validate(identity.provider.crypto(), admission.protocol_version)
                 .ok()
         });
     if revalidated.is_none() {

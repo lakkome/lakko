@@ -197,6 +197,47 @@ pub const SEALED_PAYLOAD_MIN_LEN: usize = NONCE_LEN + TAG_LEN + INTRODUCTION_PAY
 /// Longest sealed payload: nonce, AEAD tag, the longest payload.
 pub const SEALED_PAYLOAD_MAX_LEN: usize = NONCE_LEN + TAG_LEN + INTRODUCTION_PAYLOAD_MAX_LEN;
 
+/// Shortest sealed payload of a PUBLIC record, which carries a person's
+/// payload or a group's or channel's ([`crate::handle_record`], ADR-0087
+/// section 4).
+pub const PUBLIC_SEALED_PAYLOAD_MIN_LEN: usize = NONCE_LEN
+    + TAG_LEN
+    + if crate::handle_record::HANDLE_RECORD_PAYLOAD_MIN_LEN < INTRODUCTION_PAYLOAD_MIN_LEN {
+        crate::handle_record::HANDLE_RECORD_PAYLOAD_MIN_LEN
+    } else {
+        INTRODUCTION_PAYLOAD_MIN_LEN
+    };
+
+/// Longest sealed payload of a public record.
+pub const PUBLIC_SEALED_PAYLOAD_MAX_LEN: usize = NONCE_LEN
+    + TAG_LEN
+    + if crate::handle_record::HANDLE_RECORD_PAYLOAD_MAX_LEN > INTRODUCTION_PAYLOAD_MAX_LEN {
+        crate::handle_record::HANDLE_RECORD_PAYLOAD_MAX_LEN
+    } else {
+        INTRODUCTION_PAYLOAD_MAX_LEN
+    };
+
+/// The sealed-payload length bounds a record is parsed under: an
+/// introduction's (a person, in a bundle or an offer), or a public record's
+/// (a person or a group or channel, served by discovery).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SealedBounds {
+    min: usize,
+    max: usize,
+}
+
+/// The bounds of an introduction record.
+pub(crate) const INTRODUCTION_SEALED_BOUNDS: SealedBounds = SealedBounds {
+    min: SEALED_PAYLOAD_MIN_LEN,
+    max: SEALED_PAYLOAD_MAX_LEN,
+};
+
+/// The bounds of a public record.
+pub(crate) const PUBLIC_SEALED_BOUNDS: SealedBounds = SealedBounds {
+    min: PUBLIC_SEALED_PAYLOAD_MIN_LEN,
+    max: PUBLIC_SEALED_PAYLOAD_MAX_LEN,
+};
+
 /// Record header: version, `issued_at_ms`, `entry_count`.
 const RECORD_HEADER_LEN: usize = 1 + 8 + 1;
 
@@ -210,6 +251,15 @@ pub const INTRODUCTION_RECORD_MIN_LEN: usize =
 /// Longest record: every term and the longest sealed payload.
 pub const INTRODUCTION_RECORD_MAX_LEN: usize =
     RECORD_HEADER_LEN + MAX_INTRODUCTION_TERMS * ENTRY_LEN + 2 + SEALED_PAYLOAD_MAX_LEN;
+
+/// Shortest public record (ADR-0087 section 4).
+pub const PUBLIC_RECORD_MIN_LEN: usize =
+    RECORD_HEADER_LEN + ENTRY_LEN + 2 + PUBLIC_SEALED_PAYLOAD_MIN_LEN;
+
+/// Longest public record: what discovery's `public_records.record` column
+/// holds (ADR-0087 section 4).
+pub const PUBLIC_RECORD_MAX_LEN: usize =
+    RECORD_HEADER_LEN + MAX_INTRODUCTION_TERMS * ENTRY_LEN + 2 + PUBLIC_SEALED_PAYLOAD_MAX_LEN;
 
 /// Domain separator of the introduction offer (owner to contact: "relay
 /// this"). Frozen: [`crate::incoming_envelope`] dispatches on it.
@@ -429,8 +479,12 @@ impl IntroductionRecord {
     /// [`IntroductionError::BadEntryCount`], [`IntroductionError::DuplicateTag`],
     /// [`IntroductionError::SealedLength`].
     pub fn validate(&self) -> CoreResult<(), IntroductionError> {
+        self.validate_with(INTRODUCTION_SEALED_BOUNDS)
+    }
+
+    pub(crate) fn validate_with(&self, bounds: SealedBounds) -> CoreResult<(), IntroductionError> {
         check_entry_count(self.entries.len())?;
-        check_sealed_len(self.sealed_payload.len())?;
+        check_sealed_len(self.sealed_payload.len(), bounds)?;
         check_distinct_tags(self.entries.iter().map(|e| &e.tag))?;
         Ok(())
     }
@@ -441,7 +495,14 @@ impl IntroductionRecord {
     ///
     /// Exactly what [`IntroductionRecord::validate`] returns.
     pub fn encode(&self) -> CoreResult<Vec<u8>, IntroductionError> {
-        self.validate()?;
+        self.encode_with(INTRODUCTION_SEALED_BOUNDS)
+    }
+
+    pub(crate) fn encode_with(
+        &self,
+        bounds: SealedBounds,
+    ) -> CoreResult<Vec<u8>, IntroductionError> {
+        self.validate_with(bounds)?;
         let mut out = Vec::with_capacity(
             RECORD_HEADER_LEN + self.entries.len() * ENTRY_LEN + 2 + self.sealed_payload.len(),
         );
@@ -468,8 +529,24 @@ impl IntroductionRecord {
     ///
     /// Framing errors and every error of [`IntroductionRecord::validate`].
     pub fn decode(bytes: &[u8]) -> CoreResult<Self, IntroductionError> {
+        Self::decode_with(bytes, INTRODUCTION_SEALED_BOUNDS)
+    }
+
+    /// Decode a public record discovery serves or stores: the same wire,
+    /// with the sealed-payload bounds of a person's payload or a group's or
+    /// channel's ([`PUBLIC_RECORD_MIN_LEN`] to [`PUBLIC_RECORD_MAX_LEN`]).
+    /// Structure only.
+    ///
+    /// # Errors
+    ///
+    /// As [`IntroductionRecord::decode`].
+    pub fn decode_public(bytes: &[u8]) -> CoreResult<Self, IntroductionError> {
+        Self::decode_with(bytes, PUBLIC_SEALED_BOUNDS)
+    }
+
+    fn decode_with(bytes: &[u8], bounds: SealedBounds) -> CoreResult<Self, IntroductionError> {
         let mut cur = bytes;
-        let record = read_record(&mut cur)?;
+        let record = read_record(&mut cur, bounds)?;
         if !cur.is_empty() {
             return Err(IntroductionError::TrailingBytes { count: cur.len() });
         }
@@ -500,6 +577,18 @@ impl IntroductionRecord {
         &self,
         oprf_output: &[u8; OPRF_OUTPUT_LEN],
     ) -> CoreResult<Option<IntroductionPayload>, IntroductionError> {
+        match self.open_plaintext(oprf_output)? {
+            Some(plaintext) => IntroductionPayload::decode(&plaintext).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// [`IntroductionRecord::open`] without the payload decode: the opened
+    /// plaintext, whose first byte says which payload it is.
+    pub(crate) fn open_plaintext(
+        &self,
+        oprf_output: &[u8; OPRF_OUTPUT_LEN],
+    ) -> CoreResult<Option<Vec<u8>>, IntroductionError> {
         let tag = fof_tag(oprf_output);
         let Some(entry) = self.entries.iter().find(|e| e.tag == tag) else {
             return Ok(None);
@@ -511,8 +600,7 @@ impl IntroductionRecord {
             .map_err(|_| IntroductionError::Open)?;
         let content_key = SecretBytes::new(content_key);
         let header = payload_aad(self.issued_at_ms, &self.tags())?;
-        let plaintext = open_sealed(&content_key, &header, &self.sealed_payload)?;
-        IntroductionPayload::decode(&plaintext).map(Some)
+        open_sealed(&content_key, &header, &self.sealed_payload).map(Some)
     }
 }
 
@@ -629,6 +717,21 @@ fn compose_record(
     term_oprfs: &[[u8; OPRF_OUTPUT_LEN]],
     issued_at_ms: u64,
 ) -> CoreResult<Vec<u8>, IntroductionError> {
+    seal_record(
+        &payload.encode()?,
+        term_oprfs,
+        issued_at_ms,
+        INTRODUCTION_SEALED_BOUNDS,
+    )
+}
+
+/// Seal `plaintext` as a record findable by each term, under `bounds`.
+pub(crate) fn seal_record(
+    plaintext: &[u8],
+    term_oprfs: &[[u8; OPRF_OUTPUT_LEN]],
+    issued_at_ms: u64,
+    bounds: SealedBounds,
+) -> CoreResult<Vec<u8>, IntroductionError> {
     if term_oprfs.is_empty() {
         return Err(IntroductionError::NoTerms);
     }
@@ -639,7 +742,6 @@ fn compose_record(
     }
     let tags: Vec<[u8; FOF_TAG_LEN]> = term_oprfs.iter().map(fof_tag).collect();
     check_distinct_tags(tags.iter())?;
-    let plaintext = payload.encode()?;
     let content_key = random::secret_bytes::<CONTENT_KEY_LEN>();
     let mut entries = Vec::with_capacity(term_oprfs.len());
     for (oprf, tag) in term_oprfs.iter().zip(&tags) {
@@ -653,13 +755,13 @@ fn compose_record(
             wrapped_key,
         });
     }
-    let sealed_payload = seal_bound(&content_key, &payload_aad(issued_at_ms, &tags)?, &plaintext)?;
+    let sealed_payload = seal_bound(&content_key, &payload_aad(issued_at_ms, &tags)?, plaintext)?;
     IntroductionRecord {
         issued_at_ms,
         entries,
         sealed_payload,
     }
-    .encode()
+    .encode_with(bounds)
 }
 
 /// The tags of a record wire, for matching without opening.
@@ -705,7 +807,7 @@ pub fn open_public_record(
     record: &[u8],
     oprf_output: &[u8; OPRF_OUTPUT_LEN],
 ) -> CoreResult<Option<IntroductionPayload>, IntroductionError> {
-    match IntroductionRecord::decode(record)?.open(oprf_output)? {
+    match IntroductionRecord::decode_public(record)?.open(oprf_output)? {
         Some(payload) if payload.fof.is_some() => Err(IntroductionError::UnexpectedFofGrant),
         other => Ok(other),
     }
@@ -1131,8 +1233,8 @@ impl IntroductionError {
     }
 }
 
-fn check_sealed_len(len: usize) -> CoreResult<(), IntroductionError> {
-    if (SEALED_PAYLOAD_MIN_LEN..=SEALED_PAYLOAD_MAX_LEN).contains(&len) {
+fn check_sealed_len(len: usize, bounds: SealedBounds) -> CoreResult<(), IntroductionError> {
+    if (bounds.min..=bounds.max).contains(&len) {
         Ok(())
     } else {
         Err(IntroductionError::SealedLength { got: len })
@@ -1173,7 +1275,10 @@ fn check_bucket(count: usize) -> CoreResult<(), IntroductionError> {
     }
 }
 
-fn read_record(cur: &mut &[u8]) -> CoreResult<IntroductionRecord, IntroductionError> {
+fn read_record(
+    cur: &mut &[u8],
+    bounds: SealedBounds,
+) -> CoreResult<IntroductionRecord, IntroductionError> {
     let version = take_u8(cur)?;
     if version != INTRODUCTION_RECORD_VERSION_V1 {
         return Err(IntroductionError::UnknownVersion(version));
@@ -1189,14 +1294,14 @@ fn read_record(cur: &mut &[u8]) -> CoreResult<IntroductionRecord, IntroductionEr
         entries.push(IntroductionEntry { tag, wrapped_key });
     }
     let sealed_len = usize::from(u16::from_be_bytes(take_array::<2>(cur)?));
-    check_sealed_len(sealed_len)?;
+    check_sealed_len(sealed_len, bounds)?;
     let sealed_payload = take(cur, sealed_len)?.to_vec();
     let record = IntroductionRecord {
         issued_at_ms,
         entries,
         sealed_payload,
     };
-    record.validate()?;
+    record.validate_with(bounds)?;
     Ok(record)
 }
 

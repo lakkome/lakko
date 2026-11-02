@@ -39,7 +39,8 @@ pub use device_group::{AccountId, AccountSeed, DeviceGroup, MAX_SERVICE_ENVELOPE
 pub use error::{group_id_hex, Error, Result};
 pub use group::{
     epoch_after_message, epoch_of_message, is_external_join_proposal_for, Group, Incoming,
-    MemberAddition, MemberRecord, ProposalCommit, GROUP_ID_LEN,
+    JoinRequest, JoinRequestOutcome, MemberAddition, MemberRecord, ProposalCommit, GROUP_ID_LEN,
+    MAX_PENDING_JOIN_REQUESTS,
 };
 pub use group_kind::{GroupKind, GROUP_KIND_BODY_LEN};
 pub use group_proposals::{ProposalKind, ProposalRecord};
@@ -213,6 +214,47 @@ pub mod fuzz_api {
             return false;
         };
         crate::group::decode_pending_external_joins(bytes, identity).is_ok()
+    }
+
+    /// Hand `bytes` to [`crate::Group::retain_join_request`] on a fixed
+    /// group (ADR-0087 section 5). The bytes are what a sealed knock row
+    /// opened to, and anyone holding the group's public knock key can seal
+    /// any bytes, so they are attacker-chosen. Returns `true` when they were
+    /// taken as a KeyPackage.
+    ///
+    /// # Panics
+    ///
+    /// When the group's epoch or roster changes: a knock row must never
+    /// advance or alter the group, whatever it holds.
+    #[must_use]
+    pub fn retain_join_request(bytes: &[u8]) -> bool {
+        use std::cell::RefCell;
+        thread_local! {
+            static FIXTURE: RefCell<Option<(crate::Identity, crate::Group)>> =
+                RefCell::new(
+                    crate::Identity::from_seed(&[0x6Bu8; 64]).ok().and_then(|identity| {
+                        crate::Group::create(&identity, crate::GroupKind::Group)
+                            .ok()
+                            .map(|group| (identity, group))
+                    }),
+                );
+        }
+        FIXTURE.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            let Some((identity, group)) = slot.as_mut() else {
+                return false;
+            };
+            let epoch = group.epoch();
+            let members = group.member_count();
+            let taken = group.retain_join_request(identity, bytes).is_ok();
+            assert_eq!(group.epoch(), epoch, "a knock row never advances the epoch");
+            assert_eq!(
+                group.member_count(),
+                members,
+                "a knock row never changes the roster"
+            );
+            taken
+        })
     }
 
     /// The fixed login handle [`decode_pairing_qr`] binds against: 32 bytes

@@ -112,12 +112,23 @@
 //! it apart from the six above.
 //!
 //! [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
+//!
+//! # Handle certificate
+//!
+//! The eighth format, [`HandleCertificate`] (see the [`handle_cert`] module,
+//! [ADR-0087] section 3): discovery's signature, under the key that signs
+//! username certificates, binding the lookup key of a group's or channel's
+//! `@name` to the handle key that holds it. 169 bytes and its own domain
+//! separator.
+//!
+//! [ADR-0087]: ../../../docs/adr/0087-group-and-channel-handles-and-privacy.md
 
 #![forbid(unsafe_code)]
 
 pub mod account_statement;
 pub mod backup_head;
 pub mod genesis;
+pub mod handle_cert;
 pub mod key_reset;
 pub mod release_manifest;
 pub mod username_cert;
@@ -134,6 +145,10 @@ pub use backup_head::{
 pub use genesis::{
     verify_genesis_binding, verify_genesis_fresh, GenesisAttestError, GenesisAttestation,
     GENESIS_ATTESTATION_LEN,
+};
+pub use handle_cert::{
+    verify_handle_binding, HandleCertError, HandleCertificate, HANDLE_CERT_LEN,
+    HANDLE_WRITE_KEY_LEN,
 };
 pub use key_reset::{
     key_reset_account_ref, verify_key_reset_binding, verify_key_reset_fresh, KeyResetAttestError,
@@ -345,9 +360,20 @@ pub fn verify_bound(
 pub mod fuzz_api {
     use super::{
         verify_account_statement, AccountStatement, AccountStatementKind, ActionAttestation,
-        BackupHead, GenesisAttestation, KeyResetAttestation, ReleaseManifest, SigningKey,
-        UsernameCertificate,
+        BackupHead, GenesisAttestation, HandleCertificate, KeyResetAttestation, ReleaseManifest,
+        SigningKey, UsernameCertificate,
     };
+
+    /// Try to [`HandleCertificate::open`] the bytes against a FIXED verifying
+    /// key (ADR-0087 section 3). A handle certificate rides opaquely inside a
+    /// conversation-handle envelope any group member can relay, so it reaches
+    /// this bounded parser before any state is consulted. Returns `true` on
+    /// a (vanishingly rare) success.
+    #[must_use]
+    pub fn open_handle_cert(bytes: &[u8]) -> bool {
+        let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
+        HandleCertificate::open(bytes, &vk).is_ok()
+    }
 
     /// Drive the account-statement parser and verifier on attacker-controlled
     /// bytes against a FIXED verifying key, account and clock. A statement is

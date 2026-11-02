@@ -368,6 +368,21 @@ pub enum InfoSection {
     /// me" (UX `who-can-find-me.md` 5.1). Appended last: uniffi decodes by
     /// ordinal.
     TheirContactsCanFindMe,
+    /// ADR-0087: a group's or channel's `@name` row. The blocks from here on
+    /// are produced only by the core's `conversation_info_sections`, which
+    /// this surface does not expose yet (the FFI step of ADR-0087); they are
+    /// mapped so the conversion stays total. Appended last.
+    Handle,
+    /// ADR-0087: `Who can join` / `Who can subscribe`. Owner only.
+    GroupType,
+    /// ADR-0087: the owner's exit when nobody else holds a role.
+    DeleteGroup,
+    /// ADR-0087 section 14: invite contacts to a channel.
+    InvitePeople,
+    /// ADR-0087 section 15: a channel's subscribers.
+    Subscribers,
+    /// ADR-0087 section 15: a channel's publishers.
+    Admins,
 }
 
 impl From<RustInfoSection> for InfoSection {
@@ -395,6 +410,12 @@ impl From<RustInfoSection> for InfoSection {
             RustInfoSection::ChannelMembers => Self::ChannelMembers,
             RustInfoSection::AddContact => Self::AddContact,
             RustInfoSection::TheirContactsCanFindMe => Self::TheirContactsCanFindMe,
+            RustInfoSection::Handle => Self::Handle,
+            RustInfoSection::GroupType => Self::GroupType,
+            RustInfoSection::DeleteGroup => Self::DeleteGroup,
+            RustInfoSection::InvitePeople => Self::InvitePeople,
+            RustInfoSection::Subscribers => Self::Subscribers,
+            RustInfoSection::Admins => Self::Admins,
         }
     }
 }

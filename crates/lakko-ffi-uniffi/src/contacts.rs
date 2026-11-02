@@ -2502,6 +2502,10 @@ pub enum FfiIncomingEnvelopeKind {
     /// Never render it. Appended last so every earlier variant keeps its
     /// ordinal. Meaningful ONLY in the account's own DeviceGroup.
     LinkFounded,
+    /// A group's `@name` and its flag (ADR-0087 section 11). `payload` is the
+    /// whole envelope; the typed decode and the signature check are the FFI
+    /// step of ADR-0087. Never render it. Appended last.
+    ConversationHandle,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2688,6 +2692,10 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         IncomingEnvelope::LinkClaim(claim) => FfiIncomingEnvelope {
             link_claim: Some(claim.into()),
             ..FfiIncomingEnvelope::of(K::LinkClaim)
+        },
+        IncomingEnvelope::ConversationHandle(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::ConversationHandle)
         },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),

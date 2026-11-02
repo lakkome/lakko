@@ -145,7 +145,8 @@ async fn every_token_route_answers_503_when_tokens_are_disabled() {
     let token = mint_header(&master(), TokenContext::DiscoveryLookup, 1);
     for uri in [
         "/discovery/oprf",
-        "/discovery/channel/register",
+        "/discovery/handle/claim",
+        "/discovery/handle/replace",
         "/discovery/invite/AAAAAAAA/consume",
         "/discovery/call-invite/AAAAAAAA/consume",
         "/discovery/group-invite/AAAAAAAA/consume",
@@ -210,9 +211,8 @@ async fn the_oprf_evaluation_spends_one_discovery_lookup_token() {
 }
 
 #[tokio::test]
-async fn consumes_and_channel_register_spend_their_own_contexts() {
-    let Some(pool) = test_pool("consumes_and_channel_register_spend_their_own_contexts").await
-    else {
+async fn the_consumes_spend_their_own_context() {
+    let Some(pool) = test_pool("the_consumes_spend_their_own_context").await else {
         return;
     };
     let app = build_app(state(pool, true));
@@ -239,72 +239,6 @@ async fn consumes_and_channel_register_spend_their_own_contexts() {
         assert_eq!(error_code(&body), "anon-token-spent", "{uri}");
     }
 
-    let mut hash = [0u8; 64];
-    lakko_crypto::random::fill(&mut hash);
-    let mut channel = [0u8; 16];
-    lakko_crypto::random::fill(&mut channel);
-    let register_body = serde_json::json!({
-        "oprf_hash": B64.encode(hash),
-        "channel_id": B64.encode(channel),
-    })
-    .to_string();
-    let wrong = mint_header(&m, TokenContext::DiscoveryLookup, now);
-    let (status, body) = send(
-        &app,
-        post(
-            "/discovery/channel/register",
-            Some(&wrong),
-            register_body.clone(),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(error_code(&body), "anon-token-wrong-context");
-    let t = mint_header(&m, TokenContext::DiscoveryRegister, now);
-    let (status, body) = send(
-        &app,
-        post(
-            "/discovery/channel/register",
-            Some(&t),
-            register_body.clone(),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let (status, body) = send(
-        &app,
-        post("/discovery/channel/register", Some(&t), register_body),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(error_code(&body), "anon-token-spent");
-
-    // A name claimed by a channel create that failed afterwards: the retry
-    // with the same channel id succeeds, another id is refused.
-    let t = mint_header(&m, TokenContext::DiscoveryRegister, now);
-    let (status, body) = send(
-        &app,
-        post("/discovery/channel/register", Some(&t), {
-            serde_json::json!({
-                "oprf_hash": B64.encode(hash),
-                "channel_id": B64.encode(channel),
-            })
-            .to_string()
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let t = mint_header(&m, TokenContext::DiscoveryRegister, now);
-    let (status, _) = send(
-        &app,
-        post("/discovery/channel/register", Some(&t), {
-            serde_json::json!({
-                "oprf_hash": B64.encode(hash),
-                "channel_id": B64.encode([0xEE; 16]),
-            })
-            .to_string()
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT);
+    // The handle claim's `discovery-register` spend is tested with the
+    // handle routes (`handles::tests`).
 }

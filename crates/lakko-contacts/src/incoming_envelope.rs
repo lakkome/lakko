@@ -114,6 +114,9 @@ use crate::committer_beacon::{try_unwrap_committer_beacon, CommitterBeaconError}
 use crate::committer_delegation::{
     try_unwrap_committer_delegation, CommitterDelegationEnvelope, CommitterDelegationError,
 };
+use crate::conversation_handle::{
+    try_unwrap_conversation_handle, ConversationHandle, ConversationHandleError,
+};
 use crate::device_card::{try_unwrap_device_card, DeviceCard, DeviceCardError};
 use crate::group_closed::{try_unwrap_group_closed, GroupClosedError, SUCCESSOR_GROUP_ID_LEN};
 use crate::group_name::{try_unwrap_group_name, GroupName, GroupNameError};
@@ -344,6 +347,14 @@ pub enum IncomingEnvelope<'a> {
     /// a device that holds one never founds for that request, it writes the
     /// note's Welcome to the requester.
     LinkFounded(LinkFounded),
+    /// A group's `@name` and its public or private flag (ADR-0087 section
+    /// 11). Never a chat bubble. The caller verifies the certificate with one
+    /// OPRF evaluation over the name, then the signature under the
+    /// certificate's handle key for this group
+    /// ([`ConversationHandle::verify_signature`]), and keeps it only when
+    /// [`crate::conversation_handle::conversation_handle_is_newer`] than the
+    /// stored stamp. No role check: any member may relay it.
+    ConversationHandle(ConversationHandle),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -427,6 +438,9 @@ pub enum DispatchError {
     /// The link-founded domain (ADR-0079) with a malformed payload.
     #[error(transparent)]
     LinkFounded(#[from] LinkFoundedError),
+    /// The conversation-handle domain (ADR-0087) with a malformed payload.
+    #[error(transparent)]
+    ConversationHandle(#[from] ConversationHandleError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -523,6 +537,10 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7k. Link-founded note — ADR-0079 (ordering of 2026-10-17).
     if let Some(note) = try_unwrap_link_founded(plaintext)? {
         return Ok(IncomingEnvelope::LinkFounded(note));
+    }
+    // 7l. Conversation handle — ADR-0087 section 11.
+    if let Some(handle) = try_unwrap_conversation_handle(plaintext)? {
+        return Ok(IncomingEnvelope::ConversationHandle(handle));
     }
     // 8. Plain intro message — ADR-0005 scenario A.
     if let Some(record) = try_unwrap_introduction_offer(plaintext)? {

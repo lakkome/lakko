@@ -13,7 +13,8 @@
 //! proofless meeting points moved to their own `/ds/rendezvous/` namespace.
 //!
 //! What is gated: a claimed group's `GET messages` (read tier), `POST
-//! messages` and `GET knocks` (write tier); every mailbox's `GET messages`
+//! messages`, `GET knocks` and `DELETE knocks` (write tier; the delete is
+//! refused on an unclaimed journal too, ADR-0087 section 5); every mailbox's `GET messages`
 //! (the mailbox-key proof, whether or not the mailbox is claimed, ADR-0060).
 //! A mailbox `POST` is gated by reach keys, not here (ADR-0060,
 //! `src/reach.rs`): ADR-0053 left it the open cold inbox, and a claimed
@@ -110,6 +111,13 @@ const WRITE_EPOCHS: usize = 2;
 /// At most this many payloads in one knock (the attribution and the proposal
 /// fit in two; the rest is headroom).
 pub(crate) const MAX_KNOCK_PAYLOADS: usize = 4;
+/// At most this many knock rows wait in one journal (ADR-0087 section 5,
+/// chosen, not measured). A full queue refuses a knock with
+/// `429 knock-queue-full` before a token is spent; what a flood costs the
+/// group is new requests until an admin clears the queue.
+pub(crate) const MAX_KNOCKS_PER_JOURNAL: usize = 4096;
+/// The error code of a knock refused by [`MAX_KNOCKS_PER_JOURNAL`].
+pub(crate) const KNOCK_QUEUE_FULL: &str = "knock-queue-full";
 
 /// What a gated request is allowed to do with the epoch key it presents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -540,6 +548,10 @@ pub(crate) struct KnockResponse {
 /// `x-lakko-anon-token`), and only after the body has been validated, so a
 /// malformed knock costs the caller no token. A refused token answers the
 /// gate's stable code (`401 anon-token-*`, or `503 anon-tokens-disabled`).
+///
+/// A journal holds at most [`MAX_KNOCKS_PER_JOURNAL`] rows (ADR-0087 section
+/// 5): a knock that would pass it answers `429 {"error":"knock-queue-full"}`,
+/// also before the token is spent.
 pub(crate) async fn post_knock(
     State(state): State<AppState>,
     AxumPath(group_hex): AxumPath<String>,
@@ -572,6 +584,16 @@ pub(crate) async fn post_knock(
             ));
         }
         payloads.push(payload);
+    }
+    // ADR-0087 section 5: the cap is checked before the token is spent, so a
+    // knock on a full queue costs the caller nothing. A probe stores nothing
+    // and is never refused by it. With tokens disabled every knock is a 503
+    // anyway, answered below without touching the store.
+    if !payloads.is_empty() && state.anon_tokens.is_enabled() {
+        let waiting = knocks_waiting(&state.db, &group_id).await?;
+        if waiting.saturating_add(payloads.len()) > MAX_KNOCKS_PER_JOURNAL {
+            return Ok(knock_queue_full());
+        }
     }
     if let Err(refused) = state
         .anon_tokens
@@ -639,6 +661,115 @@ pub(crate) async fn get_knocks(
         header::HeaderValue::from_static("no-store"),
     );
     Ok(response)
+}
+
+/// The body of a refused knock: `429` with `{"error":"knock-queue-full"}`.
+fn knock_queue_full() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(ErrorBody {
+            error: KNOCK_QUEUE_FULL,
+        }),
+    )
+        .into_response()
+}
+
+#[derive(Serialize)]
+struct ErrorBody {
+    error: &'static str,
+}
+
+/// How many knock rows wait in `group_id`'s queue, counted up to
+/// [`MAX_KNOCKS_PER_JOURNAL`] (the count stops there, so a check never reads
+/// more of a full queue than the cap). Rows past the 7-day retention count
+/// until the hourly prune removes them.
+///
+/// The count and the insert that follows are not one transaction: knocks in
+/// flight on one journal at the same moment can each pass the check, so the
+/// queue can end at most their own payloads past the cap. Locking would make
+/// every knock on an unclaimed journal create a lock row; the overshoot is
+/// bounded by concurrency and is not worth that.
+async fn knocks_waiting(
+    pool: &MySqlPool,
+    group_id: &[u8; PSEUDONYM_LEN],
+) -> Result<usize, HandlerError> {
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM ds_group_knocks WHERE group_id = ? LIMIT ?) waiting",
+    )
+    .bind(&group_id[..])
+    .bind(MAX_KNOCKS_PER_JOURNAL as u64)
+    .fetch_one(pool)
+    .await
+    .map_err(db_error("count knocks"))?;
+    Ok(usize::try_from(count).unwrap_or(MAX_KNOCKS_PER_JOURNAL))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeleteKnocksQuery {
+    /// Delete only the rows with an id up to and including this one: what
+    /// the admin's device has seen. Absent: every row.
+    #[serde(default)]
+    pub(crate) through: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct DeleteKnocksResponse {
+    /// How many rows were deleted.
+    pub(crate) deleted: u64,
+}
+
+/// `DELETE /ds/group/{hex}/knocks` - an admin clears the queue (ADR-0087
+/// section 5, behind `Reject all`). Gated to the **write** tier, as reading
+/// the knocks is; an unclaimed journal has no key of any tier, so the delete
+/// is refused there with the uniform `401` rather than left open to whoever
+/// names the journal. `?through=<id>` limits the delete to the rows the
+/// caller has seen; without it every row goes.
+pub(crate) async fn delete_knocks(
+    State(state): State<AppState>,
+    AxumPath(group_hex): AxumPath<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    Query(q): Query<DeleteKnocksQuery>,
+) -> Result<Response, HandlerError> {
+    let group_id = journal::decode_pseudonym(&group_hex)?;
+    let gated = gate_group(
+        &state,
+        &group_id,
+        Access::Write,
+        &method,
+        &uri,
+        &headers,
+        &[],
+    )
+    .await?;
+    if gated == Gated::Unclaimed {
+        return Err(refused());
+    }
+    let result = match q.through {
+        Some(through) => {
+            sqlx::query("DELETE FROM ds_group_knocks WHERE group_id = ? AND id <= ?")
+                .bind(&group_id[..])
+                .bind(through)
+                .execute(&state.db)
+                .await
+        },
+        None => {
+            sqlx::query("DELETE FROM ds_group_knocks WHERE group_id = ?")
+                .bind(&group_id[..])
+                .execute(&state.db)
+                .await
+        },
+    }
+    .map_err(db_error("delete knocks"))?;
+    Ok((
+        StatusCode::OK,
+        Json(DeleteKnocksResponse {
+            deleted: result.rows_affected(),
+        }),
+    )
+        .into_response())
 }
 
 /// Age out read-tier epoch keys older than the journal's retention window,
@@ -1500,6 +1631,190 @@ pub(crate) mod tests {
         assert_eq!(read(knocks.clone(), k1, 1).await, StatusCode::UNAUTHORIZED);
         assert_eq!(read(knocks.clone(), k2, 2).await, StatusCode::OK);
         assert_eq!(read(knocks, k3, 3).await, StatusCode::OK);
+    }
+
+    /// Fill `gid`'s knock queue with `n` rows directly, as earlier knocks
+    /// would have.
+    async fn fill_knocks(pool: &MySqlPool, gid: &[u8; PSEUDONYM_LEN], n: usize) {
+        let mut left = n;
+        while left > 0 {
+            let batch = left.min(512);
+            let values = vec!["(?, ?)"; batch].join(", ");
+            let sql = format!("INSERT INTO ds_group_knocks (group_id, payload) VALUES {values}");
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
+            for _ in 0..batch {
+                q = q.bind(&gid[..]).bind(&b"row"[..]);
+            }
+            q.execute(pool).await.unwrap();
+            left -= batch;
+        }
+    }
+
+    async fn knock_count(pool: &MySqlPool, gid: &[u8; PSEUDONYM_LEN]) -> i64 {
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM ds_group_knocks WHERE group_id = ?")
+            .bind(&gid[..])
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            .0
+    }
+
+    /// ADR-0087 section 5: a journal holds at most `MAX_KNOCKS_PER_JOURNAL`
+    /// rows. A knock that would pass the cap is `429 knock-queue-full` and
+    /// spends no token (the same token then pays once room is made); a knock
+    /// that fits exactly is stored; a probe is never refused by the cap.
+    #[tokio::test]
+    async fn a_full_knock_queue_refuses_before_the_token_is_spent() {
+        let Some((app, pool)) = app().await else {
+            return;
+        };
+        let gid = fresh_name(37);
+        let k = key(68);
+        assert_eq!(
+            claim(&app, &gid, &fresh_signer(0x54), 3, &k).await,
+            StatusCode::NO_CONTENT
+        );
+        let knock_uri = format!("/ds/group/{}/knock", hex::encode(gid));
+        fill_knocks(&pool, &gid, MAX_KNOCKS_PER_JOURNAL - 2).await;
+
+        // Three payloads would pass the cap by one: refused, token kept.
+        let t = knock_token();
+        let (status, resp) = knock(&app, &knock_uri, &[b"a", b"b", b"c"], Some(&t)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error_code(&resp), KNOCK_QUEUE_FULL);
+        // Two fit exactly, under the same token.
+        let (status, _) = knock(&app, &knock_uri, &[b"a", b"b"], Some(&t)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(knock_count(&pool, &gid).await, 4096);
+
+        // Full: one more is refused and costs nothing.
+        let t2 = knock_token();
+        let (status, resp) = knock(&app, &knock_uri, &[b"late"], Some(&t2)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error_code(&resp), KNOCK_QUEUE_FULL);
+        // A probe stores nothing and still learns the epoch.
+        let (status, resp) = knock(&app, &knock_uri, &[], Some(&knock_token())).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let parsed: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(parsed["epoch"], 3);
+
+        // The cap is per journal: another journal is not affected.
+        let other = fresh_name(38);
+        let (status, _) = knock(
+            &app,
+            &format!("/ds/group/{}/knock", hex::encode(other)),
+            &[b"x"],
+            Some(&knock_token()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // An admin clears the queue; the refused token now pays.
+        let (status, _) = send(
+            &app,
+            Req {
+                method: "DELETE",
+                uri: &format!("/ds/group/{}/knocks", hex::encode(gid)),
+                body: vec![],
+                proof: Some((&k, 3)),
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = knock(&app, &knock_uri, &[b"late"], Some(&t2)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(knock_count(&pool, &gid).await, 1);
+    }
+
+    /// `DELETE knocks` takes a write-tier key: refused without a proof, under
+    /// a read-only key, and on an unclaimed journal; with `?through=` it
+    /// deletes only the rows up to that id, without it every row.
+    #[tokio::test]
+    async fn deleting_knocks_takes_a_write_tier_key() {
+        let Some((app, pool)) = app().await else {
+            return;
+        };
+        let gid = fresh_name(39);
+        let (k1, k2, k3) = (key(69), key(70), key(71));
+        let root = fresh_signer(0x55);
+        assert_eq!(
+            claim(&app, &gid, &root, 1, &k1).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            register(&app, &gid, &root, 2, &k2, &[]).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            register(&app, &gid, &root, 3, &k3, &[]).await,
+            StatusCode::NO_CONTENT
+        );
+        let knock_uri = format!("/ds/group/{}/knock", hex::encode(gid));
+        let (status, resp) = knock(
+            &app,
+            &knock_uri,
+            &[b"one", b"two", b"three"],
+            Some(&knock_token()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let parsed: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        let ids: Vec<u64> = parsed["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 3);
+
+        let delete = |uri: String, proof: Option<(SigningKey, u64)>| {
+            let app = app.clone();
+            async move {
+                let (status, body) = send(
+                    &app,
+                    Req {
+                        method: "DELETE",
+                        uri: &uri,
+                        body: vec![],
+                        proof: proof.as_ref().map(|(k, e)| (k, *e)),
+                    },
+                )
+                .await;
+                (status, body)
+            }
+        };
+        let all = format!("/ds/group/{}/knocks", hex::encode(gid));
+        assert_eq!(delete(all.clone(), None).await.0, StatusCode::UNAUTHORIZED);
+        // Epoch 1 is past the two newest and below H: read tier only.
+        assert_eq!(
+            delete(all.clone(), Some((k1, 1))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(knock_count(&pool, &gid).await, 3);
+
+        let through = format!("{all}?through={}", ids[1]);
+        let (status, body) = delete(through, Some((k2.clone(), 2))).await;
+        assert_eq!(status, StatusCode::OK);
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["deleted"], 2);
+        assert_eq!(knock_count(&pool, &gid).await, 1);
+
+        let (status, body) = delete(all, Some((k3, 3))).await;
+        assert_eq!(status, StatusCode::OK);
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["deleted"], 1);
+        assert_eq!(knock_count(&pool, &gid).await, 0);
+
+        // An unclaimed journal has no key of any tier: refused, rows kept.
+        let open = fresh_name(40);
+        fill_knocks(&pool, &open, 2).await;
+        assert_eq!(
+            delete(format!("/ds/group/{}/knocks", hex::encode(open)), None)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(knock_count(&pool, &open).await, 2);
     }
 
     /// Security pass, finding 3: on a claimed journal the epoch rule is

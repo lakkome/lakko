@@ -264,3 +264,31 @@ path = "fuzz_targets/link_refusal_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "handle_statement_decode"
+path = "fuzz_targets/handle_statement_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handle_record_decode"
+path = "fuzz_targets/handle_record_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "conversation_handle_decode"
+path = "fuzz_targets/conversation_handle_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sealed_knock_open"
+path = "fuzz_targets/sealed_knock_open.rs"
+test = false
+doc = false
+bench = false

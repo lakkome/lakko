@@ -54,7 +54,7 @@ use voprf::{EvaluationElement, OprfClient};
 
 use crate::error::DiscoveryClientError;
 use crate::name::{is_name_term, name_query_term};
-use crate::normalize::{normalize_username, validate_username};
+use crate::normalize::validate_username;
 use crate::LakkoOprfCs;
 
 /// VOPRF Ristretto255-SHA512 produces a 64-byte output (one
@@ -119,36 +119,20 @@ impl core::fmt::Debug for OprfFinalized {
     }
 }
 
-/// Domain-separation prefix for the `@channel` OPRF namespace
-/// (lakko-security channels review, Finding 2).
-///
-/// A `@channel` handle is blinded as
-/// `CHANNEL_OPRF_DOMAIN ‖ normalize_username(handle)` instead of the
-/// bare normalised bytes a `@username` blinds. Because the discovery
-/// service applies the SAME OPRF key to both namespaces, two identical
-/// handles would otherwise produce an identical OPRF hash across the
-/// separate username / channel tables — an operator holding the key
-/// (or diffing the tables) could observe that the same handle exists
-/// in both namespaces.
-///
-/// The leading `0xFF` byte is load-bearing: it can NEVER begin a
-/// valid-UTF-8 username input (`normalize_username` always returns a
-/// `String`, so its bytes start in `0x00..=0x7F` or `0xC2..=0xF4`).
-/// So no `@username` can forge a `@channel` input — the separation is
-/// injective, not merely a string prefix a crafted username could
-/// reproduce. The trailing `0x1F` (ASCII unit separator) delimits the
-/// domain label from the handle.
-const CHANNEL_OPRF_DOMAIN: &[u8] = b"\xfflakko/discovery/channel/v1\x1f";
-
 /// Domain-separation prefix for the display-name OPRF namespace
-/// ([ADR-0060] section 5), the same shape as [`CHANNEL_OPRF_DOMAIN`].
+/// ([ADR-0060] section 5).
 ///
 /// A name is blinded as `NAME_OPRF_DOMAIN ‖ normalize_name_for_search(name)`,
-/// so the same string used as a username, a channel handle and a name gives
-/// three unrelated OPRF outputs under the one server key. The leading `0xFF`
-/// keeps it unforgeable by any username (whose input is valid UTF-8), and the
-/// label differs from the channel domain's, so no channel handle can reproduce
-/// a name input either.
+/// so the same string used as an `@name` and as a name gives two unrelated
+/// OPRF outputs under the one server key. The leading `0xFF` keeps it
+/// unforgeable by any `@name` (whose input is valid UTF-8, so never starts
+/// with `0xFF`).
+///
+/// There is no other namespace: since [ADR-0087] section 1 people, groups and
+/// channels share one set of `@name`s with one OPRF input, so one name has one
+/// lookup key. The separate `@channel` domain is gone.
+///
+/// [ADR-0087]: ../../../docs/adr/0087-group-and-channel-handles-and-privacy.md
 ///
 /// [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 const NAME_OPRF_DOMAIN: &[u8] = b"\xfflakko/discovery/name/v1\x1f";
@@ -162,14 +146,14 @@ const NAME_OPRF_DOMAIN: &[u8] = b"\xfflakko/discovery/name/v1\x1f";
 /// useful in a `?` panic.
 pub struct OprfBlinder {
     state: OprfClient<LakkoOprfCs>,
-    /// The exact OPRF input bytes — bare normalised bytes for a
-    /// `@username`, or `CHANNEL_OPRF_DOMAIN ‖ normalised` for a
-    /// `@channel`. Cached so callers can't mismatch input between
-    /// `blind` and `finalize` — a class of bug that produces silent
-    /// wrong-hash output. Not necessarily valid UTF-8 (the channel
-    /// namespace prepends a `0xFF` byte), so display uses `display`.
+    /// The exact OPRF input bytes — bare normalised bytes for an
+    /// `@name`, or `NAME_OPRF_DOMAIN ‖ term` for a name term. Cached so
+    /// callers can't mismatch input between `blind` and `finalize` — a
+    /// class of bug that produces silent wrong-hash output. Not
+    /// necessarily valid UTF-8 (the name namespace prepends a `0xFF`
+    /// byte), so display uses `display`.
     oprf_input: Vec<u8>,
-    /// The display-normalised handle (always valid UTF-8), for
+    /// The display-normalised name or term (always valid UTF-8), for
     /// `normalised_username()` — the human form without the OPRF
     /// domain prefix.
     display: String,
@@ -189,8 +173,15 @@ impl core::fmt::Debug for OprfBlinder {
 }
 
 impl OprfBlinder {
-    /// Normalise the typed username, require it to pass the
+    /// Normalise the typed `@name`, require it to pass the
     /// ADR-0048 §4 username rule, and produce a fresh blinded element.
+    ///
+    /// One namespace for people, groups and channels ([ADR-0087] section
+    /// 1): a group's or channel's `@name` is blinded here too, under the
+    /// same rule, so a name that can be claimed is a name a search asks
+    /// for.
+    ///
+    /// [ADR-0087]: ../../../docs/adr/0087-group-and-channel-handles-and-privacy.md
     /// Returns `(blinder, blinded_b64)`.
     ///
     /// The base64 string drops straight into the `blinded` field
@@ -208,41 +199,9 @@ impl OprfBlinder {
     ///   blind (extremely unlikely on a sane RNG; treat as fatal).
     pub fn blind(username: &str) -> Result<(Self, String), DiscoveryClientError> {
         let normalised = validate_username(username)?;
-        // @username namespace: the OPRF input is the bare normalised
-        // bytes — unchanged wire, so existing registrations stay valid.
+        // The @name namespace: the OPRF input is the bare normalised
+        // bytes.
         let oprf_input = normalised.as_bytes().to_vec();
-        Self::blind_input(normalised, oprf_input)
-    }
-
-    /// Normalise the typed channel handle and produce a fresh blinded
-    /// element in the DOMAIN-SEPARATED `@channel` namespace — the OPRF
-    /// input is `CHANNEL_OPRF_DOMAIN ‖ normalize_username(handle)`, so
-    /// the resulting OPRF hash never collides with the same handle used
-    /// as a `@username` (lakko-security channels review, Finding 2).
-    /// Same `(blinder, blinded_b64)` shape + same `/discovery/oprf`
-    /// round-trip as [`Self::blind`]; the caller finalises with
-    /// [`Self::finalize`] and both register + lookup MUST use this
-    /// method so their hashes match.
-    ///
-    /// # Errors
-    ///
-    /// [`DiscoveryClientError::EmptyUsername`] when the handle reduces to
-    /// empty, or [`DiscoveryClientError::Voprf`] on a `voprf` blind failure.
-    ///
-    /// **The ADR-0048 §4 username character-set rule is NOT applied
-    /// here.** A `@channel` handle is a separate namespace (its own
-    /// OPRF domain, its own table) whose policy that ADR does not set;
-    /// applying the username rule to it would be a silent policy change
-    /// for channels. Handles keep the pre-ADR-0048 behaviour: normalise,
-    /// refuse empty.
-    pub fn blind_channel(handle: &str) -> Result<(Self, String), DiscoveryClientError> {
-        let normalised = normalize_username(handle);
-        if normalised.is_empty() {
-            return Err(DiscoveryClientError::EmptyUsername);
-        }
-        let mut oprf_input = Vec::with_capacity(CHANNEL_OPRF_DOMAIN.len() + normalised.len());
-        oprf_input.extend_from_slice(CHANNEL_OPRF_DOMAIN);
-        oprf_input.extend_from_slice(normalised.as_bytes());
         Self::blind_input(normalised, oprf_input)
     }
 
@@ -292,7 +251,7 @@ impl OprfBlinder {
     /// bytes and build the blinder. `display` is the human-normalised
     /// handle (valid UTF-8) surfaced by [`Self::normalised_username`];
     /// `oprf_input` is the exact bytes fed to `blind` + `finalize`
-    /// (domain-prefixed for `@channel`, bare for `@username`).
+    /// (domain-prefixed for a name term, bare for an `@name`).
     fn blind_input(
         display: String,
         oprf_input: Vec<u8>,
@@ -317,10 +276,10 @@ impl OprfBlinder {
     /// like "looking up @alice" without re-running normalisation.
     #[must_use]
     pub fn normalised_username(&self) -> &str {
-        // The display form is the human-normalised handle WITHOUT the
-        // `@channel` OPRF domain prefix — always valid UTF-8, so no
-        // fallible decode. The domained OPRF input lives in
-        // `oprf_input` (which may start with a non-UTF-8 `0xFF` byte).
+        // The display form is the human-normalised name WITHOUT any OPRF
+        // domain prefix — always valid UTF-8, so no fallible decode. The
+        // domained OPRF input lives in `oprf_input` (which may start with
+        // a non-UTF-8 `0xFF` byte).
         &self.display
     }
 
@@ -506,14 +465,14 @@ mod tests {
         assert_eq!(registered, fullwidth);
     }
 
-    /// `@channel` handles are a separate namespace and deliberately keep
-    /// their pre-ADR-0048 policy — the username rule does not leak into
-    /// `blind_channel`.
+    /// ADR-0087 section 1: one rule on every `@name`. A channel or group
+    /// name outside it is refused like a username, so nothing can be
+    /// claimed that a search would never ask for.
     #[test]
-    fn channel_handles_are_not_subject_to_the_username_rule() {
+    fn every_name_is_subject_to_the_one_rule() {
         assert!(OprfBlinder::blind("my-channel").is_err());
-        assert!(OprfBlinder::blind_channel("my-channel").is_ok());
-        assert!(OprfBlinder::blind_channel("ab").is_ok());
+        assert!(OprfBlinder::blind("ab").is_err());
+        assert!(OprfBlinder::blind("hiking_club").is_ok());
     }
 
     #[test]
@@ -552,83 +511,6 @@ mod tests {
         *blinder.finalize(&evaluated_b64).expect("finalize").output()
     }
 
-    /// Helper: full client + server round-trip in the
-    /// domain-separated `@channel` namespace (`blind_channel`).
-    fn oneshot_channel(server: &OprfServer<LakkoOprfCs>, handle: &str) -> [u8; OPRF_HASH_LEN] {
-        let (blinder, blinded_b64) = OprfBlinder::blind_channel(handle).expect("blind_channel");
-        let blinded_bytes = B64.decode(&blinded_b64).expect("decode");
-        let blinded_elem =
-            BlindedElement::<LakkoOprfCs>::deserialize(&blinded_bytes).expect("deserialize");
-        let evaluated = server.blind_evaluate(&blinded_elem);
-        let evaluated_b64 = B64.encode(evaluated.serialize());
-        *blinder.finalize(&evaluated_b64).expect("finalize").output()
-    }
-
-    /// Finding 2 (lakko-security channels review): the `@channel`
-    /// namespace is domain-separated from `@username`, so the SAME
-    /// handle produces DIFFERENT OPRF hashes in the two namespaces
-    /// under the SAME server key — an operator holding the key cannot
-    /// observe that a username `alice` and a channel `alice` are the
-    /// same string.
-    #[test]
-    fn channel_namespace_is_domain_separated_from_username() {
-        let seed = [0x5Au8; 32];
-        let server =
-            OprfServer::<LakkoOprfCs>::new_from_seed(&seed, b"lakko/oprf/v1").expect("server seed");
-
-        let as_user = oneshot(&server, "alice");
-        let as_channel = oneshot_channel(&server, "alice");
-        assert_ne!(
-            as_user, as_channel,
-            "same handle must hash differently across the username / channel namespaces"
-        );
-    }
-
-    /// Determinism inside the `@channel` namespace: two lookups of the
-    /// same channel handle (any equivalent normalised form) produce a
-    /// byte-equal hash, so channel lookups resolve at all.
-    #[test]
-    fn same_channel_handle_yields_same_hash() {
-        let seed = [0x5Au8; 32];
-        let server =
-            OprfServer::<LakkoOprfCs>::new_from_seed(&seed, b"lakko/oprf/v1").expect("server seed");
-
-        let a = oneshot_channel(&server, "@Alice");
-        let b = oneshot_channel(&server, "  alice ");
-        assert_eq!(a, b, "equivalent channel handles must resolve to one hash");
-    }
-
-    /// The channel domain prefix is UNFORGEABLE by any username. A
-    /// username's OPRF input is `normalize_username(x).as_bytes()` —
-    /// always valid UTF-8, whose first byte is never `0xFF`. The
-    /// channel domain begins with `0xFF`, so no crafted username can
-    /// reproduce a channel input; the separation is injective, not a
-    /// string prefix a username like
-    /// `"lakko/discovery/channel/v1<US>alice"` could forge.
-    #[test]
-    fn channel_domain_is_injective_against_crafted_usernames() {
-        assert_eq!(CHANNEL_OPRF_DOMAIN.first().copied(), Some(0xFF));
-
-        let seed = [0x5Au8; 32];
-        let server =
-            OprfServer::<LakkoOprfCs>::new_from_seed(&seed, b"lakko/oprf/v1").expect("server seed");
-        // A username crafted to mimic the readable part of the channel
-        // domain is now refused outright by the ADR-0048 username rule
-        // (`/` and U+001F are outside `[a-z0-9_]`) — a stronger outcome
-        // than the hash separation, but not a substitute for it: the
-        // separation must hold on its own, since the rule is client-side.
-        assert!(OprfBlinder::blind("lakko/discovery/channel/v1\u{1f}alice").is_err());
-        // So prove the separation at the OPRF-input level directly: a
-        // username's input is valid UTF-8 and never starts with 0xFF.
-        let (user, _) = OprfBlinder::blind("alice").expect("blind");
-        let (channel, _) = OprfBlinder::blind_channel("alice").expect("blind_channel");
-        assert_ne!(user.oprf_input.first().copied(), Some(0xFF));
-        assert!(channel.oprf_input.starts_with(CHANNEL_OPRF_DOMAIN));
-        let crafted_channel = oneshot_channel(&server, "alice");
-        let real_user = oneshot(&server, "alice");
-        assert_ne!(crafted_channel, real_user);
-    }
-
     fn oneshot_name(server: &OprfServer<LakkoOprfCs>, name: &str) -> [u8; OPRF_HASH_LEN] {
         let (blinder, blinded_b64) = OprfBlinder::blind_name(name).expect("blind_name");
         let blinded_bytes = B64.decode(&blinded_b64).expect("decode");
@@ -639,29 +521,24 @@ mod tests {
         *blinder.finalize(&evaluated_b64).expect("finalize").output()
     }
 
-    /// ADR-0060 section 5: the same string as a username, a channel handle
-    /// and a name gives three different OPRF inputs and three different
-    /// hashes under one server key.
+    /// ADR-0060 section 5: the same string as an `@name` and as a name gives
+    /// two different OPRF inputs and two different hashes under one server
+    /// key. The name domain starts with `0xFF`, which no `@name` input (valid
+    /// UTF-8) can, so the separation is injective.
     #[test]
-    fn name_namespace_is_separated_from_usernames_and_channels() {
+    fn name_namespace_is_separated_from_at_names() {
         assert_eq!(NAME_OPRF_DOMAIN.first().copied(), Some(0xFF));
-        assert_ne!(NAME_OPRF_DOMAIN, CHANNEL_OPRF_DOMAIN);
         let (user, _) = OprfBlinder::blind("alice").expect("blind");
-        let (channel, _) = OprfBlinder::blind_channel("alice").expect("blind_channel");
         let (name, _) = OprfBlinder::blind_name("alice").expect("blind_name");
         assert_eq!(user.oprf_input, b"alice");
-        assert!(channel.oprf_input.starts_with(CHANNEL_OPRF_DOMAIN));
         assert!(name.oprf_input.starts_with(NAME_OPRF_DOMAIN));
         assert_ne!(user.oprf_input, name.oprf_input);
-        assert_ne!(channel.oprf_input, name.oprf_input);
 
         let server = OprfServer::<LakkoOprfCs>::new_from_seed(&[0x5Bu8; 32], b"lakko/oprf/v1")
             .expect("server seed");
         let as_user = oneshot(&server, "alice");
-        let as_channel = oneshot_channel(&server, "alice");
         let as_name = oneshot_name(&server, "alice");
         assert_ne!(as_name, as_user);
-        assert_ne!(as_name, as_channel);
     }
 
     /// Equivalent spellings of a query resolve to one hash; a query whose
@@ -744,26 +621,6 @@ mod tests {
                 "{bad:?}"
             );
         }
-    }
-
-    #[test]
-    fn blind_channel_rejects_empty_handle() {
-        assert!(matches!(
-            OprfBlinder::blind_channel("").expect_err("must fail"),
-            DiscoveryClientError::EmptyUsername
-        ));
-        assert!(matches!(
-            OprfBlinder::blind_channel("@").expect_err("must fail"),
-            DiscoveryClientError::EmptyUsername
-        ));
-    }
-
-    #[test]
-    fn channel_blinder_display_has_no_domain_prefix() {
-        let (blinder, _) = OprfBlinder::blind_channel("@Alice").expect("blind_channel");
-        // The human-display form is the bare normalised handle — the
-        // `0xFF` domain prefix lives only in the OPRF input.
-        assert_eq!(blinder.normalised_username(), "alice");
     }
 
     /// The lookup key is pinned: the server and every client store and ask

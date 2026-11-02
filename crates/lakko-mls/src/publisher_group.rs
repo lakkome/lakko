@@ -98,7 +98,7 @@
 //! → the channel seed survives.
 
 use crate::error::{Error, Result};
-use crate::group::{Group, MemberAddition, GROUP_ID_LEN};
+use crate::group::{Group, JoinRequest, MemberAddition, GROUP_ID_LEN};
 use crate::identity::Identity;
 
 /// MLS-exporter domain-separation label for channel content
@@ -502,6 +502,23 @@ impl PublisherGroup {
     ) -> Result<MemberAddition> {
         self.inner
             .approve_external_join_directly(identity, proposal_ref)
+    }
+
+    /// Retain a co-publisher's request to join carried as a bare KeyPackage
+    /// (ADR-0087 section 5: the co-publisher join moves to the same sealed
+    /// knock row as a group's). The same checks and the same quarantine as
+    /// [`Group::retain_join_request`]; [`Self::approve_external_join`] then
+    /// approves it as a direct commit.
+    ///
+    /// # Errors
+    ///
+    /// What [`Group::retain_join_request`] returns.
+    pub fn retain_join_request(
+        &mut self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<JoinRequest> {
+        self.inner.retain_join_request(identity, key_package)
     }
 
     /// Borrow the underlying [`Group`] for the rare caller

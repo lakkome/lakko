@@ -106,3 +106,15 @@ path = "fuzz_targets/account_statement_open.rs"
 test = false
 doc = false
 bench = false
+
+# `HandleCertificate` is discovery's signature binding a group's or channel's
+# @name to its handle key (ADR-0087 section 3): a fixed-layout 169-byte blob
+# relayed opaquely by any group member inside a conversation-handle envelope,
+# so a malformed certificate reaches the bounded parser before any state is
+# consulted. Any panic / slice-out-of-bounds here is a vulnerability.
+[[bin]]
+name = "handle_cert_open"
+path = "fuzz_targets/handle_cert_open.rs"
+test = false
+doc = false
+bench = false

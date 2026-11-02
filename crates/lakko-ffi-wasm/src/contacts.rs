@@ -2529,6 +2529,10 @@ pub enum WasmIncomingEnvelopeKind {
     /// The decoded note rides the `linkFounded` getter; `payload` is empty.
     /// Never render it. Meaningful ONLY in the account's own DeviceGroup.
     LinkFounded = 21,
+    /// A group's `@name` and its flag (ADR-0087 section 11). `payload` is the
+    /// whole envelope; the typed decode and the signature check are the FFI
+    /// step of ADR-0087. Never render it.
+    ConversationHandle = 22,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -2851,6 +2855,10 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::LinkClaim(claim) => WasmIncomingEnvelope {
             link_claim: Some(claim.into()),
             ..WasmIncomingEnvelope::of(K::LinkClaim)
+        },
+        IncomingEnvelope::ConversationHandle(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::ConversationHandle)
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             payload: p.to_vec(),
