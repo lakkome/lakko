@@ -298,6 +298,7 @@ final class MembershipEndTests: XCTestCase {
         deviceIdentity: Identity? = nil,
         addAlso: Identity? = nil,
         endStore: MembershipEndStore? = nil,
+        arrivals: GroupArrivalStore? = nil,
         before: (_ ownerGroup: Group, _ owner: Identity, _ personGroup: Group, _ person: Identity) throws -> Void = { _, _, _, _ in }
     ) throws -> Fixture {
         let owner = try Identity.fromSeed(seed: Data(repeating: 0x11, count: 32))
@@ -351,7 +352,8 @@ final class MembershipEndTests: XCTestCase {
             personalPinStore: PersonalPinStore(defaults: try suite()),
             readWatermarkStore: ReadWatermarkStore(defaults: try suite()),
             groupCallStore: GroupCallStore(defaults: try suite()),
-            registrarSeeds: RegistrarSeedStore(defaults: try suite()))
+            registrarSeeds: RegistrarSeedStore(defaults: try suite()),
+            groupArrivalStore: try arrivals ?? GroupArrivalStore(defaults: suite()))
         repo.restoredGroupsDefaults = try suite()
         repo.deviceIdentityInstaller = { _, _ in deviceIdentity }
         repo.membershipEndMayRun = { true }
@@ -740,6 +742,97 @@ final class MembershipEndTests: XCTestCase {
         model.endDialogClosed()
         XCTAssertNil(model.endDialog)
         XCTAssertTrue(model.conversationGone)
+    }
+
+    /// UX 9.1 — behind the dialog the conversation is still the one that ended:
+    /// the wipe takes its name and its handle, and a group this device does not
+    /// hold reads as one being set up, with a working composer.
+    func testBehindTheDialogTheConversationKeepsItsNameAndIsNotBeingSetUp() async throws {
+        let f = try fixture()
+        let hex = f.groupIdHex
+        f.repo.groupNameStore.record(
+            accountIdB64: f.accountIdB64, groupIdHex: hex,
+            value: StoredGroupName(name: "Hikers", updatedAtMs: 1))
+        let model = ChatViewModel(repository: f.repo, groupIdHex: hex)
+        model.screenVisible = true
+        let record = try XCTUnwrap(f.repo.groups[hex])
+        let steps = try removal(
+            ownerGroup: f.ownerGroup, owner: f.owner, key: f.identity.signaturePublicKey())
+        _ = try record.group.processIncomingVerifyingRoles(identity: f.identity, bytes: steps.proposal)
+        _ = try record.group.processIncomingVerifyingRoles(identity: f.identity, bytes: steps.commit)
+        f.repo.endMembershipIfOut(groupIdHex: hex)
+        await waitUntil { f.repo.groups[hex] == nil && !f.repo.isEnding(groupIdHex: hex) }
+        await waitUntil { model.endDialog != nil }
+        // The repository has published the end of the wipe by now; give the
+        // sink its turn so this reads the state the screen draws.
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertNil(f.repo.groups[hex], "the wipe finished under the dialog")
+        XCTAssertEqual(model.conversationTitle, "Hikers")
+        XCTAssertNil(model.conversationSubtitle, "no \"1 member\" for a group that is gone")
+        XCTAssertTrue(model.membershipHasEnded, "no handle is not a live membership")
+        XCTAssertFalse(model.pollLoopShouldContinue)
+        XCTAssertFalse(model.messageActionsAvailable)
+        XCTAssertEqual(model.chatCallAction, .unavailable)
+        if case .composer = model.composerSlot { XCTFail("the composer is withdrawn") }
+        XCTAssertNil(
+            model.terminalRowCopy, "the terminal row says the messages are still here")
+    }
+
+    /// The group's own screen: the dialog stands over it, and its roster stays.
+    func testBehindTheDialogTheInfoScreenKeepsItsRoster() async throws {
+        let f = try fixture()
+        let hex = f.groupIdHex
+        let model = ChatViewModel(repository: f.repo, groupIdHex: hex)
+        model.groupInfoAppeared()
+        let before = model.members.count
+        XCTAssertGreaterThan(before, 0)
+        let record = try XCTUnwrap(f.repo.groups[hex])
+        let steps = try removal(
+            ownerGroup: f.ownerGroup, owner: f.owner, key: f.identity.signaturePublicKey())
+        _ = try record.group.processIncomingVerifyingRoles(identity: f.identity, bytes: steps.proposal)
+        _ = try record.group.processIncomingVerifyingRoles(identity: f.identity, bytes: steps.commit)
+        f.repo.endMembershipIfOut(groupIdHex: hex)
+        await waitUntil { model.endDialog != nil && f.repo.groups[hex] == nil }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertFalse(model.members.isEmpty, "not \"0 members\"")
+        XCTAssertFalse(model.canManageMembers)
+        XCTAssertEqual(model.exitBlockState, .hidden, "no Delete this chat for a group that is gone")
+        XCTAssertNotNil(model.groupName, "the name field keeps the name")
+        XCTAssertTrue(model.endedUnderScreen)
+    }
+
+    // MARK: - The arrival (section 10)
+
+    func testAJoinIsStampedARestartKeepsItARejoinMovesItAndTheEndDropsIt() async throws {
+        let arrivals = GroupArrivalStore(defaults: try suite())
+        let f = try fixture(arrivals: arrivals)
+        let hex = f.groupIdHex
+        XCTAssertNil(
+            f.repo.buildThreadList().first?.arrivedAtMs,
+            "a group reloaded at launch is not a new arrival")
+
+        arrivals.remember(accountIdB64: f.accountIdB64, groupIdHex: hex, atMs: 1)
+        XCTAssertEqual(f.repo.buildThreadList().first?.arrivedAtMs, 1)
+
+        let record = try XCTUnwrap(f.repo.groups[hex])
+        let steps = try removal(
+            ownerGroup: f.ownerGroup, owner: f.owner, key: f.identity.signaturePublicKey())
+        _ = try record.group.processIncomingVerifyingRoles(identity: f.identity, bytes: steps.proposal)
+        _ = try record.group.processIncomingVerifyingRoles(identity: f.identity, bytes: steps.commit)
+        f.repo.endMembershipIfOut(groupIdHex: hex)
+        await waitUntil { f.repo.groups[hex] == nil && !f.repo.isEnding(groupIdHex: hex) }
+        XCTAssertTrue(arrivals.load(accountIdB64: f.accountIdB64).isEmpty, "gone with the group")
+
+        // Added back: nothing from before, so the arrival is what places it.
+        let before = ChatRepository.nowMs()
+        let again = try f.ownerGroup.addMemberFromWire(
+            identity: f.owner, keyPackage: try f.identity.createKeyPackage())
+        _ = try await f.repo.joinGroupFromWelcome(welcomeBytes: again.welcome)
+        let thread = try XCTUnwrap(f.repo.state.threads.first { $0.groupIdHex == hex })
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(thread.arrivedAtMs), before)
+        XCTAssertEqual(
+            ChatListViewModel(repository: f.repo).activityMs(thread: thread), thread.arrivedAtMs)
     }
 
     func testAConversationNotOnScreenLeavesItToTheBanner() async throws {

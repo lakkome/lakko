@@ -43,9 +43,9 @@ public struct ConversationListRow: Identifiable, Equatable {
     public let title: String
     /// The last message or post, already flattened to one line.
     public let preview: String
-    /// When the last thing a person can SEE happened, in unix milliseconds, or
-    /// `nil` for a conversation nothing has happened in yet. A row that draws
-    /// nothing does not move a conversation to the top.
+    /// When the last thing a person can SEE happened, in unix milliseconds: the
+    /// last message, else the moment this device created or joined the
+    /// conversation (``GroupArrival``). `nil` when neither is known.
     public let lastActivityMs: Int64?
     public let unread: Int
     public let pinned: Bool

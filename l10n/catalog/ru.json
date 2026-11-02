@@ -3219,7 +3219,7 @@
       "status": "machine"
     },
     "chat.system.member_left": {
-      "text": "{name} покидает группу",
+      "text": "{name} больше не в группе",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -6540,10 +6540,6 @@
     },
     "new_group.error.sign_in": {
       "text": "Войдите снова, чтобы создать группу.",
-      "status": "machine"
-    },
-    "new_group.index_hint": {
-      "text": "Выберите группу, чтобы начать общение",
       "status": "machine"
     },
     "new_group.name_hint": {

@@ -154,8 +154,11 @@ public final class ChatViewModel: ObservableObject {
     public var membershipHasEnded: Bool { membershipEnded(membership) }
 
     /// §6.2.5 — the two lines of the terminal timeline row, or `nil` while the
-    /// membership holds.
-    public var terminalRowCopy: TerminalRowCopy? { terminalRow(membership) }
+    /// membership holds. Not over a conversation that went from under this
+    /// screen: the row says the messages are still here, and they are not.
+    public var terminalRowCopy: TerminalRowCopy? {
+        endedTitle == nil ? terminalRow(membership) : nil
+    }
 
     /// §6.2.5 — what occupies the composer's slot. The draft is read live so a
     /// commit landing mid-sentence preserves what was actually typed.
@@ -194,6 +197,11 @@ public final class ChatViewModel: ObservableObject {
     private var sawThread = false
     /// The end of this conversation was answered here.
     private var endAnswered = false
+    /// UX 9.1 — the conversation went from under this screen, and this is the
+    /// name it had. The group and its stores are wiped while the dialog stands,
+    /// so nothing else can say what it was called or that it ended: a group
+    /// that is no longer held reads like one still being set up.
+    @Published public private(set) var endedTitle: String?
     /// `Delete this chat` is running: the screen goes through its own path.
     private var deletingChat = false
     /// No more draft writes: the conversation's draft register was cleared.
@@ -829,13 +837,21 @@ public final class ChatViewModel: ObservableObject {
         )
     }
 
+    /// Whether anyone else is here to call (`docs/ux/group-and-channel-privacy.md`
+    /// section 10). Without it the toolbar has no call buttons.
+    var hasSomeoneToCall: Bool {
+        GroupCallHostRules.hasSomeoneToCall(
+            isGroup: isGroupChat, people: repository.memberCount(groupIdHex: groupIdHex))
+    }
+
     /// What the toolbar call buttons do right now.
     var chatCallAction: GroupCallHostRules.ChatCallAction {
         GroupCallHostRules.chatCallAction(
             membershipEnded: membershipHasEnded,
             callInProgress: anyCallInProgress,
             affordance: groupCallAffordance(),
-            isGroup: isGroupChat
+            isGroup: isGroupChat,
+            someoneToCall: hasSomeoneToCall
         )
     }
 
@@ -1024,7 +1040,13 @@ public final class ChatViewModel: ObservableObject {
         // observe the terminal state (the poll that carried the commit may
         // have landed while the sheet was closed).
         refreshMembership()
-        members = repository.members(groupIdHex: groupIdHex) ?? []
+        // The last roster stands behind the end dialog: once the group is
+        // wiped there is none to read, and an empty list reads "0 members".
+        if let roster = repository.members(groupIdHex: groupIdHex) {
+            members = roster
+        } else if endedTitle == nil {
+            members = []
+        }
         let role = repository.ownRole(groupIdHex: groupIdHex)
         // ADR-0045 UX §6.2.7 — and NOBODY may manage members once their own
         // membership has ended. Gating here rather than at each of the six
@@ -1552,6 +1574,7 @@ public final class ChatViewModel: ObservableObject {
     /// 1x1 chat; in a group the shared group name (ADR-0051 §5), else the
     /// members' names. Never the group id.
     var conversationTitle: String {
+        if let endedTitle { return endedTitle }
         // ADR-0051 §5 — a shared name wins for ANY conversation that has one,
         // whatever its kind or member count: a two-person conversation renamed
         // from another client is still keyed as a chat here.
@@ -1569,8 +1592,14 @@ public final class ChatViewModel: ObservableObject {
     /// envelope re-titles in place (``ChatRepository/groupNameRevision`` drives
     /// the re-render).
     var groupName: String? {
-        repository.groupName(groupIdHex: groupIdHex)
+        // UX 9.1 — the store is wiped while the end dialog stands; the name
+        // the group had stays on the screen behind it.
+        endedTitle ?? repository.groupName(groupIdHex: groupIdHex)
     }
+
+    /// UX 9.1 — the conversation went from under this screen (``endedTitle``).
+    /// Its screens keep what they showed and offer nothing to act on.
+    public var endedUnderScreen: Bool { endedTitle != nil }
 
     /// ADR-0051 §3 — may this device rename the group? The owner and admins
     /// (or any member of a legacy group with no role table), read from the LIVE
@@ -1604,6 +1633,7 @@ public final class ChatViewModel: ObservableObject {
     /// The header's second line: "@username" in a 1x1 chat when the other
     /// person's username is verified, "N members" in a group, else nothing.
     var conversationSubtitle: String? {
+        if endedTitle != nil { return nil }
         // ADR-0051 — under a shared name the peer's handle is not the second
         // line (the title is no longer the peer); the member count is.
         if !presentsAsGroup, groupName == nil,
@@ -1835,7 +1865,10 @@ public final class ChatViewModel: ObservableObject {
     /// §6.1.1 — the exit block: which of the two role-disjoint controls this
     /// reader gets, and why the other one is disabled.
     var exitBlockState: ExitBlock {
-        exitBlock(
+        // UX 9.1 — behind the end dialog there is no exit left to take: the
+        // group is gone, and `Delete this chat` would name nothing.
+        if endedTitle != nil { return .hidden }
+        return exitBlock(
             ExitBlockInput(
                 usesProposalPath: usesProposalPath,
                 isOwner: isOwner,
@@ -2322,6 +2355,7 @@ public final class ChatViewModel: ObservableObject {
         if threadPresent {
             sawThread = true
             endAnswered = false
+            endedTitle = nil
             conversationGone = false
             draftClosed = false
             return
@@ -2337,7 +2371,10 @@ public final class ChatViewModel: ObservableObject {
         let held = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let keptDraft = held.isEmpty ? nil : draft
         draft = ""
-        if let notice = repository.claimEndNotice(groupIdHex: groupIdHex) {
+        let notice = repository.claimEndNotice(groupIdHex: groupIdHex)
+        endedTitle = notice?.name ?? conversationTitle
+        refreshMembership()
+        if let notice {
             endDialog = EndDialog(name: notice.name, draft: keptDraft)
         } else {
             // The person left: the row goes with no notice.
@@ -2371,7 +2408,10 @@ public final class ChatViewModel: ObservableObject {
     /// (`membershipRotationDecision`'s `selfEvicted`) and the exporter-backed
     /// call buttons (`ChatScreen`'s toolbar).
     private func refreshMembership() {
-        membership = repository.membershipStateNow(groupIdHex: groupIdHex)
+        let read = repository.membershipStateNow(groupIdHex: groupIdHex)
+        // Once the group is wiped there is no handle, and no handle reads as
+        // still a member. The state this screen reached does not reverse.
+        membership = endedTitle != nil && !membershipEnded(read) ? .ended(left: false) : read
         // UX §2 — the leave notice goes the moment the leave lands. Here, not
         // in `refreshMembers()`: a poll is what usually sees the landing, and
         // the screen read "Leave requested" beside the frozen list until

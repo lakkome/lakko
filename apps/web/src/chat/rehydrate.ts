@@ -244,6 +244,9 @@ export async function rehydrateMlsState(
       label: restoredGroupLabel(names, groupIdB64),
       group,
       restored: true,
+      ...(snapshot.joinedAtMs?.[groupIdB64] === undefined
+        ? {}
+        : { joinedAtMs: snapshot.joinedAtMs[groupIdB64] }),
     });
 
     // ADR-0042 legacy-sweep — provision opaque push routing for every

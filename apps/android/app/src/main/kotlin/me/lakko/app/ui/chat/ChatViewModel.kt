@@ -493,12 +493,19 @@ public class ChatViewModel(
                         typingText = typingTextFor(repoState),
                         otherIdentities = otherChatIdentities(),
                         isActive = repo.isGroupActive(groupIdHex),
+                        peopleCount = repo.memberCount(groupIdHex),
                     )
                 }
                 lastTypingText = live.typingText
                 derived.value = buildState(repoState, composer.value, live.typingText)
                 noteConversationEnd(repoState)
-                mutableOtherMemberIdentities.value = live.otherIdentities
+                // Behind the end's dialog the group is being wiped: the screen
+                // keeps the roster it last had, so nothing there reads as a
+                // group of one.
+                if (!conversationEnding()) {
+                    mutableOtherMemberIdentities.value = live.otherIdentities
+                    mutablePeopleCount.value = live.peopleCount
+                }
                 // ADR-0052 decision 3 — the local half of the shared-pin
                 // standing, re-read with the roster (a role change or a
                 // membership change moves it). Same off-main-thread rule.
@@ -822,6 +829,13 @@ public class ChatViewModel(
     public val otherMemberIdentities: StateFlow<Set<me.lakko.app.chat.MemberIdentity>> =
         mutableOtherMemberIdentities.asStateFlow()
 
+    private val mutablePeopleCount: MutableStateFlow<Int?> = MutableStateFlow(null)
+
+    /** ADR-0050 — how many PEOPLE are in this conversation, or `null` until the
+     *  roster has been read. [otherMemberIdentities] counts leaves, so a person
+     *  on two phones reads as one here and as a stranger there. */
+    public val peopleCount: StateFlow<Int?> = mutablePeopleCount.asStateFlow()
+
     private val mutableMembersPanelOpen: MutableStateFlow<Boolean> =
         MutableStateFlow(false)
 
@@ -1073,6 +1087,8 @@ public class ChatViewModel(
 
     /** Re-read the stored shared name (and reset the draft to it). */
     private fun refreshGroupName() {
+        // The wipe behind the end's dialog deletes the name.
+        if (conversationEnding()) return
         val stored = repo.groupName(groupIdHex)?.name.orEmpty()
         mutableGroupName.value = stored
         if (!mutableGroupNameBusy.value) mutableGroupNameDraft.value = stored
@@ -1566,6 +1582,19 @@ public class ChatViewModel(
         if (held) sawConversation = true
     }
 
+    /**
+     * ADR-0087 section 9 — this account is out of the group on screen: from the
+     * moment the end is recorded until the dialog closes. The wipe behind it
+     * empties every read this screen makes, so what it showed is held instead
+     * of read again. Read off the repository directly rather than off the last
+     * emission, because the wipe can run ahead of it.
+     */
+    public fun conversationEnding(): Boolean {
+        val hex = groupIdHex.lowercase()
+        return mutableEndDialog.value != null || repo.isEndOwed(hex) ||
+            repo.state.value.endNotices.any { it.idHex == hex }
+    }
+
     /** `OK` on the dialog: the name goes, and the screen goes back to Chats. */
     public fun onEndNoticeAcknowledged() {
         mutableEndDialog.value = null
@@ -1576,7 +1605,7 @@ public class ChatViewModel(
     /** [refreshMembership] with the core's `isActive` already read (off main). */
     private fun applyMembership(isActive: Boolean?) {
         mutableMembership.value = me.lakko.app.chat.membershipState(
-            isActive = isActive,
+            isActive = me.lakko.app.chat.activeBehindEnd(isActive, conversationEnding()),
             leaveRequestedAtMs = leaveRequestedAtMs,
         )
         // The leave landed: its `requested` notice goes, and only it.
@@ -1590,6 +1619,8 @@ public class ChatViewModel(
         // ADR-0045 UX §6.2.7 — decided FIRST, because every gate below depends
         // on it and reading the roster does not change the answer.
         refreshMembership()
+        // The info screen keeps what it showed behind the end's dialog.
+        if (conversationEnding()) return
         val ended = membershipEnded.value
         mutableMembers.value = repo.members(groupIdHex) ?: emptyList()
         // Section 2.4 — a person asked for here leaves the "asked for" set
@@ -2989,6 +3020,7 @@ public class ChatViewModel(
         val typingText: UiText?,
         val otherIdentities: Set<me.lakko.app.chat.MemberIdentity>,
         val isActive: Boolean?,
+        val peopleCount: Int?,
     )
 
     /** The typing line for [repoState]. Reads the live roster: call it off

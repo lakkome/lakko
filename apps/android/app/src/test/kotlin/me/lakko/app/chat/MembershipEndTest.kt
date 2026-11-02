@@ -509,4 +509,79 @@ class MembershipEndTest {
         assertFalse(conversationIsGone(sawConversation = true, held = true, endOwed = false))
         assertFalse(conversationIsGone(sawConversation = false, held = false, endOwed = false))
     }
+
+    @Test
+    fun `an end under way is not active, whatever the read says`() {
+        // The wipe deletes the group and the read answers null, which means
+        // active: the composer came back behind the dialog.
+        assertEquals(false, activeBehindEnd(isActive = null, ending = true))
+        assertEquals(false, activeBehindEnd(isActive = true, ending = true))
+        assertNull(activeBehindEnd(isActive = null, ending = false))
+        assertEquals(true, activeBehindEnd(isActive = true, ending = false))
+    }
+
+    @Test
+    fun `the title stays behind the dialog after the wipe took the name`() {
+        assertEquals("Hikers", titleBehindEnd(live = "Group", held = "Hikers", ending = true))
+        assertEquals("Renamed", titleBehindEnd(live = "Renamed", held = "Hikers", ending = false))
+        // Nothing held: the live title, never nothing.
+        assertEquals("Group", titleBehindEnd(live = "Group", held = null, ending = true))
+    }
+
+    @Test
+    fun `a title read during the wipe is never the one held`() {
+        assertTrue(holdsTitle(threadKnown = true, ending = false))
+        assertFalse(holdsTitle(threadKnown = true, ending = true))
+        assertFalse(holdsTitle(threadKnown = false, ending = false))
+    }
+
+    @Test
+    fun `a removed person is never told the conversation is being set up`() {
+        assertFalse(showsSettingUpLine(threadKnown = false, ending = true))
+        assertTrue(showsSettingUpLine(threadKnown = false, ending = false))
+        assertFalse(showsSettingUpLine(threadKnown = true, ending = false))
+    }
+
+    @Test
+    fun `a group of one has no call controls and they come with a second person`() {
+        assertFalse(showsCallControls(isGroup = true, people = 1))
+        assertTrue(showsCallControls(isGroup = true, people = 2))
+        assertTrue(showsCallControls(isGroup = true, people = 7))
+        // A roster not read yet does not flash them on a group of one.
+        assertFalse(showsCallControls(isGroup = true, people = null))
+    }
+
+    @Test
+    fun `a one-to-one keeps its call controls whatever the roster reads`() {
+        assertTrue(showsCallControls(isGroup = false, people = 2))
+        assertTrue(showsCallControls(isGroup = false, people = 1))
+        assertTrue(showsCallControls(isGroup = false, people = null))
+    }
+
+    @Test
+    fun `an end shows no row saying the messages are still here`() {
+        val ended = MembershipState.Ended(left = false)
+        assertNull(terminalRowBehindEnd(ended, ending = true))
+        // A retired leaf keeps its history and its row.
+        assertEquals(terminalRow(ended), terminalRowBehindEnd(ended, ending = false))
+    }
+
+    @Test
+    fun `the info screen behind the dialog keeps nothing that acts and no frozen line`() {
+        val behind = infoBehindEnd(ending = true, membershipEnded = true)
+        assertFalse(behind.exitBlock)
+        assertFalse(behind.frozenRosterLine)
+        assertFalse(behind.membersCanFindMe)
+    }
+
+    @Test
+    fun `a retired leaf keeps its frozen line and its exit, a live group its switch`() {
+        val retired = infoBehindEnd(ending = false, membershipEnded = true)
+        assertTrue(retired.exitBlock)
+        assertTrue(retired.frozenRosterLine)
+        val live = infoBehindEnd(ending = false, membershipEnded = false)
+        assertTrue(live.exitBlock)
+        assertFalse(live.frozenRosterLine)
+        assertTrue(live.membersCanFindMe)
+    }
 }

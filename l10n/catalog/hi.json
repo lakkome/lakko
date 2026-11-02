@@ -3103,7 +3103,7 @@
       "status": "machine"
     },
     "chat.system.member_left": {
-      "text": "{name} चले गए",
+      "text": "{name} अब समूह में नहीं है",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -6424,10 +6424,6 @@
     },
     "new_group.error.sign_in": {
       "text": "ग्रुप बनाने के लिए फिर से साइन इन करें।",
-      "status": "machine"
-    },
-    "new_group.index_hint": {
-      "text": "मैसेज भेजने के लिए कोई ग्रुप चुनें",
       "status": "machine"
     },
     "new_group.name_hint": {

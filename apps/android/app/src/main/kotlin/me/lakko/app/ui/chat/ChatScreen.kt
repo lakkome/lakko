@@ -241,10 +241,18 @@ public fun ChatScreen(
     val endDialog by viewModel.endDialog.collectAsStateWithLifecycle()
     val conversationGone by viewModel.conversationGone.collectAsStateWithLifecycle()
     LaunchedEffect(conversationGone) { if (conversationGone) onNavigateBack() }
+    // The wipe behind the dialog deletes what a title is made from. The screen
+    // keeps the title it had while the conversation was whole.
+    val ending = endDialog != null || viewModel.conversationEnding()
+    var heldGroupTitle by remember(viewModel) { mutableStateOf<String?>(null) }
+    val shownGroupTitle = me.lakko.app.chat.titleBehindEnd(groupTitle, heldGroupTitle, ending)
+    SideEffect {
+        if (me.lakko.app.chat.holdsTitle(state.threadKnown, ending)) heldGroupTitle = groupTitle
+    }
     endDialog?.let { dialog ->
         MembershipEndDialog(
             dialog = dialog,
-            shownTitle = groupTitle,
+            shownTitle = shownGroupTitle,
             onOk = viewModel::onEndNoticeAcknowledged,
         )
     }
@@ -677,16 +685,19 @@ public fun ChatScreen(
     }
 
     val headerTitle = if (isGroupChat) {
-        groupTitle ?: peerName ?: t("chat.group.fallback_name")
+        shownGroupTitle ?: peerName ?: t("chat.group.fallback_name")
     } else {
-        peerName ?: groupTitle ?: t("chat.group.fallback_name")
+        peerName ?: shownGroupTitle ?: t("chat.group.fallback_name")
     }
+    // ADR-0050 — people, not leaves: this device's other phone is not a member.
+    val peopleCount by viewModel.peopleCount.collectAsStateWithLifecycle()
+    val callControls = me.lakko.app.chat.showsCallControls(isGroupChat, peopleCount)
     // UX 5.2 — "typing..." while a typing indicator is live (ADR-0024; never on
     // a dead group), else "@username" in a 1x1, else "N members" in a group.
     val typingLine = state.typingText?.text()
     val headerSubtitle = when {
         typingLine != null && !membershipEnded -> typingLine
-        isGroupChat -> t("chat.members.count", emptyMap(), mapOf("count" to (otherMembers.size + 1).toULong()))
+        isGroupChat -> t("chat.members.count", emptyMap(), mapOf("count" to (peopleCount ?: (otherMembers.size + 1)).toULong()))
         peerUsername != null -> "@$peerUsername"
         else -> null
     }
@@ -750,9 +761,10 @@ public fun ChatScreen(
             // per-call SFrame seed comes from `exportSecret("lakko/call/v1", …)`
             // and now raises, so they fail closed — which is correct, and is not
             // enough: a call control asserts a live E2EE session, and there is
-            // not one. Folded into `callActive` because the two reasons to hide
-            // them are the same rendering decision.
-            callActive = callOccupant != null || membershipEnded,
+            // not one. Folded into `callActive` because the reasons to hide
+            // them are the same rendering decision; a group of one is the third
+            // (docs/ux/group-and-channel-privacy.md section 10).
+            callActive = callOccupant != null || membershipEnded || !callControls,
             onNavigateBack = onNavigateBack,
             // A live group call on this chat is JOINED rather than
             // duplicated; otherwise a group chat (>2 MLS members) starts a
@@ -915,7 +927,7 @@ public fun ChatScreen(
         // are mounted app-wide by `MainActivity`, so leaving this chat never
         // hides or ends a call and returning to it shows the live call.
 
-        if (!state.threadKnown) {
+        if (me.lakko.app.chat.showsSettingUpLine(state.threadKnown, ending)) {
             // The chat list opened this screen for a group that
             // the repository doesn't know about yet (post-restart
             // before snapshot rehydrate built the handle, or a
@@ -991,8 +1003,10 @@ public fun ChatScreen(
                             // calls back, through the same permission gate and
                             // the same routing as the header buttons.
                             onCallBack = { video ->
-                                callPermissions.request(video = video) { granted ->
-                                    viewModel.onCallButton(video = granted)
+                                if (callControls) {
+                                    callPermissions.request(video = video) { granted ->
+                                        viewModel.onCallButton(video = granted)
+                                    }
                                 }
                             },
                             ownIdentity = ownIdentity,
@@ -1152,7 +1166,7 @@ public fun ChatScreen(
         // `ChatMessage`: nothing produced it on the wire (the removing commit
         // returns the same content-less `Commit` as any other), and the state
         // is terminal, so "after everything" is the only place it can be.
-        me.lakko.app.chat.terminalRow(membership)?.let { row ->
+        me.lakko.app.chat.terminalRowBehindEnd(membership, ending)?.let { row ->
             TerminalMembershipRow(row)
         }
         // ADR-0024 — the typing indicator lives in the header's second line
@@ -3631,6 +3645,13 @@ private fun MembersSheet(
     val transferOutgoing by viewModel.transferOutgoing.collectAsStateWithLifecycle()
     // ADR-0045 UX §6.2 — has this device's membership ended?
     val membershipEnded by viewModel.membershipEnded.collectAsStateWithLifecycle()
+    // ADR-0087 section 9 — under "You are no longer in {name}" this screen keeps
+    // the name and the members and nothing that acts.
+    val infoEndDialog by viewModel.endDialog.collectAsStateWithLifecycle()
+    val behindEnd = me.lakko.app.chat.infoBehindEnd(
+        ending = infoEndDialog != null || viewModel.conversationEnding(),
+        membershipEnded = membershipEnded,
+    )
     // ADR-0045 UX §6.2.4 — the `Delete this chat` confirmation. Local to the
     // sheet, like `confirmingLeave`: it is a presentation concern, and nothing
     // outside this composable may open it.
@@ -3716,7 +3737,8 @@ private fun MembersSheet(
                 },
             )
         }
-    val exit = me.lakko.app.chat.exitBlock(
+    // Behind the end's dialog there is no exit to offer: the group is gone.
+    val exit = if (!behindEnd.exitBlock) me.lakko.app.chat.ExitBlock.Hidden else me.lakko.app.chat.exitBlock(
         me.lakko.app.chat.ExitBlockInput(
             usesProposalPath = roleTable != null,
             isOwner = isOwner,
@@ -3883,11 +3905,13 @@ private fun MembersSheet(
                     // docs/ux/who-can-find-me.md section 5 — this group's
                     // `Members can find me` switch (absent unless the setting
                     // includes groups).
-                    me.lakko.app.ui.settings.MembersCanFindMeRow(
-                        reach = me.lakko.app.reach.ReachManager.get(androidx.compose.ui.platform.LocalContext.current),
-                        kind = me.lakko.app.ui.settings.FindMeScopeKind.GROUP,
-                        idHex = viewModel.groupIdHex,
-                    )
+                    if (behindEnd.membersCanFindMe) {
+                        me.lakko.app.ui.settings.MembersCanFindMeRow(
+                            reach = me.lakko.app.reach.ReachManager.get(androidx.compose.ui.platform.LocalContext.current),
+                            kind = me.lakko.app.ui.settings.FindMeScopeKind.GROUP,
+                            idHex = viewModel.groupIdHex,
+                        )
+                    }
                 }
                 // ADR-0028 (G-3) — owner/admin "create invite link" affordance.
                 // Mints a /g/<slug> link conveying this group's id; a non-member
@@ -4178,7 +4202,7 @@ private fun MembersSheet(
                 // frozen at the removing epoch and never moves again) rather
                 // than a euphemism for it, and it is deliberately neutral
                 // between having left and having been removed.
-                if (membershipEnded) {
+                if (behindEnd.frozenRosterLine) {
                     Text(
                         text = me.lakko.app.chat.FROZEN_ROSTER_HEADER.text(),
                         style = MaterialTheme.typography.bodySmall,

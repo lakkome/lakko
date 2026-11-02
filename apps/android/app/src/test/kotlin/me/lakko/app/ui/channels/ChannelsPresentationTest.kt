@@ -186,4 +186,19 @@ class ChannelsPresentationTest {
             }
         }
     }
+
+    @Test
+    fun `following needs both the list row and a reader key`() {
+        assertTrue(channelIsFollowed(listed = true, readerKeyHeld = true))
+        assertFalse(channelIsFollowed(listed = true, readerKeyHeld = false))
+        assertFalse(channelIsFollowed(listed = false, readerKeyHeld = true))
+        assertFalse(channelIsFollowed(listed = false, readerKeyHeld = false))
+    }
+
+    @Test
+    fun `opening a channel reads it only for a follower or after a press`() {
+        assertFalse(channelPageReads(followed = false, pressed = false))
+        assertTrue(channelPageReads(followed = false, pressed = true))
+        assertTrue(channelPageReads(followed = true, pressed = false))
+    }
 }

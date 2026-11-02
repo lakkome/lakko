@@ -200,7 +200,7 @@ gives the same answer). Unbuilt.
   device changes). In a **group**, when a batch of commits changes the
   people (person keys before and after differ, ADR-0050), the device writes
   one row at the batch's last commit naming each person: "VG3 joined",
-  "VG2 left" (several people: one sentence each, in one row). The row stores
+  "VG2 is no longer in the group" (several people: one sentence each, in one row). The row stores
   the person keys, never names; the name is resolved when drawn, through the
   one display resolver ("Member" when unknown). It does not say who
   committed: under ADR-0045 the committer only sweeps what someone else

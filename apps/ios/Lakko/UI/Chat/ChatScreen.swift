@@ -485,7 +485,10 @@ public struct ChatScreen: View {
             // shape §6.1.1 rejects, and §6.2.11 forbids any live indicator on a
             // dead group for a stronger reason: a call control asserts a live
             // E2EE session, and there is not one.
-            if !viewModel.membershipHasEnded {
+            //
+            // `docs/ux/group-and-channel-privacy.md` section 10 — and absent
+            // in a group of one: there is nobody to call.
+            if !viewModel.membershipHasEnded, viewModel.hasSomeoneToCall {
             ToolbarItem(placement: .navigationBarTrailing) {
                 // No `TimelineView` in a toolbar item, ever: one inside a bar
                 // item host re-rendered on every layout pass and dirtied the
@@ -3005,7 +3008,11 @@ struct GroupInfoScreen: View {
                 }
                 // `docs/ux/who-can-find-me.md` section 5 — present only while
                 // the setting includes groups at all.
-                MembersCanFindMeSection(groupIdHex: viewModel.groupIdHex)
+                // Not over a group that went from under the screen (UX 9.1):
+                // a setting for a group that is no longer held does nothing.
+                if !viewModel.endedUnderScreen {
+                    MembersCanFindMeSection(groupIdHex: viewModel.groupIdHex)
+                }
                 // ADR-0045 (UX §14) — the membership error/notice slot is
                 // UNGATED, and that is a fix rather than a layout choice. It
                 // used to live inside the `canManageMembers` `Add member`
@@ -3536,6 +3543,12 @@ struct GroupInfoScreen: View {
             // UX 9.1 — the dialog over whichever screen of the conversation is
             // up; a cover cannot be presented from a screen under this one.
             .modifier(EndDialogPresenter(viewModel: viewModel, active: viewModel.conversationInfoOpen))
+            // UX 9.1 — `OK`, then Chats: the info and the conversation under
+            // it both go. The conversation's own screen is covered here, and a
+            // covered screen in the stack does not see the change.
+            .onChange(of: viewModel.conversationGone) { _, gone in
+                if gone { onDeleted() }
+            }
     }
 
     /// A member's avatar, name and pending annotation. A member who is a

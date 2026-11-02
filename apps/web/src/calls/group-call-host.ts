@@ -212,6 +212,9 @@ export interface ChatCallAffordanceInput {
   /** Set when the conversation was created as a group (ADR-0062), whatever
    *  its people count; a two-person group calls over the SFU too. */
   readonly isGroup: boolean;
+  /** People in the conversation, each counted once however many devices they
+   *  are on (`chat/person-key.ts`). */
+  readonly people: number;
 }
 
 /**
@@ -222,12 +225,15 @@ export interface ChatCallAffordanceInput {
  * second one. A group call already in progress in this chat is JOINED, never
  * shadowed by a new one; otherwise a group starts an SFU call and a one-to-one
  * a 1x1 P2P call. The kind is the conversation's own (ADR-0062), never the
- * people count, so a group of two still calls as a group.
+ * people count, so a group of two still calls as a group. A group with nobody
+ * else in it has no buttons: there is nobody to call (`docs/ux/
+ * group-and-channel-privacy.md` section 10).
  */
 export function chatCallAffordance(input: ChatCallAffordanceInput): ChatCallAffordance {
   if (input.membershipEnded || input.callInProgress) return "hidden";
   if (input.liveCallInThisChat) return "join-group";
-  return input.isGroup ? "start-group" : "start-one-to-one";
+  if (!input.isGroup) return "start-one-to-one";
+  return input.people > 1 ? "start-group" : "hidden";
 }
 
 export interface GroupCallStartFailureInput {

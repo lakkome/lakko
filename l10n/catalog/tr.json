@@ -3103,7 +3103,7 @@
       "status": "machine"
     },
     "chat.system.member_left": {
-      "text": "{name} ayrıldı",
+      "text": "{name} artık grupta değil",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -6424,10 +6424,6 @@
     },
     "new_group.error.sign_in": {
       "text": "Grup oluşturmak için tekrar giriş yapın.",
-      "status": "machine"
-    },
-    "new_group.index_hint": {
-      "text": "Mesajlaşmaya başlamak için bir grup seçin",
       "status": "machine"
     },
     "new_group.name_hint": {

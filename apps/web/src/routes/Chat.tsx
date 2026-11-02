@@ -1520,6 +1520,7 @@ function ChatView(props: {
       callInProgress: callHost.anyCallInProgress(),
       liveCallInThisChat: liveGroupCall() !== null,
       isGroup: isGroupChat(),
+      people: memberCount(),
     });
 
   /** Place a 1x1 call. The session lives in the call host, so it survives

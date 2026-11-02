@@ -227,6 +227,7 @@ public object AccountLocalWipe {
             me.lakko.app.ds.EncryptedJournalOwnershipStore(ctx).clearForAccount(acct)
         },
         Step("group-names") { ctx, acct -> me.lakko.app.chat.GroupNameStore.deleteAccount(ctx, acct) },
+        Step("conversation-joined") { ctx, acct -> me.lakko.app.chat.ConversationJoinedStore.deleteAccount(ctx, acct) },
         // ADR-0073 "Phase 2 revised" — what an accepted reset of a contact
         // left on this device: the reset ledger, the verified bindings, the
         // successor claims, the continuity facts and the lineage mirror.

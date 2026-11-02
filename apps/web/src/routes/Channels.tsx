@@ -1159,7 +1159,9 @@ const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
                     <button
                       type="button"
                       class="primary"
-                      onClick={(): void => navigate(paths.channelSubscribe(params.id))}
+                      onClick={(): void =>
+                        navigate(paths.channelSubscribe(params.id), { state: { subscribe: true } })
+                      }
                     >
                       {t("channels.subscribe.action")}
                     </button>
@@ -1238,11 +1240,11 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
   const membershipEnd = useMembershipEnd();
   // Read once: constant for this instance (see `ChannelView`).
   const params = { id: untrack(() => props.id) } as const;
-  const location = useLocation<{ handle?: string }>();
+  const location = useLocation<{ handle?: string; subscribe?: boolean }>();
   const navigate = useNavigate();
   const [infoOpen, setInfoOpen] = createSignal(false);
   const [bootstrap, setBootstrap] = createSignal<
-    "idle" | "registering" | "polling" | "active" | "error"
+    "idle" | "offered" | "registering" | "polling" | "active" | "error"
   >("idle");
   const [bootstrapError, setBootstrapError] = createLiveText();
   const [posts, setPosts] = createSignal<ReadonlyArray<ChannelPostView>>([]);
@@ -1413,8 +1415,22 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
     enabled: () => bootstrap() === "active",
   });
 
+  /** Opening a channel this account does not follow offers it; only pressing
+   *  Subscribe subscribes (`docs/ux/group-and-channel-privacy.md` section
+   *  5.1). A registration spends a token and shows on the owner's count, so a
+   *  search result, a pasted handle or a typed address must not reach it. */
+  const follows = (): boolean =>
+    channelsState.channels().some((c) => c.id === params.id) ||
+    channelsState.subscriberKeysByChannel().has(params.id);
+
+  async function open(): Promise<void> {
+    await awaitChannelsHydration();
+    if (follows() || location.state?.subscribe === true) await bootstrap_();
+    else setBootstrap("offered");
+  }
+
   // First-load: drive the bootstrap.
-  void bootstrap_();
+  void open();
 
   // Polling loop — runs while `bootstrap === "polling"`. 3-second cadence;
   // cancels itself once at least one epoch's seed is recovered.
@@ -1492,6 +1508,8 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
   const meta = (): ReturnType<typeof channelMetaOf> => channelMetaOf(params.id);
   const statusLine = (): string => {
     switch (bootstrap()) {
+      case "offered":
+        return t("channels.subscribe.status.not_subscribed");
       case "idle":
       case "registering":
         return t("channels.subscribe.status.subscribing");
@@ -1513,7 +1531,7 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
       <div class="lk-chat-body" style={{ position: "relative" }}>
         <ChannelHead
           id={params.id}
-          name={meta().name}
+          name={follows() ? meta().name : channelTitle(undefined, "", foundHandle())}
           sub={statusLine()}
           onOpenInfo={(): void => {
               setInfoOpen(true);
@@ -1568,13 +1586,33 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
             </div>
           </Match>
         </Switch>
-        <PostList
-          channelId={params.id}
-          posts={bootstrap() === "active" ? posts() : []}
-          decodedByCursor={decodedByCursor()}
-          loading={bootstrap() !== "active" && bootstrap() !== "error"}
-          emptyText={bootstrap() === "error" ? "" : t("channels.posts.empty")}
-        />
+        <Show
+          when={bootstrap() !== "offered" && !(bootstrap() === "error" && !follows())}
+          fallback={
+            <div class="lk-empty">
+              <Icon name="channels" size={40} strokeWidth={1.4} />
+              <strong>{t("channels.subscribe.prompt_title")}</strong>
+              <span>{t("channels.subscribe.prompt_body")}</span>
+              <button
+                type="button"
+                class="primary"
+                onClick={(): void => {
+                  void bootstrap_();
+                }}
+              >
+                {t("channels.subscribe.action")}
+              </button>
+            </div>
+          }
+        >
+          <PostList
+            channelId={params.id}
+            posts={bootstrap() === "active" ? posts() : []}
+            decodedByCursor={decodedByCursor()}
+            loading={bootstrap() !== "active" && bootstrap() !== "error"}
+            emptyText={bootstrap() === "error" ? "" : t("channels.posts.empty")}
+          />
+        </Show>
       </div>
     </article>
   );

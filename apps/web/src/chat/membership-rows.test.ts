@@ -143,15 +143,15 @@ describe("drawing a membership row", () => {
     ]);
   });
 
-  it("draws a person who left as '{name} left', and an unknown one as Member", () => {
+  it("draws a person who is gone as '{name} is no longer in the group', and an unknown one as Member", () => {
     const change = judge(["ME", "A", "B"], ["ME"]).change as MembershipChange;
-    expect(sentencesOf(change, { A: "VG2" })).toEqual(["VG2 left", "Member left"]);
+    expect(sentencesOf(change, { A: "VG2" })).toEqual(["VG2 is no longer in the group", "Member is no longer in the group"]);
   });
 
   it("puts every joined sentence before every left one", () => {
     expect(sentencesOf({ joined: ["C"], left: ["A"] }, { A: "Ann", C: "Cy" })).toEqual([
       "Cy joined",
-      "Ann left",
+      "Ann is no longer in the group",
     ]);
   });
 
@@ -224,7 +224,7 @@ describe("this device's own commit (the sweep)", () => {
     expect(isDrawnMembershipRow({ kind: "incoming", event: own }, "group")).toBe(true);
     expect(sentencesOf(own.membership as MembershipChange, { A: "VG2", B: "VG3" })).toEqual([
       "VG3 joined",
-      "VG2 left",
+      "VG2 is no longer in the group",
     ]);
     expect(eventToPersistedMessage(own).membership).toEqual({
       joinedKeysB64: ["B"],

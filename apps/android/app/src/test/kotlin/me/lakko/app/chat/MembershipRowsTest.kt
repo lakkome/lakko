@@ -78,12 +78,12 @@ class MembershipRowsTest {
     }
 
     @Test
-    fun `a person leaving draws left, several people one sentence each with joined first`() {
+    fun `a person gone draws that they are no longer in the group, several people one sentence each with joined first`() {
         val change = membershipChangeOf(listOf(own, ana, bea), listOf(own, ana), noAccount, false, own)
         assertEquals(MembershipChange(joined = emptyList(), left = listOf(bea)), change)
-        assertEquals("Bea left", membershipRowText(commitRow(4, left = change!!.left), nameOf))
+        assertEquals("Bea is no longer in the group", membershipRowText(commitRow(4, left = change!!.left), nameOf))
         val both = commitRow(5, joined = listOf("Q0ND"), left = listOf(bea))
-        assertEquals("Member joined Bea left", membershipRowText(both, nameOf))
+        assertEquals("Member joined Bea is no longer in the group", membershipRowText(both, nameOf))
     }
 
     @Test

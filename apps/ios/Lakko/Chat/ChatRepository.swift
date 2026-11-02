@@ -128,6 +128,8 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0087 section 9 — the owed ends, the notices not yet closed and the
     /// held Welcomes (``ChatRepository+MembershipEnd``).
     let membershipEndStore: MembershipEndStore
+    /// When this device created or joined each group (``GroupArrival``).
+    let groupArrivalStore: GroupArrivalStore
     /// The owed ends of this account, the store's record in memory: consulted
     /// on every poll and for every row.
     var owedEnds: [String: OwedMembershipEnd] = [:]
@@ -722,8 +724,10 @@ public final class ChatRepository: ObservableObject {
         personalPinStore: PersonalPinStore = PersonalPinStore(),
         readWatermarkStore: ReadWatermarkStore = ReadWatermarkStore(),
         groupCallStore: GroupCallStore = GroupCallStore(),
-        registrarSeeds: RegistrarSeedStore = RegistrarSeedStore()
+        registrarSeeds: RegistrarSeedStore = RegistrarSeedStore(),
+        groupArrivalStore: GroupArrivalStore = GroupArrivalStore()
     ) {
+        self.groupArrivalStore = groupArrivalStore
         self.groupCallStore = groupCallStore
         self.registrarSeeds = registrarSeeds
         self.groupNameStore = groupNameStore
@@ -2983,6 +2987,7 @@ public final class ChatRepository: ObservableObject {
         // nothing.
         sharedPinStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         personalPinStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        groupArrivalStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         // ADR-0051 — the name; the notice holds its own copy.
         groupNameStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         groupNameRevision &+= 1
@@ -6358,6 +6363,10 @@ public final class ChatRepository: ObservableObject {
     func persistKnownGroupBestEffort(groupIdHex: String) {
         guard let accountIdB64 = currentAccountIdB64 else { return }
         knownGroupsStore.add(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        // Section 10 of the UX spec: arriving counts as activity. A launch
+        // reloads groups without coming here, so this time survives it.
+        groupArrivalStore.remember(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex, atMs: Self.nowMs())
         // The device holds the group itself now, so it no longer needs to be
         // carried as "a conversation a restored backup named".
         dropRestoredKnownGroup(groupIdHex: groupIdHex)
@@ -9556,7 +9565,8 @@ public final class ChatRepository: ObservableObject {
     /// group (the head), with the rows of the older segments it still holds
     /// in front, under history ids.
     func buildThreadList() -> [ChatThread] {
-        conversationPlans().compactMap { plan -> ChatThread? in
+        let arrivals = currentAccountIdB64.map { groupArrivalStore.load(accountIdB64: $0) } ?? [:]
+        return conversationPlans().compactMap { plan -> ChatThread? in
             guard let head = groups[plan.headHex] else { return nil }
             // ADR-0087 section 9 — the row leaves the moment the end is known,
             // whatever step the end is at.
@@ -9579,7 +9589,10 @@ public final class ChatRepository: ObservableObject {
                 history: history,
                 historyGroupIdHexes: older,
                 segmentIndex: conversationLineage.segmentIndexOf(plan.headHex),
-                leaveRequested: leaveRequestedAt(groupIdHex: plan.headHex) != nil)
+                leaveRequested: leaveRequestedAt(groupIdHex: plan.headHex) != nil,
+                // The conversation's own arrival first: moving into a
+                // successor group is not a new conversation (ADR-0073 R.5).
+                arrivedAtMs: arrivals[plan.conversationHex] ?? arrivals[plan.headHex])
             // Bundle v3 — what another device of this account wrote to the
             // person before this one-to-one existed, drawn as own waiting
             // rows until the real messages arrive. Display only: not in the
@@ -9701,6 +9714,9 @@ public struct ChatThread: Equatable {
     /// UX 9.4 — this device asked to leave and the request has not landed.
     /// The row stays and says `Waiting to leave.`
     public let leaveRequested: Bool
+    /// When this device created or joined the conversation, for a list row
+    /// with no message yet (``GroupArrival``). `nil` when it is not known.
+    public let arrivedAtMs: Int64?
 
     public init(
         groupIdHex: String,
@@ -9714,8 +9730,10 @@ public struct ChatThread: Equatable {
         historyGroupIdHexes: [String] = [],
         segmentIndex: Int = 0,
         syncedThroughMessageId: Int64? = nil,
-        leaveRequested: Bool = false
+        leaveRequested: Bool = false,
+        arrivedAtMs: Int64? = nil
     ) {
+        self.arrivedAtMs = arrivedAtMs
         self.leaveRequested = leaveRequested
         self.syncedThroughMessageId = syncedThroughMessageId
         self.conversationIdHex = conversationIdHex ?? groupIdHex
@@ -9746,7 +9764,8 @@ extension ChatThread {
             historyGroupIdHexes: historyGroupIdHexes,
             segmentIndex: segmentIndex,
             syncedThroughMessageId: syncedThroughMessageId,
-            leaveRequested: leaveRequested)
+            leaveRequested: leaveRequested,
+            arrivedAtMs: arrivedAtMs)
     }
 }
 
@@ -10637,7 +10656,8 @@ final class GroupRecord {
         history: [ChatMessage] = [],
         historyGroupIdHexes: [String] = [],
         segmentIndex: Int = 0,
-        leaveRequested: Bool = false
+        leaveRequested: Bool = false,
+        arrivedAtMs: Int64? = nil
     ) -> ChatThread {
         ChatThread(
             groupIdHex: DsClient.pseudonymHex(groupId),
@@ -10654,7 +10674,8 @@ final class GroupRecord {
             historyGroupIdHexes: historyGroupIdHexes,
             segmentIndex: segmentIndex,
             syncedThroughMessageId: syncedThroughMessageId,
-            leaveRequested: leaveRequested
+            leaveRequested: leaveRequested,
+            arrivedAtMs: arrivedAtMs
         )
     }
 

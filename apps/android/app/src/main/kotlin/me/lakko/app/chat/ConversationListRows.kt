@@ -47,9 +47,10 @@ public data class ConversationListRow(
     /** The formatted last-activity time, or `null` when there is none to show. */
     val time: String?,
     /**
-     * When the last thing a person can SEE happened, in unix millis, or `null`
-     * for a conversation nothing has happened in yet. A row that draws nothing
-     * does not move a conversation to the top.
+     * What the list sorts by, in unix millis: the last message or post a person
+     * can SEE, else the moment this device created or joined the conversation
+     * ([conversationActivityMs]; a channel: the moment it was added). A row
+     * that draws nothing does not move a conversation.
      */
     val lastActivityMs: Long?,
     /**

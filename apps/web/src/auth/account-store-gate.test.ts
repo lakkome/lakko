@@ -266,8 +266,8 @@ describe("localStorage and sessionStorage", () => {
 describe("a write in flight when Forget device wipes the account", () => {
   it("the MLS snapshot is not put back, and the write throws", async () => {
     const key = await deviceKey();
-    await saveMlsSnapshot(A, key, new Uint8Array([1, 2, 3]), ["g"]);
-    expect(await loadMlsSnapshot(A, key)).not.toBeNull();
+    await saveMlsSnapshot(A, key, new Uint8Array([1, 2, 3]), ["g"], undefined, { g: 42 });
+    expect((await loadMlsSnapshot(A, key))?.joinedAtMs).toEqual({ g: 42 });
     // Started before the wipe, suspended on its encrypt while the wipe runs.
     const late = saveMlsSnapshot(A, key, new Uint8Array([4, 5, 6]), ["g"]);
     const outcome = late.then(

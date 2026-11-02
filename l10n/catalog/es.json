@@ -3103,7 +3103,7 @@
       "status": "machine"
     },
     "chat.system.member_left": {
-      "text": "{name} salió",
+      "text": "{name} ya no está en el grupo",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -6424,10 +6424,6 @@
     },
     "new_group.error.sign_in": {
       "text": "Vuelve a iniciar sesión para crear un grupo.",
-      "status": "machine"
-    },
-    "new_group.index_hint": {
-      "text": "Selecciona un grupo para empezar a enviar mensajes",
       "status": "machine"
     },
     "new_group.name_hint": {

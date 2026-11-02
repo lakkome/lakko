@@ -358,6 +358,7 @@ class AccountLocalWipeTest {
         SharedPrefsLastObservedOwnerStore(context).save(acct, group, "owner")
         SharedPrefsLeaveRecordStore(context).save(acct, group, 5L)
         GroupNameStore.save(context, acct, group, StoredGroupName("Family", 1uL))
+        me.lakko.app.chat.ConversationJoinedStore.save(context, acct, group, 1L)
         PinStore.saveShared(context, acct, group, mapOf(1L to StoredPin(pinned = true, updatedAtMs = 1uL)))
         PinStore.savePersonal(context, acct, group, mapOf(2L to 1uL))
         SharedPreferencesReadWatermarkStore(context).merge(acct, group, mapOf("member" to 3L))
@@ -569,6 +570,7 @@ class AccountLocalWipeTest {
         val ALL_PLAIN_PREFS = setOf(
             "me.lakko.session.v1", "lakko.backup.auto", "lakko-group-calls", "me.lakko.ds.co-published",
             "lakko-committer-beacons", "lakko-conversation-kind", "lakko-readmission-removed", "lakko-group-names",
+            "lakko-conversation-joined",
             "me.lakko.known-groups.v1", "lakko-leave-requested", "lakko-last-observed-owner", "lakko-pending-requests",
             "lakko-sent-committer-envelopes",
             "lakko-pins", "lakko-read-watermarks", "lakko-unapplied-requests", "lakko-accepted-contacts",
@@ -588,6 +590,7 @@ class AccountLocalWipeTest {
             "lakko-readmission-removed", "me.lakko.known-groups.v1", "lakko-committer-beacons", "lakko-pending-requests",
             "lakko-sent-committer-envelopes",
             "lakko-unapplied-requests", "lakko-last-observed-owner", "lakko-leave-requested", "lakko-group-names",
+            "lakko-conversation-joined",
             "lakko-pins", "lakko-read-watermarks", "lakko-group-calls", "lakko-peer-profiles", "lakko-own-profile",
             "lakko-profile-requests", "lakko-accepted-contacts", "lakko-contacts-inbox", "me.lakko.ds.co-published",
             "me.lakko.push-routing.v2", "me.lakko.push-routing.v1", "lakko-device-sync-pending",

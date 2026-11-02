@@ -205,6 +205,34 @@ final class GroupCallHostRulesTests: XCTestCase {
             .startOneToOne, "a one-to-one places a 1x1 call")
     }
 
+    /// `docs/ux/group-and-channel-privacy.md` section 10.
+    func testAGroupOfOneHasNobodyToCall() {
+        XCTAssertFalse(GroupCallHostRules.hasSomeoneToCall(isGroup: true, people: 1))
+        XCTAssertFalse(
+            GroupCallHostRules.hasSomeoneToCall(isGroup: true, people: nil),
+            "a roster that cannot be read names nobody")
+        XCTAssertTrue(GroupCallHostRules.hasSomeoneToCall(isGroup: true, people: 2))
+        XCTAssertTrue(
+            GroupCallHostRules.hasSomeoneToCall(isGroup: false, people: 1),
+            "a one-to-one keeps its buttons")
+        XCTAssertEqual(
+            GroupCallHostRules.chatCallAction(
+                membershipEnded: false, callInProgress: false, affordance: .none, isGroup: true,
+                someoneToCall: false),
+            .unavailable, "tapping an old call row in a group of one calls nobody")
+    }
+
+    /// ADR-0050 — two phones of one person are one person.
+    func testOnePersonOnTwoPhonesIsStillAlone() {
+        let account = Data(repeating: 1, count: 32)
+        let phones = [
+            GroupMember(leafIndex: 0, signaturePublicKey: Data(repeating: 2, count: 32), accountKey: account),
+            GroupMember(leafIndex: 1, signaturePublicKey: Data(repeating: 3, count: 32), accountKey: account),
+        ]
+        XCTAssertFalse(
+            GroupCallHostRules.hasSomeoneToCall(isGroup: true, people: PersonKey.people(phones).count))
+    }
+
     // MARK: Alone in the call (docs/ux/calls.md section 4.3)
 
     func testTheAloneEndArmsOnlyOnceARemoteWasSeenAndTheRosterIsEmpty() {

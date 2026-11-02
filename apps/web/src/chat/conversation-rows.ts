@@ -187,7 +187,9 @@ export function createConversationRows() {
   }
 
   /** The last message's time as a sort key: the DS stamp, else the moment
-   *  the conversation was created on this device. */
+   *  the conversation was created or joined on this device. Only the
+   *  fallback: a device added to an account joins all its chats at once, and
+   *  the history it is handed must decide their order. */
   const lastActivityMs = (g: ActiveGroup): number => {
     const at = summaryFor(g.group.groupId).lastAt;
     if (at !== null) {

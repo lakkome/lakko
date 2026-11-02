@@ -321,7 +321,7 @@ public struct ChatListScreen: View {
                 preview: thread.leaveRequested
                     ? waitingToLeaveLine
                     : viewModel.preview(thread: thread, isGroup: kind == .group),
-                lastActivityMs: viewModel.lastMessageMs(thread: thread),
+                lastActivityMs: viewModel.activityMs(thread: thread),
                 unread: UnreadCounting.displayed(
                     local: thread.unread,
                     cursorDerived: Self.unreadCount(
@@ -1185,6 +1185,12 @@ public final class ChatListViewModel: ObservableObject {
             return nil
         }
         return ChatRepository.parseDsTimestampMs(last.createdAt)
+    }
+
+    /// The time this row sorts by and shows (``GroupArrival``).
+    func activityMs(thread: ChatThread) -> Int64? {
+        GroupArrival.activityMs(
+            lastMessageMs: lastMessageMs(thread: thread), arrivedAtMs: thread.arrivedAtMs)
     }
 
     /// Chat folders' Mark all as read: clear the local badge and return the

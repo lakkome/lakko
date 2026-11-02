@@ -410,7 +410,9 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
     }
     setVerified(new Set([...verified(), card.channelIdHex]));
     if (!here()) return;
-    navigate(paths.channelSubscribe(card.channelIdHex), { state: { handle: card.handle } });
+    navigate(paths.channelSubscribe(card.channelIdHex), {
+      state: { handle: card.handle, subscribe: true },
+    });
   }
 
   return {

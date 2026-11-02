@@ -3103,7 +3103,7 @@
       "status": "machine"
     },
     "chat.system.member_left": {
-      "text": "{name} 已离开",
+      "text": "{name} 已不在群组中",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -6424,10 +6424,6 @@
     },
     "new_group.error.sign_in": {
       "text": "请重新登录以创建群组。",
-      "status": "machine"
-    },
-    "new_group.index_hint": {
-      "text": "选择一个群组开始发消息",
       "status": "machine"
     },
     "new_group.name_hint": {

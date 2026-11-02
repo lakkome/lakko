@@ -3274,7 +3274,7 @@
       "comment": "Row in a group's timeline: this person became a member. {name} is the person's display name, or 'Member' when unknown."
     },
     "chat.system.member_left": {
-      "text": "{name} left",
+      "text": "{name} is no longer in the group",
       "comment": "Row in a group's timeline: this person is no longer a member (left or was removed). {name} is the person's display name, or 'Member' when unknown."
     },
     "chat.timeline.empty": {
@@ -6755,10 +6755,6 @@
     "new_group.error.sign_in": {
       "text": "Sign in again to create a group.",
       "comment": "A group cannot be created because this session holds no keys."
-    },
-    "new_group.index_hint": {
-      "text": "Select a group to start messaging",
-      "comment": "Web: hint in the empty main pane of the groups screen."
     },
     "new_group.name_hint": {
       "text": "Every member sees the name.",

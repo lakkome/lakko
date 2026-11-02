@@ -426,6 +426,68 @@ internal data class EndDialog(
 internal fun conversationIsGone(sawConversation: Boolean, held: Boolean, endOwed: Boolean): Boolean =
     sawConversation && !held && !endOwed
 
+/**
+ * What the screen under the dialog takes the group's `isActive` to be. The wipe
+ * deletes the group, the read then answers `null`, and `null` means active
+ * ([membershipState]): the composer and the call buttons came back behind the
+ * dialog. An end under way is not active, whatever the read says.
+ */
+internal fun activeBehindEnd(isActive: Boolean?, ending: Boolean): Boolean? =
+    if (ending) false else isActive
+
+/**
+ * The title the screen under the dialog shows. The wipe deletes the name and
+ * the roster a title is made from, so it would turn into "Group": [held] is the
+ * title from the last moment the conversation was whole.
+ */
+internal fun titleBehindEnd(live: String?, held: String?, ending: Boolean): String? =
+    if (ending) held ?: live else live
+
+/**
+ * Whether the title on screen may become the one [titleBehindEnd] holds: only
+ * while the conversation is whole, so a title read during the wipe never is.
+ */
+internal fun holdsTitle(threadKnown: Boolean, ending: Boolean): Boolean = threadKnown && !ending
+
+/**
+ * "This conversation is still being set up on this device." The list drops a
+ * conversation the moment its end is recorded, which reads exactly like one not
+ * loaded yet, and for that person the sentence would be false.
+ */
+internal fun showsSettingUpLine(threadKnown: Boolean, ending: Boolean): Boolean = !threadKnown && !ending
+
+/**
+ * The terminal row under the timeline. It says the messages already received
+ * are still here, which is true of a retired leaf ([MembershipEnded.kt]) and
+ * false of an end, whose dialog says they are gone: an end shows none.
+ */
+internal fun terminalRowBehindEnd(state: MembershipState, ending: Boolean): TerminalRowCopy? =
+    if (ending) null else terminalRow(state)
+
+/** What the group's info screen shows under the dialog. */
+internal data class InfoBehindEnd(
+    /** The exit block: Leave, Transfer, or `Delete this chat`. */
+    val exitBlock: Boolean,
+    /** "This list stopped updating when your membership ended." */
+    val frozenRosterLine: Boolean,
+    /** This group's `Members can find me` switch. */
+    val membersCanFindMe: Boolean,
+)
+
+/**
+ * The info screen under the dialog keeps the name and the member list and
+ * drops what offers an action or describes a state the dialog contradicts: an
+ * exit (the group is already gone), the frozen-roster line (which belongs to a
+ * retired leaf that keeps its history), and the find-me switch (there is no
+ * membership left to be found through).
+ */
+internal fun infoBehindEnd(ending: Boolean, membershipEnded: Boolean): InfoBehindEnd =
+    InfoBehindEnd(
+        exitBlock = !ending,
+        frozenRosterLine = membershipEnded && !ending,
+        membersCanFindMe = !ending,
+    )
+
 /** The dialog for [notice] over a composer holding [draft]. */
 internal fun endDialogFor(notice: MembershipEndNotice, draft: String): EndDialog =
     EndDialog(notice.name, draft.takeIf { it.isNotBlank() })
@@ -579,3 +641,18 @@ internal class SharedPrefsHeldWelcomeStore(context: Context) : HeldWelcomeStore 
         private val LOCK = Any()
     }
 }
+
+// ---------------------------------------------------------------------------
+// A group of one
+// ---------------------------------------------------------------------------
+
+/**
+ * `docs/ux/group-and-channel-privacy.md` section 10 — "Call controls: absent.
+ * There is nobody to call. They appear with a second person."
+ *
+ * [people] counts people, not leaves (ADR-0050): a person alone on two phones
+ * is still alone. `null` is a roster not read yet; a group keeps them off until
+ * it is, so a group of one never flashes them. A one-to-one always keeps them.
+ */
+internal fun showsCallControls(isGroup: Boolean, people: Int?): Boolean =
+    !isGroup || (people ?: 0) >= 2

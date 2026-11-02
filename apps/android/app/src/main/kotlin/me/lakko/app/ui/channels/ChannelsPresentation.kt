@@ -22,6 +22,21 @@ import java.util.Locale
  * the [Strings] of the language on screen.
  */
 
+/**
+ * Whether this account follows a channel: it is in the list and this device
+ * holds a reader key for it. Either alone is a subscribe that never finished,
+ * or a channel known only by name.
+ */
+public fun channelIsFollowed(listed: Boolean, readerKeyHeld: Boolean): Boolean = listed && readerKeyHeld
+
+/**
+ * Whether a channel's page reads the channel, which registers a reader key and
+ * spends a `channel-subscribe` token when there is none, or shows the Subscribe
+ * page, which does neither. A person becomes a subscriber only by pressing
+ * Subscribe (`docs/ux/group-and-channel-privacy.md` section 5.1).
+ */
+public fun channelPageReads(followed: Boolean, pressed: Boolean): Boolean = followed || pressed
+
 /** Everything one Channels row renders. */
 public data class ChannelRowModel(
     val id: String,

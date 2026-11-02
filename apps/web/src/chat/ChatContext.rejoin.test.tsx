@@ -25,7 +25,7 @@ vi.mock("../ds/session-access", () => ({
   installPredecessorChainAccess: () => undefined,
 }));
 
-import { ChatProvider, useChats, type ChatApi } from "./ChatContext";
+import { ChatProvider, joinedTimes, useChats, type ChatApi } from "./ChatContext";
 import { chatViewKey, groupIdOfViewKey } from "./membership-end";
 
 const handle = (): never => ({ groupId: new Uint8Array(32).fill(7) }) as never;
@@ -61,5 +61,39 @@ describe("a Welcome replacing a group under the same id", () => {
     const joined = chats.add({ label: "Book club", group: handle(), rejoined: true });
     const reset = chats.add({ label: "Book club", group: handle() });
     expect(chatViewKey(reset)).toBe(chatViewKey(joined));
+  });
+});
+
+describe("when a group was joined", () => {
+  it("a reload under the same id keeps the moment, and a Welcome replacing the group is a new one", () => {
+    vi.useFakeTimers({ now: 1_000 });
+    try {
+      const chats = chatApi();
+      const joined = chats.add({ label: "Book club", group: handle() });
+      expect(joined.createdAtMs).toBe(1_000);
+      vi.setSystemTime(2_000);
+      expect(chats.add({ label: "Book club", group: handle() }).createdAtMs).toBe(1_000);
+      vi.setSystemTime(3_000);
+      expect(
+        chats.add({ label: "Joined", group: handle(), rejoined: true }).createdAtMs,
+      ).toBe(3_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a group loaded from the store keeps the stored moment, and has none when none was stored", () => {
+    const chats = chatApi();
+    const stored = chats.add({ label: "A", group: handle(), restored: true, joinedAtMs: 42 });
+    expect(stored.createdAtMs).toBe(42);
+    expect(chats.add({ label: "A", group: handle(), restored: true }).createdAtMs).toBe(0);
+  });
+
+  it("the store is given only the moments that are known", () => {
+    const chats = chatApi();
+    const known = chats.add({ label: "A", group: handle(), restored: true, joinedAtMs: 42 });
+    expect(joinedTimes(chats.groups())).toEqual({ [known.groupIdB64]: 42 });
+    chats.add({ label: "A", group: handle(), restored: true });
+    expect(joinedTimes(chats.groups())).toEqual({});
   });
 });

@@ -186,11 +186,19 @@ function affordance(over: Partial<ChatCallAffordanceInput>): ChatCallAffordanceI
     callInProgress: false,
     liveCallInThisChat: false,
     isGroup: false,
+    people: 2,
     ...over,
   };
 }
 
 describe("chatCallAffordance", () => {
+  it("a group with nobody else in it offers no call, and a call running in it can still be joined", () => {
+    expect(chatCallAffordance(affordance({ isGroup: true, people: 1 }))).toBe("hidden");
+    expect(
+      chatCallAffordance(affordance({ isGroup: true, people: 1, liveCallInThisChat: true })),
+    ).toBe("join-group");
+  });
+
   it("a call in progress anywhere hides the buttons, so a return to its chat never starts a second one", () => {
     expect(chatCallAffordance(affordance({ callInProgress: true, isGroup: true }))).toBe(
       "hidden",
@@ -217,6 +225,7 @@ describe("chatCallAffordance", () => {
   it("otherwise starts a group call in a group, of any size, and a 1x1 call in a one-to-one", () => {
     expect(chatCallAffordance(affordance({ isGroup: true }))).toBe("start-group");
     expect(chatCallAffordance(affordance({ isGroup: false }))).toBe("start-one-to-one");
+    expect(chatCallAffordance(affordance({ isGroup: true, people: 3 }))).toBe("start-group");
   });
 });
 

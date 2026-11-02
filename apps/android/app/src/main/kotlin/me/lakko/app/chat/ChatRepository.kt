@@ -1604,6 +1604,12 @@ public class ChatRepository(
                 reconcileAppointmentsBestEffort(groupIdHex, force = true)
                 persistKnownGroupBestEffort(groupIdHex)
                 persistSnapshotBestEffort()
+                // Section 10 of the group privacy spec — creation counts as
+                // activity. Only if absent: this also runs for a founded group
+                // brought back after a restart.
+                currentAccountIdB64.get()?.let {
+                    ConversationJoinedStore.saveIfAbsent(applicationContext, it, groupIdHex, System.currentTimeMillis())
+                }
                 // ADR-0042 — the founder is the OWNER: mint the push-routing
                 // secret + distribute it + subscribe under the derived push_gid.
                 // G-37 — kept INSIDE the provider critical section because it
@@ -2497,6 +2503,11 @@ public class ChatRepository(
         // ADR-0024 — a group re-joined under the same id keeps the read state
         // this device already persisted for it. Read outside the provider lock.
         seedReadWatermarksBestEffort(groupIdHex)
+        // Written after the settling above, which wipes what is left of a
+        // membership that ended: a rejoin gets a new moment.
+        currentAccountIdB64.get()?.let {
+            ConversationJoinedStore.save(applicationContext, it, groupIdHex, System.currentTimeMillis())
+        }
         publishThreadList()
         // ADR-0048 §2 — publish this device's profile into the group it just
         // joined: nobody there knows its name yet.
@@ -12580,6 +12591,7 @@ public class ChatRepository(
         }
         step("own echoes") { if (chatClientLazy.isInitialized()) chatClient.forgetOwnEchoesOf(groupIdHex) }
         step("group name") { GroupNameStore.delete(applicationContext, accountIdB64, groupIdHex) }
+        step("joined moment") { ConversationJoinedStore.delete(applicationContext, accountIdB64, groupIdHex) }
         step("push secret") { PushRoutingSecretStore.remove(applicationContext, accountIdB64, groupIdHex) }
         step("held") {
             val conversation = conversationIdOf(hex)
@@ -14221,6 +14233,9 @@ public class ChatRepository(
             thread.copy(
                 leaveWaiting = !thread.membershipEnded && leaveAccount != null &&
                     loadLeaveRequestedAt(leaveRecords, leaveAccount, thread.groupIdHex) != null,
+                joinedAtMs = leaveAccount?.let {
+                    ConversationJoinedStore.load(applicationContext, it, thread.groupIdHex)
+                },
                 localUnread = unread.count,
                 unreadViewedThisSession = unread.viewedThisSession,
             )
@@ -14412,6 +14427,11 @@ public data class ChatThread(
     /** ADR-0087 UX 9.4 — this device asked to leave and the request has not
      *  landed: the row says so. */
     val leaveWaiting: Boolean = false,
+    /** The moment this device created or joined this group
+     *  ([ConversationJoinedStore]), which is what the list sorts a
+     *  conversation with no message by. Carried here so a thread that gains it
+     *  counts as changed and the row is built again. */
+    val joinedAtMs: Long? = null,
     /** Incoming chat messages this device applied while the chat was not on
      *  screen, since it was last shown or since the process started (in
      *  memory). The chat list folds it with the cross-device read cursor. */

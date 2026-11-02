@@ -914,6 +914,9 @@ internal fun threadConversationRows(
     val kind = conversationKind(repository, thread.groupIdHex)
     val last = previewSourceRow(thread.messages)
     val lastMs = last?.let { parseMessageTimeMs(it.createdAt) }
+    // Section 10 of the group privacy spec — a conversation with no message
+    // sorts by the moment this device created or joined it.
+    val activityMs = me.lakko.app.chat.conversationActivityMs(lastMs, thread.joinedAtMs)
     val senderName = last?.takeIf { it.direction == Direction.Incoming }
         ?.authorKey?.let { directory.resolve(it).primary }
     val flags = flagsMap[thread.conversationHex]
@@ -933,12 +936,8 @@ internal fun threadConversationRows(
             senderName = senderName,
             strings = strings,
         ),
-        time = lastMs?.let { formatListTime(it, nowMs, zone, use24h, locale) },
-        // A conversation nothing has happened in yet has no activity
-        // at all, and the shared rule puts "never" at the bottom and
-        // breaks the tie on the title — so an unrelated refresh never
-        // reshuffles the empty ones.
-        lastActivityMs = lastMs,
+        time = activityMs?.let { formatListTime(it, nowMs, zone, use24h, locale) },
+        lastActivityMs = activityMs,
         // ADR-0045 UX §6.2.4 / §6.2.11 — no badge once the membership
         // has ended; the count would be frozen for good.
         unread = if (thread.membershipEnded) {

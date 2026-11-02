@@ -9,7 +9,8 @@
  * that carries at least one commit changes the set of PEOPLE (person keys,
  * ADR-0050 account keys), the device records on the batch's LAST commit row
  * the person keys that joined and the person keys that left, and the row is
- * drawn as one sentence per person, joined first ("VG3 joined", "VG2 left").
+ * drawn as one sentence per person, joined first ("VG3 joined", "VG2 is no
+ * longer in the group": the roster cannot tell leaving from being removed).
  * The keys are stored, never the names: a name is resolved when the row is
  * drawn, through the one display resolver ("Member" when unknown).
  *

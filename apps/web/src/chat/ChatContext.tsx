@@ -153,6 +153,8 @@ export interface ChatApi {
       /** Loaded from this device's store, so not made now. With no message
        *  to go by it must not read as the newest thing in the list. */
       readonly restored?: boolean;
+      /** When this device created or joined the group, from the store. */
+      readonly joinedAtMs?: number;
     },
   ): ActiveGroup;
   /** Drop a group from the registry. No-op when missing. */
@@ -222,6 +224,13 @@ export interface ChatApi {
 }
 
 const ChatContext = createContext<ChatApi>();
+
+/** When this device created or joined each group, for the snapshot row. */
+export function joinedTimes(groups: readonly ActiveGroup[]): Record<string, number> {
+  return Object.fromEntries(
+    groups.filter((g) => g.createdAtMs > 0).map((g) => [g.groupIdB64, g.createdAtMs]),
+  );
+}
 
 export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
   const [groups, setGroups] = createSignal<readonly ActiveGroup[]>([]);
@@ -369,12 +378,20 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
     },
     add(input) {
       const groupIdB64 = base64Encode(input.group.groupId);
-      const held = groups().find((g) => g.groupIdB64 === groupIdB64)?.joinGeneration ?? 0;
+      const prior = groups().find((g) => g.groupIdB64 === groupIdB64);
+      const held = prior?.joinGeneration ?? 0;
       const entry: ActiveGroup = {
         groupIdB64,
         label: input.label,
         group: input.group,
-        createdAtMs: input.restored === true ? 0 : Date.now(),
+        // A group reloaded under its id keeps the moment it was joined; only
+        // a Welcome that replaced it is a new join.
+        createdAtMs:
+          input.restored === true
+            ? (input.joinedAtMs ?? 0)
+            : prior !== undefined && input.rejoined !== true
+              ? prior.createdAtMs
+              : Date.now(),
         joinGeneration: input.rejoined === true ? held + 1 : held,
       };
       // Upsert by groupIdB64 — a duplicate Welcome on the same
@@ -422,6 +439,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
         snapshotBytes,
         knownGroupIds,
         base64Encode(id.signaturePublicKey),
+        joinedTimes(groups()),
       );
     },
     async persistSnapshotDurable(accountIdB64, expectedIdentity) {
@@ -453,6 +471,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
         snapshotBytes,
         knownGroupIds,
         base64Encode(id.signaturePublicKey),
+        joinedTimes(groups()),
       );
     },
     async persistSnapshotWithCommit(accountIdB64, entry) {
@@ -486,6 +505,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
         knownGroupIds,
         full,
         base64Encode(id.signaturePublicKey),
+        joinedTimes(groups()),
       );
     },
     clear() {

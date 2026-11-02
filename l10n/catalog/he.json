@@ -3103,7 +3103,7 @@
       "status": "machine"
     },
     "chat.system.member_left": {
-      "text": "{name} עזב/ה",
+      "text": "{name} כבר לא בקבוצה",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -6424,10 +6424,6 @@
     },
     "new_group.error.sign_in": {
       "text": "התחברו מחדש כדי ליצור קבוצה.",
-      "status": "machine"
-    },
-    "new_group.index_hint": {
-      "text": "בחרו קבוצה כדי להתחיל לשלוח הודעות",
       "status": "machine"
     },
     "new_group.name_hint": {

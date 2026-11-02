@@ -90,6 +90,10 @@ export interface MlsSnapshotRecord {
    *  be restored into this one; `undefined` on a row written before the
    *  field existed, which the rehydrate path treats as a mismatch. */
   leafKeyB64?: string;
+  /** When this device created or joined each group, ms since epoch, by
+   *  base64 `group_id`. Joining counts as activity in the conversation list
+   *  and has to outlast a reload, when no message may say so yet. */
+  joinedAtMs?: Readonly<Record<string, number>>;
 }
 
 /** Internal on-disk row shape. The `ciphertext` here actually
@@ -100,6 +104,7 @@ interface PersistedRow {
   ciphertext: Uint8Array;
   knownGroupIds: string[];
   leafKeyB64?: string;
+  joinedAtMs?: Readonly<Record<string, number>>;
 }
 
 /**
@@ -200,6 +205,8 @@ async function decryptSnapshot(
  * @param knownGroupIds   Base64-encoded `group_id`s the
  *                        rehydrate path should later drive
  *                        through `Group.load`.
+ * @param joinedAtMs      When this device created or joined each
+ *                        of them.
  */
 export async function saveMlsSnapshot(
   accountIdB64: string,
@@ -207,6 +214,7 @@ export async function saveMlsSnapshot(
   snapshotBytes: Uint8Array,
   knownGroupIds: readonly string[],
   leafKeyB64?: string,
+  joinedAtMs?: Readonly<Record<string, number>>,
 ): Promise<void> {
   const ciphertext = await encryptSnapshot(deviceKey, snapshotBytes);
   const row: PersistedRow = {
@@ -214,6 +222,7 @@ export async function saveMlsSnapshot(
     ciphertext,
     knownGroupIds: [...knownGroupIds],
     ...(leafKeyB64 === undefined ? {} : { leafKeyB64 }),
+    ...(joinedAtMs === undefined ? {} : { joinedAtMs }),
   };
   const db = await openMlsDb();
   try {
@@ -255,6 +264,7 @@ export async function saveSnapshotWithCommitEntry(
   knownGroupIds: readonly string[],
   entry: PendingCommitEntry,
   leafKeyB64?: string,
+  joinedAtMs?: Readonly<Record<string, number>>,
 ): Promise<void> {
   const ciphertext = await encryptSnapshot(deviceKey, snapshotBytes);
   const snapshotRow: PersistedRow = {
@@ -262,6 +272,7 @@ export async function saveSnapshotWithCommitEntry(
     ciphertext,
     knownGroupIds: [...knownGroupIds],
     ...(leafKeyB64 === undefined ? {} : { leafKeyB64 }),
+    ...(joinedAtMs === undefined ? {} : { joinedAtMs }),
   };
   const db = await openMlsDb();
   try {
@@ -309,6 +320,7 @@ export async function loadMlsSnapshot(
     snapshotBytes,
     knownGroupIds: row.knownGroupIds,
     ...(row.leafKeyB64 === undefined ? {} : { leafKeyB64: row.leafKeyB64 }),
+    ...(row.joinedAtMs === undefined ? {} : { joinedAtMs: row.joinedAtMs }),
   };
 }
 

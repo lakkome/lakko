@@ -53,7 +53,10 @@ ADR-0087. Add a scenario whenever a defect shows one was missing.
 13. A message sent while the other side is offline arrives; push wakes a closed app.
 
 ## Groups
-14. Create a group with nobody else, then add people.
+14. Create a group with nobody else, then add people. Alone, it shows no call buttons;
+    they appear with the second person and go when that person is removed. A group just
+    created or joined, with no message yet, sits at the top of Chats on both sides, and
+    stays there after a restart.
 15. Create a group with contacts and with people found by search.
 16. Name, photo, roles, admins, ownership transfer.
 17. Add, remove, leave, and re-add the same person; the removed person loses the group
@@ -76,7 +79,10 @@ ADR-0087. Add a scenario whenever a defect shows one was missing.
 24. Post text, photo, file, voice, video note, GIF; a subscriber sees each. (design)
 24b. A subscriber reacts and takes it off on two devices; comments under a post, opens and
     collapses the thread; a publisher deletes a comment and bans. (design)
-25. Find a channel by @handle and by name; subscribe; unsubscribe. (design)
+25. Find a channel by @handle and by name; subscribe; unsubscribe. Opening a channel
+    found by search shows Subscribe and changes nothing: the owner's count moves only
+    when Subscribe is pressed. A channel already followed opens straight to its posts.
+    (design)
 26. Invite a person to a channel, public and private. (design)
 27. A subscriber who joins later; one who was offline across a rotation.
 28. Publishers of a channel post and moderate, only the owner renames and adds them;

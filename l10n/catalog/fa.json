@@ -3103,7 +3103,7 @@
       "status": "machine"
     },
     "chat.system.member_left": {
-      "text": "{name} رفت",
+      "text": "{name} دیگر در گروه نیست",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -6424,10 +6424,6 @@
     },
     "new_group.error.sign_in": {
       "text": "برای ساخت گروه دوباره وارد شوید.",
-      "status": "machine"
-    },
-    "new_group.index_hint": {
-      "text": "برای شروع پیام‌رسانی یک گروه را انتخاب کنید",
       "status": "machine"
     },
     "new_group.name_hint": {

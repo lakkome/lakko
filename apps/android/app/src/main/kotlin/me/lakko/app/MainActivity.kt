@@ -2088,8 +2088,13 @@ private fun SessionRoot(
                         onNewChat = { navController.navigate(Routes.NEW_CHAT) },
                         onCreateGroup = { navController.navigate(Routes.NEW_GROUP) },
                         onCreateChannel = { navController.navigate(Routes.CHANNEL_NEW) },
+                        // A tap on a search result opens the channel's page;
+                        // it subscribes nobody.
                         onSubscribeToChannel = { id, handle ->
-                            navController.navigate(Routes.channelSubscribe(id, handle))
+                            val held = channelsState.channels.value.any { it.id == id }
+                            navController.navigate(
+                                if (held) Routes.channel(id) else Routes.channelSubscribe(id, handle, pressed = false),
+                            )
                         },
                         // Only the plain lookup row (no people search wired)
                         // reaches this; the people search sends the request
@@ -2158,9 +2163,10 @@ private fun SessionRoot(
                         onGoToChats = { navController.navigateToTab(Routes.CHATS) },
                         channelsClient = channelsClient,
                         // ADR-0059 — a card whose handle was verified opens the
-                        // ordinary subscribe route under that handle.
+                        // ordinary subscribe route under that handle. This is
+                        // the card's Subscribe button: a press.
                         onSubscribeChannel = { id, handle ->
-                            navController.navigate(Routes.channelSubscribe(id, handle))
+                            navController.navigate(Routes.channelSubscribe(id, handle, pressed = true))
                         },
                         // UX spec section 5 — the item menu's Forward opens the
                         // chat's own picker.
@@ -2244,7 +2250,7 @@ private fun SessionRoot(
                         state = channelsState,
                         client = channelsClient,
                         onBack = { navController.popBackStack() },
-                        onSubscribe = { navController.navigate(Routes.channelSubscribe(id, handle = null)) },
+                        onSubscribe = { navController.navigate(Routes.channelSubscribe(id, handle = null, pressed = true)) },
                         onManage = { navController.navigate(Routes.channelManage(id)) },
                     )
                 }
@@ -2256,6 +2262,10 @@ private fun SessionRoot(
                             nullable = true
                             defaultValue = null
                         },
+                        androidx.navigation.navArgument("pressed") {
+                            type = androidx.navigation.NavType.BoolType
+                            defaultValue = false
+                        },
                     ),
                 ) { entry ->
                     val id = entry.arguments?.getString("channelId") ?: return@composable
@@ -2264,6 +2274,7 @@ private fun SessionRoot(
                         state = channelsState,
                         client = channelsClient,
                         handle = entry.arguments?.getString("handle")?.takeIf { it.isNotEmpty() },
+                        subscribePressed = entry.arguments?.getBoolean("pressed") == true,
                         onBack = { navController.popBackStack() },
                     )
                 }
@@ -3035,9 +3046,12 @@ private object Routes {
     /** A channel; `channelId` is the 32-char hex id (URL-safe by construction). */
     const val CHANNEL = "channel/{channelId}"
     fun channel(channelId: String): String = "channel/$channelId"
-    const val CHANNEL_SUBSCRIBE = "channel/{channelId}/subscribe?handle={handle}"
-    fun channelSubscribe(channelId: String, handle: String?): String =
-        "channel/$channelId/subscribe?handle=${android.net.Uri.encode(handle.orEmpty())}"
+    const val CHANNEL_SUBSCRIBE = "channel/{channelId}/subscribe?handle={handle}&pressed={pressed}"
+
+    /** [pressed]: the person pressed Subscribe on the way here. Without it the
+     *  page only offers the button. */
+    fun channelSubscribe(channelId: String, handle: String?, pressed: Boolean): String =
+        "channel/$channelId/subscribe?handle=${android.net.Uri.encode(handle.orEmpty())}&pressed=$pressed"
     const val CHANNEL_MANAGE = "channel/{channelId}/manage"
     fun channelManage(channelId: String): String = "channel/$channelId/manage"
     const val PROFILE = "settings/profile"

@@ -504,7 +504,12 @@ public fun ChannelDetailScreen(
     val isOrphaned = me.lakko.app.channels.channelIsOrphaned(channelId, orphaned)
     val channel = channels.firstOrNull { it.id == channelId }
     val keys = keysByChannel[channelId]?.takeIf { !isOrphaned }
-    val isSubscriber = subscriberKeysByChannel.containsKey(channelId) && !isOrphaned
+    // Following needs the list row too: a reader key alone is what a subscribe
+    // that never finished left, and this screen registers nobody.
+    val isSubscriber = channelIsFollowed(
+        listed = channel != null,
+        readerKeyHeld = subscriberKeysByChannel.containsKey(channelId),
+    ) && !isOrphaned
     val strings = LocalStrings.current
     val title = channel?.let { channelTitle(it, strings) } ?: t("channels.fallback_name")
     // The header card below carries the name, the handle, the description and
@@ -606,30 +611,51 @@ public fun ChannelDetailScreen(
                     state = state,
                     client = client,
                 )
-                else -> Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    channel?.let { channelDescription(it) }?.let {
-                        Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.height(12.dp))
-                    }
-                    Text(t("channels.subscribe.prompt_title"), style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.height(12.dp))
-                    Button(onClick = onSubscribe) { Text(t("channels.subscribe.action")) }
-                }
+                else -> SubscribePrompt(
+                    description = channel?.let { channelDescription(it) },
+                    onSubscribe = onSubscribe,
+                )
             }
         }
     }
 }
 
 /**
- * The subscribe route for a channel found by handle or id: registers this
- * device's reader key, waits for the channel owner's key, then shows the
- * posts — the same view the channel screen shows a subscriber afterwards.
+ * The page of a channel this account does not follow. It spends no token and
+ * registers no key: a person becomes a subscriber only by pressing Subscribe
+ * (`docs/ux/group-and-channel-privacy.md` section 5.1).
+ */
+@Composable
+private fun SubscribePrompt(description: String?, onSubscribe: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        description?.let {
+            Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(12.dp))
+        }
+        Text(t("channels.subscribe.prompt_title"), style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            t("channels.subscribe.prompt_body"),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(12.dp))
+        Button(onClick = onSubscribe) { Text(t("channels.subscribe.action")) }
+    }
+}
+
+/**
+ * A channel found by handle or id. Until Subscribe is pressed it is the
+ * [SubscribePrompt] page and nothing else; once pressed, here or on the card
+ * that led here, it registers this device's reader key, waits for the channel
+ * owner's key, then shows the posts — the same view the channel screen shows a
+ * subscriber afterwards.
  */
 @Composable
 public fun ChannelSubscribeScreen(
@@ -638,14 +664,22 @@ public fun ChannelSubscribeScreen(
     client: ChannelsClient,
     /** The handle the channel was found by, if any: its list name until it has a better one. */
     handle: String?,
+    /** Subscribe was already pressed, on the card that opened this page. */
+    subscribePressed: Boolean,
     onBack: () -> Unit,
 ) {
     val channels by state.channels.collectAsState()
+    val subscriberKeys by state.subscriberKeysByChannel.collectAsState()
     val channel = channels.firstOrNull { it.id == channelId }
+    var pressed by rememberSaveable(channelId) { mutableStateOf(subscribePressed) }
+    val reading = channelPageReads(
+        followed = channelIsFollowed(listed = channel != null, readerKeyHeld = subscriberKeys.containsKey(channelId)),
+        pressed = pressed,
+    )
     // A channel this device subscribes to belongs in its list, else there is
     // no way back to it after leaving this screen.
-    LaunchedEffect(channelId) {
-        if (state.channels.value.none { it.id == channelId }) {
+    LaunchedEffect(channelId, reading) {
+        if (reading && state.channels.value.none { it.id == channelId }) {
             val bare = handle?.trim()?.removePrefix("@").orEmpty()
             state.addChannel(
                 ChannelHandle(
@@ -661,7 +695,9 @@ public fun ChannelSubscribeScreen(
     Scaffold(
         topBar = {
             ChannelTopBar(
-                title = channel?.let { channelTitle(it, LocalStrings.current) } ?: t("channels.fallback_name"),
+                title = channel?.let { channelTitle(it, LocalStrings.current) }
+                    ?: handle?.takeIf { it.isNotBlank() }?.let { "@" + it.trim().removePrefix("@") }
+                    ?: t("channels.fallback_name"),
                 onBack = onBack,
             )
         },
@@ -671,12 +707,19 @@ public fun ChannelSubscribeScreen(
                 .fillMaxSize()
                 .padding(inner),
         ) {
-            SubscriberChannelView(
-                channelId = channelId,
-                header = channel?.let { channelHeaderModel(it, isOwner = false, LocalStrings.current) },
-                state = state,
-                client = client,
-            )
+            if (reading) {
+                SubscriberChannelView(
+                    channelId = channelId,
+                    header = channel?.let { channelHeaderModel(it, isOwner = false, LocalStrings.current) },
+                    state = state,
+                    client = client,
+                )
+            } else {
+                SubscribePrompt(
+                    description = channel?.let { channelDescription(it) },
+                    onSubscribe = { pressed = true },
+                )
+            }
         }
     }
 }
@@ -1421,7 +1464,9 @@ private fun SubscriberChannelView(
             // it already holds is not registered again on every open; the
             // catch-up re-registers when the current epoch's seed is missing.
             val existingKeys = state.subscriberKeysByChannel.value[channelId]
-            val alreadyFollowing = existingKeys != null &&
+            // `attempt` above 0 is `Try again` after a failed subscribe, whose
+            // key and list row are already here: that press must register.
+            val alreadyFollowing = attempt == 0 && existingKeys != null &&
                 state.channels.value.any { it.id == channelId }
             val kp = existingKeys
                 ?: ChannelsComposer.freshSubscriberKeys().also {
