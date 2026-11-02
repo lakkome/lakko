@@ -75,6 +75,7 @@ Entry: the create menu ([`navigation.md`](navigation.md) section 3). Spec
 
 ```
 New group
+              ( FW )[✎]           photo, optional: initials of the name until one is chosen
 Group name    [                    ]
 @name         [@family_k3x9        ]
               Only members see this.
@@ -98,11 +99,12 @@ Add people (optional)
   needs a name."
 - **Create group** is enabled when the `@name` is well formed and, if Public, there
   is a name. Nobody has to be picked.
+- The photo is optional and never blocks Create. Choosing it is section 4.5.3.
 
 ### 3.2 New channel
 
-The same form: `Channel name` (required, as today), `Description`, `@name`, `Who can
-subscribe`.
+The same form: the photo (optional, section 4.5.3), `Channel name` (required, as
+today), `Description`, `@name`, `Who can subscribe`.
 
 - `Private`, default: "Only people you invite can subscribe. It stays out of search."
 - `Public`: "Anyone can find this channel and subscribe. Lakko may suggest it in
@@ -125,6 +127,8 @@ subscribe`.
 | Too many today | "You've created a lot of groups today. Try again tomorrow." |
 | No network | "Could not reach Lakko. Check your connection and try again." The form stays filled. |
 | Secure setup failed | "Couldn't create this group. Nothing was created. Try again." |
+| The photo could not be uploaded | Under the photo: "Couldn't upload the photo. Check your connection and try again." Nothing was created, and the form stays filled. Removing the photo lets Create go ahead without it. |
+| Sending files is over its limit | Under the photo: "You have reached the limit for sending files. Try again later." As above. |
 | Created | The conversation opens. Picks are added through the normal add path, as `new-group.md` says. |
 
 The word "taken" is used only when the person can see the holder; "isn't available"
@@ -163,10 +167,10 @@ asks first.
 
 | Action | Dialog title | Body | Confirm |
 |---|---|---|---|
-| Private to public, group | Make this group public? | Anyone can find it and ask to join. Its name, description and rough size become visible to everyone. | Make public |
+| Private to public, group | Make this group public? | Anyone can find it and ask to join. Its name, photo, description and rough size become visible to everyone. | Make public |
 | Public to private, group | Make this group private? | It leaves search. People can join only if the owner or an admin invites them. Everyone in the group stays. | Make private |
 | ... with requests waiting | (same) | (same) + "{n} people are waiting to join. You can still answer them." | Make private |
-| Private to public, channel | Make this channel public? | Anyone can find it and read it, and Lakko may suggest it in Discover. Its name and description become visible to everyone. Posts from before stay readable only by people who already subscribe. | Make public |
+| Private to public, channel | Make this channel public? | Anyone can find it and read it, and Lakko may suggest it in Discover. Its name, photo and description become visible to everyone. Posts from before stay readable only by people who already subscribe. | Make public |
 | Public to private, channel | Make this channel private? | It leaves search and Discover. People can subscribe only if you invite them. Everyone subscribed stays. | Make private |
 | New `@name` | Change @name? | The old @name stops working now. It stays reserved for this group for 30 days. | Change |
 
@@ -199,6 +203,142 @@ owner was away for months:
   type opens with the proposed name.
 - Others see the header line with no `@name` row.
 - Nothing about the conversation changes.
+
+### 4.5 The photo
+
+Added 2026-11-02 (maintainer: groups and channels have photos too; the choices below
+decided 2026-11-02, maintainer). A group and a channel have a photo, or a short video
+(decided 2026-11-02, maintainer), the way a person does
+([`profile-screen.md`](profile-screen.md) section 2). With none, the circle shows the
+initials of the title on the tint of its id, as today. Architecture:
+[ADR-0087](../adr/0087-group-and-channel-handles-and-privacy.md) section 18.
+
+#### 4.5.1 Who sets it
+
+The same people who rename it.
+
+| | Group | Channel |
+|---|---|---|
+| Set, change, remove | the owner and admins | the owner |
+| Everyone else | sees it | sees it |
+
+Publishers of a channel see the photo and cannot change it, as they cannot rename
+(section 15). The photo belongs to the group, not to the person who set it: it stays
+when that person leaves, and changes only when someone who may set it changes it.
+
+**Nobody has to keep it.** The devices of the owner and of the admins (a channel: of the
+owner and the publishers) keep the photo's file from expiring by themselves, whenever
+Lakko is open on them, with no control, prompt or message on any screen (decided
+2026-11-02, maintainer). A replaced photo is deleted by the devices of whoever set it;
+if that person has left, it expires after a year that nobody opened it (decided
+2026-11-02, maintainer). Neither shows anywhere.
+
+#### 4.5.2 Changing it on the info screen
+
+The header avatar of the info screen is 96 pt. For whoever may set the photo it carries
+the edit button of Settings > Profile (a 32 pt pencil on its lower trailing edge,
+accessible label `Change photo`). Tapping the button, or the avatar itself, opens the
+same in-app menu as the profile photo:
+
+| Item | Shown when |
+|---|---|
+| `Photo or video` | always |
+| `Camera` | the device has a camera |
+| `Remove photo` | a photo or video is set; destructive colour |
+
+`Photo or video` and `Camera` lead to the profile photo's crop screen and camera screen
+unchanged ([`profile-screen.md`](profile-screen.md) sections 2.2 and 2.3): a square,
+a still of at most 640 px or a video of at most 10 s, no sound kept, the same message
+when a video cannot be used.
+
+**There is no Save.** The info screen has no pending state: `Use` on the crop screen
+is the confirmation, and the photo is sent from there, as a rename is sent when the
+field closes. `Remove photo` asks first, because everyone loses the photo at once:
+
+| Kind | Dialog title | Body | Confirm |
+|---|---|---|---|
+| Group | Remove the group photo? | Everyone in the group will see its initials instead. | Remove |
+| Channel | Remove the channel photo? | Subscribers will see its initials instead. | Remove |
+
+States of the header after `Use` or `Remove`:
+
+| State | What the header shows |
+|---|---|
+| Uploading | The new photo, with a progress ring around the circle. The edit button is disabled. |
+| Sent | The new photo. No toast and no timeline row, as for a rename (section 4.2). |
+| Upload failed | The photo in effect before, and under the header: "Couldn't upload the photo. Check your connection and try again." with `Try again`. Leaving the screen drops the attempt; nothing was sent. |
+| Sending files is over its limit | The photo in effect before, and "You have reached the limit for sending files. Try again later." |
+| Uploaded, the device went offline | The new photo, and "Will apply when you're back online." under the header. It is sent when the device is back, also after a restart. |
+| No longer allowed (the person was demoted while the crop screen was open) | The photo in effect, and "Only the owner and admins can change the photo." (a channel: "Only the owner can change the photo."). Nothing was sent. |
+| The photo in effect is gone (its file expired or was deleted) | Initials, and for whoever may set it only: "The photo is no longer available. Choose another." Everyone else sees initials and nothing more. |
+
+Two admins changing the photo at about the same time: the later change wins on every
+device, as for the name.
+
+#### 4.5.3 Choosing it at creation
+
+The New group and New channel forms (sections 3.1 and 3.2) open with the avatar slot:
+96 pt, the initials of the typed name (or a group or channel glyph before any name), and
+the same edit button and menu, without `Remove photo` until one is chosen. After `Use`
+the slot shows the chosen photo; choosing again replaces it.
+
+The photo is uploaded when Create is pressed, before anything is created, so a failed
+upload creates nothing (the states are in section 3.3). A public group or channel is
+published with its photo.
+
+#### 4.5.4 Where it shows
+
+Every circle that stands for the group or channel shows its photo when this device holds
+it, else the initials:
+
+- the row in Chats and in a folder, the conversation header, the info header;
+- local search results, and the **Groups and channels** rows of network search
+  (section 5) for a public one;
+- the card (section 5.1), the `Requests sent` list (section 6.2);
+- the group invite page and a channel's link page (section 7.2), and the channel
+  invitation card in a chat (section 14);
+- the Forward picker and any other list of conversations;
+- the call screen of a group call ([`navigation.md`](navigation.md) section 5);
+- Feed items from groups and channels.
+
+A video plays muted and looped only in the large views: the info header, the card of
+section 5.1 and the invite and link pages. Everywhere else its still is shown.
+
+Notifications show no conversation photo, as they show no person's photo: the
+background paths never download one.
+
+| State | What the circle shows |
+|---|---|
+| There is a photo, not downloaded yet | Initials; the photo replaces them when it arrives, no spinner |
+| Download or decryption failed | Initials; tried again on the next display after 1 minute |
+| Removed | Initials, on every device, when the change arrives |
+| Changed | The new photo when it arrives; the old one until then |
+| Gone (expired or deleted) | Initials, and no error (section 4.5.2 for the people who may set it) |
+| Invite or link page, not signed in | Initials: a photo is downloaded only by a signed-in device |
+| Invite or link page, the photo changed since the link was made | The photo the link was made with, or initials once that one is gone |
+
+**A newcomer** gets the photo with the name when they are added, and a new subscriber
+with the channel's name. A device added to an account gets it at the same moment.
+
+**A public group or channel** shows its photo to anyone who finds it, before they join.
+Going private stops new people seeing it in search, and the owner's device sends the
+same photo again in a form only members can open, with nothing to do for anyone
+(decided 2026-11-02, maintainer). Someone who already saw the card may still have it,
+like the name.
+
+**When a membership ends** (section 9) the downloaded photo goes with the rest of the
+conversation.
+
+#### 4.5.5 Per platform
+
+The avatar component that draws a person (web `ui/Avatar.tsx`, iOS `ProfileAvatar`,
+Android `LakkoAvatar`) draws a group or channel too, looked up by the conversation
+instead of a person's key. Behind it each client has one store of downloaded photos
+for people, groups and channels, bounded in size; when it is full, the photo drawn
+least recently goes first, and it is downloaded again the next time it is drawn,
+showing initials until then (decided 2026-11-02, maintainer). The menu is `LakkoMenu`, the dialog `LakkoDialog`, the crop
+and camera screens are the profile photo's. Nothing differs between platforms beyond
+the design system's idioms.
 
 ## 5. Finding a group or channel
 
@@ -537,6 +677,7 @@ Members can find me          [on]     everyone, per who-can-find-me section 5
 Unsubscribe                           a subscriber
 ```
 
+The owner changes the photo from the header avatar (section 4.5.2).
 Rename and the description are edited in place in the header by the owner, as a group's
 name.
 
@@ -750,6 +891,10 @@ channel's cannot, since a million people are not a roster, so publishers have th
 | Comments | Comment / Show {n} more comments / Write a comment / {n} new comments |
 | Comments failed | Comments didn't load. |
 | Moderation | Ban from comments / Banned / Unban |
+| Photo | Change photo / Remove photo / Remove the group photo? / Remove the channel photo? |
+| Photo failed | Couldn't upload the photo. Check your connection and try again. |
+| Photo not allowed | Only the owner and admins can change the photo. / Only the owner can change the photo. |
+| Photo gone | The photo is no longer available. Choose another. |
 
 Never in copy: journal, knock, epoch, record, OPRF, token, key, commit, proposal. No
 statement of what servers cannot see. A public channel carries no lock and no claim of
@@ -779,6 +924,12 @@ privacy.
 - Per account the reactions it gave, shared among its devices and kept on them only, so
   that a second device knows what the first gave.
 - Per channel a ban list, sealed, folded by every reader.
+- Per group and channel a photo reference (a still, optionally a video) with a stamp,
+  synced among members and subscribers, set only by whoever may rename; in the public
+  record of a public one; in the preview of a group link and a channel link.
+- Per device a durable "photo owed" record per conversation (uploaded, not yet sent),
+  and the existing avatar cache keyed by file.
+- Per photo, whether its file is gone, as distinct from a failed download.
 
 ## 18. One model, three implementations
 
@@ -790,6 +941,9 @@ design system's. **Which sections an info screen shows stays one copy in
 inputs. A channel's blocks and a group's come from one function over one capability
 record, so a channel cannot grow a screen of its own.
 
+The avatar component is one per client and draws people, groups and channels alike
+(section 4.5.5).
+
 **Per platform.** The group type screen is a pushed screen on all three. The picker is
 `LakkoPicker`. The removal banner is the design system's Banner.
 
@@ -798,7 +952,6 @@ record, so a channel cannot grow a screen of its own.
 - A shareable address for a public name.
 - A ban list. A removed person may ask again in a public group.
 - "Let anyone join" with no approval on a public group.
-- Group photos.
 - Telling a person their request was refused.
 - Transferring a channel's ownership.
 - Attachments in comments.

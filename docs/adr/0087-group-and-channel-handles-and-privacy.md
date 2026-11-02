@@ -5,9 +5,10 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0087: Every group and channel has an @name, and is public or private
 
-- **Status:** Proposed (2026-10-31, amended 2026-11-01). The product decisions in Context
-  are the maintainer's and are final; the mechanism below is proposed. Nothing is built,
-  apart from the group of one and the end-of-membership groundwork.
+- **Status:** Proposed (2026-10-31, amended 2026-11-01; section 18, the photo, added
+  2026-11-02). The product decisions in Context are the maintainer's and are final; the
+  mechanism below is proposed. Nothing is built, apart from the group of one and the
+  end-of-membership groundwork.
 - **Date:** 2026-10-31
 - **Context:** product, the scale requirement in `CLAUDE.md`, invariants #1, #2,
   #3, #4, #5. UX spec:
@@ -21,7 +22,9 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   is folded into public, the handle route, channel post content),
   [ADR-0060](0060-scoped-discovery.md) (the public record covers groups and
   channels), [ADR-0065](0065-attachment-lifetime-and-access.md) (a shorter idle
-  life for a channel's files),
+  life for a channel's files; a keep source for conversation photos),
+  [ADR-0084](0084-profile-photo.md) (its avatar codec is shared with groups and
+  channels, section 18),
   [ADR-0064](0064-conversation-backup-and-device-re-entry.md) (a vault ends with
   the membership), [ADR-0078](0078-servers-cannot-link-accounts.md) section 4
   (one knock key per group, not per link; this ADR makes it a prerequisite)
@@ -826,7 +829,240 @@ Flag day, as usual: no production users. Test stacks are reset. A test group tha
 no handle needs no compatibility code, because a group whose lease lapsed is the same
 state: the owner's device asks for an @name (UX section 4.4).
 
+### 18. The photo
+
+Added 2026-11-02 (maintainer: groups and channels have photos too). The five choices
+of 18.8 were decided by the maintainer the same day; the mechanism is proposed. UX:
+[`group-and-channel-privacy.md`](../ux/group-and-channel-privacy.md) section 4.5.
+
+**The photo of a group or channel is a profile photo with a different owner.** The
+bytes are what [ADR-0084](0084-profile-photo.md) uploads for a person: a square JPEG
+still (at most 640 px, 256 KiB) and optionally a square H.264 MP4 without sound (at
+most 480 px, 4 MiB, 10 s; the video is allowed, decided 2026-11-02, maintainer), each
+encrypted with `encrypt_attachment` under a fresh key
+and stored as a blob. What changes is who may set it, how the reference travels and
+who keeps the file alive.
+
+**One codec.** The ADR-0084 avatar field, `avatar_len(1: 0 | 84 | 170) ‖ avatar` with
+its bounds (square, sizes, duration; any violation refuses the whole envelope), moves
+out of `lakko-contacts::profile` into a module of its own, `lakko-contacts::avatar`,
+used unchanged by the profile and by every carrier below. The profile wire does not
+change. `lakko-channels` already depends on `lakko-contacts`, so the channel record
+uses the same module.
+
+#### 18.1 To the members of a group: an envelope of its own
+
+```text
+envelope = "lakko/group-photo/v1\0" ‖ version(1)=0x01 ‖ updated_at_ms(8, BE)
+           ‖ avatar_len(1: 0 | 84 | 170) ‖ avatar
+```
+
+Exactly 31, 115 or 201 bytes. `avatar_len = 0` removes the photo. Bounded, fail-closed,
+dispatched as `IncomingEnvelope::GroupPhoto`, never rendered, fuzz target
+`group_photo_decode`, the cross-kind separator test extended.
+
+It follows ADR-0051's group name in everything but its content:
+
+- **Authority at receipt.** The receiver resolves the sender to its account key (C-68)
+  and reads the live role table: owner or admin, accepted if newer; anyone else, an
+  unresolvable sender or an unreadable table, dropped. The read-decide-write runs
+  under the per-group lock (C-62 sub-invariant 5). A one-to-one drops it, as it drops a
+  group name.
+- **Order.** Strictly newer `updated_at_ms` wins, per group; equal is not newer. The
+  stamp is stored and re-emitted verbatim on a re-send (the ADR-0044 lesson).
+- **Carriers and timing.** Sent after the creating commit when the group was created
+  with a photo, on every change, and on growth, re-sent by the owner and admins that
+  hold one on the name's schedule; the device that committed the add sends at once
+  (ADR-0051 section 3 as amended 2026-10-31).
+- **Background filters.** The web service worker, the Android background decrypt and
+  the iOS NSE recognise and suppress it; the extension surface gets decode only.
+- **Store.** `{ avatar, updated_at_ms }` per `(account, group)`, beside the name.
+
+**Why not a second version of the group name envelope.** A name and a photo are
+changed independently, often by different admins. One record with one stamp means the
+admin who renames sends the photo it last saw, and the admin who changes the photo
+sends the name it last saw; the later stamp wins whole, so a rename made a moment
+before a photo change is undone on every device. Two envelopes keep two registers.
+The cost is one more journal row per growth event, at most 201 bytes of envelope.
+
+**Why not the conversation-handle envelope (section 11).** It is signed by the handle
+key, which only the owner holds (section 3), and admins set the photo. Its relay rule
+(any member may relay, because the signature is checkable) does not carry over: a
+photo envelope has no signature a member could check, only the sender's role.
+
+**Why not a `GroupContext` extension.** ADR-0051's reason: every change would be a
+commit, a proposal and an owner sweep under ADR-0045, and a `lakko-mls` change.
+
+#### 18.2 To the subscribers of a channel: channel metadata v3
+
+The v3 record (sections 11 and 16, not shipped) gains the field after the handle:
+
+```text
+... ‖ public ‖ handle_len ‖ handle ‖ avatar_len(1: 0 | 84 | 170) ‖ avatar ‖ reactions_mode ‖ ...
+```
+
+At most 171 bytes more per record. The record keeps its one stamp: it has one writer
+(the owner renames, describes and sets the photo, section 15), and a publisher's
+re-issue after a rotation carries the stored record, photo included, verbatim. As for
+the name, "only the owner" is held by the clients; the service checks only that a
+publisher signed the post (section 15's limit, unchanged). A subscriber learns the
+photo with the name from the newest record, and a new subscriber from the record of the
+newest epoch.
+
+#### 18.3 In the public record, and what public means for the key
+
+The handle record payload (section 4) gains the field after the size band, with the
+first byte moved from `0x41` to `0x42` (flag day; a `0x41` payload is refused):
+
+```text
+payload = 0x42 ‖ kind ‖ updated_at_ms ‖ id_len ‖ id ‖ key ‖ handle_len ‖ handle
+          ‖ name_len ‖ name ‖ description_len ‖ description ‖ size_band
+          ‖ avatar_len(1: 0 | 84 | 170) ‖ avatar
+```
+
+`HANDLE_RECORD_PAYLOAD_MAX_LEN` goes from 1,391 to 1,562 bytes and
+`PUBLIC_RECORD_MAX_LEN` from 7,411 to 7,582 (arithmetic: the handle record is the
+larger of the two payload kinds); the `public_records.record` column is widened to
+match, by a migration the existing pinning test checks.
+
+**The blob key is then public.** A public record opens for anyone holding a
+`discovery-lookup` token and a search term, and for the operator, who holds the OPRF
+key, for any name it can guess. So the photo of a public group or channel is a public
+file: anyone who opened the record can download and decrypt it while it lives. That is
+the point of a public photo, the same class as the public name, and it is said in the
+dialog that makes a group public (UX section 4.1).
+
+**One blob, not a public copy beside a private one.** A separate copy for the record
+would hide which addresses fetch the members' copy. It hides nothing new: the record
+already names the group id, and the Delivery Service already sees which addresses read
+that journal (class (c), section 4). For a public channel the metadata record is
+readable under the public read key anyway.
+
+**Going private re-keys the photo** (decided 2026-11-02, maintainer). The flag change (section 8) gains one owed step:
+the owner's device uploads the current photo again under a fresh key and sends it as an
+ordinary change with a new stamp (a group: the envelope; a channel: the record of the
+new epoch), so a key that was published opens nothing current. The published blob is
+deleted if this account uploaded it (18.5), else it ages out. Someone who already saw
+the photo still has it, as with the name.
+
+#### 18.4 In invite links
+
+The sealed link preview (`lakko-contacts::group_invite`) gains `avatar_len ‖ avatar` at
+the end of kinds 1 (a group), 2 (a co-publisher link) and 3 (a channel subscriber
+invitation), so the invite page and the channel link page show the photo the link was
+made with. A link holder can then fetch that photo, which is what holding the link
+already allows for the name. A visitor who is not signed in has no read pass and sees
+initials (ADR-0065 section 5).
+
+Bounds, arithmetic: the largest preview (kind 3) grows from 1,366 to 1,537 bytes of
+plaintext, `MAX_WIRE_LEN` from 1,794 to 1,965, the `/g/` ledger column
+(`group_invites.sealed_capability`, migration `0036`, 1,824 bytes) to 1,995. A knock
+carries the capability: a key package of at most 4,096 bytes, a 134-byte reply grant, a
+profile of at most 926 bytes and the capability of at most 1,965 fit the 16 KiB row.
+
+#### 18.5 Keeping the file, and deleting it
+
+**Who keeps it alive.** ADR-0065 deletes a blob nobody accessed for 365 days. Member
+devices download the photo once and cache it (ADR-0084 section 3), so a settled group
+reads its photo rarely and the file would expire under people who still see it. The
+keepers do not depend on the setter: **every device of the owner and of each admin**
+(a channel: of the owner and each publisher) adds the current photo's blob ids to one
+keep source, `conversation-photos`, sent on the ADR-0065 tick. When the setter leaves,
+the remaining owner and admins keep it; a group always has an owner (C-63). Decided
+2026-11-02, maintainer.
+
+**Keeping is automatic.** No person does anything for it: there is no control, no
+prompt and no state on any screen. The device works out from its own role in each group
+or channel whether it keeps that photo, and the keep tick sends it. The tick runs
+whenever Lakko is open on one of those devices (ADR-0065: foreground, every 10 minutes,
+each source due every 30 days); a closed app sends nothing, which is what the 365-day
+lifetime allows for. A device that stops being owner or admin drops the photo from its
+source at the next tick.
+
+One source, not one per conversation: a tick sends at most 4 sources and each is due
+every 30 days, so 10,000 per-conversation sources would need 84 ticks a day, 14 hours of
+foreground at one tick per 10 minutes (arithmetic on `MAX_SOURCES_PER_TICK` and
+`KEEP_INTERVAL_MS`). One source is batched by 256 ids: an admin of 10,000 conversations
+with a photo and a video each keeps 20,000 ids, 79 requests and about 1.3 MB a month
+(66 JSON bytes an id). The service writes at most one access per blob per day, so more
+keepers add requests, not index writes.
+
+**Who deletes it.** The ADR-0065 delete key stays the uploader's (derived from the
+uploading account's lineage seed and the blob id). A device that uploads a group or
+channel photo keeps a small durable record of the blob ids of the photos it set. When a newer photo replaces or removes one
+it recorded (its own change or another admin's, seen on receipt), the device deletes the
+old blob, retried from the durable list. A replaced photo whose uploader is no longer in
+the group, or whose uploading device is gone, is not deleted: nobody keeps it any more,
+and it expires after 365 days unread. `Delete group` deletes the photos the owner's
+device set. Decided 2026-11-02, maintainer.
+
+#### 18.6 Budget
+
+Arithmetic on the bounds above, not measured. A real still is usually far under 256
+KiB; the ceilings are what the bounds allow.
+
+| One device | Figure |
+|---|---|
+| Envelope or field held per conversation | at most 201 bytes; 2 MB at 10,000 conversations |
+| Download per photo change | at most 256 KiB, plus at most 4 MiB for a video opened in a large view |
+| Cached stills, 10,000 conversations, all drawn | at most 2.44 GiB (10,000 x 256 KiB) |
+| Keep traffic, admin of 10,000 photos with video | 79 requests, about 1.3 MB a month |
+
+The cache line is why decision 4 of 18.8 bounds the cache: today's avatar cache never
+evicts.
+
+| Server | Figure |
+|---|---|
+| A photo | stored once, however many members: at most 256 KiB, plus 4 MiB with a video; 2 index rows |
+| Per 1% of conversations with a still, at 1B accounts (2B conversations, the Budget assumption) | 20M stills, at most 5.24 TB (4.77 TiB) |
+| The same with a video each | at most 83.9 TB (76.3 TiB) more |
+| Egress per change, channel of 1M subscribers, one device each | at most 262 GB (244 GiB) for the still |
+| Journal | one row per change; one more row per holder per growth event, on the name's schedule |
+| Channel record | at most 171 bytes more per re-issue; 5 KB a channel over 30 days at one rotation a day |
+| Discovery | at most 171 bytes a public record; 17.1 GB at 1B accounts (100M public) |
+| Search responses | at most 3,420 bytes more for 20 records; at most 6.84 TB a day more at 1B accounts at the Budget's search rate |
+| `/g/` ledger | at most 171 bytes a link |
+
+The egress line is the one that matters at scale, and it is the same as a channel's
+media (Budget): ciphertext, immutable, content-addressed, so a cache in front of
+`/blob` serves it once a read pass is checked there.
+
+#### 18.7 What the servers learn
+
+- Storage: a blob's size, day and last access, as for any file. Every member device
+  fetches the same blob id, so an operator watching addresses and times can cluster a
+  group's members by its photo (ADR-0084's residual, now per group). For a public group
+  the record already names the journal, so the photo adds nothing there.
+- A keep source batches the photos one person administers under one read pass, so the
+  storage service sees that one device keeps these blob ids together (ADR-0065 residual
+  1). For a private group a blob id names nothing the service can map to a group.
+  Spreading a source's batches over several hourly passes would blur it; not proposed
+  here.
+- Discovery: the photo of a public group or channel, which is public.
+
+#### 18.8 Decisions
+
+All five decided 2026-11-02, maintainer.
+
+1. **Video: allowed.** A group or channel may have a short video, as a person may: the
+   same codec, crop and camera screens and cache, and no second rule. Cost: up to 4 MiB
+   per photo and the egress line of 18.6.
+2. **Keepers: the owner and admins** (a channel: the owner and publishers), whoever set
+   the photo, automatically with no action by the person (18.5). Not chosen: every
+   member device.
+3. **Going private re-uploads the photo under a fresh key** (18.3), one upload owed with
+   the flag change. Not chosen: keeping the published blob.
+4. **One size-bounded avatar cache per client**, for people, groups and channels alike,
+   the least recently drawn evicted first. The bound is chosen at build time and stated
+   as chosen. An evicted photo is downloaded again on its next display, which counts as
+   an access (ADR-0065 section 2).
+5. **The uploader's devices delete a replaced photo** (18.5); a photo whose uploader has
+   left expires after 365 days unread. Not chosen: a delete key shared by the owner and
+   admins.
+
 ## Budget
+
+The photo's budget is section 18.6.
 
 Arithmetic on stated assumptions, none of it measured. Row sizes exclude database
 overhead and indexes. Assumptions (chosen): 2 groups and channels per account, 5%
@@ -954,7 +1190,9 @@ one filesystem on one host (`services/storage`), and it will not carry that egre
 - **Negative:** an orphaned name of a reset owner stays taken for up to 210 days.
 - **Negative:** channels have no reactions, and a person who lists no name is a number.
 - **Negative:** a large channel's bandwidth is real and the blob store has no answer for
-  it yet.
+  it yet. A channel's photo adds to it (section 18.6).
+- **Negative:** the photo of a public group or channel is a public file, and a photo
+  replaced by someone who has left is not deleted until it expires (section 18).
 - **Neutral:** a public group's request needs an admin. A popular group waits on its
   admins.
 
@@ -978,6 +1216,8 @@ one filesystem on one host (`services/storage`), and it will not carry that egre
 - "Admin" in a channel is enforced by the client and the service, not by every peer
   (section 15).
 - A file of a deleted post uploaded by another admin stays until its idle life ends.
+- Members fetching one photo blob can be clustered by address; a keep source links the
+  photos one person administers under one pass (section 18.7).
 
 ## Invariants
 
@@ -986,6 +1226,9 @@ one filesystem on one host (`services/storage`), and it will not carry that egre
 - **#2:** the record, knock rows and seed envelopes are ciphertext; a public record is
   public by the owner's choice, the same class as a person in Everyone and an ADR-0059
   listing.
+- **#2, the photo:** the blob is ciphertext and its key travels inside an MLS message, a
+  sealed post or a sealed preview; in a public record the key is public by the owner's
+  choice, as the name is (section 18.3).
 - **#3:** touched by step 3 (`retain_join_request`, removing `process_knock` and
   `create_external_join_proposal`) and step 5 (`Group::delete`). Both need property
   tests; G-39 grows. A solo group needs a test and no change.
@@ -1025,6 +1268,17 @@ wipe.
 7a. **Comments and reactions (section 13a):** post-key derivation, labels, the comment seal,
    the ban list, the own-reactions register in `lakko-sync`, two token contexts, fuzz targets `channel_comment_open` and
    `channel_ban_list_decode`; the channels routes for rows and batched counts.
+7b. **The photo (section 18):** `lakko-contacts::avatar` (the ADR-0084 codec moved, no
+   profile wire change), the `group_photo` envelope and its dispatch arm, the avatar
+   field in channel metadata v3, in the handle record payload (`0x42`) and in link
+   preview kinds 1 to 3; fuzz `group_photo_decode` and the existing record, preview and
+   metadata targets extended; both FFI surfaces and the NSE decode arm; discovery
+   migrations widening `public_records.record` to 7,582 bytes and
+   `group_invites.sealed_capability` to 1,995. Clients: the avatar component's
+   conversation lookup, the per-group photo store, the owed send, the
+   `conversation-photos` keep source, the delete-on-replace record, the re-key on going
+   private, one size-bounded avatar cache per client (least recently drawn evicted
+   first, replacing the unbounded ADR-0084 cache), and UX section 4.5.
 8. **FFI, then web, iOS and Android:** create forms, info, search rows, cards, requests,
    the backlog, invitations, the wipe, the solo group.
 9. **Channels as conversations, on all three:** the shared view and composer, the info
@@ -1052,6 +1306,7 @@ Steps 1 to 5 can land without channels; steps 6 and 7 stand alone behind the fla
    my groups" (ADR-0060). The person's own setting governs, and it reaches every member
    of a public group they join. The proposal to start it off in a public group was
    declined.
+9. Decided 2026-11-02 (maintainer): the photo, the five choices of section 18.8.
 
 ## References
 
