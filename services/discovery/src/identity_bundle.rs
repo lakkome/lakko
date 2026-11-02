@@ -480,7 +480,15 @@ fn is_lost_race(e: &sqlx::Error) -> bool {
     if db.is_unique_violation() {
         return true;
     }
-    db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+    is_lock_conflict(e)
+}
+
+/// `true` when a sqlx error is a deadlock or a lock-wait timeout: MariaDB
+/// rolled the transaction back (or gave up waiting) and the same work run
+/// again may well commit. Shared by every write path that retries one.
+pub(crate) fn is_lock_conflict(e: &sqlx::Error) -> bool {
+    e.as_database_error()
+        .and_then(|db| db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>())
         .is_some_and(|m| matches!(m.number(), ER_LOCK_DEADLOCK | ER_LOCK_WAIT_TIMEOUT))
 }
 

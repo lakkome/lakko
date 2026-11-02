@@ -707,3 +707,45 @@ async fn a_claim_spends_a_discovery_register_token() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(c.claim(group.claim_body(false)).await.0, StatusCode::OK);
 }
+
+/// A transaction that met a deadlock is run again, at most
+/// `LOCK_ATTEMPTS` times; any other refusal is returned at once.
+#[tokio::test]
+async fn a_lock_conflict_is_retried_and_nothing_else_is() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    fn conflict() -> Response {
+        let mut resp = StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        resp.extensions_mut().insert(super::LockConflict);
+        resp
+    }
+
+    let runs = AtomicUsize::new(0);
+    let got = super::retry_on_lock_conflict(|| async {
+        if runs.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(conflict())
+        } else {
+            Ok(7)
+        }
+    })
+    .await;
+    assert_eq!(got.ok(), Some(7));
+    assert_eq!(runs.load(Ordering::SeqCst), 2);
+
+    let runs = AtomicUsize::new(0);
+    let got: Result<(), Response> = super::retry_on_lock_conflict(|| async {
+        runs.fetch_add(1, Ordering::SeqCst);
+        Err(conflict())
+    })
+    .await;
+    assert_eq!(got.unwrap_err().status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(runs.load(Ordering::SeqCst), super::LOCK_ATTEMPTS);
+
+    let runs = AtomicUsize::new(0);
+    let got: Result<(), Response> = super::retry_on_lock_conflict(|| async {
+        runs.fetch_add(1, Ordering::SeqCst);
+        Err(super::refused())
+    })
+    .await;
+    assert_eq!(got.unwrap_err().status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+}

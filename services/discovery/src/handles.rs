@@ -53,6 +53,17 @@
 //! (`LAKKO_DISCOVERY_RETIRED_NAME_HOLD_SECS`). During the hold the key may
 //! take it back with an update.
 //!
+//! ## Lock order and retries
+//!
+//! Every transaction here takes its locks in one order: `name_claims`, then
+//! `handles`, then `search_terms` and `public_records` (the route writes and
+//! [`prune`] alike). Under concurrency MariaDB can still pick a transaction
+//! as a deadlock victim (gap and insert-intention locks on the unique
+//! indexes are outside any order a statement chooses), so a route that meets
+//! a deadlock or a lock-wait timeout runs its transaction again, up to
+//! [`LOCK_ATTEMPTS`] times, before answering `500`; the nonce it consumed was
+//! rolled back with it.
+//!
 //! [ADR-0087]: ../../../docs/adr/0087-group-and-channel-handles-and-privacy.md
 
 use axum::extract::State;
@@ -104,14 +115,70 @@ fn refused() -> Response {
     coded(StatusCode::UNAUTHORIZED, CODE_REFUSED)
 }
 
+/// How many times a transaction that met a deadlock or a lock-wait timeout
+/// is run in all. Chosen, not measured.
+pub(crate) const LOCK_ATTEMPTS: usize = 3;
+
+/// Marks a `500` that came from a deadlock or a lock-wait timeout, so
+/// [`retry_on_lock_conflict`] runs the transaction again.
+#[derive(Clone, Copy, Debug)]
+struct LockConflict;
+
 fn internal(what: &'static str) -> impl FnOnce(sqlx::Error) -> Response {
     move |e| {
-        tracing::error!(error = %e, what, "handles db error");
-        (
+        let conflict = crate::identity_bundle::is_lock_conflict(&e);
+        if conflict {
+            tracing::warn!(error = %e, what, "handles lock conflict");
+        } else {
+            tracing::error!(error = %e, what, "handles db error");
+        }
+        let mut resp = (
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal db error".to_string(),
         )
-            .into_response()
+            .into_response();
+        if conflict {
+            resp.extensions_mut().insert(LockConflict);
+        }
+        resp
+    }
+}
+
+/// Run a route's transaction, again when it met a deadlock or a lock-wait
+/// timeout (MariaDB rolled it back), at most [`LOCK_ATTEMPTS`] times in all.
+/// Any other outcome is returned as it is.
+async fn retry_on_lock_conflict<T, F, Fut>(mut attempt: F) -> Result<T, Response>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, Response>>,
+{
+    let mut tries = 1;
+    loop {
+        match attempt().await {
+            Err(resp)
+                if tries < LOCK_ATTEMPTS && resp.extensions().get::<LockConflict>().is_some() =>
+            {
+                tries += 1;
+            },
+            other => return other,
+        }
+    }
+}
+
+/// [`retry_on_lock_conflict`] for the pruner's own transactions.
+async fn retry_db<T, F, Fut>(mut attempt: F) -> Result<T, sqlx::Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, sqlx::Error>>,
+{
+    let mut tries = 1;
+    loop {
+        match attempt().await {
+            Err(e) if tries < LOCK_ATTEMPTS && crate::identity_bundle::is_lock_conflict(&e) => {
+                tries += 1;
+            },
+            other => return other,
+        }
     }
 }
 
@@ -464,20 +531,25 @@ pub(crate) async fn claim(
         return Err(bad_request("statement: wrong kind for this route"));
     };
     let content = content_of(&req, visibility, &content_hash)?;
-    let mut conn = connection(&state).await?;
-    let mut tx = begin(&mut conn).await?;
-    consume_nonce(&mut tx, &statement).await?;
-    let (until, lease_secs) = lease_from_now();
-    insert_name(
-        &mut tx,
-        &statement.lookup_key,
-        &random_handle_id(),
-        &statement.write_pk,
-        &content,
-        lease_secs,
-    )
+    let (st, stmt, body) = (&state, &statement, &content);
+    let until = retry_on_lock_conflict(|| async move {
+        let mut conn = connection(st).await?;
+        let mut tx = begin(&mut conn).await?;
+        consume_nonce(&mut tx, stmt).await?;
+        let (until, lease_secs) = lease_from_now();
+        insert_name(
+            &mut tx,
+            &stmt.lookup_key,
+            &random_handle_id(),
+            &stmt.write_pk,
+            body,
+            lease_secs,
+        )
+        .await?;
+        tx.commit().await.map_err(internal("commit claim"))?;
+        Ok(until)
+    })
     .await?;
-    tx.commit().await.map_err(internal("commit claim"))?;
     tracing::info!(public = content.visibility.is_public(), "handle claimed");
     Ok(answer(
         &state,
@@ -503,28 +575,26 @@ pub(crate) async fn update(
         return Err(bad_request("statement: wrong kind for this route"));
     };
     let content = content_of(&req, visibility, &content_hash)?;
-    let mut conn = connection(&state).await?;
-    let mut tx = begin(&mut conn).await?;
-    consume_nonce(&mut tx, &statement).await?;
-    let Some(row) = lock_row(&mut tx, &statement.lookup_key).await? else {
-        return Err(coded(StatusCode::NOT_FOUND, CODE_NO_HANDLE));
-    };
-    if row.write_pk != statement.write_pk {
-        return Err(refused());
-    }
-    let (until, lease_secs) = lease_from_now();
-    revive(
-        &mut tx,
-        &statement.lookup_key,
-        &row.handle_id,
-        &content,
-        lease_secs,
-    )
+    let (st, stmt, body) = (&state, &statement, &content);
+    let (until, revived) = retry_on_lock_conflict(|| async move {
+        let mut conn = connection(st).await?;
+        let mut tx = begin(&mut conn).await?;
+        consume_nonce(&mut tx, stmt).await?;
+        let Some(row) = lock_row(&mut tx, &stmt.lookup_key).await? else {
+            return Err(coded(StatusCode::NOT_FOUND, CODE_NO_HANDLE));
+        };
+        if row.write_pk != stmt.write_pk {
+            return Err(refused());
+        }
+        let (until, lease_secs) = lease_from_now();
+        revive(&mut tx, &stmt.lookup_key, &row.handle_id, body, lease_secs).await?;
+        tx.commit().await.map_err(internal("commit update"))?;
+        Ok((until, row.retired))
+    })
     .await?;
-    tx.commit().await.map_err(internal("commit update"))?;
     tracing::info!(
         public = content.visibility.is_public(),
-        revived = row.retired,
+        revived,
         "handle updated"
     );
     Ok(answer(
@@ -558,56 +628,61 @@ pub(crate) async fn replace(
         return Err(coded(StatusCode::CONFLICT, CODE_NAME_TAKEN));
     }
     let content = content_of(&req, visibility, &content_hash)?;
-    let mut conn = connection(&state).await?;
-    let mut tx = begin(&mut conn).await?;
-    consume_nonce(&mut tx, &statement).await?;
-    let Some(old) = lock_row(&mut tx, &statement.lookup_key).await? else {
-        return Err(coded(StatusCode::NOT_FOUND, CODE_NO_HANDLE));
-    };
-    if old.write_pk != statement.write_pk {
-        return Err(refused());
-    }
-    if old.retired {
-        return Err(coded(StatusCode::NOT_FOUND, CODE_NO_HANDLE));
-    }
-    // The new name: free, or this key's own retired row.
-    let claimed: Option<(u8,)> =
-        sqlx::query_as("SELECT kind FROM name_claims WHERE lookup_key = ? FOR UPDATE")
-            .bind(&new_lookup_key[..])
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(internal("read new name claim"))?;
-    let target = lock_row(&mut tx, &new_lookup_key).await?;
-    let take_back = match (&claimed, &target) {
-        (None, None) => None,
-        (Some((CLAIM_HANDLE,)), Some(row)) if row.retired && row.write_pk == old.write_pk => {
-            Some(row.handle_id.clone())
-        },
-        _ => return Err(coded(StatusCode::CONFLICT, CODE_NAME_TAKEN)),
-    };
-    // Free this key's other retired names.
-    free_retired_except(&mut tx, &statement.write_pk, &new_lookup_key).await?;
-    // Retire the row left, before the new one becomes current (one current
-    // row per key).
-    retire(&mut tx, &statement.lookup_key, &old.handle_id).await?;
-    let (until, lease_secs) = lease_from_now();
-    match take_back {
-        Some(handle_id) => {
-            revive(&mut tx, &new_lookup_key, &handle_id, &content, lease_secs).await?;
-        },
-        None => {
-            insert_name(
-                &mut tx,
-                &new_lookup_key,
-                &random_handle_id(),
-                &statement.write_pk,
-                &content,
-                lease_secs,
-            )
-            .await?;
-        },
-    }
-    tx.commit().await.map_err(internal("commit replace"))?;
+    let (st, stmt, body, new_key) = (&state, &statement, &content, &new_lookup_key);
+    let until = retry_on_lock_conflict(|| async move {
+        let mut conn = connection(st).await?;
+        let mut tx = begin(&mut conn).await?;
+        consume_nonce(&mut tx, stmt).await?;
+        let Some(old) = lock_row(&mut tx, &stmt.lookup_key).await? else {
+            return Err(coded(StatusCode::NOT_FOUND, CODE_NO_HANDLE));
+        };
+        if old.write_pk != stmt.write_pk {
+            return Err(refused());
+        }
+        if old.retired {
+            return Err(coded(StatusCode::NOT_FOUND, CODE_NO_HANDLE));
+        }
+        // The new name: free, or this key's own retired row.
+        let claimed: Option<(u8,)> =
+            sqlx::query_as("SELECT kind FROM name_claims WHERE lookup_key = ? FOR UPDATE")
+                .bind(&new_key[..])
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(internal("read new name claim"))?;
+        let target = lock_row(&mut tx, new_key).await?;
+        let take_back = match (&claimed, &target) {
+            (None, None) => None,
+            (Some((CLAIM_HANDLE,)), Some(row)) if row.retired && row.write_pk == old.write_pk => {
+                Some(row.handle_id.clone())
+            },
+            _ => return Err(coded(StatusCode::CONFLICT, CODE_NAME_TAKEN)),
+        };
+        // Free this key's other retired names.
+        free_retired_except(&mut tx, &stmt.write_pk, new_key).await?;
+        // Retire the row left, before the new one becomes current (one current
+        // row per key).
+        retire(&mut tx, &stmt.lookup_key, &old.handle_id).await?;
+        let (until, lease_secs) = lease_from_now();
+        match take_back {
+            Some(handle_id) => {
+                revive(&mut tx, new_key, &handle_id, body, lease_secs).await?;
+            },
+            None => {
+                insert_name(
+                    &mut tx,
+                    new_key,
+                    &random_handle_id(),
+                    &stmt.write_pk,
+                    body,
+                    lease_secs,
+                )
+                .await?;
+            },
+        }
+        tx.commit().await.map_err(internal("commit replace"))?;
+        Ok(until)
+    })
+    .await?;
     tracing::info!(public = content.visibility.is_public(), "handle replaced");
     Ok(answer(&state, new_lookup_key, statement.write_pk, until))
 }
@@ -650,18 +725,20 @@ pub(crate) async fn rekey(
     if req.public_record_b64.is_some() || !req.terms_b64.is_empty() {
         return Err(bad_request("a rekey publishes nothing"));
     }
-    let mut conn = connection(&state).await?;
+    let (st, stmt, new_pk) = (&state, &statement, &new_write_pk);
+    let lease = retry_on_lock_conflict(|| async move {
+    let mut conn = connection(st).await?;
     let mut tx = begin(&mut conn).await?;
-    consume_nonce(&mut tx, &statement).await?;
-    let Some(row) = lock_row(&mut tx, &statement.lookup_key).await? else {
+    consume_nonce(&mut tx, stmt).await?;
+    let Some(row) = lock_row(&mut tx, &stmt.lookup_key).await? else {
         return Err(coded(StatusCode::NOT_FOUND, CODE_NO_HANDLE));
     };
-    if row.write_pk != statement.write_pk {
+    if row.write_pk != stmt.write_pk {
         return Err(refused());
     }
     let taken: Option<(i32,)> =
         sqlx::query_as("SELECT 1 FROM handles WHERE write_pk = ? LIMIT 1 FOR UPDATE")
-            .bind(&new_write_pk[..])
+            .bind(&new_pk[..])
             .fetch_optional(&mut *tx)
             .await
             .map_err(internal("read new key"))?;
@@ -669,19 +746,22 @@ pub(crate) async fn rekey(
         return Err(coded(StatusCode::CONFLICT, CODE_KEY_IN_USE));
     }
     sqlx::query("UPDATE handles SET write_pk = ? WHERE write_pk = ?")
-        .bind(&new_write_pk[..])
-        .bind(&statement.write_pk[..])
+        .bind(&new_pk[..])
+        .bind(&stmt.write_pk[..])
         .execute(&mut *tx)
         .await
         .map_err(internal("rekey handles"))?;
     let lease: (i64,) = sqlx::query_as(
         "SELECT CAST(UNIX_TIMESTAMP(lease_until) * 1000 AS SIGNED) FROM handles WHERE lookup_key = ?",
     )
-    .bind(&statement.lookup_key[..])
+    .bind(&stmt.lookup_key[..])
     .fetch_one(&mut *tx)
     .await
     .map_err(internal("read lease"))?;
     tx.commit().await.map_err(internal("commit rekey"))?;
+    Ok(lease)
+    })
+    .await?;
     tracing::info!("handle rekeyed");
     Ok(answer(
         &state,
@@ -701,70 +781,174 @@ pub(crate) async fn retire_name(
     if req.public_record_b64.is_some() || !req.terms_b64.is_empty() {
         return Err(bad_request("a retire publishes nothing"));
     }
-    let mut conn = connection(&state).await?;
-    let mut tx = begin(&mut conn).await?;
-    consume_nonce(&mut tx, &statement).await?;
-    let Some(row) = lock_row(&mut tx, &statement.lookup_key).await? else {
-        return Err(coded(StatusCode::NOT_FOUND, CODE_NO_HANDLE));
-    };
-    if row.write_pk != statement.write_pk {
-        return Err(refused());
-    }
-    retire(&mut tx, &statement.lookup_key, &row.handle_id).await?;
-    tx.commit().await.map_err(internal("commit retire"))?;
+    let (st, stmt) = (&state, &statement);
+    retry_on_lock_conflict(|| async move {
+        let mut conn = connection(st).await?;
+        let mut tx = begin(&mut conn).await?;
+        consume_nonce(&mut tx, stmt).await?;
+        let Some(row) = lock_row(&mut tx, &stmt.lookup_key).await? else {
+            return Err(coded(StatusCode::NOT_FOUND, CODE_NO_HANDLE));
+        };
+        if row.write_pk != stmt.write_pk {
+            return Err(refused());
+        }
+        retire(&mut tx, &stmt.lookup_key, &row.handle_id).await?;
+        tx.commit().await.map_err(internal("commit retire"))
+    })
+    .await?;
     tracing::info!("handle retired");
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// Rows one pruner transaction takes. Chosen, not measured: a batch is short
+/// enough that a route waiting on one of its rows waits briefly.
+const PRUNE_BATCH: usize = 500;
 
 /// One pass of the pruner: retire lapsed rows (`retired_at = lease_until`,
 /// their records and terms deleted), delete rows retired longer than
 /// `hold_secs` ago with their claims, and drop nonces older than twice the
 /// statement window. Returns `(lapsed, freed)`.
 ///
+/// Each batch is its own READ COMMITTED transaction and takes its locks in
+/// the routes' order (`name_claims`, `handles`, then `search_terms` and
+/// `public_records`), by key, with no join or subquery over another table:
+/// the earlier form deleted `search_terms` through a join on `handles` and
+/// so locked the two tables in the opposite order to an update or a retire,
+/// which deadlocked with them (seen as MariaDB 1213 in the tests). A batch
+/// that still meets a deadlock or a lock-wait timeout is run again
+/// ([`LOCK_ATTEMPTS`]).
+///
 /// # Errors
 ///
 /// Any `sqlx::Error`.
 pub(crate) async fn prune(pool: &MySqlPool, hold_secs: u64) -> Result<(u64, u64), sqlx::Error> {
     let hold = i64::try_from(hold_secs).unwrap_or(i64::MAX);
+    let mut lapsed = 0u64;
+    loop {
+        let (seen, done) = retry_db(|| retire_lapsed_batch(pool)).await?;
+        lapsed = lapsed.saturating_add(done);
+        if seen < PRUNE_BATCH {
+            break;
+        }
+    }
+    let mut freed = 0u64;
+    loop {
+        let (seen, done) = retry_db(|| free_held_batch(pool, hold)).await?;
+        freed = freed.saturating_add(done);
+        if seen < PRUNE_BATCH {
+            break;
+        }
+    }
+    let window = i64::try_from(2 * HANDLE_STATEMENT_WINDOW_MS / 1000).unwrap_or(i64::MAX);
+    retry_db(|| async move {
+        let mut conn = read_committed(pool).await?;
+        sqlx::query(
+            "DELETE FROM handle_statement_nonces WHERE seen_at <= NOW(3) - INTERVAL ? SECOND",
+        )
+        .bind(window)
+        .execute(&mut *conn)
+        .await
+    })
+    .await?;
+    Ok((lapsed, freed))
+}
+
+/// Push `keys` as a bound `IN (...)` list.
+fn push_in_list(q: &mut sqlx::QueryBuilder<sqlx::MySql>, keys: &[Vec<u8>]) {
+    q.push(" IN (");
+    let mut sep = q.separated(", ");
+    for key in keys {
+        sep.push_bind(key.clone());
+    }
+    q.push(")");
+}
+
+/// Retire up to [`PRUNE_BATCH`] lapsed rows: lock them, delete their terms
+/// and records, mark them retired at their lease end. Returns `(rows
+/// locked, rows retired)`.
+async fn retire_lapsed_batch(pool: &MySqlPool) -> Result<(usize, u64), sqlx::Error> {
     let mut conn = read_committed(pool).await?;
     let mut tx = sqlx::Connection::begin(&mut *conn).await?;
-    for sql in [
-        "DELETE s FROM search_terms s JOIN handles h ON s.kind = 2 AND s.target = h.handle_id \
-         WHERE h.retired_at IS NULL AND h.lease_until <= NOW(3)",
-        "DELETE p FROM public_records p JOIN handles h ON p.kind = 2 AND p.target = h.handle_id \
-         WHERE h.retired_at IS NULL AND h.lease_until <= NOW(3)",
-    ] {
-        sqlx::query(sql).execute(&mut *tx).await?;
-    }
-    let lapsed = sqlx::query(
-        "UPDATE handles SET retired_at = lease_until, is_public = FALSE \
-         WHERE retired_at IS NULL AND lease_until <= NOW(3)",
+    let rows: Vec<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "SELECT lookup_key, handle_id FROM handles \
+         WHERE retired_at IS NULL AND lease_until <= NOW(3) \
+         ORDER BY lookup_key LIMIT ? FOR UPDATE",
     )
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    sqlx::query(
-        "DELETE FROM name_claims WHERE lookup_key IN \
-           (SELECT lookup_key FROM handles \
-            WHERE retired_at IS NOT NULL AND retired_at <= NOW(3) - INTERVAL ? SECOND)",
-    )
-    .bind(hold)
-    .execute(&mut *tx)
+    .bind(u64::try_from(PRUNE_BATCH).unwrap_or(u64::MAX))
+    .fetch_all(&mut *tx)
     .await?;
-    let freed = sqlx::query(
-        "DELETE FROM handles \
-         WHERE retired_at IS NOT NULL AND retired_at <= NOW(3) - INTERVAL ? SECOND",
+    if rows.is_empty() {
+        tx.commit().await?;
+        return Ok((0, 0));
+    }
+    let (keys, ids): (Vec<Vec<u8>>, Vec<Vec<u8>>) = rows.into_iter().unzip();
+    for table in ["search_terms", "public_records"] {
+        let mut q = sqlx::QueryBuilder::<sqlx::MySql>::new("DELETE FROM ");
+        q.push(table);
+        q.push(" WHERE kind = ");
+        q.push_bind(crate::visibility::TARGET_HANDLE);
+        q.push(" AND target");
+        push_in_list(&mut q, &ids);
+        q.build().execute(&mut *tx).await?;
+    }
+    let mut q = sqlx::QueryBuilder::<sqlx::MySql>::new(
+        "UPDATE handles SET retired_at = lease_until, is_public = FALSE \
+         WHERE retired_at IS NULL AND lease_until <= NOW(3) AND lookup_key",
+    );
+    push_in_list(&mut q, &keys);
+    let retired = q.build().execute(&mut *tx).await?.rows_affected();
+    tx.commit().await?;
+    Ok((keys.len(), retired))
+}
+
+/// Free up to [`PRUNE_BATCH`] rows retired longer than `hold` seconds ago,
+/// with their claims. The candidates are read without a lock; the claims
+/// are locked first and the rows second (the order of a claim and a
+/// replace), and a row taken back in between is left alone. Returns `(rows
+/// read, rows freed)`.
+async fn free_held_batch(pool: &MySqlPool, hold: i64) -> Result<(usize, u64), sqlx::Error> {
+    let mut conn = read_committed(pool).await?;
+    let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+    let candidates: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT lookup_key FROM handles \
+         WHERE retired_at IS NOT NULL AND retired_at <= NOW(3) - INTERVAL ? SECOND \
+         ORDER BY lookup_key LIMIT ?",
     )
     .bind(hold)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    sqlx::query("DELETE FROM handle_statement_nonces WHERE seen_at <= NOW(3) - INTERVAL ? SECOND")
-        .bind(i64::try_from(2 * HANDLE_STATEMENT_WINDOW_MS / 1000).unwrap_or(i64::MAX))
-        .execute(&mut *tx)
-        .await?;
+    .bind(u64::try_from(PRUNE_BATCH).unwrap_or(u64::MAX))
+    .fetch_all(&mut *tx)
+    .await?;
+    if candidates.is_empty() {
+        tx.commit().await?;
+        return Ok((0, 0));
+    }
+    let mut q = sqlx::QueryBuilder::<sqlx::MySql>::new(
+        "SELECT lookup_key FROM name_claims WHERE lookup_key",
+    );
+    push_in_list(&mut q, &candidates);
+    q.push(" ORDER BY lookup_key FOR UPDATE");
+    q.build().fetch_all(&mut *tx).await?;
+    let mut q = sqlx::QueryBuilder::<sqlx::MySql>::new(
+        "SELECT lookup_key FROM handles WHERE retired_at IS NOT NULL \
+         AND retired_at <= NOW(3) - INTERVAL ",
+    );
+    q.push_bind(hold);
+    q.push(" SECOND AND lookup_key");
+    push_in_list(&mut q, &candidates);
+    q.push(" ORDER BY lookup_key FOR UPDATE");
+    let still_held: Vec<Vec<u8>> = q.build_query_scalar().fetch_all(&mut *tx).await?;
+    let mut freed = 0;
+    if !still_held.is_empty() {
+        let mut q =
+            sqlx::QueryBuilder::<sqlx::MySql>::new("DELETE FROM name_claims WHERE lookup_key");
+        push_in_list(&mut q, &still_held);
+        q.build().execute(&mut *tx).await?;
+        let mut q = sqlx::QueryBuilder::<sqlx::MySql>::new("DELETE FROM handles WHERE lookup_key");
+        push_in_list(&mut q, &still_held);
+        freed = q.build().execute(&mut *tx).await?.rows_affected();
+    }
     tx.commit().await?;
-    Ok((lapsed, freed))
+    Ok((candidates.len(), freed))
 }
 
 /// Hourly pruner: lapsed leases, held names past the hold, old nonces.
