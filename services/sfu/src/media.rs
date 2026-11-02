@@ -8703,47 +8703,7 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
             peer_id,
             answer_sdp,
             reply,
-        } => {
-            // A peer answering a renegotiation MUST
-            // already have a media slot (the inbound
-            // SdpOffer cycle created it). If not, the
-            // peer is replying to a phantom offer.
-            let res = match router.peer_mut(&peer_id) {
-                Some(peer) => peer.accept_renegotiation_answer(&answer_sdp),
-                None => Err(MediaError::Str0m(format!(
-                    "SdpAnswer from unknown media peer {peer_id}"
-                ))),
-            };
-            // Lifecycle point 4 of 4, and the one that separates the two
-            // failure shapes this logging exists for. Point 3 present and
-            // this absent means the subscriber never answered — it refused
-            // the offer, or never received it. Both present and still no
-            // picture means the track is open and the fault is downstream,
-            // in media rather than in negotiation.
-            match &res {
-                Ok(opened) => {
-                    tracing::info!(
-                        peer = %peer_id.log_tag(),
-                        opened = opened.len(),
-                        "media: subscriber answered the downstream-track offer"
-                    );
-                    // The subscriber can receive now, and holds no reference
-                    // frame for anything that just opened. Ask each video
-                    // publisher for a keyframe at this moment rather than at
-                    // open time — asked earlier it lands before the
-                    // subscriber exists to decode it, and the subscriber is
-                    // left waiting for the publisher's next natural keyframe,
-                    // which in a live call took five minutes.
-                    request_keyframes_for_opened(router, &peer_id, opened, Instant::now());
-                },
-                Err(e) => tracing::warn!(
-                    peer = %peer_id.log_tag(),
-                    error = %e,
-                    "media: subscriber's answer to the downstream-track offer was refused"
-                ),
-            }
-            let _ = reply.send(res.map(|_| ()));
-        },
+        } => handle_renegotiation_answer(router, &peer_id, &answer_sdp, reply),
         MediaCommand::VideoWants { peer_id, wants } => {
             take_video_wants(router, &peer_id, &wants);
         },
@@ -8763,6 +8723,56 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
             );
         },
     }
+}
+
+/// Apply a subscriber's answer to an SFU-initiated renegotiation
+/// ([`MediaCommand::AcceptRenegotiationAnswer`]) and reply with the
+/// outcome.
+fn handle_renegotiation_answer(
+    router: &mut MediaRouter,
+    peer_id: &MediaPeerId,
+    answer_sdp: &str,
+    reply: tokio::sync::oneshot::Sender<MediaResult<()>>,
+) {
+    // A peer answering a renegotiation MUST
+    // already have a media slot (the inbound
+    // SdpOffer cycle created it). If not, the
+    // peer is replying to a phantom offer.
+    let res = match router.peer_mut(peer_id) {
+        Some(peer) => peer.accept_renegotiation_answer(answer_sdp),
+        None => Err(MediaError::Str0m(format!(
+            "SdpAnswer from unknown media peer {peer_id}"
+        ))),
+    };
+    // Lifecycle point 4 of 4, and the one that separates the two
+    // failure shapes this logging exists for. Point 3 present and
+    // this absent means the subscriber never answered — it refused
+    // the offer, or never received it. Both present and still no
+    // picture means the track is open and the fault is downstream,
+    // in media rather than in negotiation.
+    match &res {
+        Ok(opened) => {
+            tracing::info!(
+                peer = %peer_id.log_tag(),
+                opened = opened.len(),
+                "media: subscriber answered the downstream-track offer"
+            );
+            // The subscriber can receive now, and holds no reference
+            // frame for anything that just opened. Ask each video
+            // publisher for a keyframe at this moment rather than at
+            // open time — asked earlier it lands before the
+            // subscriber exists to decode it, and the subscriber is
+            // left waiting for the publisher's next natural keyframe,
+            // which in a live call took five minutes.
+            request_keyframes_for_opened(router, peer_id, opened, Instant::now());
+        },
+        Err(e) => tracing::warn!(
+            peer = %peer_id.log_tag(),
+            error = %e,
+            "media: subscriber's answer to the downstream-track offer was refused"
+        ),
+    }
+    let _ = reply.send(res.map(|_| ()));
 }
 
 /// Hand the `light_mids` of an offer `peer` sent, and the SFU accepted, to

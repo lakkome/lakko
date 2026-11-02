@@ -136,41 +136,42 @@ impl Transport for MasqueTransport {
             .parse()
             .map_err(|e| Error::Config(format!("masque config: {e}")))?;
 
-        // Resolve the proxy host:port. We use blocking
-        // resolution (the std DNS path) because `tokio::net::lookup_host`
-        // would tie us to the multi-threaded runtime — masque is
-        // expected to be called from generic async contexts.
-        // Picks the first address; production deployments may
-        // want happy-eyeballs-style racing.
-        let proxy_authority = (proxy.host.as_str(), proxy.port);
-        let proxy_addr = proxy_authority
-            .to_socket_addrs()
-            .map_err(|e| Error::Io(format!("masque proxy resolve: {e}")))?
-            .next()
-            .ok_or_else(|| {
-                Error::Io(format!(
-                    "masque proxy {:?} resolved to no addresses",
-                    proxy.host
-                ))
-            })?;
+        // Resolve the proxy host:port and load the OS trust
+        // anchors on the blocking pool, never on the async
+        // executor: both are synchronous system calls of
+        // unbounded latency. Loading the native roots on macOS
+        // goes through `SecTrustSettingsCopyCertificates`, whose
+        // first use in a process looks up the main bundle, and
+        // for a bare executable CoreFoundation does that by
+        // reading the executable's whole directory. A test binary
+        // in a `target/debug/deps` holding about half a million
+        // entries took over 10 s there, and done inline it froze
+        // a current-thread runtime for that long, starving every
+        // other task on it (the in-process proxy of the loopback
+        // test could not even accept). Picks the first resolved
+        // address; production deployments may want
+        // happy-eyeballs-style racing.
+        let proxy_host = proxy.host.clone();
+        let proxy_port = proxy.port;
+        let extra_roots = self.extra_roots.clone();
+        let (proxy_addr, roots) = tokio::task::spawn_blocking(move || {
+            let proxy_addr = (proxy_host.as_str(), proxy_port)
+                .to_socket_addrs()
+                .map_err(|e| Error::Io(format!("masque proxy resolve: {e}")))?
+                .next()
+                .ok_or_else(|| {
+                    Error::Io(format!(
+                        "masque proxy {proxy_host:?} resolved to no addresses"
+                    ))
+                })?;
+            Ok::<_, Error>((proxy_addr, root_store(&extra_roots)))
+        })
+        .await
+        .map_err(|e| Error::Io(format!("masque connect setup task: {e}")))??;
 
         // rustls + quinn config — TLS 1.3, h3 ALPN, system
-        // root CAs.
+        // root CAs plus any caller-supplied anchors.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let mut roots = rustls::RootCertStore::empty();
-        let native = rustls_native_certs::load_native_certs();
-        for cert in native.certs {
-            // Drop individual cert load failures silently —
-            // matches what web-transport-quinn::ClientBuilder
-            // does on its own with_system_roots branch.
-            let _ = roots.add(cert);
-        }
-        // Fold in any caller-supplied trust anchors (private-CA
-        // proxy pin / loopback test cert). These ADD to the
-        // native roots, never replace them.
-        for cert in &self.extra_roots {
-            let _ = roots.add(cert.clone());
-        }
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let mut tls = rustls::ClientConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&rustls::version::TLS13])
@@ -270,6 +271,26 @@ impl Transport for MasqueTransport {
             closed: false,
         }))
     }
+}
+
+/// The rustls root store a MASQUE connect validates the proxy
+/// against: the OS native certs plus `extra_roots` (a private-CA
+/// pin or a loopback test cert), which ADD to the native roots and
+/// never replace them. Blocking: it reads the OS trust store, so
+/// call it from the blocking pool.
+fn root_store(extra_roots: &[CertificateDer<'static>]) -> rustls::RootCertStore {
+    let mut roots = rustls::RootCertStore::empty();
+    let native = rustls_native_certs::load_native_certs();
+    for cert in native.certs {
+        // Drop individual cert load failures silently —
+        // matches what web-transport-quinn::ClientBuilder
+        // does on its own with_system_roots branch.
+        let _ = roots.add(cert);
+    }
+    for cert in extra_roots {
+        let _ = roots.add(cert.clone());
+    }
+    roots
 }
 
 /// Convert our typed [`ConnectUdpRequest`] into the
