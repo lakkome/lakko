@@ -50,6 +50,14 @@
 //!    role table), and keeps it only if
 //!    [`crate::group_name::group_name_is_newer`] than the stored
 //!    stamp for that group. An empty name clears the name.
+//!
+//!    7a. [`crate::group_photo::try_unwrap_group_photo`] — the
+//!    group's photo (ADR-0087 §18.1). Same gate and order as the
+//!    name: owner or admin resolved at receipt, kept only if
+//!    [`crate::group_photo::group_photo_is_newer`]; a one-to-one
+//!    drops it. No avatar removes the photo.
+//!    Then [`crate::group_reactions::try_unwrap_group_reactions`] —
+//!    which reactions the group takes, same gate and order.
 //! 8. [`crate::profile_request::try_unwrap_profile_request`],
 //!    [`crate::pin::try_unwrap_pin`] and
 //!    [`crate::registrar_seed::try_unwrap_registrar_seed`] (ADR-0048
@@ -121,6 +129,8 @@ use crate::conversation_handle::{
 use crate::device_card::{try_unwrap_device_card, DeviceCard, DeviceCardError};
 use crate::group_closed::{try_unwrap_group_closed, GroupClosedError, SUCCESSOR_GROUP_ID_LEN};
 use crate::group_name::{try_unwrap_group_name, GroupName, GroupNameError};
+use crate::group_photo::{try_unwrap_group_photo, GroupPhoto, GroupPhotoError};
+use crate::group_reactions::{try_unwrap_group_reactions, GroupReactions, GroupReactionsError};
 use crate::introduction::{
     try_unwrap_introduction_offer, try_unwrap_introductions, IntroductionError, IntroductionRecord,
     IntroductionsBundle,
@@ -236,6 +246,32 @@ pub enum IncomingEnvelope<'a> {
     /// for that group — the whole read-decide-write under the per-group
     /// lock (C-62 sub-invariant 5).
     GroupName(GroupName),
+    /// The group's photo (ADR-0087 §18.1): the avatar (none = remove) and
+    /// the setter-clock stamp — already validated against every bound.
+    /// Never rendered.
+    ///
+    /// **The caller must not store this unconditionally.** Resolve the MLS
+    /// sender to the account key at receipt (C-68) and accept only from the
+    /// owner or an admin of the live role table (an unresolvable sender, an
+    /// unreadable table or a one-to-one: drop), then keep it only when
+    /// [`crate::group_photo::group_photo_is_newer`] than the stored stamp,
+    /// the whole read-decide-write under the per-group lock (C-62
+    /// sub-invariant 5).
+    GroupPhoto(GroupPhoto),
+    /// Which reactions the group's messages take (UX
+    /// `reactions-and-emoji.md` section 9): all, none or a list, and the
+    /// setter-clock stamp — already validated against every bound. Never
+    /// rendered.
+    ///
+    /// **The caller must not store this unconditionally.** Same gate and
+    /// order as the group name: resolve the MLS sender to the account key at
+    /// receipt (C-68), accept only from the owner or an admin of the live
+    /// role table (any member of a table-less group; a one-to-one drops it),
+    /// then keep it only when
+    /// [`crate::group_reactions::group_reactions_is_newer`] than the stored
+    /// stamp, the whole read-decide-write under the per-group lock (C-62
+    /// sub-invariant 5). It is a display rule: nothing refuses a reaction.
+    GroupReactions(GroupReactions),
     /// A member asks the group to introduce itself (ADR-0048 §2,
     /// trigger 4). Carries nothing; the receiver answers with its own
     /// profile through the throttled growth path. Never a chat bubble.
@@ -414,6 +450,14 @@ pub enum DispatchError {
     /// refused — a name has no remainder worth keeping.
     #[error(transparent)]
     GroupName(#[from] GroupNameError),
+    /// A group-photo envelope (ADR-0087 §18.1) matched its domain
+    /// separator but was malformed or out of bounds. Refused whole.
+    #[error(transparent)]
+    GroupPhoto(#[from] GroupPhotoError),
+    /// A group allowed-reactions envelope matched its domain separator but
+    /// was malformed or out of bounds. Refused whole.
+    #[error(transparent)]
+    GroupReactions(#[from] GroupReactionsError),
     /// The profile-request domain with a malformed payload.
     #[error(transparent)]
     ProfileRequest(#[from] ProfileRequestError),
@@ -516,6 +560,14 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7. Group name — ADR-0051.
     if let Some(group_name) = try_unwrap_group_name(plaintext)? {
         return Ok(IncomingEnvelope::GroupName(group_name));
+    }
+    // 7a. Group photo — ADR-0087 §18.1.
+    if let Some(photo) = try_unwrap_group_photo(plaintext)? {
+        return Ok(IncomingEnvelope::GroupPhoto(photo));
+    }
+    // 7a'. Group allowed reactions — UX reactions-and-emoji section 9.
+    if let Some(reactions) = try_unwrap_group_reactions(plaintext)? {
+        return Ok(IncomingEnvelope::GroupReactions(reactions));
     }
     // 7b. Profile request — ADR-0048 §2 trigger 4.
     if try_unwrap_profile_request(plaintext)?.is_some() {
@@ -858,6 +910,40 @@ mod tests {
         assert_eq!(
             dispatch_incoming_envelope(&truncated),
             Err(DispatchError::GroupName(GroupNameError::Truncated)),
+        );
+    }
+
+    #[test]
+    fn dispatches_group_photo_envelope() {
+        use crate::avatar::{Avatar, AvatarRef};
+        use crate::group_photo::compose_group_photo;
+        let still = AvatarRef {
+            blob_id: [1; 32],
+            key: [2; 32],
+            nonce: [3; 12],
+            size: 1000,
+            width: 320,
+            height: 320,
+        };
+        for avatar in [None, Some(Avatar { still, video: None })] {
+            let photo = GroupPhoto {
+                avatar,
+                updated_at_ms: 42,
+            };
+            let wrapped = compose_group_photo(&photo).unwrap();
+            let result = dispatch_incoming_envelope(&wrapped).unwrap();
+            assert_eq!(result, IncomingEnvelope::GroupPhoto(photo));
+        }
+    }
+
+    #[test]
+    fn a_malformed_group_photo_is_an_error_not_an_intro_message() {
+        use crate::group_photo::{GROUP_PHOTO_ENVELOPE_DOMAIN_V1, GROUP_PHOTO_VERSION_V1};
+        let mut truncated = GROUP_PHOTO_ENVELOPE_DOMAIN_V1.to_vec();
+        truncated.push(GROUP_PHOTO_VERSION_V1);
+        assert_eq!(
+            dispatch_incoming_envelope(&truncated),
+            Err(DispatchError::GroupPhoto(GroupPhotoError::Truncated)),
         );
     }
 

@@ -419,6 +419,21 @@ mod tests {
         assert_eq!(open_knock(&seed, &row).unwrap(), big);
     }
 
+    /// ADR-0087 section 18.4: the largest request (a maximal key package,
+    /// a reply grant, a maximal profile and a maximal `/g/` capability, the
+    /// photo in its preview included) still fits the large row.
+    #[test]
+    fn the_largest_request_fits_the_large_row() {
+        let seed = knock_seed(&[0x11; 32], 1);
+        let mut big = request();
+        big.key_package = vec![0xAB; KNOCK_MAX_KEY_PACKAGE_LEN];
+        big.capability = Some(vec![0xCC; KNOCK_MAX_CAPABILITY_LEN]);
+        let profile = vec![0xDD; PROFILE_ENVELOPE_MAX_LEN];
+        let row = seal_knock(&knock_public_key(&seed), 1, &big, &profile).unwrap();
+        assert_eq!(row.len(), KNOCK_LARGE_ROW_LEN);
+        assert_eq!(KNOCK_MAX_CAPABILITY_LEN, 1965);
+    }
+
     #[test]
     fn another_version_or_group_does_not_open_it() {
         let root = [0x11; 32];

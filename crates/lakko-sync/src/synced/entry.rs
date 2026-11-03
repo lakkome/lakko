@@ -274,6 +274,10 @@ pub enum BoundsError {
     /// A writer-side rule, never a decode bound: the service cannot check it.
     #[error("at most 3 reactions per post")]
     TooManyChannelReactions,
+    /// The account's quick reaction was empty or longer than 64 bytes (UX
+    /// `reactions-and-emoji.md` D3).
+    #[error("quick reaction length is out of bounds")]
+    QuickReaction,
 }
 
 /// Which kind of conversation a [`ConversationRef`] names.
@@ -1003,8 +1007,11 @@ pub enum SyncEntry {
     /// removal (ADR-0087 section 13a).
     ChannelReaction(super::channel_reaction::ChannelReactionEntry),
     /// One of the account's own comments under a channel post, or its
-    /// deletion (ADR-0087 section 13a). Appended last.
+    /// deletion (ADR-0087 section 13a).
     ChannelComment(super::channel_comment::ChannelCommentEntry),
+    /// The account's quick reaction (UX `reactions-and-emoji.md` D3).
+    /// Appended last.
+    QuickReaction(super::quick_reaction::QuickReactionEntry),
 }
 
 /// Which register an entry writes.
@@ -1053,12 +1060,15 @@ pub enum RegisterKey {
         String,
     ),
     /// The own-comment register of this comment nonce under this channel
-    /// post. Appended last.
+    /// post.
     ChannelComment(
         [u8; super::channel_reaction::CHANNEL_REACTION_CHANNEL_ID_LEN],
         u64,
         [u8; super::channel_comment::CHANNEL_COMMENT_NONCE_LEN],
     ),
+    /// The account's one quick-reaction register. Appended last, so the
+    /// register order of every older kind is unchanged.
+    QuickReaction,
 }
 
 impl RegisterKey {
@@ -1093,6 +1103,7 @@ const TAG_CONVERSATION_END: u8 = 15;
 const TAG_DEVICE_ACK: u8 = 16;
 const TAG_CHANNEL_REACTION: u8 = 17;
 const TAG_CHANNEL_COMMENT: u8 = 18;
+const TAG_QUICK_REACTION: u8 = 19;
 
 impl SyncEntry {
     /// The register this entry writes.
@@ -1121,6 +1132,7 @@ impl SyncEntry {
             Self::ChannelComment(c) => {
                 RegisterKey::ChannelComment(c.channel_id, c.post_cursor, c.comment_nonce)
             },
+            Self::QuickReaction(_) => RegisterKey::QuickReaction,
         }
     }
 
@@ -1147,6 +1159,7 @@ impl SyncEntry {
             Self::LinkRecord(r) => r.validate(),
             Self::ConversationEnd(e) => e.validate(),
             Self::ChannelReaction(r) => r.validate(),
+            Self::QuickReaction(q) => q.validate(),
             Self::FolderRemoved(_)
             | Self::Flags(_)
             | Self::ReadCursor(_)
@@ -1241,6 +1254,10 @@ impl SyncEntry {
             Self::OwnUsername(u) => {
                 out.push(TAG_OWN_USERNAME);
                 put_bytes32(&mut out, u.username.as_bytes());
+            },
+            Self::QuickReaction(q) => {
+                out.push(TAG_QUICK_REACTION);
+                q.encode_body(&mut out);
             },
             Self::LinkRecord(r) => {
                 out.push(TAG_LINK_RECORD);
@@ -1426,6 +1443,9 @@ impl SyncEntry {
             ),
             TAG_CHANNEL_COMMENT => Self::ChannelComment(
                 super::channel_comment::ChannelCommentEntry::take_body(&mut cur)?,
+            ),
+            TAG_QUICK_REACTION => Self::QuickReaction(
+                super::quick_reaction::QuickReactionEntry::take_body(&mut cur)?,
             ),
             _ => return Err(CodecError::UnknownTag),
         };

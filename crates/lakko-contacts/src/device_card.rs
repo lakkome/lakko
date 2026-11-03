@@ -908,6 +908,7 @@ mod tests {
             crate::committer_beacon::COMMITTER_BEACON_ENVELOPE_DOMAIN_V1,
             crate::profile::PROFILE_ENVELOPE_DOMAIN_V1,
             crate::group_name::GROUP_NAME_ENVELOPE_DOMAIN_V1,
+            crate::group_photo::GROUP_PHOTO_ENVELOPE_DOMAIN_V1,
             crate::shared_channels::SHARED_CHANNELS_ENVELOPE_DOMAIN_V1,
             crate::profile_request::PROFILE_REQUEST_ENVELOPE_DOMAIN_V1,
             crate::pin::PIN_ENVELOPE_DOMAIN_V1,

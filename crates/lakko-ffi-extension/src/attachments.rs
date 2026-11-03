@@ -184,7 +184,7 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
         },
-        inner::MessageBody::Reaction { target, emoji } => ParsedBody {
+        inner::MessageBody::Reaction { target, emoji, .. } => ParsedBody {
             kind: MessageBodyKind::Reaction,
             text: String::new(),
             attachments: Vec::new(),

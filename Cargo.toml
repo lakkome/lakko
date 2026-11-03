@@ -141,6 +141,18 @@ icu_locale_core = "2"
 # `sync`: ICU4X data held in `Arc`, not `Rc`, so a catalog can cross the
 # UniFFI boundary (which requires `Send + Sync`).
 icu_provider = { version = "2", features = ["sync"] }
+# The one-emoji rule of lakko-ui-rules (reactions and emoji-only messages,
+# UX `reactions-and-emoji.md` D10): Unicode extended grapheme clusters, so
+# "one emoji" means the same on web, iOS and Android instead of three
+# platform segmenters (`Intl.Segmenter`, Swift `Character`, an Android
+# check). No dependencies of its own; MIT OR Apache-2.0.
+unicode-segmentation = "1.13"
+# The Extended_Pictographic property the same rule needs, which
+# unicode-segmentation uses internally but does not expose. Already in the
+# lock (url -> idna -> idna_adapter pulls 2.2.0), the ICU4X family
+# lakko-l10n already uses; Unicode-3.0. Default features keep the compiled
+# data.
+icu_properties = "2"
 
 # Internal crates — path + version (cargo-deny rejects wildcard-only deps).
 # The version is kept in lockstep with workspace.package.version so they

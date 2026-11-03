@@ -94,6 +94,7 @@ impl Group {
             name: "Hiking club".to_string(),
             description: String::new(),
             size_band: 1,
+            avatar: None,
         };
         compose_handle_record(&payload, &[self.name_output, self.term_output], 1).unwrap()
     }

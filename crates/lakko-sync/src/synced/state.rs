@@ -56,6 +56,15 @@
 //! [`SyncedState::apply_own_username_envelope`], persisted by
 //! [`SyncedState::to_bytes`], never in [`StateSnapshot`].
 //!
+//! ## The quick-reaction register (UX `reactions-and-emoji.md` D3)
+//!
+//! One register per account holding the emoji a double tap sends, the
+//! own-username register's shape: last-writer-wins, carried by
+//! [`SyncedState::quick_reaction_envelope`] /
+//! [`SyncedState::apply_quick_reaction_envelope`], persisted by
+//! [`SyncedState::to_bytes`], never in [`StateSnapshot`]. "Never chosen" is
+//! the absence of the register.
+//!
 //! ## The link-record register (ADR-0079 section 4)
 //!
 //! One register per invite link of the account, keyed by link id, carried by
@@ -174,6 +183,10 @@ use super::link_record::{
 use super::own_username::{
     compose_own_username_envelope, decode_own_username_envelope, OwnUsernameEnvelopeError,
 };
+use super::quick_reaction::{
+    compose_quick_reaction_envelope, decode_quick_reaction_envelope, QuickReactionEntry,
+    QuickReactionEnvelopeError,
+};
 
 use super::recovery_email::{
     compose_recovery_email_envelope, decode_recovery_email_envelope, RecoveryEmailEnvelopeError,
@@ -190,11 +203,12 @@ use super::recovery_email::{
 /// last two changes had each called theirs `5`), `7` since the
 /// conversation-end register (ADR-0087 section 9), `8` since the
 /// own channel-reaction register (ADR-0087 section 13a), `9` since the
-/// own channel-comment register (the same section, a key per write). Older
+/// own channel-comment register (the same section, a key per write), `10`
+/// since the quick-reaction register (UX `reactions-and-emoji.md` D3). Older
 /// versions are refused rather than read: nothing is deployed, and a build
 /// that silently accepted an older layout would be a second decoder nobody
 /// tests.
-const STATE_VERSION: u8 = 9;
+const STATE_VERSION: u8 = 10;
 
 /// A stored register value with its stamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -414,7 +428,8 @@ impl SyncedState {
                 | SyncEntry::LinkRecord(_)
                 | SyncEntry::DeviceAck(_)
                 | SyncEntry::ChannelReaction(_)
-                | SyncEntry::ChannelComment(_) => {},
+                | SyncEntry::ChannelComment(_)
+                | SyncEntry::QuickReaction(_) => {},
                 other => {
                     let _ = snap.folders.push(h.hlc, other.clone());
                 },
@@ -732,6 +747,87 @@ impl SyncedState {
         let register = decode_own_username_envelope(bytes)?;
         Ok(matches!(
             self.apply(register.hlc, SyncEntry::OwnUsername(register.value))?,
+            ApplyOutcome::Applied
+        ))
+    }
+
+    // -----------------------------------------------------------------
+    // The quick reaction (UX reactions-and-emoji D3).
+    // -----------------------------------------------------------------
+
+    /// Write the account's quick reaction, stamped `hlc`: the emoji a double
+    /// tap sends, followed to the account's other devices.
+    ///
+    /// `emoji` is stored as given; the client offers only what passes the
+    /// one-emoji rule (`lakko_ui_rules::emoji::is_single_emoji`). An
+    /// ordinary last-writer-wins write: `Ok(true)` when the register now
+    /// holds this value (send [`Self::quick_reaction_envelope`] to the
+    /// account's other devices), `Ok(false)` when nothing changed.
+    ///
+    /// # Errors
+    ///
+    /// [`super::entry::BoundsError::QuickReaction`] for an empty or
+    /// over-long value.
+    pub fn set_quick_reaction(
+        &mut self,
+        hlc: u64,
+        emoji: &str,
+    ) -> Result<bool, super::entry::BoundsError> {
+        let entry = QuickReactionEntry {
+            emoji: emoji.to_owned(),
+        };
+        Ok(matches!(
+            self.apply(hlc, SyncEntry::QuickReaction(entry))?,
+            ApplyOutcome::Applied
+        ))
+    }
+
+    /// The quick-reaction register as held; `None` when it was never
+    /// written.
+    #[must_use]
+    pub fn quick_reaction_register(&self) -> Option<Stamped<QuickReactionEntry>> {
+        match self.registers.get(&RegisterKey::QuickReaction) {
+            Some(Held {
+                hlc,
+                entry: SyncEntry::QuickReaction(q),
+            }) => Some(Stamped {
+                hlc: *hlc,
+                value: q.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// The account's quick reaction, or `None` when never chosen (the client
+    /// then uses `lakko_ui_rules::reaction::DEFAULT_QUICK_REACTION`).
+    #[must_use]
+    pub fn quick_reaction(&self) -> Option<String> {
+        self.quick_reaction_register().map(|s| s.value.emoji)
+    }
+
+    /// The envelope carrying the held register with its original stamp: sent
+    /// after [`Self::set_quick_reaction`] returned `true`, and again as the
+    /// catch-up re-send after the DeviceGroup grew. `None` when the register
+    /// was never written.
+    #[must_use]
+    pub fn quick_reaction_envelope(&self) -> Option<Vec<u8>> {
+        compose_quick_reaction_envelope(&self.quick_reaction_register()?).ok()
+    }
+
+    /// Decode a quick-reaction envelope and fold the register in with its
+    /// original stamp. Fail closed: a malformed envelope changes nothing.
+    /// Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`QuickReactionEnvelopeError`].
+    pub fn apply_quick_reaction_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<bool, QuickReactionEnvelopeError> {
+        let register = decode_quick_reaction_envelope(bytes)?;
+        Ok(matches!(
+            self.apply(register.hlc, SyncEntry::QuickReaction(register.value))?,
             ApplyOutcome::Applied
         ))
     }
@@ -2333,15 +2429,15 @@ mod tests {
         let mut s = SyncedState::new();
         s.apply(3, SyncEntry::FolderRemoved(fid(2))).ok();
         let mut old = s.to_bytes();
-        assert_eq!(old[0], 9);
-        for version in [1u8, 2, 3, 4, 5, 6, 7, 8] {
+        assert_eq!(old[0], 10);
+        for version in [1u8, 2, 3, 4, 5, 6, 7, 8, 9] {
             old[0] = version;
             assert_eq!(
                 SyncedState::from_bytes(&old),
                 Err(CodecError::UnknownVersion)
             );
         }
-        assert_eq!(SyncedState::new().to_bytes(), vec![9, 0, 0, 0, 0]);
+        assert_eq!(SyncedState::new().to_bytes(), vec![10, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -2958,6 +3054,54 @@ mod tests {
         assert_eq!(x, fold_of(["", "alice", "bob"]));
         // The larger canonical bytes win: the longer length prefix first.
         assert_eq!(x.own_username().as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn the_quick_reaction_is_a_last_writer_wins_register_carried_by_its_envelope() {
+        let mut a = SyncedState::new();
+        assert_eq!(a.quick_reaction(), None);
+        assert_eq!(a.quick_reaction_envelope(), None);
+        assert_eq!(a.set_quick_reaction(5, "\u{1F525}"), Ok(true));
+        assert_eq!(a.set_quick_reaction(5, "\u{1F525}"), Ok(false));
+        assert_eq!(a.set_quick_reaction(4, "\u{1F602}"), Ok(false));
+        assert_eq!(a.quick_reaction().as_deref(), Some("\u{1F525}"));
+        for bad in ["", &"x".repeat(65)] {
+            assert_eq!(
+                a.set_quick_reaction(9, bad),
+                Err(super::super::entry::BoundsError::QuickReaction)
+            );
+        }
+        assert_eq!(a.quick_reaction().as_deref(), Some("\u{1F525}"));
+
+        // Never in the snapshot; by its envelope; persisted (so the backup).
+        a.apply(1, meta(1, "Work")).ok();
+        assert!(a
+            .snapshot()
+            .stamped_entries()
+            .iter()
+            .all(|(_, e)| !matches!(e, SyncEntry::QuickReaction(_))));
+        let live = a.quick_reaction_envelope().unwrap();
+        let mut b = SyncedState::new();
+        assert_eq!(b.apply_quick_reaction_envelope(&live), Ok(true));
+        assert_eq!(b.apply_quick_reaction_envelope(&live), Ok(false));
+        assert_eq!(b.quick_reaction_register(), a.quick_reaction_register());
+        assert_eq!(
+            b.apply_own_username_envelope(&live),
+            Err(OwnUsernameEnvelopeError::WrongDomain)
+        );
+        let restored = SyncedState::from_bytes(&a.to_bytes()).unwrap();
+        assert_eq!(restored, a);
+        assert_eq!(restored.quick_reaction().as_deref(), Some("\u{1F525}"));
+
+        // A later choice on another device wins; an older re-send does not.
+        assert_eq!(b.set_quick_reaction(7, "\u{1F44D}"), Ok(true));
+        assert_eq!(
+            a.apply_quick_reaction_envelope(&b.quick_reaction_envelope().unwrap()),
+            Ok(true)
+        );
+        assert_eq!(a.quick_reaction().as_deref(), Some("\u{1F44D}"));
+        assert_eq!(a.apply_quick_reaction_envelope(&live), Ok(false));
+        assert_eq!(a.quick_reaction().as_deref(), Some("\u{1F44D}"));
     }
 
     #[test]

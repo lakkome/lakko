@@ -19,6 +19,12 @@ workspace = true
 # The canonical username rule, so "is this worth a lookup" is the SAME
 # predicate the blinder enforces rather than a third spelling of it.
 lakko-contacts.workspace = true
+# The one-emoji rule (`emoji`, UX reactions-and-emoji D10): extended
+# grapheme clusters, and the Extended_Pictographic property that
+# unicode-segmentation uses but does not expose. Both justified at the
+# workspace declaration.
+unicode-segmentation.workspace = true
+icu_properties.workspace = true
 
 [dev-dependencies]
 # Only to pin that the folder bitfield constants equal the wire ones.

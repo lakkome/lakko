@@ -605,7 +605,11 @@ pub fn compose_delete_envelope(target: i64) -> Result<Vec<u8>, FfiError> {
 /// `MAX_EMOJI_BYTES`, or on serialisation failure.
 #[uniffi::export]
 pub fn compose_reaction_envelope(target: i64, emoji: String) -> Result<Vec<u8>, FfiError> {
-    inner::compose_reaction(target, &emoji).map_err(Into::into)
+    // Mechanical bridge after the core gained an explicit add / remove op
+    // and an optional target-author key (UX reactions-and-emoji section 17):
+    // this surface still sends an add without the key until the FFI work
+    // exposes both parameters.
+    inner::compose_reaction(target, &emoji, inner::ReactionAction::Add, None).map_err(Into::into)
 }
 
 /// Build an ephemeral TYPING envelope (ADR-0024).
@@ -694,7 +698,7 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
         },
-        inner::MessageBody::Reaction { target, emoji } => ParsedBody {
+        inner::MessageBody::Reaction { target, emoji, .. } => ParsedBody {
             kind: MessageBodyKind::Reaction,
             text: String::new(),
             attachments: Vec::new(),

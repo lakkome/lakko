@@ -56,6 +56,9 @@
 //! - [`channel_comment`] — the account's own comments under channel posts
 //!   (the nonce each comment's write key is derived from, so any device can
 //!   delete it), bounded the same way, and their envelope.
+//! - [`quick_reaction`] — the account's quick reaction (UX
+//!   `reactions-and-emoji.md` D3: the emoji a double tap sends, synced) and
+//!   its envelope.
 //! - [`state`] — the fold ([`SyncedState`]), its queries, its persistence
 //!   codec, and [`should_send_snapshot`].
 
@@ -66,6 +69,7 @@ pub mod entry;
 pub mod lineage;
 pub mod link_record;
 pub mod own_username;
+pub mod quick_reaction;
 pub mod recovery_email;
 pub mod state;
 
@@ -130,6 +134,12 @@ pub use own_username::{
     compose_own_username_envelope, decode_own_username_envelope, is_own_username_envelope,
     OwnUsernameEnvelopeError, OWN_USERNAME_ENVELOPE_DOMAIN_V1, OWN_USERNAME_ENVELOPE_MAX_LEN,
     OWN_USERNAME_ENVELOPE_MIN_LEN, OWN_USERNAME_ENVELOPE_VERSION_V1,
+};
+pub use quick_reaction::{
+    compose_quick_reaction_envelope, decode_quick_reaction_envelope, is_quick_reaction_envelope,
+    QuickReactionEntry, QuickReactionEnvelopeError, QUICK_REACTION_ENVELOPE_DOMAIN_V1,
+    QUICK_REACTION_ENVELOPE_MAX_LEN, QUICK_REACTION_ENVELOPE_MIN_LEN,
+    QUICK_REACTION_ENVELOPE_VERSION_V1, QUICK_REACTION_MAX_BYTES,
 };
 pub use recovery_email::{
     compose_recovery_email_envelope, decode_recovery_email_envelope, is_recovery_email_envelope,

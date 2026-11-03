@@ -71,6 +71,17 @@
 //!   `mime: text/html` is a file.
 //! - [`WIRE_VERSION`] stays 1.
 //!
+//! # Reaction op (ADR-0023, UX `reactions-and-emoji.md` section 17)
+//!
+//! A reaction is `react_to` + `emoji` + `react_op` (`"add"` or
+//! `"remove"`), with an optional `react_author` (standard base64 of the
+//! target author's 32-byte account key). The op is explicit and required:
+//! the earlier toggle form is not kept (no deployment), so an envelope with
+//! `react_to` and no recognised op degrades to a plain chat like any other
+//! malformed op. `react_author` is dropped alone when it does not decode to
+//! 32 bytes. What a sequence of ops means (per person, at most 3, journal
+//! order) is the fold in `lakko_ui_rules::reaction`, not this parser's.
+//!
 //! # Channel invitation (ADR-0087 section 14)
 //!
 //! `channel_invite` carries an invitation card a channel's owner or
@@ -145,6 +156,28 @@ pub const fn is_reaction_emoji(emoji: &str) -> bool {
     !emoji.is_empty() && emoji.len() <= MAX_EMOJI_BYTES
 }
 
+/// Length of the optional target-author key a reaction carries: the 32-byte
+/// account key of the person who wrote the message reacted to (UX
+/// `reactions-and-emoji.md` section 17 item 7).
+pub const REACTION_TARGET_AUTHOR_LEN: usize = 32;
+
+/// What a reaction op does (UX `reactions-and-emoji.md` section 17 item 3,
+/// maintainer 2026-11-02): add the emoji to the sender's reactions on the
+/// target, or take it off. Explicit rather than a toggle: with a toggle two
+/// of a person's devices pressing at once cancel each other, and a fourth add
+/// a receiver ignored would turn into a removal the next time the same emoji
+/// is sent. With explicit ops an add of an emoji the person already holds,
+/// and a remove of one it does not, are no-ops (the fold in
+/// `lakko_ui_rules::reaction`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReactionAction {
+    /// Add the emoji to the sender's reactions on the target.
+    Add,
+    /// Take the emoji off the sender's reactions on the target.
+    Remove,
+}
+
 /// ADR-0052 — the longest quoted author name a reply may carry, in bytes.
 /// The profile display-name rule already caps a name at 255 bytes
 /// (`lakko-contacts::profile`), so a snapshot of one needs no more; a
@@ -177,7 +210,7 @@ pub const MAX_RESEND_ORIGIN_GROUP_BYTES: usize = MAX_FORWARD_ORIGIN_GROUP_BYTES;
 
 /// ADR-0087 section 14: the longest channel invitation card, in decoded
 /// bytes, a chat envelope keeps. At least
-/// `lakko_contacts::group_invite::CHANNEL_INVITE_CARD_MAX_LEN` (1843, pinned
+/// `lakko_contacts::group_invite::CHANNEL_INVITE_CARD_MAX_LEN` (2014, pinned
 /// by a test there); a larger value is dropped alone.
 pub const MAX_CHANNEL_INVITE_BYTES: usize = 2048;
 
@@ -976,6 +1009,29 @@ pub struct Envelope {
     /// set `react_to` degrades the message to a plain chat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emoji: Option<String>,
+    /// The reaction op (`"add"` / `"remove"`), paired with `react_to`.
+    /// Required: a `react_to` without a recognised op degrades the message
+    /// to a plain chat (no toggle form is kept; there is no deployment).
+    /// Lenient, so an unknown value never fails the whole envelope into the
+    /// raw-JSON fallback.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
+    pub react_op: Option<ReactionAction>,
+    /// The account key of the target message's author, standard base64 of
+    /// [`REACTION_TARGET_AUTHOR_LEN`] bytes, so a background process can tell
+    /// a reaction is to the person's own message without the message log.
+    /// **The sender's claim**: a client that holds the message checks its
+    /// own record. Dropped alone when it does not decode to exactly
+    /// [`REACTION_TARGET_AUTHOR_LEN`] bytes.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
+    pub react_author: Option<String>,
     /// ADR-0024 — if set, this is an ephemeral TYPING signal
     /// (`true` = started, `false` = stopped). Never persisted by the
     /// receiver; auto-expires after a few seconds.
@@ -1104,6 +1160,8 @@ impl Envelope {
             delete_of: None,
             react_to: None,
             emoji: None,
+            react_op: None,
+            react_author: None,
             typing: None,
             read_up_to: None,
             reply_to: None,
@@ -1192,6 +1250,15 @@ fn decode_channel_invite(encoded: &str) -> Option<Vec<u8>> {
     }
     let bytes = B64.decode(encoded).ok()?;
     (!bytes.is_empty() && bytes.len() <= MAX_CHANNEL_INVITE_BYTES).then_some(bytes)
+}
+
+/// The target-author key of a reaction, when it is valid base64 of exactly
+/// [`REACTION_TARGET_AUTHOR_LEN`] bytes. The encoded length is checked first.
+fn decode_react_author(encoded: &str) -> Option<[u8; REACTION_TARGET_AUTHOR_LEN]> {
+    if encoded.len() != REACTION_TARGET_AUTHOR_LEN.div_ceil(3) * 4 {
+        return None;
+    }
+    B64.decode(encoded).ok()?.try_into().ok()
 }
 
 /// A snapshot string as the parser keeps it: present only if non-empty and
@@ -1321,12 +1388,18 @@ pub enum MessageBody {
         /// DS `messageId` of the deleted message.
         target: i64,
     },
-    /// React to the target message with `emoji`.
+    /// Add or take off a reaction `emoji` on the target message.
     Reaction {
         /// DS `messageId` of the reacted-to message.
         target: i64,
         /// The reaction emoji (validated, length-capped).
         emoji: String,
+        /// Add or remove; never a toggle.
+        action: ReactionAction,
+        /// The target message's author account key, as the sender states
+        /// it, when it decoded to exactly [`REACTION_TARGET_AUTHOR_LEN`]
+        /// bytes.
+        target_author: Option<[u8; REACTION_TARGET_AUTHOR_LEN]>,
     },
     /// ADR-0024 — an ephemeral typing signal.
     Typing {
@@ -1410,12 +1483,19 @@ impl Envelope {
                 return MessageBody::ReadReceipt { up_to };
             }
             if let Some(target) = self.react_to {
-                if let Some(emoji) = self.emoji {
+                if let (Some(emoji), Some(action)) = (self.emoji, self.react_op) {
                     if is_reaction_emoji(&emoji) {
-                        return MessageBody::Reaction { target, emoji };
+                        let target_author =
+                            self.react_author.as_deref().and_then(decode_react_author);
+                        return MessageBody::Reaction {
+                            target,
+                            emoji,
+                            action,
+                            target_author,
+                        };
                     }
                 }
-                // react_to set without a valid emoji → degrade.
+                // react_to set without a valid emoji or op → degrade.
                 return MessageBody::Chat {
                     text: self.text,
                     attachments: self.attachments,
@@ -1612,16 +1692,24 @@ pub fn compose_delete(target: i64) -> Result<Vec<u8>, AttachmentError> {
         .map_err(|e| AttachmentError::WireFormat(format!("compose_delete: {e}")))
 }
 
-/// Encode a REACTION (`emoji`) to the message whose DS `messageId`
-/// is `target` (ADR-0023). The emoji is length-capped at
-/// [`MAX_EMOJI_BYTES`]; an over-long value is refused here rather
-/// than silently degrading on the receiver.
+/// Encode a REACTION op: add `emoji` to, or take it off, the sender's
+/// reactions on the message whose DS `messageId` is `target` (ADR-0023, UX
+/// `reactions-and-emoji.md` section 17 items 3 and 7). `target_author` is the
+/// account key of the target's author when the sender knows it; a receiver's
+/// background process uses it to tell a reaction to its own message. The
+/// emoji is length-capped at [`MAX_EMOJI_BYTES`]; an over-long value is
+/// refused here rather than silently degrading on the receiver.
 ///
 /// # Errors
 ///
 /// [`AttachmentError::WireFormat`] if `emoji` is empty or exceeds
 /// [`MAX_EMOJI_BYTES`], or if serialisation fails.
-pub fn compose_reaction(target: i64, emoji: &str) -> Result<Vec<u8>, AttachmentError> {
+pub fn compose_reaction(
+    target: i64,
+    emoji: &str,
+    action: ReactionAction,
+    target_author: Option<&[u8; REACTION_TARGET_AUTHOR_LEN]>,
+) -> Result<Vec<u8>, AttachmentError> {
     if !is_reaction_emoji(emoji) {
         return Err(AttachmentError::WireFormat(format!(
             "compose_reaction: emoji length {} not in 1..={MAX_EMOJI_BYTES}",
@@ -1631,6 +1719,8 @@ pub fn compose_reaction(target: i64, emoji: &str) -> Result<Vec<u8>, AttachmentE
     let envelope = Envelope {
         react_to: Some(target),
         emoji: Some(emoji.to_string()),
+        react_op: Some(action),
+        react_author: target_author.map(|k| B64.encode(k)),
         ..Envelope::base()
     };
     serde_json::to_vec(&envelope)
@@ -1769,11 +1859,12 @@ pub enum AttachmentError {
 #[doc(hidden)]
 pub mod fuzz_api {
     use super::{
-        compose, compose_channel_invite, compose_chat, compose_forward, compose_reply, parse,
-        parse_body, AttachmentRef, MediaKind, MessageBody, MAX_CHANNEL_INVITE_BYTES,
-        MAX_FORWARDED_FROM_BYTES, MAX_FORWARD_ORIGIN_GROUP_BYTES, MAX_MEDIA_DIMENSION,
-        MAX_REPLY_AUTHOR_BYTES, MAX_REPLY_EXCERPT_BYTES, MAX_RESEND_ORIGIN_GROUP_BYTES,
-        MAX_THUMB_BYTES, MAX_VIDEO_NOTE_DURATION_MS, MAX_VOICE_DURATION_MS, MAX_WAVEFORM_BYTES,
+        compose, compose_channel_invite, compose_chat, compose_forward, compose_reaction,
+        compose_reply, is_reaction_emoji, parse, parse_body, AttachmentRef, MediaKind, MessageBody,
+        MAX_CHANNEL_INVITE_BYTES, MAX_FORWARDED_FROM_BYTES, MAX_FORWARD_ORIGIN_GROUP_BYTES,
+        MAX_MEDIA_DIMENSION, MAX_REPLY_AUTHOR_BYTES, MAX_REPLY_EXCERPT_BYTES,
+        MAX_RESEND_ORIGIN_GROUP_BYTES, MAX_THUMB_BYTES, MAX_VIDEO_NOTE_DURATION_MS,
+        MAX_VOICE_DURATION_MS, MAX_WAVEFORM_BYTES,
     };
 
     /// ADR-0052 property oracle over attacker-controlled bytes.
@@ -1903,6 +1994,38 @@ pub mod fuzz_api {
         matches!(parse_body(&recomposed), MessageBody::Chat { channel_invite: Some(again), .. } if again == card)
     }
 
+    /// Reaction-op property oracle over attacker-controlled bytes (UX
+    /// `reactions-and-emoji.md` section 17 items 3 and 7): a reaction that
+    /// survives [`parse_body`] carries an emoji within the wire bound and an
+    /// explicit op, and re-composing it then parsing again yields the
+    /// identical reaction (the target author survives whole or not at all).
+    #[must_use]
+    pub fn reaction_within_bounds(bytes: &[u8]) -> bool {
+        let MessageBody::Reaction {
+            target,
+            emoji,
+            action,
+            target_author,
+        } = parse_body(bytes)
+        else {
+            return true;
+        };
+        if !is_reaction_emoji(&emoji) {
+            return false;
+        }
+        let Ok(recomposed) = compose_reaction(target, &emoji, action, target_author.as_ref())
+        else {
+            return false;
+        };
+        parse_body(&recomposed)
+            == MessageBody::Reaction {
+                target,
+                emoji,
+                action,
+                target_author,
+            }
+    }
+
     /// ADR-0047 property oracle over attacker-controlled bytes.
     ///
     /// Every media field that survives [`parse`] is within its bound,
@@ -1994,8 +2117,13 @@ pub mod fuzz_api {
             MessageBody::Delete { target } => {
                 let _ = target;
             },
-            MessageBody::Reaction { target, emoji } => {
-                let _ = (target, emoji.len());
+            MessageBody::Reaction {
+                target,
+                emoji,
+                action,
+                target_author,
+            } => {
+                let _ = (target, emoji.len(), action, target_author);
             },
             MessageBody::Typing { is_typing } => {
                 let _ = is_typing;
@@ -2189,13 +2317,80 @@ mod tests {
 
     #[test]
     fn reaction_round_trips_through_compose_parse_body() {
-        let bytes = compose_reaction(99, "\u{1F44D}").unwrap();
-        match parse_body(&bytes) {
-            MessageBody::Reaction { target, emoji } => {
-                assert_eq!(target, 99);
-                assert_eq!(emoji, "\u{1F44D}");
-            },
-            other => panic!("expected Reaction, got {other:?}"),
+        let author = [7_u8; REACTION_TARGET_AUTHOR_LEN];
+        for action in [ReactionAction::Add, ReactionAction::Remove] {
+            for target_author in [None, Some(author)] {
+                let bytes =
+                    compose_reaction(99, "\u{1F44D}", action, target_author.as_ref()).unwrap();
+                assert_eq!(
+                    parse_body(&bytes),
+                    MessageBody::Reaction {
+                        target: 99,
+                        emoji: "\u{1F44D}".to_string(),
+                        action,
+                        target_author,
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_reaction_op_wire_is_pinned() {
+        let bytes = compose_reaction(5, "x", ReactionAction::Remove, None).unwrap();
+        assert_eq!(
+            bytes,
+            br#"{"v":1,"text":"","react_to":5,"emoji":"x","react_op":"remove"}"#
+        );
+        let bytes = compose_reaction(5, "x", ReactionAction::Add, Some(&[0; 32])).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains(r#""react_op":"add""#), "{text}");
+        assert!(
+            text.contains(r#""react_author":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=""#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_reaction_without_a_recognised_op_degrades_to_chat() {
+        // No toggle form is kept: an op-less reaction is not a reaction.
+        for json in [
+            r#"{"v":1,"react_to":5,"emoji":"x"}"#,
+            r#"{"v":1,"react_to":5,"emoji":"x","react_op":"toggle"}"#,
+            r#"{"v":1,"react_to":5,"emoji":"x","react_op":7}"#,
+            r#"{"v":1,"react_to":5,"emoji":"x","react_op":"Add"}"#,
+        ] {
+            assert!(
+                matches!(parse_body(json.as_bytes()), MessageBody::Chat { .. }),
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bad_target_author_is_dropped_alone() {
+        let short = B64.encode([1_u8; 31]);
+        let long = B64.encode([1_u8; 33]);
+        for author in [
+            format!(r#""{short}""#),
+            format!(r#""{long}""#),
+            r#""not base64!""#.to_string(),
+            "17".to_string(),
+            "null".to_string(),
+        ] {
+            let json = format!(
+                r#"{{"v":1,"react_to":5,"emoji":"x","react_op":"add","react_author":{author}}}"#
+            );
+            assert_eq!(
+                parse_body(json.as_bytes()),
+                MessageBody::Reaction {
+                    target: 5,
+                    emoji: "x".to_string(),
+                    action: ReactionAction::Add,
+                    target_author: None,
+                },
+                "{json}"
+            );
         }
     }
 
@@ -2249,7 +2444,7 @@ mod tests {
         // A react_to with an emoji past the cap degrades rather than
         // carrying an unbounded string into the reaction path.
         let big = "x".repeat(MAX_EMOJI_BYTES + 1);
-        let json = format!(r#"{{"v":1,"react_to":5,"emoji":"{big}"}}"#);
+        let json = format!(r#"{{"v":1,"react_to":5,"emoji":"{big}","react_op":"add"}}"#);
         assert!(matches!(
             parse_body(json.as_bytes()),
             MessageBody::Chat { .. }
@@ -2258,9 +2453,9 @@ mod tests {
 
     #[test]
     fn compose_reaction_rejects_empty_and_overlong_emoji() {
-        assert!(compose_reaction(1, "").is_err());
+        assert!(compose_reaction(1, "", ReactionAction::Add, None).is_err());
         let big = "x".repeat(MAX_EMOJI_BYTES + 1);
-        assert!(compose_reaction(1, &big).is_err());
+        assert!(compose_reaction(1, &big, ReactionAction::Add, None).is_err());
     }
 
     #[test]

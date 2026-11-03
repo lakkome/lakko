@@ -66,11 +66,11 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 
 /// Server-side ceiling on the sealed blob: the codec's bound on a sealed `/g/`
-/// link (`lakko_contacts::group_invite::MAX_SEALED_LEN`, the 1794-byte bound
-/// on a capability plus the 30-byte seal, 1824 bytes), derived rather than
+/// link (`lakko_contacts::group_invite::MAX_SEALED_LEN`, the 1965-byte bound
+/// on a capability plus the 30-byte seal, 1995 bytes), derived rather than
 /// written as a literal so a codec change moves it. The `VARBINARY` width of
 /// `group_invites.sealed_capability` (migration
-/// `0036_subscriber_invite_width.sql`) matches it; a test pins both, and
+/// `0038_invite_preview_photo_width.sql`) matches it; a test pins both, and
 /// another seals the largest links a client can mint and checks they fit.
 const MAX_SEALED_BYTES: usize = MAX_SEALED_LEN;
 
@@ -646,28 +646,51 @@ mod tests {
 
     /// `MAX_SEALED_BYTES` pins the `group_invites.sealed_capability` width,
     /// declared in `0031_ownerless_invite_ledgers.sql` and widened by
-    /// `0036_subscriber_invite_width.sql` (ADR-0087). Drift surfaces as a
+    /// `0036_subscriber_invite_width.sql` and
+    /// `0038_invite_preview_photo_width.sql` (ADR-0087). Drift surfaces as a
     /// test failure rather than a silent "everything past N bytes 500s in
     /// production".
     #[test]
     fn max_sealed_bytes_matches_column_width() {
-        let widened = include_str!("../migrations/0036_subscriber_invite_width.sql");
+        let widened = include_str!("../migrations/0038_invite_preview_photo_width.sql");
         let normalised = widened.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             normalised.contains(&format!(
                 "MODIFY sealed_capability VARBINARY({MAX_SEALED_BYTES})"
             )),
             "MAX_SEALED_BYTES ({MAX_SEALED_BYTES}) must match group_invites.sealed_capability \
-             in 0036_subscriber_invite_width.sql",
+             in 0038_invite_preview_photo_width.sql",
         );
     }
 
-    /// The derivation lands where it was computed by hand: the 1794-byte
-    /// bound on a v3 capability plus the 30-byte seal.
+    /// The derivation lands where it was computed by hand: the 1965-byte
+    /// bound on a v3 capability with a photo in its preview plus the 30-byte
+    /// seal.
     #[test]
     fn max_sealed_bytes_is_the_computed_maximum() {
-        assert_eq!(lakko_contacts::group_invite::MAX_WIRE_LEN, 1794);
-        assert_eq!(MAX_SEALED_BYTES, 1824);
+        assert_eq!(lakko_contacts::group_invite::MAX_WIRE_LEN, 1965);
+        assert_eq!(MAX_SEALED_BYTES, 1995);
+    }
+
+    /// The largest photo a preview carries: a still and a video at their
+    /// size bounds (ADR-0087 section 18.4).
+    fn maximal_photo() -> lakko_contacts::avatar::Avatar {
+        use lakko_contacts::avatar::{Avatar, AvatarRef, AvatarVideo};
+        let reference = |byte: u8, side: u16, size: u32| AvatarRef {
+            blob_id: [byte; 32],
+            key: [byte; 32],
+            nonce: [byte; 12],
+            size,
+            width: side,
+            height: side,
+        };
+        Avatar {
+            still: reference(0x10, 640, 256 * 1024),
+            video: Some(AvatarVideo {
+                reference: reference(0x20, 480, 4 * 1024 * 1024),
+                duration_ms: 10_000,
+            }),
+        }
     }
 
     fn maximal_capability(expiry_ms: u64, secret: &[u8; 12]) -> Vec<u8> {
@@ -685,6 +708,7 @@ mod tests {
             member_count: u16::MAX,
             channel_id: None,
             subscriber: None,
+            avatar: Some(maximal_photo()),
         };
         compose_with_preview(
             &SigningKey::from_seed(&[0x61; 32]),
@@ -723,6 +747,7 @@ mod tests {
                 },
                 description: "\u{1F600}".repeat(256),
             }),
+            avatar: Some(maximal_photo()),
         };
         compose_with_preview(
             &SigningKey::from_seed(&[0x61; 32]),

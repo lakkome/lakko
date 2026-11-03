@@ -12,7 +12,9 @@
 //! UTF-8 / bound checks all run on attacker-chosen input. Since schema
 //! version 2 (ADR-0059 §2) that includes the topic byte, the language
 //! length prefix and code; since version 3 (ADR-0087) the public flag and
-//! the length-prefixed conversation-handle envelope; and the allowed-reactions
+//! the length-prefixed conversation-handle envelope; the photo field
+//! (ADR-0087 section 18.2: a length byte admitting 0, 84 or 170 and the
+//! square / size / duration bounds of `lakko_contacts::avatar`); and the allowed-reactions
 //! mode with its bounded list (count and every emoji length checked before a
 //! copy). A plaintext that is not
 //! a record goes to the chat-envelope parser (`lakko_attachments`).
@@ -56,6 +58,13 @@ fuzz_target!(|data: &[u8]| {
                 meta.language.is_empty() || (2..=3).contains(&meta.language.len()),
                 "a decoded language is unset or an ISO 639 code"
             );
+            if let Some(avatar) = &meta.avatar {
+                assert!(
+                    avatar.validate().is_ok(),
+                    "a decoded photo is within every avatar bound"
+                );
+                assert_eq!(avatar.still.width, avatar.still.height);
+            }
             let recomposed = compose_channel_meta(&meta).expect("a decoded record must re-compose");
             assert_eq!(recomposed, data, "the encoding must be canonical");
         },

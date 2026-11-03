@@ -404,6 +404,7 @@ mod tests {
             crate::registrar_seed::REGISTRAR_SEED_ENVELOPE_DOMAIN_V1,
             crate::conversation_handle::CONVERSATION_HANDLE_ENVELOPE_DOMAIN_V1,
             crate::group_name::GROUP_NAME_ENVELOPE_DOMAIN_V1,
+            crate::group_photo::GROUP_PHOTO_ENVELOPE_DOMAIN_V1,
             crate::profile::PROFILE_ENVELOPE_DOMAIN_V1,
             crate::push_routing::PUSH_ROUTING_SECRET_ENVELOPE_DOMAIN_V1,
             crate::group_closed::GROUP_CLOSED_ENVELOPE_DOMAIN_V1,

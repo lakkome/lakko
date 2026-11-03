@@ -908,7 +908,11 @@ pub fn compose_delete_envelope(target: i64) -> Result<Vec<u8>, JsError> {
 /// serialisation failure.
 #[wasm_bindgen(js_name = composeReactionEnvelope)]
 pub fn compose_reaction_envelope(target: i64, emoji: &str) -> Result<Vec<u8>, JsError> {
-    inner::compose_reaction(target, emoji).map_err(attachment_err)
+    // Mechanical bridge after the core gained an explicit add / remove op
+    // and an optional target-author key (UX reactions-and-emoji section 17):
+    // this surface still sends an add without the key until the FFI work
+    // exposes both parameters.
+    inner::compose_reaction(target, emoji, inner::ReactionAction::Add, None).map_err(attachment_err)
 }
 
 /// Build an ephemeral TYPING envelope (ADR-0024).
@@ -996,7 +1000,7 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
         },
-        inner::MessageBody::Reaction { target, emoji } => ParsedBody {
+        inner::MessageBody::Reaction { target, emoji, .. } => ParsedBody {
             kind: "reaction",
             text: String::new(),
             attachments: Vec::new(),

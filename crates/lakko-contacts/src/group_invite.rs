@@ -101,10 +101,12 @@
 //! u8   group_name_len  ‖ group_name    — UTF-8, the display-name rule, 0 = none
 //! u8   inviter_len     ‖ inviter_name  — UTF-8, the display-name rule, 0 = none
 //! u16be member_count
+//! u8   avatar_len      ‖ avatar        — crate::avatar, 0 | 84 | 170
 //!
 //! u8   kind (= 2, a channel's co-publisher link, ADR-0078 section 6)
 //! [16] channel_id
 //! u8   channel_name_len ‖ channel_name — UTF-8, the display-name rule, 0 = none
+//! u8   avatar_len      ‖ avatar        — crate::avatar, 0 | 84 | 170
 //!
 //! u8   kind (= 3, a channel subscriber invitation, ADR-0087 sections 7 and 14)
 //! [16] channel_id
@@ -113,7 +115,14 @@
 //! public:  [32] read_key
 //! u8   channel_name_len ‖ channel_name — the channel-name rule, 1..=255 bytes
 //! u16be description_len ‖ description  — the channel-description rule, 0..=1024
+//! u8   avatar_len      ‖ avatar        — crate::avatar, 0 | 84 | 170
 //! ```
+//!
+//! The trailing `avatar` (ADR-0087 section 18.4) is the photo of the group or
+//! channel the link was made with, in the codec a person's profile uses: the
+//! invite page shows it, and a link holder can fetch it, which is what holding
+//! the link already allows for the name. An avatar outside its bounds refuses
+//! the whole preview.
 //!
 //! A subscriber invitation's capability names the channel id as its
 //! `group_id` (16 bytes): a subscriber never joins the PublisherGroup, so its
@@ -152,6 +161,7 @@ use lakko_crypto::signing::{
     Signature, SigningKey, VerifyingKey, PUBLIC_KEY_LEN as ED25519_PUB_LEN, SIGNATURE_LEN,
 };
 
+use crate::avatar::{decode_avatar_field, encode_avatar_field, Avatar, AVATAR_FIELD_MAX_LEN};
 use crate::channel_text::{check_description, check_name, DESCRIPTION_MAX_BYTES, NAME_MAX_BYTES};
 use crate::error::{ContactError, Result};
 use crate::invite::{BLOB_ID_LEN, NEVER_EXPIRES};
@@ -216,12 +226,12 @@ pub const PREVIEW_CHANNEL_ID_LEN: usize = 16;
 pub const MAX_PREVIEW_NAME_BYTES: usize = 255;
 
 /// Longest group preview plaintext: kind, two length-prefixed names, the
-/// count.
+/// count and a photo with a video.
 const MAX_GROUP_PREVIEW_PLAINTEXT_LEN: usize =
-    1 + 1 + MAX_PREVIEW_NAME_BYTES + 1 + MAX_PREVIEW_NAME_BYTES + 2;
+    1 + 1 + MAX_PREVIEW_NAME_BYTES + 1 + MAX_PREVIEW_NAME_BYTES + 2 + AVATAR_FIELD_MAX_LEN;
 
 /// Longest subscriber-invitation plaintext: kind, channel id, access, two
-/// keys (private), the name and the description.
+/// keys (private), the name, the description and a photo with a video.
 const MAX_SUBSCRIBER_PREVIEW_PLAINTEXT_LEN: usize = 1
     + PREVIEW_CHANNEL_ID_LEN
     + 1
@@ -230,7 +240,8 @@ const MAX_SUBSCRIBER_PREVIEW_PLAINTEXT_LEN: usize = 1
     + 1
     + NAME_MAX_BYTES
     + 2
-    + DESCRIPTION_MAX_BYTES;
+    + DESCRIPTION_MAX_BYTES
+    + AVATAR_FIELD_MAX_LEN;
 
 /// Longest preview plaintext of any kind.
 const MAX_PREVIEW_PLAINTEXT_LEN: usize =
@@ -240,10 +251,11 @@ const MAX_PREVIEW_PLAINTEXT_LEN: usize =
         MAX_GROUP_PREVIEW_PLAINTEXT_LEN
     };
 
-// A co-publisher preview (kind, channel id, one name) fits inside the group
-// preview's bound.
+// A co-publisher preview (kind, channel id, one name, a photo) fits inside
+// the group preview's bound.
 const _: () = assert!(
-    1 + PREVIEW_CHANNEL_ID_LEN + 1 + MAX_PREVIEW_NAME_BYTES <= MAX_GROUP_PREVIEW_PLAINTEXT_LEN
+    1 + PREVIEW_CHANNEL_ID_LEN + 1 + MAX_PREVIEW_NAME_BYTES + AVATAR_FIELD_MAX_LEN
+        <= MAX_GROUP_PREVIEW_PLAINTEXT_LEN
 );
 
 /// Longest sealed preview on the wire (nonce + ciphertext + tag). A link that
@@ -358,11 +370,20 @@ pub struct GroupInvitePreview {
     /// (required, the channel-name rule), `inviter_name` is `None` and
     /// `member_count` 0.
     pub subscriber: Option<SubscriberInvite>,
+    /// ADR-0087 section 18.4: the photo of the group or channel when the
+    /// link was made, or `None`. Its keys are readable by whoever holds the
+    /// link.
+    pub avatar: Option<Avatar>,
 }
 
 impl GroupInvitePreview {
     /// Refuse a preview that the decoder would refuse, before sealing it.
     fn validate(&self) -> Result<()> {
+        if let Some(avatar) = &self.avatar {
+            avatar.validate().map_err(|e| {
+                ContactError::InvalidArgument(format!("group-invite preview photo: {}", e.code()))
+            })?;
+        }
         if self.channel_id.is_some() && (self.inviter_name.is_some() || self.member_count != 0) {
             return Err(ContactError::InvalidArgument(
                 "a channel group-invite preview carries no inviter name and no member count".into(),
@@ -434,6 +455,7 @@ impl GroupInvitePreview {
             let description_len = u16::try_from(description.len()).unwrap_or(u16::MAX);
             out.extend_from_slice(&description_len.to_be_bytes());
             out.extend_from_slice(&description[..usize::from(description_len)]);
+            encode_avatar_field(self.avatar.as_ref(), &mut out);
             return out;
         }
         if let Some(channel_id) = &self.channel_id {
@@ -443,6 +465,7 @@ impl GroupInvitePreview {
             let len = u8::try_from(bytes.len()).unwrap_or(u8::MAX);
             out.push(len);
             out.extend_from_slice(&bytes[..usize::from(len)]);
+            encode_avatar_field(self.avatar.as_ref(), &mut out);
             return out;
         }
         out.push(PREVIEW_VERSION);
@@ -454,6 +477,7 @@ impl GroupInvitePreview {
             out.extend_from_slice(&bytes[..usize::from(len)]);
         }
         out.extend_from_slice(&self.member_count.to_be_bytes());
+        encode_avatar_field(self.avatar.as_ref(), &mut out);
         out
     }
 
@@ -487,6 +511,7 @@ impl GroupInvitePreview {
             *slot = Some(text.to_string());
         }
         let count = take_n(&mut cur, 2)?;
+        let avatar = take_avatar(&mut cur)?;
         if !cur.is_empty() {
             return Err(ContactError::InvalidEncoding(format!(
                 "trailing {} bytes after group-invite preview",
@@ -500,6 +525,7 @@ impl GroupInvitePreview {
             member_count: u16::from_be_bytes([count[0], count[1]]),
             channel_id: None,
             subscriber: None,
+            avatar,
         })
     }
 
@@ -521,6 +547,7 @@ impl GroupInvitePreview {
             })?;
             Some(text.to_string())
         };
+        let avatar = take_avatar(&mut cur)?;
         if !cur.is_empty() {
             return Err(ContactError::InvalidEncoding(format!(
                 "trailing {} bytes after group-invite preview",
@@ -533,6 +560,7 @@ impl GroupInvitePreview {
             member_count: 0,
             channel_id: Some(channel_id),
             subscriber: None,
+            avatar,
         })
     }
 
@@ -586,6 +614,7 @@ impl GroupInvitePreview {
                 e.code()
             ))
         })?;
+        let avatar = take_avatar(&mut cur)?;
         if !cur.is_empty() {
             return Err(ContactError::InvalidEncoding(format!(
                 "trailing {} bytes after group-invite preview",
@@ -601,8 +630,17 @@ impl GroupInvitePreview {
                 access,
                 description: description.to_string(),
             }),
+            avatar,
         })
     }
+}
+
+/// Read the preview's trailing photo field, bounds included (ADR-0087
+/// section 18.4).
+fn take_avatar(cur: &mut &[u8]) -> Result<Option<Avatar>> {
+    decode_avatar_field(cur).map_err(|e| {
+        ContactError::InvalidEncoding(format!("group-invite preview photo: {}", e.code()))
+    })
 }
 
 /// Mint a fresh link secret (the URL-fragment value). One per link, never
@@ -615,7 +653,7 @@ pub fn generate_link_key() -> [u8; LINK_SECRET_LEN] {
 /// Longest capability wire the codec can produce: schema version (1) +
 /// `group_id_len` (2) + a [`MAX_GROUP_ID_LEN`] group id + the issuer key +
 /// `expiry_ms` (8) + the knock flag (1) and key (34) + `preview_len` (2) + a
-/// [`MAX_SEALED_PREVIEW_LEN`] sealed preview + the signature (1794 bytes; an
+/// [`MAX_SEALED_PREVIEW_LEN`] sealed preview + the signature (1965 bytes; an
 /// upper bound, since only a subscriber invitation, whose `group_id` is a
 /// 16-byte channel id, carries the largest preview). The
 /// sealed knock row and the `/g/` join attribution carry the plaintext
@@ -1264,6 +1302,7 @@ mod tests {
             member_count: 7,
             channel_id: None,
             subscriber: None,
+            avatar: Some(test_photo()),
         };
         let secret = generate_link_key();
         let wire = compose_with_preview(
@@ -1323,6 +1362,7 @@ mod tests {
             member_count: 0,
             channel_id: Some([0xC4; PREVIEW_CHANNEL_ID_LEN]),
             subscriber: None,
+            avatar: None,
         };
         let secret = generate_link_key();
         let wire = compose_with_preview(
@@ -1354,9 +1394,11 @@ mod tests {
             member_count: 0,
             channel_id: Some([0x01; PREVIEW_CHANNEL_ID_LEN]),
             subscriber: None,
+            avatar: None,
         };
         let plain = preview.encode();
-        assert_eq!(plain.len(), 1 + PREVIEW_CHANNEL_ID_LEN + 1);
+        // kind, channel id, name length, photo length.
+        assert_eq!(plain.len(), 1 + PREVIEW_CHANNEL_ID_LEN + 1 + 1);
         assert_eq!(GroupInvitePreview::decode(&plain).unwrap(), preview);
         assert_eq!(
             crate::fuzz_api::group_invite_preview_plaintext(&plain),
@@ -1373,6 +1415,7 @@ mod tests {
                 member_count: count,
                 channel_id: Some([0x01; PREVIEW_CHANNEL_ID_LEN]),
                 subscriber: None,
+                avatar: None,
             };
             assert!(compose_with_preview(
                 &fixture_signing(),
@@ -1394,6 +1437,7 @@ mod tests {
             member_count: 0,
             channel_id: Some([0x01; PREVIEW_CHANNEL_ID_LEN]),
             subscriber: None,
+            avatar: None,
         };
         let plain = preview.encode();
         for cut in 0..plain.len() {
@@ -1406,7 +1450,8 @@ mod tests {
         trailing.push(0);
         assert!(GroupInvitePreview::decode(&trailing).is_err());
         let mut bad_name = plain;
-        let last = bad_name.len() - 1;
+        // The last name byte sits before the (empty) photo field.
+        let last = bad_name.len() - 2;
         bad_name[last] = b'\n';
         assert!(GroupInvitePreview::decode(&bad_name).is_err());
     }
@@ -1422,6 +1467,7 @@ mod tests {
             member_count: 7,
             channel_id: None,
             subscriber: None,
+            avatar: None,
         };
         let plain = preview.encode();
         assert_eq!(
@@ -1448,7 +1494,7 @@ mod tests {
             None
         );
         // A name carrying a line break fails the display-name rule.
-        let bad_name = [PREVIEW_VERSION, 2, b'a', b'\n', 0, 0, 1];
+        let bad_name = [PREVIEW_VERSION, 2, b'a', b'\n', 0, 0, 1, 0];
         assert_eq!(
             crate::fuzz_api::group_invite_preview_plaintext(&bad_name),
             None
@@ -1679,6 +1725,7 @@ mod tests {
             member_count: 4,
             channel_id: None,
             subscriber: None,
+            avatar: None,
         }
     }
 
@@ -1794,6 +1841,7 @@ mod tests {
             member_count: u16::MAX,
             channel_id: None,
             subscriber: None,
+            avatar: None,
         };
         let wire = compose_with_preview(
             &fixture_signing(),
@@ -1818,6 +1866,7 @@ mod tests {
                 member_count: 1,
                 channel_id: None,
                 subscriber: None,
+                avatar: None,
             };
             assert!(
                 compose_with_preview(
@@ -1841,6 +1890,7 @@ mod tests {
             member_count: 3,
             channel_id: None,
             subscriber: None,
+            avatar: None,
         };
         let wire = compose_with_preview(
             &fixture_signing(),
@@ -1917,6 +1967,101 @@ mod tests {
             subscriber: Some(SubscriberInvite {
                 access,
                 description: "Local news\nevery morning".into(),
+            }),
+            avatar: None,
+        }
+    }
+
+    /// ADR-0087 section 18.4: every preview kind carries the photo at its
+    /// end, through the sealed link, and a photo outside its bounds refuses
+    /// the whole preview on compose and on decode.
+    #[test]
+    fn every_preview_kind_carries_a_photo() {
+        let mut still_only = test_photo();
+        still_only.video = None;
+        let group = GroupInvitePreview {
+            avatar: Some(test_photo()),
+            ..fixture_preview()
+        };
+        let copublisher = GroupInvitePreview {
+            group_name: Some("Daily notes".into()),
+            inviter_name: None,
+            member_count: 0,
+            channel_id: Some([0xC4; PREVIEW_CHANNEL_ID_LEN]),
+            subscriber: None,
+            avatar: Some(still_only),
+        };
+        let subscriber = GroupInvitePreview {
+            avatar: Some(test_photo()),
+            ..subscriber_preview(private_access())
+        };
+        for (preview, group_id, knock_key) in [
+            (group, fixture_group_id(), Some(knock())),
+            (copublisher, vec![0x5a; 32], Some(knock())),
+            (subscriber, vec![0xC7; PREVIEW_CHANNEL_ID_LEN], None),
+        ] {
+            let plain = preview.encode();
+            assert_eq!(GroupInvitePreview::decode(&plain).unwrap(), preview);
+            let without = GroupInvitePreview {
+                avatar: None,
+                ..preview.clone()
+            };
+            let len = if preview.avatar.as_ref().unwrap().video.is_some() {
+                170
+            } else {
+                84
+            };
+            assert_eq!(plain.len(), without.encode().len() + len);
+            let secret = generate_link_key();
+            let wire = compose_with_preview(
+                &fixture_signing(),
+                &group_id,
+                0,
+                knock_key.as_ref(),
+                &preview,
+                &secret,
+            )
+            .unwrap();
+            let (cap, _) = open_link(&secret, &seal_link(&secret, &wire).unwrap()).unwrap();
+            assert_eq!(cap.open_preview(&secret).unwrap(), Some(preview.clone()));
+
+            // Out of bounds: refused before sealing, and on decode.
+            let mut bad = preview.clone();
+            if let Some(a) = &mut bad.avatar {
+                a.still.height = a.still.width - 1;
+            }
+            assert!(compose_with_preview(
+                &fixture_signing(),
+                &group_id,
+                0,
+                knock_key.as_ref(),
+                &bad,
+                &secret,
+            )
+            .is_err());
+            assert!(GroupInvitePreview::decode(&bad.encode()).is_err());
+            assert_eq!(
+                crate::fuzz_api::group_invite_preview_plaintext(&bad.encode()),
+                None
+            );
+        }
+    }
+
+    fn test_photo() -> Avatar {
+        use crate::avatar::{AvatarRef, AvatarVideo};
+        let reference = |byte: u8, side: u16, size: u32| AvatarRef {
+            blob_id: [byte; 32],
+            key: [byte.wrapping_add(1); 32],
+            nonce: [byte.wrapping_add(2); 12],
+            size,
+            width: side,
+            height: side,
+        };
+        Avatar {
+            still: reference(0x10, 640, 40_000),
+            video: Some(AvatarVideo {
+                reference: reference(0x20, 480, 1_000_000),
+                duration_ms: 5_000,
             }),
         }
     }
@@ -2059,11 +2204,11 @@ mod tests {
 
     #[test]
     fn maximal_lengths_are_the_documented_construction() {
-        assert_eq!(MAX_PREVIEW_PLAINTEXT_LEN, 1366);
-        assert_eq!(MAX_SEALED_PREVIEW_LEN, 1394);
-        assert_eq!(MAX_WIRE_LEN, 1794);
-        assert_eq!(MAX_SEALED_LEN, 1824);
-        assert_eq!(CHANNEL_INVITE_CARD_MAX_LEN, 1843);
+        assert_eq!(MAX_PREVIEW_PLAINTEXT_LEN, 1537);
+        assert_eq!(MAX_SEALED_PREVIEW_LEN, 1565);
+        assert_eq!(MAX_WIRE_LEN, 1965);
+        assert_eq!(MAX_SEALED_LEN, 1995);
+        assert_eq!(CHANNEL_INVITE_CARD_MAX_LEN, 2014);
         // The chat envelope keeps a card of up to
         // `lakko_attachments::MAX_CHANNEL_INVITE_BYTES` (2048) bytes.
         const { assert!(CHANNEL_INVITE_CARD_MAX_LEN <= 2048) };
@@ -2077,6 +2222,7 @@ mod tests {
                 access: private_access(),
                 description: "\u{1F600}".repeat(256),
             }),
+            avatar: Some(test_photo()),
         };
         assert_eq!(preview.encode().len(), MAX_PREVIEW_PLAINTEXT_LEN);
     }

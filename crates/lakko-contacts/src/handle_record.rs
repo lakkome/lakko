@@ -10,11 +10,15 @@
 //! its own:
 //!
 //! ```text
-//! payload = version(1)=0x41 ‖ kind(1: 1 group, 2 channel) ‖ updated_at_ms(8, BE)
+//! payload = version(1)=0x42 ‖ kind(1: 1 group, 2 channel) ‖ updated_at_ms(8, BE)
 //!           ‖ id_len(1) ‖ id ‖ key(32)
 //!           ‖ handle_len(1) ‖ handle ‖ name_len(1) ‖ name
 //!           ‖ description_len(2, BE) ‖ description ‖ size_band(1)
+//!           ‖ avatar_len(1: 0 | 84 | 170) ‖ avatar
 //! ```
+//!
+//! Version `0x42` added the photo (ADR-0087 section 18.3, flag day): a
+//! `0x41` payload is refused like any other unknown first byte.
 //!
 //! - **The first byte** is the payload's kind as well as its version: a
 //!   person's payload starts with its own version byte (`0x03`), so one
@@ -39,6 +43,12 @@
 //! - **`size_band`**: `0` `<10`, `1` `10+`, `2` `100+`, `3` `1k+`, `4`
 //!   `10k+`, `5` `100k+` (ADR-0059). A group's is the owner's statement; a
 //!   channel's is unused (the channels service counts it).
+//! - **`avatar`**: the photo, in the [`crate::avatar`] codec a person's
+//!   profile uses (ADR-0087 section 18.3). `avatar_len = 0` means no photo.
+//!   **The blob keys in it are public**: anyone who opens the record can
+//!   fetch and decrypt the photo while it lives, as with the name; a group or
+//!   channel going private re-uploads its photo under a fresh key (a client
+//!   obligation, not this codec's).
 //!
 //! Whole-payload rejection: any field outside its bound refuses the payload.
 //!
@@ -48,6 +58,9 @@ use core::result::Result as CoreResult;
 
 use thiserror::Error;
 
+use crate::avatar::{
+    decode_avatar_field, encode_avatar_field, Avatar, AvatarError, AVATAR_FIELD_MAX_LEN,
+};
 use crate::channel_text::{check_description, check_name, ChannelTextError, DESCRIPTION_MAX_BYTES};
 use crate::introduction::{
     seal_record, IntroductionError, IntroductionPayload, IntroductionRecord, OPRF_OUTPUT_LEN,
@@ -58,9 +71,10 @@ use crate::username::{
     check_canonical_username, UsernameError, USERNAME_MAX_LEN, USERNAME_MIN_LEN,
 };
 
-/// The payload's first byte: version 1 of a group's or channel's payload.
-/// Distinct from every person payload version.
-pub const HANDLE_RECORD_PAYLOAD_VERSION_V1: u8 = 0x41;
+/// The payload's first byte: version 2 of a group's or channel's payload
+/// (ADR-0087 section 18.3; version 1, `0x41`, carried no photo and is
+/// refused). Distinct from every person payload version.
+pub const HANDLE_RECORD_PAYLOAD_VERSION_V2: u8 = 0x42;
 
 /// Length of a group id in the payload.
 pub const HANDLE_RECORD_GROUP_ID_LEN: usize = 32;
@@ -75,7 +89,7 @@ pub const HANDLE_RECORD_KEY_LEN: usize = 32;
 pub const MAX_SIZE_BAND: u8 = 5;
 
 /// Shortest payload: a channel id, a three-character handle, a one-byte
-/// name, no description.
+/// name, no description, no photo.
 pub const HANDLE_RECORD_PAYLOAD_MIN_LEN: usize = 1
     + 1
     + 8
@@ -87,9 +101,11 @@ pub const HANDLE_RECORD_PAYLOAD_MIN_LEN: usize = 1
     + 1
     + 1
     + 2
+    + 1
     + 1;
 
-/// Longest payload: a group id, the longest handle, name and description.
+/// Longest payload: a group id, the longest handle, name and description,
+/// and a photo with a video.
 pub const HANDLE_RECORD_PAYLOAD_MAX_LEN: usize = 1
     + 1
     + 8
@@ -102,7 +118,8 @@ pub const HANDLE_RECORD_PAYLOAD_MAX_LEN: usize = 1
     + DISPLAY_NAME_MAX_BYTES
     + 2
     + DESCRIPTION_MAX_BYTES
-    + 1;
+    + 1
+    + AVATAR_FIELD_MAX_LEN;
 
 /// Group or channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -163,12 +180,14 @@ pub struct HandleRecordPayload {
     pub description: String,
     /// The size band, `0..=5`.
     pub size_band: u8,
+    /// The photo, or `None`. Its keys are public (see the module docs).
+    pub avatar: Option<Avatar>,
 }
 
 /// Why a group's or channel's record payload was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum HandleRecordError {
-    /// The payload's first byte is not [`HANDLE_RECORD_PAYLOAD_VERSION_V1`].
+    /// The payload's first byte is not [`HANDLE_RECORD_PAYLOAD_VERSION_V2`].
     #[error("unknown handle record payload version {0:#04x}")]
     UnknownVersion(u8),
     /// The kind byte is neither group nor channel.
@@ -195,6 +214,10 @@ pub enum HandleRecordError {
     /// The size band is above [`MAX_SIZE_BAND`].
     #[error("handle record size band {0} is out of range")]
     BadSizeBand(u8),
+    /// The photo's length byte is not 0, 84 or 170, or the photo violates a
+    /// bound.
+    #[error("handle record photo: {0}")]
+    Avatar(AvatarError),
     /// The record wire refused (structure, sealing, opening).
     #[error("handle record: {0}")]
     Record(IntroductionError),
@@ -214,7 +237,17 @@ impl HandleRecordError {
             Self::GroupName(e) => format!("name.{}", e.code()),
             Self::Text(e) => format!("text.{}", e.code()),
             Self::BadSizeBand(_) => "badSizeBand".to_string(),
+            Self::Avatar(e) => format!("avatar.{}", e.code()),
             Self::Record(e) => format!("record.{}", e.code()),
+        }
+    }
+}
+
+impl From<AvatarError> for HandleRecordError {
+    fn from(e: AvatarError) -> Self {
+        match e {
+            AvatarError::Truncated => Self::BadLength,
+            other => Self::Avatar(other),
         }
     }
 }
@@ -251,6 +284,9 @@ impl HandleRecordPayload {
         if self.size_band > MAX_SIZE_BAND {
             return Err(HandleRecordError::BadSizeBand(self.size_band));
         }
+        if let Some(avatar) = &self.avatar {
+            avatar.validate().map_err(HandleRecordError::Avatar)?;
+        }
         Ok(())
     }
 
@@ -265,7 +301,7 @@ impl HandleRecordPayload {
         let description_len =
             u16::try_from(self.description.len()).map_err(|_| HandleRecordError::BadLength)?;
         let mut out = Vec::with_capacity(HANDLE_RECORD_PAYLOAD_MAX_LEN);
-        out.push(HANDLE_RECORD_PAYLOAD_VERSION_V1);
+        out.push(HANDLE_RECORD_PAYLOAD_VERSION_V2);
         out.push(self.kind.to_byte());
         out.extend_from_slice(&self.updated_at_ms.to_be_bytes());
         out.push(len8(self.id.len())?);
@@ -278,6 +314,7 @@ impl HandleRecordPayload {
         out.extend_from_slice(&description_len.to_be_bytes());
         out.extend_from_slice(self.description.as_bytes());
         out.push(self.size_band);
+        encode_avatar_field(self.avatar.as_ref(), &mut out);
         Ok(out)
     }
 
@@ -290,7 +327,7 @@ impl HandleRecordPayload {
     pub fn decode(bytes: &[u8]) -> CoreResult<Self, HandleRecordError> {
         let mut cur = bytes;
         let version = take_u8(&mut cur)?;
-        if version != HANDLE_RECORD_PAYLOAD_VERSION_V1 {
+        if version != HANDLE_RECORD_PAYLOAD_VERSION_V2 {
             return Err(HandleRecordError::UnknownVersion(version));
         }
         let kind_byte = take_u8(&mut cur)?;
@@ -324,6 +361,7 @@ impl HandleRecordPayload {
             HandleRecordError::Text(ChannelTextError::NotUtf8),
         )?;
         let size_band = take_u8(&mut cur)?;
+        let avatar = decode_avatar_field(&mut cur).map_err(HandleRecordError::from)?;
         if !cur.is_empty() {
             return Err(HandleRecordError::BadLength);
         }
@@ -336,6 +374,7 @@ impl HandleRecordPayload {
             name,
             description,
             size_band,
+            avatar,
         };
         payload.validate()?;
         Ok(payload)
@@ -386,8 +425,9 @@ pub fn open_handle_record(
 pub enum SearchRecord {
     /// A person in Everyone (never with a `fof` grant).
     Person(Box<IntroductionPayload>),
-    /// A public group or channel.
-    Conversation(HandleRecordPayload),
+    /// A public group or channel (boxed: with its photo it is the larger
+    /// variant by far).
+    Conversation(Box<HandleRecordPayload>),
 }
 
 /// Open any public record a lookup or a name search returned: a person's
@@ -407,9 +447,9 @@ pub fn open_search_record(
     else {
         return Ok(None);
     };
-    if plaintext.first() == Some(&HANDLE_RECORD_PAYLOAD_VERSION_V1) {
+    if plaintext.first() == Some(&HANDLE_RECORD_PAYLOAD_VERSION_V2) {
         return HandleRecordPayload::decode(&plaintext)
-            .map(|p| Some(SearchRecord::Conversation(p)));
+            .map(|p| Some(SearchRecord::Conversation(Box::new(p))));
     }
     let person = IntroductionPayload::decode(&plaintext)?;
     if person.fof.is_some() {
@@ -480,6 +520,26 @@ mod tests {
             name: "Hiking club".to_string(),
             description: "Weekend walks around Berlin.".to_string(),
             size_band: 2,
+            avatar: None,
+        }
+    }
+
+    fn photo() -> Avatar {
+        use crate::avatar::{AvatarRef, AvatarVideo};
+        let reference = |byte: u8, side: u16, size: u32| AvatarRef {
+            blob_id: [byte; 32],
+            key: [byte.wrapping_add(1); 32],
+            nonce: [byte.wrapping_add(2); 12],
+            size,
+            width: side,
+            height: side,
+        };
+        Avatar {
+            still: reference(0x10, 640, 40_000),
+            video: Some(AvatarVideo {
+                reference: reference(0x20, 480, 1_000_000),
+                duration_ms: 5_000,
+            }),
         }
     }
 
@@ -490,7 +550,7 @@ mod tests {
             assert_eq!(open_handle_record(&wire, &oprf).unwrap(), Some(group()));
             assert_eq!(
                 open_search_record(&wire, &oprf).unwrap(),
-                Some(SearchRecord::Conversation(group()))
+                Some(SearchRecord::Conversation(Box::new(group())))
             );
         }
         assert_eq!(open_handle_record(&wire, &[0x99; 64]).unwrap(), None);
@@ -531,6 +591,7 @@ mod tests {
         p.handle = "a".repeat(32);
         p.name = "n".repeat(64);
         p.description = "\u{4e2d}".repeat(300);
+        p.avatar = Some(photo());
         let terms: Vec<[u8; 64]> = (0..65u8).map(|i| [i; 64]).collect();
         let wire = compose_handle_record(&p, &terms, 1).unwrap();
         assert!(wire.len() <= PUBLIC_RECORD_MAX_LEN);
@@ -573,6 +634,51 @@ mod tests {
             HandleRecordPayload::decode(&kind),
             Err(HandleRecordError::UnknownKind(3))
         );
+    }
+
+    #[test]
+    fn the_photo_rides_after_the_size_band_and_is_bounded() {
+        let mut p = group();
+        p.avatar = Some(photo());
+        let wire = p.encode().unwrap();
+        assert_eq!(wire[0], 0x42);
+        assert_eq!(wire.len(), group().encode().unwrap().len() + 170);
+        assert_eq!(HandleRecordPayload::decode(&wire), Ok(p.clone()));
+        let sealed = compose_handle_record(&p, &[HANDLE_OPRF], 3).unwrap();
+        assert_eq!(open_handle_record(&sealed, &HANDLE_OPRF).unwrap(), Some(p));
+
+        let mut not_square = group();
+        let mut a = photo();
+        a.still.height = 600;
+        not_square.avatar = Some(a.clone());
+        assert_eq!(
+            not_square.encode(),
+            Err(HandleRecordError::Avatar(AvatarError::NotSquare))
+        );
+        // The same bytes on the wire, past encode.
+        let mut wire = group().encode().unwrap();
+        wire.pop();
+        encode_avatar_field(Some(&a), &mut wire);
+        assert_eq!(
+            HandleRecordPayload::decode(&wire),
+            Err(HandleRecordError::Avatar(AvatarError::NotSquare))
+        );
+    }
+
+    #[test]
+    fn a_version_one_payload_is_refused() {
+        let mut wire = group().encode().unwrap();
+        wire[0] = 0x41;
+        assert_eq!(
+            HandleRecordPayload::decode(&wire),
+            Err(HandleRecordError::UnknownVersion(0x41))
+        );
+    }
+
+    #[test]
+    fn payload_bounds_are_the_documented_construction() {
+        assert_eq!(HANDLE_RECORD_PAYLOAD_MAX_LEN, 1562);
+        assert_eq!(PUBLIC_RECORD_MAX_LEN, 7582);
     }
 
     proptest! {

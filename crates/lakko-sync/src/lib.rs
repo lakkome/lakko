@@ -106,6 +106,9 @@ pub mod fuzz_api {
     ///   removal), fold to exactly that register, and not apply twice.
     /// * [`decode_own_username_envelope`] — the account's own username
     ///   register, reached the same way, held to the same properties.
+    /// * `decode_quick_reaction_envelope` — the account's quick reaction (UX
+    ///   reactions-and-emoji D3), reached the same way, held to the same
+    ///   properties.
     /// * [`decode_link_record_envelope`] — the account's invite links
     ///   (ADR-0079), reached the same way. Whatever decodes must re-encode to
     ///   the identical bytes, hold records within their bounds, and fold so
@@ -126,6 +129,7 @@ pub mod fuzz_api {
         lineage_envelope_holds(bytes)
             && recovery_email_envelope_holds(bytes)
             && own_username_envelope_holds(bytes)
+            && quick_reaction_envelope_holds(bytes)
             && link_record_envelope_holds(bytes)
             && device_ack_envelope_holds(bytes)
             && channel_reaction_envelope_holds(bytes)
@@ -265,6 +269,23 @@ pub mod fuzz_api {
             && state.apply_own_username_envelope(bytes) == Ok(false)
     }
 
+    /// The quick-reaction envelope (UX reactions-and-emoji D3): canonical,
+    /// within its bounds, folds to exactly its own register, and a re-send is
+    /// not an update.
+    fn quick_reaction_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(register) = crate::synced::decode_quick_reaction_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        crate::synced::compose_quick_reaction_envelope(&register).as_deref() == Ok(bytes)
+            && register.value.validate().is_ok()
+            && bytes.len() <= crate::synced::QUICK_REACTION_ENVELOPE_MAX_LEN
+            && state.apply_quick_reaction_envelope(bytes) == Ok(true)
+            && state.quick_reaction_register().as_ref() == Some(&register)
+            && state.quick_reaction_envelope().as_deref() == Some(bytes)
+            && state.apply_quick_reaction_envelope(bytes) == Ok(false)
+    }
+
     /// The persisted state: it reads back as itself, and each
     /// envelope-carried register is valid and rebuilt by its envelope.
     fn persisted_state_holds(bytes: &[u8]) -> bool {
@@ -290,6 +311,11 @@ pub mod fuzz_api {
         }
         if let Some(envelope) = state.own_username_envelope() {
             if rebuilt.apply_own_username_envelope(&envelope).is_err() {
+                return false;
+            }
+        }
+        if let Some(envelope) = state.quick_reaction_envelope() {
+            if rebuilt.apply_quick_reaction_envelope(&envelope).is_err() {
                 return false;
             }
         }
@@ -326,6 +352,7 @@ pub mod fuzz_api {
             && rebuilt.all_link_records() == state.all_link_records()
             && rebuilt.recovery_email_register() == state.recovery_email_register()
             && rebuilt.own_username_register() == state.own_username_register()
+            && rebuilt.quick_reaction_register() == state.quick_reaction_register()
             && !state
                 .recovery_email_register()
                 .is_some_and(|r| r.value.validate().is_err())

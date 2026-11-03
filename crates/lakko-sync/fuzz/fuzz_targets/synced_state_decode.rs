@@ -3,7 +3,7 @@
 
 //! Fuzz target — the byte decoders of the synced state (`lakko-sync`).
 //!
-//! Eight decoders run on bytes this device did not write:
+//! Nine decoders run on bytes this device did not write:
 //!
 //! * `decode_lineage_envelope` (ADR-0073 R.5): a conversation-lineage
 //!   envelope another device of the same account sent over the DeviceGroup's
@@ -17,6 +17,9 @@
 //! * `decode_own_username_envelope` (ADR-0076 section 3): the account's own
 //!   username register, sent the same way and laid out the same; the value
 //!   must be empty or a canonical username.
+//! * `decode_quick_reaction_envelope` (UX `reactions-and-emoji.md` D3): the
+//!   account's quick reaction, sent the same way and laid out the same; the
+//!   value is 1 to 64 bytes of UTF-8.
 //! * `decode_link_record_envelope` (ADR-0079 section 4): the account's own
 //!   invite links, sent the same way (version `0x02` since the record carries
 //!   the ledger row's revocation seed, 0 or 32 bytes, reworked 2026-10-17;
@@ -40,8 +43,8 @@
 //!   strictly ascending keys, no trailing bytes.
 //! * `SyncedState::from_bytes` (ADR-0058): the persisted fold, which is also
 //!   what the backup payload carries, so a hostile storage tier chooses it.
-//!   Version 9 since the own channel-comment register (ADR-0087 section
-//!   13a); version 8 added the own channel-reaction register and version 7
+//!   Version 10 since the quick-reaction register; version 9 added the own
+//!   channel-comment register (ADR-0087 section 13a); version 8 added the own channel-reaction register and version 7
 //!   the conversation-end register (section 9).
 //!
 //! The harness asserts none panics, that an accepted envelope is canonical

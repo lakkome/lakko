@@ -106,6 +106,8 @@
 
 pub mod ack;
 pub mod admission_seed;
+pub mod allowed_reactions;
+pub mod avatar;
 pub mod call_invite;
 pub mod call_kp_forward;
 pub mod call_welcome;
@@ -120,6 +122,8 @@ pub mod group_closed;
 pub mod group_invite;
 pub mod group_join_attribution;
 pub mod group_name;
+pub mod group_photo;
+pub mod group_reactions;
 pub mod handle;
 pub mod handle_record;
 pub mod incoming_envelope;
@@ -154,6 +158,16 @@ pub use admission_seed::{
     admission_seed_public_key, compose_admission_seed, decode_admission_seed,
     try_unwrap_admission_seed, AdmissionSeedEnvelope, AdmissionSeedError,
     ADMISSION_SEED_ENVELOPE_DOMAIN_V1, ADMISSION_SEED_ENVELOPE_LEN, ADMISSION_SEED_VERSION_V1,
+};
+pub use allowed_reactions::{
+    is_reaction_emoji_bytes, AllowedReactions, AllowedReactionsError,
+    ALLOWED_REACTIONS_ENCODED_MAX_LEN, ALLOWED_REACTIONS_MAX, REACTION_EMOJI_MAX_BYTES,
+};
+pub use avatar::{
+    avatar_field_len, decode_avatar_field, encode_avatar_field, read_avatar_field, Avatar,
+    AvatarError, AvatarRef, AvatarVideo, AVATAR_FIELD_MAX_LEN, AVATAR_REF_LEN,
+    AVATAR_STILL_MAX_BYTES, AVATAR_STILL_MAX_PX, AVATAR_STILL_ONLY_LEN, AVATAR_VIDEO_MAX_BYTES,
+    AVATAR_VIDEO_MAX_DURATION_MS, AVATAR_VIDEO_MAX_PX, AVATAR_WITH_VIDEO_LEN,
 };
 pub use call_invite::{
     call_revoke_canonical_bytes, call_sign_revocation, compose as compose_call_invite,
@@ -223,6 +237,17 @@ pub use group_name::{
     try_unwrap_group_name, GroupName, GroupNameError, GROUP_NAME_ENVELOPE_DOMAIN_V1,
     GROUP_NAME_ENVELOPE_MAX_LEN, GROUP_NAME_ENVELOPE_MIN_LEN, GROUP_NAME_VERSION_V1,
 };
+pub use group_photo::{
+    compose_group_photo, decode_group_photo, group_photo_is_newer, try_unwrap_group_photo,
+    GroupPhoto, GroupPhotoError, GROUP_PHOTO_ENVELOPE_DOMAIN_V1, GROUP_PHOTO_ENVELOPE_MAX_LEN,
+    GROUP_PHOTO_ENVELOPE_MIN_LEN, GROUP_PHOTO_ENVELOPE_STILL_LEN, GROUP_PHOTO_VERSION_V1,
+};
+pub use group_reactions::{
+    compose_group_reactions, decode_group_reactions, group_reactions_is_newer,
+    try_unwrap_group_reactions, GroupReactions, GroupReactionsError,
+    GROUP_REACTIONS_ENVELOPE_DOMAIN_V1, GROUP_REACTIONS_ENVELOPE_MAX_LEN,
+    GROUP_REACTIONS_ENVELOPE_MIN_LEN, GROUP_REACTIONS_VERSION_V1,
+};
 pub use handle::{
     handle_content_hash, handle_write_public_key, handle_write_seed, HandleStatement,
     HandleStatementBody, HandleStatementError, HandleVisibility, HANDLE_STATEMENT_MAX_LEN,
@@ -231,7 +256,7 @@ pub use handle::{
 pub use handle_record::{
     compose_handle_record, open_handle_record, open_search_record, HandleRecordError,
     HandleRecordKind, HandleRecordPayload, SearchRecord, HANDLE_RECORD_PAYLOAD_MAX_LEN,
-    HANDLE_RECORD_PAYLOAD_MIN_LEN, HANDLE_RECORD_PAYLOAD_VERSION_V1, MAX_SIZE_BAND,
+    HANDLE_RECORD_PAYLOAD_MIN_LEN, HANDLE_RECORD_PAYLOAD_VERSION_V2, MAX_SIZE_BAND,
 };
 pub use incoming_envelope::{dispatch_incoming_envelope, DispatchError, IncomingEnvelope};
 pub use introduction::{

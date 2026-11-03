@@ -31,6 +31,7 @@ pub mod call_bar;
 pub mod call_group;
 pub mod capture;
 pub mod conversation;
+pub mod emoji;
 pub mod folder;
 pub mod guest_name;
 pub mod handle;
