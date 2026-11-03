@@ -19,6 +19,7 @@
  */
 import type { ResolvedName } from "../profile/resolver";
 import { memberListLabelOf, memberNameOf } from "../profile/member-label";
+import { knockClaimedName } from "../ds/knock-seeds";
 
 /** The part of the wasm `Group` this reads. */
 export interface PendingJoinGroup {
@@ -63,7 +64,11 @@ function resolvePendingJoin(
     const byAccount = resolve(encodeB64(accountKey));
     if (byAccount.source !== "fingerprint") return byAccount;
   }
-  return resolve(encodeB64(leafKey));
+  const byLeaf = resolve(encodeB64(leafKey));
+  // ADR-0087 UX section 8 — the name a request carries, unverified, when the
+  // device knows nothing better.
+  const claimed = byLeaf.source === "fingerprint" ? knockClaimedName(encodeB64(leafKey)) : null;
+  return claimed === null ? byLeaf : { ...byLeaf, name: claimed, listLabel: claimed, source: "profile" };
 }
 
 /** The list label for the pending request whose leaf key is `leafKey`

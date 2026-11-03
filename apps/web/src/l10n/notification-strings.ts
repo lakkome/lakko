@@ -16,6 +16,7 @@
 import { createEffect, createRoot } from "solid-js";
 import { isDesktop } from "../platform";
 import { currentLanguage, t } from "./index";
+import { reactionNotificationsOn } from "../chat/reaction-notify-pref";
 
 /** Cache name; must equal `NOTIFICATION_STRINGS_CACHE` in the worker. */
 export const NOTIFICATION_STRINGS_CACHE = "lakko-l10n";
@@ -43,6 +44,12 @@ export interface NotificationWords {
   unsupportedMessage: string;
   /** Entry `i` is the attachment-only preview line for `i + 1` attachments. */
   attachments: string[];
+  /** Reactions section 12 — "{name} reacted {emoji} to your message", with
+   *  U+0001 where the name goes and U+0002 where the emoji goes (the worker
+   *  cannot run the formatter). */
+  reactedToYourMessage: string;
+  /** The `Reactions` switch is off on this device. */
+  reactionsOff: boolean;
 }
 
 /** The words, rendered now. */
@@ -60,6 +67,8 @@ export function renderNotificationStrings(): NotificationWords {
     newMessage: t("notification.message.new"),
     unsupportedMessage: t("chat.message.unsupported"),
     attachments,
+    reactedToYourMessage: t("notification.reaction.body", { name: "\u0001", emoji: "\u0002" }),
+    reactionsOff: !reactionNotificationsOn(),
   };
 }
 
@@ -90,6 +99,7 @@ export function publishNotificationStrings(): void {
     createEffect(() => {
       // Re-run on a language switch: `t` reads the current dictionary.
       currentLanguage();
+      reactionNotificationsOn();
       void store(renderNotificationStrings());
     });
   });

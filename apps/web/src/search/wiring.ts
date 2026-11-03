@@ -9,6 +9,10 @@
  * and `send-request.ts`; this file only answers their questions from real
  * sources, so it holds no rule of its own.
  */
+import { nameLookupAll, type NameLookupAnyHit } from "../discovery/handle-lookup";
+import type { LookupResponse } from "../discovery/wire";
+import { avatarFromWasm } from "../profile/avatar-model";
+import type { FoundConversation } from "./people-search";
 import type { ContactsClient } from "../contacts/client";
 import { ContactsError } from "../contacts/client";
 import { contactsErrorText } from "../contacts/errors";
@@ -18,7 +22,6 @@ import { base64Decode, base64Encode } from "../auth/account-id";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import { DiscoveryClient } from "../discovery/client";
 import { DsClient } from "../ds/client";
-import { bytesToHex } from "../channels/composer";
 import { personKeysOf, verifiedTargetOfGrant } from "../reach/mailbox-write";
 import { provenSuccessorWith } from "../contacts/proven-successor";
 import { grantsInOrderForPerson } from "../reach/received-grants";
@@ -224,6 +227,48 @@ function logSearchCounts(c: SearchCounts): void {
   );
 }
 
+/** The answers of one search's lookups, by lookup key (base64), so the
+ *  conversation question reads what the person question already fetched. */
+const handleLookups = new Map<string, LookupResponse | null>();
+const termLookups = new Map<string, NameLookupAnyHit[]>();
+
+/** `openSearchRecord` for a public group or channel; `null` otherwise. */
+export function openConversationRecordWith(
+  wasm: Wasm,
+  record: Uint8Array,
+  output: Uint8Array,
+): FoundConversation | null {
+  let opened;
+  try {
+    opened = wasm.openSearchRecord(record, output);
+  } catch {
+    return null;
+  }
+  if (opened === undefined) return null;
+  try {
+    const c = opened.conversation;
+    if (c === undefined) return null;
+    try {
+      const kind = c.kind === "channel" ? "channel" : "group";
+      return {
+        kind,
+        idB64: base64Encode(c.id),
+        handle: c.handle,
+        name: c.name,
+        description: c.description,
+        sizeBand: c.sizeBand,
+        key: c.key,
+        knockVersion: c.knockVersion,
+        avatar: avatarFromWasm(c.avatar),
+      };
+    } finally {
+      c.free();
+    }
+  } finally {
+    opened.free();
+  }
+}
+
 /** The network search, answered from the running app. */
 export function peopleSearchDeps(args: {
   readonly wasm: Wasm;
@@ -238,10 +283,9 @@ export function peopleSearchDeps(args: {
     canonicalUsername: (typed) => canonicalUsernameOf(wasm, typed),
     queryTerm: (query) => wasm.nameQueryTerm(query) ?? null,
     nameMatches: (name, query) => wasm.nameMatchesQuery(name, query),
-    lookupChannel: async (handle) => {
-      const found = await discovery.lookupChannel(handle);
-      return found.channel === null ? null : bytesToHex(found.channel);
-    },
+    // ADR-0087 section 1: a channel's `@name` is a handle in the one
+    // namespace; the conversations question below finds it (by `@name` and by
+    // name) from the same OPRF rounds, so no separate channel question.
     usernameOprf: (username) => scoped.usernameOprf(username),
     usernameLookupKey: async (username) => {
       const held = usernameLookupKeys.get(username);
@@ -256,7 +300,11 @@ export function peopleSearchDeps(args: {
     },
     accountOfUsernameLookupKey: async (lookupKey) => {
       const res = await discovery.lookupRaw({ oprf_hash: base64Encode(lookupKey) });
+      handleLookups.set(base64Encode(lookupKey), res);
       if (res === null) return null;
+      // ADR-0087 section 1: one namespace; a group or channel answers here
+      // with its record and no account (read by the conversation question).
+      if ((res as { kind?: string }).kind === "handle" || res.account_id === undefined) return null;
       let publicRecord: Uint8Array | null = null;
       if (res.public_record_b64 !== undefined) {
         try {
@@ -268,7 +316,32 @@ export function peopleSearchDeps(args: {
       return { accountId: base64Decode(res.account_id), publicRecord };
     },
     nameTermOprf: (term) => scoped.nameTermOprf(term),
-    accountsOfNameTermLookupKey: (lookupKey) => scoped.nameLookup(lookupKey),
+    accountsOfNameTermLookupKey: async (lookupKey) => {
+      const all = await nameLookupAll(lookupKey);
+      termLookups.set(base64Encode(lookupKey), all);
+      return all.flatMap((h) =>
+        h.kind === "person" && h.accountId !== null ? [{ accountId: h.accountId, publicRecord: h.publicRecord }] : [],
+      );
+    },
+    conversationRecordOfLookupKey: async (lookupKey) => {
+      const key = base64Encode(lookupKey);
+      const res = handleLookups.has(key)
+        ? handleLookups.get(key)
+        : await discovery.lookupRaw({ oprf_hash: key });
+      if (res === null || res === undefined) return null;
+      if ((res as { kind?: string }).kind !== "handle" || res.public_record_b64 === undefined) return null;
+      try {
+        return base64Decode(res.public_record_b64);
+      } catch {
+        return null;
+      }
+    },
+    conversationRecordsOfTermLookupKey: async (lookupKey) => {
+      const key = base64Encode(lookupKey);
+      const all = termLookups.get(key) ?? (await nameLookupAll(lookupKey));
+      return all.flatMap((h) => (h.kind === "handle" && h.publicRecord !== null ? [h.publicRecord] : []));
+    },
+    openConversationRecord: (record, output) => openConversationRecordWith(wasm, record, output),
     openPublicRecord: (record, oprfOutput) => openPublicRecordWith(wasm, record, oprfOutput),
     identityKeyOf: async (accountId) => {
       const bundle = await discovery.identityFetch(accountId);

@@ -16,6 +16,9 @@
  * the cross-device sync runtime; unread, preview and time from the persisted
  * message log, which the open chat and the background receive both write.
  */
+import { dropRequestSent, requestsSent } from "./requests-sent";
+import { RequestsSentScreen } from "./RequestsSentScreen";
+import { unseenReactionIds } from "./unseen-reactions";
 import {
   createEffect,
   createMemo,
@@ -226,6 +229,11 @@ function ChannelRow(props: {
 
 export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Element {
   const chats = useChats();
+  const [requestsOpen, setRequestsOpen] = createSignal(false);
+  // ADR-0087 UX 6.2 — a request leaves the list once its group is in Chats.
+  createEffect(() => {
+    for (const r of requestsSent()) if (chats.get(r.idB64) !== undefined) dropRequestSent(r.idB64);
+  });
   const sync = useDeviceGroupSync();
   const navigate = useNavigate();
   const callHost = useCallHost();
@@ -615,6 +623,23 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
         }
       >
         <div class="lk-pane-body">
+          {/* ADR-0087 UX 6.2 — the Requests sent row, at the top, while one is open. */}
+          <Show when={currentFolder() === null && !searching() && requestsSent().length > 0}>
+            <button type="button" class="lk-row" onClick={() => setRequestsOpen(true)}>
+              <span class="lk-avatar" aria-hidden="true">
+                <Icon name="groups" size={18} />
+              </span>
+              <div class="lk-row-body">
+                <div class="lk-row-line">
+                  <span class="lk-row-title">{t("requests_sent.title")}</span>
+                </div>
+              </div>
+              <span class="lk-row-trail">
+                <span class="lk-badge muted">{requestsSent().length}</span>
+              </span>
+            </button>
+          </Show>
+          <RequestsSentScreen open={requestsOpen()} onBack={() => setRequestsOpen(false)} />
           {/* UX 2.4 - one sentence whatever the filter; the person made it. */}
           <Show when={visibleRows().length === 0 && !searching() && currentFolder() !== null}>
             <div class="lk-folder-empty">
@@ -718,7 +743,12 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                     press.swallowClick(e);
                   }}
                 >
-                  <Avatar label={label()} id={conversationIdB64Of(g)} personKey={row.personKey} />
+                  <Avatar
+                    label={label()}
+                    id={conversationIdB64Of(g)}
+                    personKey={row.personKey}
+                    conversationKey={row.personKey === undefined ? g.groupIdB64 : undefined}
+                  />
                   <div class="lk-row-body">
                     <div class="lk-row-line">
                       <span class="lk-row-title" classList={{ unread: unread() > 0 }}>
@@ -740,6 +770,14 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         </Show>
                         <Show when={pinnedHere(row)}>
                           <Icon name="pin" size={14} title={t("chats.row.pinned")} />
+                        </Show>
+                        {/* Reactions section 12 — a small heart beside the
+                            badge while others' reactions to the person's
+                            own messages here are unseen. */}
+                        <Show when={unseenReactionIds(accountId(), g.groupIdB64).length > 0}>
+                          <span class="lk-list-unseen-reactions" title={t("chats.row.unseen_reactions")}>
+                            <Icon name="heart" size={14} />
+                          </span>
                         </Show>
                         <Show when={unread() > 0}>
                           <span
@@ -876,6 +914,10 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               standingAboveB64={visibleChatPeers}
               chatHrefOf={chatHrefOf}
               channelNameOf={channelNameOf}
+              onOpenConversation={(idB64) => {
+                const g = chats.get(idB64);
+                if (g !== undefined) navigate(paths.groupChat(base64UrlEncodeNoPad(g.group.groupId)));
+              }}
             />
           </Show>
         </div>

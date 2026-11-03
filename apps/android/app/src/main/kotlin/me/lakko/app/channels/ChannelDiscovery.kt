@@ -84,6 +84,36 @@ public object ChannelDiscovery {
      * @return 32-char hex `channel_id`, or `null` on an unknown
      *   handle (the server's 404 not-found path).
      */
+    /**
+     * ADR-0087 section 1 — claim a channel's `@handle` on the handle
+     * mechanism (the separate channel-name routes are gone): the write key
+     * from the channel's PublisherGroup journal root, one `discovery-lookup`
+     * and one `discovery-register` token. Throws
+     * [me.lakko.app.discovery.HandleWriteError] (`name-taken`) or a network
+     * error.
+     */
+    public suspend fun claimChannelHandle(
+        identity: uniffi.lakko_ffi_uniffi.Identity,
+        handle: String,
+        channelIdHex: String,
+        name: String,
+        description: String,
+    ) {
+        val channelId = ChannelsComposer.channelIdFromHex(channelIdHex)
+        val journalId = CoPublisher.openPublisherGroup(identity, channelIdHex).use { it.groupId() }
+        DiscoveryClient().use { client ->
+            me.lakko.app.chat.claimChannelHandle(
+                discovery = client,
+                accountSeed = identity.ed25519Seed(),
+                journalId = journalId,
+                channelId = channelId,
+                handle = handle,
+                name = name,
+                description = description,
+            )
+        }
+    }
+
     public suspend fun resolveChannelHandle(handle: String): String? =
         DiscoveryClient().use { it.lookupChannel(handle) }
 

@@ -71,6 +71,16 @@ import me.lakko.app.ui.contacts.contactRouteKey
 internal fun canCreateGroup(creating: Boolean, name: String, pickedCount: Int): Boolean =
     !creating && (pickedCount > 0 || name.isNotBlank())
 
+/** ADR-0087 / group-and-channel-privacy.md section 3.1 — Create is enabled
+ *  when the @name is well formed and, if Public, there is a name; nobody has
+ *  to be picked. [wellFormed] is the core's username rule. */
+internal fun canCreateGroupWithHandle(
+    creating: Boolean,
+    name: String,
+    handleWellFormed: Boolean,
+    public: Boolean,
+): Boolean = !creating && handleWellFormed && (!public || name.isNotBlank())
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 public fun NewGroupScreen(
@@ -91,6 +101,30 @@ public fun NewGroupScreen(
     val picked = remember { mutableStateOf(setOf<Long>()) }
     var creating by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<UiText?>(null) }
+    // Section 3.1 — the proposed @name follows the name field until the person
+    // edits it; Private by default.
+    var public by remember { mutableStateOf(false) }
+    val random = remember { me.lakko.app.chat.handleRandom() }
+    var handle by remember { mutableStateOf(me.lakko.app.chat.suggestedGroupHandle("", true, random)) }
+    var handleEdited by remember { mutableStateOf(false) }
+    var handleError by remember { mutableStateOf<UiText?>(null) }
+    // ADR-0087 4.5.3 — the optional photo, uploaded at Create.
+    var photo by remember { mutableStateOf<me.lakko.app.avatar.AvatarMedia.Encoded?>(null) }
+    var photoError by remember { mutableStateOf<UiText?>(null) }
+    val appCtx = LocalContext.current.applicationContext
+    val refreshSuggestion: () -> Unit = {
+        if (!handleEdited) handle = me.lakko.app.chat.suggestedGroupHandle(name, !public, random)
+    }
+    val wellFormed = me.lakko.app.chat.handleWellFormed(handle)
+    // Section 3.3 — Public: 500 ms after typing stops, from 3 characters, a
+    // lookup says whether the name is visibly taken. Private asks nothing.
+    var visiblyTaken by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(handle, public) {
+        visiblyTaken = false
+        if (!public || handle.length < 3 || !wellFormed) return@LaunchedEffect
+        kotlinx.coroutines.delay(500)
+        visiblyTaken = chatRepository.handleVisiblyTaken(handle) == true
+    }
 
     val selectable = state.accepted.filter { it.request.fromAccountId != null }
 
@@ -113,16 +147,99 @@ public fun NewGroupScreen(
                 .padding(padding)
                 .imePadding(),
         ) {
+            NewGroupPhotoSlot(
+                name = name,
+                chosen = photo,
+                enabled = !creating,
+                onChosen = {
+                    photo = it
+                    photoError = null
+                },
+                error = photoError,
+            )
             OutlinedTextField(
                 value = name,
-                onValueChange = { if (it.length <= GroupPresentationStore.MAX_NAME_CHARS) name = it },
+                onValueChange = {
+                    if (it.length <= GroupPresentationStore.MAX_NAME_CHARS) {
+                        name = it
+                        refreshSuggestion()
+                    }
+                },
                 label = { Text(t("chats.new_group.name_label")) },
                 singleLine = true,
                 enabled = !creating,
+                supportingText = if (public && name.isBlank()) {
+                    { Text(t("group_type.needs_name")) }
+                } else {
+                    null
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             )
+            // Section 3.1 — the @name, always LTR and Latin.
+            OutlinedTextField(
+                value = handle,
+                onValueChange = {
+                    handle = me.lakko.app.chat.canonicalHandleInput(it).take(32)
+                    handleEdited = true
+                    handleError = null
+                },
+                label = { Text(t("group_type.handle")) },
+                prefix = { Text("@") },
+                singleLine = true,
+                enabled = !creating,
+                isError = handleError != null || visiblyTaken || (handle.isNotEmpty() && !wellFormed),
+                supportingText = {
+                    val line = when {
+                        handleError != null -> handleError!!.text()
+                        visiblyTaken -> t("group_handle.error.taken")
+                        handle.isNotEmpty() && !wellFormed -> t("group_handle.error.bad_form")
+                        public -> t("group_type.handle_public")
+                        else -> t("group_type.handle_private")
+                    }
+                    Text(line)
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+            )
+            // Section 3.1 — Who can join: Private (default) or Public.
+            Text(
+                t("group_type.who_can_join"),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 16.dp, top = 8.dp),
+            )
+            for (option in listOf(false, true)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = !creating) {
+                            public = option
+                            refreshSuggestion()
+                        }
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                ) {
+                    androidx.compose.material3.RadioButton(
+                        selected = public == option,
+                        onClick = {
+                            public = option
+                            refreshSuggestion()
+                        },
+                        enabled = !creating,
+                    )
+                    Column {
+                        Text(t(if (option) "group_type.public" else "group_type.private"))
+                        Text(
+                            t(if (option) "group_type.public_desc" else "group_type.private_desc"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
             if (state.accepted.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -205,35 +322,71 @@ public fun NewGroupScreen(
                 )
             }
             Button(
-                enabled = canCreateGroup(creating, name, picked.value.size),
+                enabled = canCreateGroupWithHandle(creating, name, wellFormed, public) && !visiblyTaken,
                 onClick = {
                     val chosen: List<AcceptedContact> =
                         selectable.filter { it.request.messageId in picked.value }
                     creating = true
                     error = null
+                    handleError = null
                     scope.launch {
-                        val first = chosen.firstOrNull()
+                        // ADR-0087 4.5.3 — the photo first: a failed upload
+                        // creates nothing, and the form stays filled.
+                        var avatar: me.lakko.app.profile.AvatarRefs? = null
+                        photo?.let { chosenPhoto ->
+                            try {
+                                avatar = uploadGroupPhoto(appCtx, chosenPhoto)
+                            } catch (cause: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(cause) { creating = false }
+                                photoError = newGroupPhotoFailure(cause)
+                                creating = false
+                                return@launch
+                            }
+                        }
+                        // ADR-0087 sections 3 and 10 — the group starts with
+                        // its creator; the @name is claimed before anything
+                        // about the group leaves this device, so a held name
+                        // creates nothing. Picks are added through the normal
+                        // add path.
+                        var claimed: me.lakko.app.chat.SignedGroupHandle? = null
                         val groupIdHex = try {
-                            if (first == null) {
-                                // A group with nobody else in it yet.
-                                chatRepository.startGroupAlone()
-                            } else {
-                                chatRepository.startGroupWith(
-                                    recipientAccountId = first.request.fromAccountId!!,
-                                    recipientSignaturePubkey = first.request.fromPubkey,
-                                    // ADR-0062 — a group from the first pick on,
-                                    // even while it holds two people.
-                                    kind = uniffi.lakko_ffi_uniffi.GroupKind.GROUP,
-                                )
+                            chatRepository.startGroupAlone { groupId, knock ->
+                                val facts = if (public) {
+                                    me.lakko.app.chat.PublicGroupFacts(
+                                        name = name.trim(),
+                                        description = "",
+                                        memberCount = 1 + chosen.size,
+                                        knockPublicKey = knock,
+                                        avatar = avatar,
+                                    )
+                                } else {
+                                    null
+                                }
+                                claimed = chatRepository.claimHandleForNewGroup(groupId, handle, public, facts)
                             }
                         } catch (cause: Throwable) {
                             me.lakko.app.rethrowIfCancelled(cause) {
                                 creating = false
                             }
                             android.util.Log.w("NewGroupScreen", "group creation failed", cause)
-                            error = UiText("chats.new_group.error")
+                            val handleCopy = me.lakko.app.chat.handleWriteFailure(cause)
+                            if (handleCopy.key == "group_handle.error.held") {
+                                handleError = handleCopy
+                            } else if (handleCopy.key != "group_handle.error.failed") {
+                                error = handleCopy
+                            } else {
+                                error = UiText("chats.new_group.error")
+                            }
                             creating = false
                             return@launch
+                        }
+                        claimed?.let { signed ->
+                            try {
+                                chatRepository.adoptSignedHandle(groupIdHex, signed)
+                            } catch (cause: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(cause)
+                                android.util.Log.w("NewGroupScreen", "group handle not stored", cause)
+                            }
                         }
                         // ADR-0051 §3 — the name is written to the shared-name
                         // store and sent into the group right after the
@@ -249,7 +402,17 @@ public fun NewGroupScreen(
                                 android.util.Log.w("NewGroupScreen", "group name not sent", cause)
                             }
                         }
-                        for (next in chosen.drop(1)) {
+                        // 4.5.3 — the photo goes to the group right after the
+                        // creating commit; a failed send is kept owed.
+                        avatar?.let { refs ->
+                            try {
+                                chatRepository.setGroupPhoto(groupIdHex, refs)
+                            } catch (cause: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(cause)
+                                android.util.Log.w("NewGroupScreen", "group photo not sent", cause)
+                            }
+                        }
+                        for (next in chosen) {
                             try {
                                 chatRepository.addMemberToGroup(
                                     groupIdHex = groupIdHex,

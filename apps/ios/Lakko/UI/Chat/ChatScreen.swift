@@ -131,11 +131,33 @@ public struct ChatScreen: View {
 
     /// Which picker is open: the composer's (Emoji + GIF), or the reaction
     /// bar's `+` for one message (Emoji only).
+    /// Section 8.1 — the reactions list rows, names from the timeline's
+    /// resolver; this person's own row is `You`.
+    private func reactorRows(_ message: ChatMessage) -> [ReactorRow] {
+        let own = viewModel.ownIdentity
+        return message.heldReactions.map { r in
+            let key = Data(base64Encoded: r.reactor).flatMap { $0.count == 32 ? $0 : nil }
+            let isOwn = r.reactor == own || r.reactor == AuthorIdentity.ownReactionSentinel
+            return ReactorRow(
+                id: "\(r.reactor)|\(r.emoji)", key: key,
+                name: viewModel.personName(signatureKeyB64: r.reactor) ?? ResolvedDisplayName.placeholderMember,
+                emoji: r.emoji, isOwn: isOwn)
+        }
+    }
+
     private struct PickerRequest: Identifiable {
         let id = UUID()
         let mode: MediaPickerSheet.Mode
         let message: ChatMessage?
     }
+
+    /// Reactions-and-emoji spec section 8.1 — the open reactions list.
+    private struct ReactorsRequest: Identifiable {
+        let id = UUID()
+        let message: ChatMessage
+        let emoji: String?
+    }
+    @State private var reactorsRequest: ReactorsRequest?
 
     public init(
         viewModel: ChatViewModel,
@@ -216,9 +238,31 @@ public struct ChatScreen: View {
                             caret.utf16Range = end..<end
                         }
                     },
-                    onClose: { picker = nil }
+                    onClose: { picker = nil },
+                    reactionOnly: request.message == nil ? nil : {
+                        if case .only(let list) = viewModel.allowedReactions { return list }
+                        return nil
+                    }(),
+                    reactionEnabled: { emoji in
+                        guard let message = request.message else { return true }
+                        let verdict = ReactionRules.verdict(
+                            emoji: emoji, message: message, own: viewModel.ownIdentity,
+                            allowed: viewModel.allowedReactions)
+                        return verdict == .add || verdict == .remove
+                    },
+                    reactionNote: request.message.flatMap { message in
+                        viewModel.reactionRow(for: message).capReached
+                            ? Localization.text("chat.reaction.cap_reached") : nil
+                    }
                 )
                 .presentationDetents([.medium, .large])
+            }
+            .sheet(item: $reactorsRequest) { request in
+                ReactionsListSheet(
+                    rows: reactorRows(request.message),
+                    emojiOrder: viewModel.reactionChips(for: request.message).chips.map(\.emoji),
+                    selected: request.emoji,
+                    onOpenPerson: nil)
             }
     }
 
@@ -711,6 +755,38 @@ public struct ChatScreen: View {
         // its rows. Until the first read arrives the rows size against a
         // conservative width.
         messagesColumn(width: messagesWidth > 0 ? messagesWidth : 360)
+            .overlay(alignment: .bottomTrailing) { unseenReactionsButton }
+    }
+
+    /// Reactions-and-emoji spec section 12 — a round heart button with the
+    /// count; jumps to the oldest such message and highlights it.
+    @ViewBuilder
+    private var unseenReactionsButton: some View {
+        let ids = viewModel.unseenReactionIds
+        if let oldest = ids.first {
+            Button {
+                jumpToQuoted(oldest)
+                viewModel.repositoryMarkSeen(oldest)
+            } label: {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: "heart.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Color.lakkoAccent)
+                        .frame(width: 44, height: 44)
+                        .background(Circle().fill(Color.lakkoSurface))
+                        .overlay(Circle().stroke(Color.lakkoBorder, lineWidth: 0.5))
+                    Text(ids.count.formatted(.number.locale(l10n.locale)))
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color.lakkoAccentForeground)
+                        .padding(.horizontal, 5)
+                        .background(Capsule().fill(Color.lakkoAccent))
+                        .offset(x: 4, y: -4)
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(16)
+            .accessibilityLabel(l10n.t("chat.reaction.unseen_a11y", counts: ["count": UInt64(ids.count)]))
+        }
     }
 
     @ViewBuilder
@@ -718,8 +794,21 @@ public struct ChatScreen: View {
         ScrollViewReader { scrollProxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    // UX section 10 — the creation row stays as the
+                    // timeline's first row; the solo block goes when a second
+                    // person lands.
+                    if viewModel.createdHere {
+                        Text(l10n.t("group_solo.created"))
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.top, 16)
+                    }
+                    if viewModel.isAloneInGroup {
+                        soloGroupBlock
+                    }
                     if viewModel.messages.isEmpty {
-                        emptyHint
+                        if !viewModel.isAloneInGroup { emptyHint }
                     } else {
                         let entries = timelineEntries
                         ForEach(entries, id: \.message.messageId) { entry in
@@ -730,6 +819,8 @@ public struct ChatScreen: View {
                             // mark at its leading edge and the whole row is
                             // the toggle; a row that cannot be acted on shows
                             // no mark and takes no tap.
+                            Color.clear.frame(height: 0)
+                                .onAppear { viewModel.noteRowShown(entry.message) }
                             let rowSelection = selectionRowState(for: entry.message)
                             SelectableMessageRow(
                                 state: rowSelection,
@@ -759,7 +850,7 @@ public struct ChatScreen: View {
                                 // the timeline width.
                                 maxBubbleWidth: width * 0.78,
                                 reactorNames: { emoji in
-                                    entry.message.reactions
+                                    entry.message.heldReactions
                                         .filter { $0.emoji == emoji }
                                         .compactMap { viewModel.personName(signatureKeyB64: $0.reactor) }
                                 },
@@ -780,6 +871,13 @@ public struct ChatScreen: View {
                                 // ADR-0047 §4 — the reaction bar's `+`.
                                 onMoreReactions: {
                                     picker = PickerRequest(mode: .reaction, message: entry.message)
+                                },
+                                reactionRow: viewModel.reactionRow(for: entry.message),
+                                chipRow: viewModel.reactionChips(for: entry.message),
+                                showsCapLine: viewModel.capLineMessageId == entry.message.id,
+                                onQuickReact: { viewModel.quickReact(to: entry.message) },
+                                onShowReactors: { emoji in
+                                    reactorsRequest = ReactorsRequest(message: entry.message, emoji: emoji)
                                 },
                                 // `docs/ux/calls.md` section 6 — tapping a
                                 // call row calls back, the same way the
@@ -962,6 +1060,36 @@ public struct ChatScreen: View {
             try? await Task.sleep(for: .milliseconds(350))
             jumpToQuoted(messageId)
         }
+    }
+
+    @ViewBuilder
+    /// ADR-0087 section 10 / UX 10 — a group of one: "Only you are here."
+    /// with `Add members` and `Copy invite link`. Goes when a second person
+    /// lands.
+    private var soloGroupBlock: some View {
+        VStack(spacing: 12) {
+
+            Text(l10n.t("group_solo.only_you"))
+                .font(.body)
+                .foregroundStyle(Color.lakkoTextMuted)
+            HStack(spacing: 12) {
+                if viewModel.canManageMembers {
+                    Button(l10n.t("group_solo.add_members")) { onOpenGroupInfo() }
+                        .buttonStyle(.bordered)
+                    Button(l10n.t("group_solo.copy_invite")) {
+                        Task { @MainActor in
+                            if let link = await viewModel.mintInviteLinkForCopy() {
+                                MessageClipboard.copy(link)
+                            }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+        }
+        .tint(Color.lakkoAccent)
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.vertical, 24)
     }
 
     @ViewBuilder
@@ -1269,6 +1397,37 @@ public struct ChatScreen: View {
     /// by design, so the rule inverts: disable while the state is TRANSIENT,
     /// replace when it is TERMINAL. A disabled Send button on a group you will
     /// never be in again is a control promising a future it does not have.
+    /// Section 13 — up to eight matching emoji above the composer while the
+    /// caret ends `:` and two or more letters; a tap replaces `:word`.
+    @ViewBuilder
+    private var colonStrip: some View {
+        if let hit = ColonQuery.find(in: viewModel.draft, caretUtf16: caret.utf16Range?.upperBound) {
+            let picks = ColonQuery.suggestions(
+                EmojiDataset.bundled, query: hit.query,
+                recent: EmojiIndex.loadRecent(accountIdB64: AcceptedContactsStore.boundAccountIdB64))
+            if !picks.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        ForEach(picks, id: \.self) { emoji in
+                            Button {
+                                let end = ColonQuery.replace(hit.range, in: &viewModel.draft, with: emoji)
+                                caret.utf16Range = end..<end
+                            } label: {
+                                Text(emoji).font(.system(size: 26)).frame(width: 40, height: 40)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(EmojiDataset.bundled.byEmoji[emoji]?.name ?? emoji)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                }
+                .background(Color.lakkoSurface, in: RoundedRectangle(cornerRadius: LakkoRadius.control))
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel(l10n.t("chat.emoji.suggestions"))
+            }
+        }
+    }
+
     @ViewBuilder
     private var composer: some View {
         switch viewModel.composerSlot {
@@ -1325,6 +1484,8 @@ public struct ChatScreen: View {
     @ViewBuilder
     private var liveComposer: some View {
         VStack(spacing: 8) {
+            // Reactions-and-emoji spec section 13 — `:word` suggestions.
+            colonStrip
             if let err = viewModel.sendError {
                 Text(err.text)
                     .font(.footnote)
@@ -1846,6 +2007,16 @@ struct MessageRow: View {
     let onReact: (String) -> Void
     /// ADR-0047 §4 — the reaction bar's trailing `+`: any single emoji.
     var onMoreReactions: () -> Void = {}
+    /// Reactions-and-emoji spec section 5 — what the menu's row offers.
+    var reactionRow: ReactionRowModel = .empty
+    /// Section 7 — the chips under the bubble (the shared rule's answer).
+    var chipRow: FfiChipRow = FfiChipRow(chips: [], overflowKinds: 0)
+    /// Section 10 — the 3-reactions line shows under the chips.
+    var showsCapLine: Bool = false
+    /// Section 6 — a double tap on the bubble.
+    var onQuickReact: () -> Void = {}
+    /// Section 8 — open the reactions list on `emoji` (`nil` = All).
+    var onShowReactors: (String?) -> Void = { _ in }
     /// `docs/ux/calls.md` section 6 — tapping a call row calls back, in the
     /// mode the row records.
     var onCallBack: (_ video: Bool) -> Void = { _ in }
@@ -2148,8 +2319,14 @@ struct MessageRow: View {
     ) -> some View {
         VStack(alignment: alignment, spacing: 4) {
             content()
-            if !message.deleted, !message.reactions.isEmpty {
+            if !message.deleted, !chipRow.chips.isEmpty {
                 reactionChips
+            }
+            if showsCapLine {
+                Text(Localization.text("chat.reaction.cap_reached"))
+                    .font(.caption)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .accessibilityAddTraits(.updatesFrequently)
             }
         }
     }
@@ -2225,6 +2402,20 @@ struct MessageRow: View {
                 LongPressGesture(minimumDuration: MessageLongPress.thresholdSeconds)
                     .onEnded { _ in openMenu(AnyView(content)) }
             )
+            // Reactions-and-emoji spec section 6 — a double tap sends the
+            // quick reaction. Lower priority than any control inside the
+            // bubble, so a double tap that starts on a control is the
+            // control's. With VoiceOver on, double tap is the system's
+            // activate gesture; the same reaction is a named action.
+            .onTapGesture(count: 2) {
+                guard canReact, !selecting else { return }
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                onQuickReact()
+            }
+            .accessibilityAction(named: Localization.text(
+                "chat.message.react_with", texts: ["emoji": QuickReactionSetting.shared.current])) {
+                if canReact { onQuickReact() }
+            }
     }
 
     private func openMenu(_ bubble: AnyView) {
@@ -2241,14 +2432,15 @@ struct MessageRow: View {
         let actions = menuActions
         // A menu with no reaction row and no actions is an empty card over a
         // dimmed screen. The case is real: a tombstone offers neither.
-        guard canReact || !actions.isEmpty else { return }
+        guard (canReact && !reactionRow.emoji.isEmpty) || !actions.isEmpty else { return }
         menuPresenter.open(
             MessageMenuRequest(
                 id: message.id,
                 bubbleFrame: frame,
                 isOutgoing: isOutgoing,
                 actions: actions,
-                canReact: canReact,
+                canReact: canReact && !reactionRow.emoji.isEmpty,
+                reactionRow: reactionRow,
                 bubble: bubble,
                 onReact: onReact,
                 onMoreReactions: onMoreReactions,
@@ -2283,7 +2475,33 @@ struct MessageRow: View {
     /// lower trailing corner, beside the last line of text.
     @ViewBuilder
     private var bubble: some View {
-        menuTarget(bubbleContent)
+        if largeEmojiCount > 0 {
+            menuTarget(largeEmojiContent)
+        } else {
+            menuTarget(bubbleContent)
+        }
+    }
+
+    /// Reactions-and-emoji spec section 13 — a message of one to three emoji
+    /// and nothing else (no attachment, no quote, no forward line) is drawn
+    /// large, without a bubble; the count is the shared rule's.
+    private var largeEmojiCount: Int {
+        guard !message.deleted, message.unsupportedVersion == nil, message.attachments.isEmpty,
+              message.reply == nil, message.forward == nil, !message.text.isEmpty else { return 0 }
+        return Int(emojiOnlyCount(text: message.text))
+    }
+
+    private var largeEmojiContent: some View {
+        let size: CGFloat = largeEmojiCount == 1 ? 56 : (largeEmojiCount == 2 ? 44 : 36)
+        return VStack(alignment: isOutgoing ? .trailing : .leading, spacing: 2) {
+            Text(message.text.trimmingCharacters(in: .whitespaces))
+                .font(.system(size: size))
+            metaContent
+                .foregroundStyle(Color.lakkoTextMuted)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.lakkoSurfaceSunken))
+        }
     }
 
     @ViewBuilder
@@ -2468,27 +2686,58 @@ struct MessageRow: View {
     /// replaced rather than disabled.
     @ViewBuilder
     private var reactionChips: some View {
-        HStack(spacing: 4) {
-            ForEach(message.reactionSummary(own: ownIdentity)) { tally in
+        ReactionChipFlow(spacing: 4) {
+            ForEach(chipRow.chips, id: \.emoji) { chip in
                 if actionsAvailable {
                     // A tap reacts; a long press lists who reacted (Lakko's
-                    // own menu, never the system context menu). Not a
+                    // own sheet, never the system context menu). Not a
                     // `Button`: its tap would also fire when a long press
                     // ends.
-                    chipLabel(tally)
+                    chipLabel(chip)
                         .contentShape(Rectangle())
-                        .onTapGesture { onReact(tally.emoji) }
-                        .lakkoLongPressMenu { reactedByItems(tally.emoji) }
+                        .onTapGesture { onReact(chip.emoji) }
+                        .onLongPressGesture(minimumDuration: MessageLongPress.thresholdSeconds) {
+                            onShowReactors(chip.emoji)
+                        }
                         .accessibilityAddTraits(.isButton)
-                        .accessibilityAction { onReact(tally.emoji) }
-                        .accessibilityHint(reactedByLine(tally.emoji))
+                        .accessibilityLabel(chipAccessibilityLabel(chip))
+                        .accessibilityAction { onReact(chip.emoji) }
+                        .accessibilityAction(named: Localization.text("chat.reaction.show_who_a11y")) {
+                            onShowReactors(chip.emoji)
+                        }
+                        .accessibilityHint(reactedByLine(chip.emoji))
                 } else {
-                    chipLabel(tally)
-                        .lakkoLongPressMenu { reactedByItems(tally.emoji) }
-                        .accessibilityHint(reactedByLine(tally.emoji))
+                    chipLabel(chip)
+                        .onLongPressGesture(minimumDuration: MessageLongPress.thresholdSeconds) {
+                            onShowReactors(chip.emoji)
+                        }
+                        .accessibilityLabel(chipAccessibilityLabel(chip))
+                        .accessibilityHint(reactedByLine(chip.emoji))
                 }
             }
+            if chipRow.overflowKinds > 0 {
+                Text("+\(Int(chipRow.overflowKinds).formatted(.number.locale(l10n.locale)))")
+                    .font(.caption)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.lakkoSurfaceSunken)
+                    .clipShape(Capsule())
+                    .contentShape(Rectangle())
+                    .onTapGesture { onShowReactors(nil) }
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityLabel(Localization.text("chat.reaction.show_who_a11y"))
+            }
         }
+    }
+
+    /// Section 19 — "{emoji}, your reaction" / "{emoji}, {count} reactions".
+    private func chipAccessibilityLabel(_ chip: FfiReactionChip) -> String {
+        if chip.mine {
+            return l10n.t("chat.reaction.chip_yours_a11y", texts: ["emoji": chip.emoji])
+        }
+        return l10n.t(
+            "chat.reaction.chip_a11y", texts: ["emoji": chip.emoji], counts: ["count": UInt64(chip.count)])
     }
 
     /// ADR-0048 — "Reacted by Alice, Bob" for a chip, by resolved name.
@@ -2499,32 +2748,44 @@ struct MessageRow: View {
             : l10n.t("chat.reaction.reacted_by", texts: ["names": Localization.joinList(names)])
     }
 
-    /// ADR-0048 — the long-press list of who reacted with `emoji`.
-    private func reactedByItems(_ emoji: String) -> [LakkoMenuItem] {
-        let names = reactorNames(emoji)
-        guard !names.isEmpty else { return [] }
-        return [.text(l10n.t("chat.reaction.reacted_by_title"), secondary: true)] + names.map { .text($0) }
-    }
-
     /// The chip's content, shared by the interactive and the frozen arm so the
-    /// two cannot come to look different.
-    private func chipLabel(_ tally: ReactionTally) -> some View {
-        HStack(spacing: 2) {
-            Text(tally.emoji).font(.caption)
-            if tally.count > 1 {
-                Text(tally.count.formatted(.number.locale(l10n.locale)))
+    /// two cannot come to look different (section 7: the face is the shared
+    /// rule's — the emoji alone, a number, or up to three faces).
+    private func chipLabel(_ chip: FfiReactionChip) -> some View {
+        HStack(spacing: 3) {
+            Text(chip.emoji).font(.caption)
+            switch chip.face {
+            case .emojiOnly:
+                EmptyView()
+            case .count(let count):
+                Text(Int(count).formatted(.number.locale(l10n.locale)))
                     .font(.caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
+            case .avatars(let reactors):
+                HStack(spacing: -5) {
+                    ForEach(Array(reactors.prefix(3).enumerated()), id: \.offset) { _, key in
+                        InitialsAvatar(
+                            name: reactorName(key), identity: key.base64EncodedString(), size: 16,
+                            photo: .person(key))
+                            .overlay(Circle().stroke(Color.lakkoSurface, lineWidth: 1))
+                    }
+                }
             }
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
-        .background(tally.reactedByMe ? Color.lakkoAccentSoft : Color.lakkoSurfaceSunken)
+        .background(chip.mine ? Color.lakkoAccentSoft : Color.lakkoSurfaceSunken)
         .overlay(
             Capsule()
-                .stroke(tally.reactedByMe ? Color.lakkoAccent : Color.clear, lineWidth: 1)
+                .stroke(chip.mine ? Color.lakkoAccent : Color.clear, lineWidth: 1)
         )
         .clipShape(Capsule())
+        .animation(.easeOut(duration: 0.15), value: chip.count)
+    }
+
+    /// A reactor's name for an avatar's initials.
+    private func reactorName(_ key: Data) -> String {
+        ProfileDirectory.shared.resolve(signatureKey: key).name
     }
 
     /// ADR-0024 — the delivery glyph in an own bubble's corner (UX spec
@@ -2913,6 +3174,15 @@ struct GroupInfoScreen: View {
     /// that an assumption rather than a fact.
     @State private var deleteConfirmPresented = false
 
+    /// Reactions-and-emoji spec section 9 — the `Reactions` screen.
+    @State private var reactionsOpen = false
+    /// UX 4.1 — the `Group type` screen.
+    @State private var groupTypeOpen = false
+    /// UX section 8 — the `Reject all requests?` confirmation.
+    @State private var rejectAllConfirm = false
+    /// ADR-0087 section 11 — the `Delete this group?` confirmation.
+    @State private var deleteGroupConfirm = false
+
     /// What the screen does after the chat is gone: the row it was reached from
     /// no longer exists, so staying on it would leave the user looking at a
     /// thread the registry has forgotten. Supplied by the navigation (the info
@@ -2941,7 +3211,26 @@ struct GroupInfoScreen: View {
     /// control to do, and a torn own-leaf read is not a licence to offer an
     /// exit either.
     private var groupSections: [InfoSection] {
-        groupInfoSections(
+        // ADR-0087 / UX section 18 — the one rule over one capability record,
+        // `conversationInfoSections`, while this device is in the group. A
+        // membership that ended here (a retired leaf, ADR-0050) is outside
+        // what that record expresses and keeps the older rule.
+        if !viewModel.membershipHasEnded {
+            return conversationInfoSections(caps: ConversationInfoCapabilities(
+                kind: .group,
+                role: {
+                    switch viewModel.ownRole {
+                    case .owner?: return .owner
+                    case .admin?: return .admin
+                    default: return .member
+                    }
+                }(),
+                alone: viewModel.isAloneInGroup,
+                canTransfer: viewModel.isOwner && !viewModel.isAloneInGroup,
+                canLeave: viewModel.usesProposalPath && viewModel.ownLeafIndex != nil,
+                hasHandle: viewModel.groupHandle != nil))
+        }
+        return groupInfoSections(
             caps: GroupInfoCapabilities(
                 canManageMembers: viewModel.canManageMembers,
                 canRename: viewModel.canRenameGroup,
@@ -2956,6 +3245,64 @@ struct GroupInfoScreen: View {
         // roster below is a `ForEach` that asks about `.roles` on every member.
         let sections = groupSections
         return List {
+                // ADR-0087 section 18 / UX 4.5.2 — the header photo.
+                Section {
+                    GroupPhotoHeader(viewModel: viewModel)
+                        .listRowBackground(Color.clear)
+                    // ADR-0087 section 4 — what this is, in one line.
+                    Text(viewModel.groupHeaderLine)
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .listRowBackground(Color.clear)
+                }
+                // Section 4.4 — the owner of a group with no @name.
+                if sections.contains(.groupType), viewModel.groupHandle == nil {
+                    Section {
+                        Text(l10n.t("group_info.handle.lapsed")).font(.footnote)
+                        Button(l10n.t("group_info.handle.choose")) { groupTypeOpen = true }
+                            .foregroundStyle(Color.lakkoAccent)
+                    }
+                }
+                // Section 4.1 — the owner's `Who can join` row, opening Group type.
+                if sections.contains(.groupType) {
+                    Section {
+                        Button { groupTypeOpen = true } label: {
+                            HStack {
+                                Text(l10n.t("group_type.who_can_join")).foregroundStyle(Color.lakkoText)
+                                Spacer()
+                                Text(l10n.t(viewModel.groupHandle?.isPublic == true
+                                            ? "group_type.public" : "group_type.private"))
+                                    .foregroundStyle(Color.lakkoTextMuted)
+                                Image(systemName: "chevron.forward")
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(Color.lakkoTextMuted)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                // Section 4 — the @name row with Copy (no system share sheet).
+                if sections.contains(.handle) || !viewModel.membershipHasEnded, let handle = viewModel.groupHandle {
+                    Section {
+                        HStack {
+                            Text("@" + handle.handle)
+                                .environment(\.layoutDirection, .leftToRight)
+                                .foregroundStyle(Color.lakkoText)
+                            Spacer()
+                            Button {
+                                MessageClipboard.copy("@" + handle.handle)
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Color.lakkoAccent)
+                            .accessibilityLabel(l10n.t("group_info.handle.copy_a11y"))
+                        }
+                    } header: {
+                        Text(l10n.t("group_type.handle"))
+                    }
+                }
                 // ADR-0045 UX §6.1.9 — tell the new owner, best-effort and
                 // fail-open. Nothing on the wire announces a transfer, so this
                 // is an inference from an observed role-table change and can
@@ -3005,6 +3352,26 @@ struct GroupInfoScreen: View {
                     GroupNameSection(
                         viewModel: viewModel,
                         canRename: sections.contains(.renameGroup))
+                }
+                // Reactions-and-emoji spec section 9 — owner and admins only,
+                // with the current value on the right.
+                if sections.contains(.reactions) {
+                    Section {
+                        Button { reactionsOpen = true } label: {
+                            HStack {
+                                Label(l10n.t("group_reactions.title"), systemImage: "face.smiling")
+                                    .foregroundStyle(Color.lakkoText)
+                                Spacer()
+                                Text(viewModel.allowedReactionsSummary)
+                                    .foregroundStyle(Color.lakkoTextMuted)
+                                Image(systemName: "chevron.forward")
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(Color.lakkoTextMuted)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+
                 }
                 // `docs/ux/who-can-find-me.md` section 5 — present only while
                 // the setting includes groups at all.
@@ -3067,11 +3434,13 @@ struct GroupInfoScreen: View {
                 if viewModel.canManageMembers,
                     !viewModel.pendingJoins.isEmpty || viewModel.unkeptJoinRequest
                 {
-                    Section(
-                        l10n.t(
-                            "chat.members.join.heading",
-                            texts: ["count": viewModel.pendingJoins.count.formatted(.number.locale(Localization.currentLocale))])
-                    ) {
+                    Section {
+                        // UX section 8 — at 64 the list stops growing.
+                        if viewModel.pendingJoins.count >= 64 {
+                            Text(l10n.t("chat.members.join.more_waiting"))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                         // ADR-0027 / UX §7.1 — a request the quarantine turned
                         // away. It is in no row below, because the core never
                         // kept it, and it gets no Approve for the same reason:
@@ -3130,6 +3499,28 @@ struct GroupInfoScreen: View {
                                 .disabled(viewModel.membershipBusy)
                             }
                         }
+                    } header: {
+                        HStack {
+                            Text(viewModel.pendingJoins.count >= 64
+                                ? l10n.t("chat.members.join.heading_full")
+                                : l10n.t("chat.members.join.heading",
+                                    texts: ["count": viewModel.pendingJoins.count.formatted(.number.locale(Localization.currentLocale))]))
+                            Spacer()
+                            // UX section 8 — `Reject all` when two or more wait.
+                            if viewModel.pendingJoins.count >= 2 {
+                                Button(l10n.t("chat.members.join.reject_all")) { rejectAllConfirm = true }
+                                    .font(.footnote)
+                                    .foregroundStyle(Color.lakkoDanger)
+                                    .disabled(viewModel.membershipBusy)
+                            }
+                        }
+                    }
+                    .lakkoDialog(
+                        isPresented: $rejectAllConfirm,
+                        title: l10n.t("chat.members.join.reject_all_title"),
+                        message: l10n.t("chat.members.join.reject_all_body")
+                    ) {
+                        [.danger(l10n.t("chat.members.join.reject_all")) { viewModel.onRejectAllJoins() }, .cancel()]
                     }
                 }
                 // ADR-0045 S4a (UX §5.1) — the pending notice. One line, and it
@@ -3407,6 +3798,31 @@ struct GroupInfoScreen: View {
                         }
                         .disabled(viewModel.membershipBusy)
                     }
+                case .owner where viewModel.isAloneInGroup || sections.contains(.deleteGroup):
+                    // ADR-0087 sections 10 and 11 — an owner alone: `Delete
+                    // group` instead of `Transfer ownership` and `Leave group`.
+                    Section {
+                        Button(role: .destructive) {
+                            deleteGroupConfirm = true
+                        } label: {
+                            Text(l10n.t("group_delete.action"))
+                        }
+                        .disabled(viewModel.membershipBusy)
+                    }
+                    .lakkoDialog(
+                        isPresented: $deleteGroupConfirm,
+                        title: l10n.t("group_delete.title"),
+                        message: l10n.t(
+                            "group_delete.body",
+                            texts: ["name": viewModel.groupHandle?.handle ?? viewModel.conversationTitle])
+                    ) {
+                        [
+                            .danger(l10n.t("group_delete.confirm")) {
+                                viewModel.onDeleteAloneGroup(onDone: onDeleted)
+                            },
+                            .cancel(),
+                        ]
+                    }
                 case .owner(let transfer, let leave):
                     Section {
                         // NOT destructive-styled at rest. Red would file it with
@@ -3466,6 +3882,13 @@ struct GroupInfoScreen: View {
             // on the same stack, never a sheet: one surface owns the whole
             // choice, because splitting it would put the warning and the button
             // on different screens.
+            // Reactions-and-emoji spec section 9 / UX 4.1 — pushed screens.
+            .navigationDestination(isPresented: $reactionsOpen) {
+                AllowedReactionsScreen(viewModel: viewModel) { reactionsOpen = false }
+            }
+            .navigationDestination(isPresented: $groupTypeOpen) {
+                GroupTypeScreen(viewModel: viewModel) { groupTypeOpen = false }
+            }
             .navigationDestination(isPresented: $viewModel.transferStepOpen) {
                 TransferOwnershipStep(viewModel: viewModel)
             }
@@ -3801,7 +4224,7 @@ private struct ChatTitleView: View {
         HStack(spacing: 8) {
             InitialsAvatar(
                 name: title, identity: identity, size: 32, isGroup: isGroup,
-                photo: personKey.map(AvatarPhoto.person))
+                photo: personKey.map(AvatarPhoto.person) ?? (isGroup ? AvatarPhoto.group(identity) : nil))
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)
                     .font(.headline)

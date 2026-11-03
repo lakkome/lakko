@@ -24,6 +24,8 @@
  *
  * Every decision is in the plain modules beside this file; this renders them.
  */
+import { ConversationCard, ConversationRow } from "./ConversationCard";
+import type { FoundConversation } from "./people-search";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, type JSX } from "solid-js";
 import { A } from "@solidjs/router";
 
@@ -119,6 +121,8 @@ export function PeopleSearch(props: {
   readonly chatHrefOf?: (personKeyB64: string) => string | null;
   /** A channel's name when this device knows one, `null` otherwise. */
   readonly channelNameOf?: (channelIdHex: string) => string | null;
+  /** ADR-0087 — open a group this device is in (a found row's `Open`). */
+  readonly onOpenConversation?: (groupIdB64: string) => void;
 }): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
@@ -215,7 +219,13 @@ export function PeopleSearch(props: {
       });
       // Contacts matches only people: no channel handle is asked there.
       if (inContacts) {
-        const { lookupChannel: _channel, ...peopleOnly } = deps;
+        const {
+          lookupChannel: _channel,
+          openConversationRecord: _open,
+          conversationRecordOfLookupKey: _byName,
+          conversationRecordsOfTermLookupKey: _byTerm,
+          ...peopleOnly
+        } = deps;
         return searchPeople(query, peopleOnly);
       }
       return searchPeople(query, deps);
@@ -255,6 +265,10 @@ export function PeopleSearch(props: {
   };
 
   const channel = () => (inContacts ? null : (network().outcome?.channel ?? null));
+  /** ADR-0087 section 5 — public groups and channels, under People. */
+  const conversations = (): readonly FoundConversation[] =>
+    inContacts ? [] : (network().outcome?.conversations ?? []);
+  const [card, setCard] = createSignal<FoundConversation | null>(null);
   const searching = (): boolean => network().searching;
   /** The line under People; none while a new question is out. */
   const message = (): string | null => {
@@ -271,7 +285,7 @@ export function PeopleSearch(props: {
     const nothing = showsNoMatchLine({
       rowsAbove: (props.conversationMatches?.() ?? 0) + (props.listedB64?.().size ?? 0),
       peopleRows: people().length,
-      channel: channel() !== null,
+      channel: channel() !== null || conversations().length > 0,
       searchOut: searching() || network().waiting === true,
     });
     if (!nothing) return null;
@@ -309,6 +323,37 @@ export function PeopleSearch(props: {
           )}
         </Show>
       </Show>
+      <Show when={conversations().length > 0}>
+        <div class="lk-section-label">{t("search.conversations.heading")}</div>
+        <For each={conversations()}>
+          {(c) => (
+            <ConversationRow
+              found={c}
+              onOpen={(found) => {
+                if (chats.get(found.idB64) !== undefined) {
+                  props.onOpenConversation?.(found.idB64);
+                  return;
+                }
+                setCard(found);
+              }}
+            />
+          )}
+        </For>
+      </Show>
+      <ConversationCard
+        found={card()}
+        onBack={() => setCard(null)}
+        onOpenConversation={(id) => {
+          setCard(null);
+          props.onOpenConversation?.(id);
+        }}
+        onOpenChannel={(found) => {
+          setCard(null);
+          let hex = "";
+          for (const b of atob(found.idB64)) hex += b.charCodeAt(0).toString(16).padStart(2, "0");
+          props.onOpenChannel?.(hex, found.handle);
+        }}
+      />
       <Show when={channel()}>
         {(c) => (
           <>

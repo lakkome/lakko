@@ -173,6 +173,13 @@ public data class ProcessedRow(
     val senderAccountB64: String? = null,
     /** ADR-0073 R.7 case 1 — the re-send marker a chat body carried. */
     val resendOrigin: me.lakko.app.chat.ResendOrigin? = null,
+    /** Reactions only: add (`true`) or take off. */
+    val reactionAdd: Boolean? = null,
+    /** Reactions only: the emoji. */
+    val reactionEmoji: String? = null,
+    /** Reactions only: the account key (base64) of the reacted-to message's
+     *  author, as the reactor named it. */
+    val reactionTargetAuthorB64: String? = null,
 )
 
 /** What the superseded-sender rule reads off the group as the batch left it
@@ -289,6 +296,10 @@ public interface PushDecryptDeps {
      * silence a phone.
      */
     public fun isMuted(accountIdB64: String, groupHex: String): Boolean = false
+
+    /** reactions-and-emoji section 12 — this device's `Reactions`
+     *  notification switch (on by default). A READ. */
+    public fun reactionNotificationsOn(accountIdB64: String): Boolean = true
 
     /**
      * ADR-0073 R.5 — is the group the OLD segment of a one-to-one whose
@@ -656,6 +667,23 @@ public suspend fun decryptPushWake(
                 processed.callSignal == null &&
                 processed.senderAccountB64 == ownPersonKeyB64
             if (fromOwnAccount) continue
+            // reactions-and-emoji section 12 — a reaction added to one of
+            // this person's own messages is a notification of its own,
+            // "Anna reacted ❤️ to your message", unless the switch is off or
+            // the conversation is muted. No excerpt: this path holds no
+            // message log.
+            val reactionBody = processed?.let { p ->
+                reactionNotificationBody(
+                    row = p,
+                    ownPersonKeyB64 = ownPersonKeyB64,
+                    enabled = { runCatching { deps.reactionNotificationsOn(account.accountIdB64) }.getOrDefault(true) },
+                    muted = { runCatching { deps.isMuted(account.accountIdB64, realGroupHex) }.getOrDefault(false) },
+                )
+            }
+            if (reactionBody != null) {
+                latest = PushPreview(title = processed?.senderName ?: "Lakko", body = reactionBody, tag = realGroupHex)
+                continue
+            }
             val body = previewBodyOf(processed) ?: continue
             // ADR-0048 UX §5 — the sender's resolved name when it is already
             // known on this device; the generic title otherwise.
@@ -744,6 +772,30 @@ private fun previewBodyOf(row: ProcessedRow?): String? {
         ProcessedKind.CALL_SIGNALING,
         -> null
     }
+}
+
+/**
+ * reactions-and-emoji section 12 — the body of a reaction notification, or
+ * `null`: only an ADD naming this person's account as the message's author,
+ * from someone else, with the switch on and the conversation not muted. Pure
+ * apart from the two reads it is handed.
+ */
+internal fun reactionNotificationBody(
+    row: ProcessedRow,
+    ownPersonKeyB64: String?,
+    enabled: () -> Boolean,
+    muted: () -> Boolean,
+): String? {
+    if (row.kind != ProcessedKind.REACTION || row.reactionAdd != true) return null
+    val emoji = row.reactionEmoji ?: return null
+    if (ownPersonKeyB64 == null || row.reactionTargetAuthorB64 != ownPersonKeyB64) return null
+    if (row.senderAccountB64 == ownPersonKeyB64) return null
+    if (!enabled() || muted()) return null
+    val strings = me.lakko.app.l10n.Localization.strings.value
+    return strings.format(
+        "notification.reaction.body",
+        texts = mapOf("name" to (row.senderName ?: strings["contacts.request.someone"]), "emoji" to emoji),
+    )
 }
 
 /** Truncate a preview body to a sane notification length. */

@@ -15,6 +15,7 @@
  *     conversation this device holds, the saved messages' files, and the own
  *     profile photo.
  */
+import { useGroupNames } from "../chat/GroupNameContext";
 import { createEffect, onCleanup, untrack, type JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
@@ -90,6 +91,7 @@ function writeKeepState(accountId: string, state: KeepState): void {
 export function BlobAccessRuntime(): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
+  const groupNames = useGroupNames();
   const pins = usePins();
   const sync = useDeviceGroupSync();
   const profiles = useProfiles();
@@ -170,6 +172,18 @@ export function BlobAccessRuntime(): JSX.Element {
       const ids = [avatar.still.blobIdB64, avatar.video?.ref.blobIdB64].filter((b): b is string => b !== undefined);
       out.push({ key: "profile", idsHex: ids.map((b) => bytesToHex(b64ToBytes(b))) });
     }
+    // ADR-0087 section 18.5 — the photos of the groups this account owns or
+    // administers are kept by its devices, with no control anywhere.
+    const photoIds: string[] = [];
+    for (const g of untrack(chats.groups)) {
+      const photo = groupNames.photoOf(g.groupIdB64);
+      if (photo === undefined || photo.avatar === null) continue;
+      if ((await groupNames.liveRole(g.group)) === "member") continue;
+      for (const b of [photo.avatar.still.blobIdB64, photo.avatar.video?.ref.blobIdB64]) {
+        if (b !== undefined) photoIds.push(bytesToHex(b64ToBytes(b)));
+      }
+    }
+    if (photoIds.length > 0) out.push({ key: "conversation-photos", idsHex: photoIds });
     return out;
   }
 

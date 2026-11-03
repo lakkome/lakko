@@ -46,6 +46,26 @@ import { useChats, type ActiveGroup } from "./ChatContext";
 import { ChatClient, type IncomingChatEvent } from "./client";
 import { IdbGroupNameBackend } from "./group-name-idb";
 import {
+  GroupSettingStore,
+  PHOTO_CODEC,
+  REACTIONS_CODEC,
+  photoKey,
+  reactionsKey,
+  type StoredGroupPhoto,
+  type StoredGroupReactions,
+} from "./group-settings-store";
+import type { StoredConversationHandle } from "./group-settings-envelope";
+import { ALLOW_ALL, type AllowedSetting } from "./reaction-rules";
+import { avatarToWasm, b64ToBytes, bytesToB64, type AvatarData } from "../profile/avatar-model";
+import type { ProfileAvatar as WasmProfileAvatar } from "../../wasm/lakko_ffi_wasm";
+import { usernameCertKey } from "../reach/scoped-discovery";
+import { avatarLookupChanged, setConversationAvatarLookup } from "../profile/avatar-runtime";
+import { avatarBlobIdsHex } from "../profile/avatar-upload";
+import { deleteBlobs } from "../storage/blob-deletes";
+import { installGroupPublicLookup } from "../ds/knock-seeds";
+import { openRequestsSent } from "./requests-sent";
+import { lookupKeyForName } from "../discovery/handle-lookup";
+import {
   GroupNameStore,
   groupNameVerdict,
   groupNameVerdictAccepts,
@@ -100,7 +120,25 @@ export interface GroupNameApi {
   addedHere(groupIdB64: string): void;
   /** This device's ADR-0022 role, read off the LIVE group now. */
   liveRole(group: WasmGroup): Promise<PushRotationRole>;
+  /** ADR-0087 section 18.1 — the group's photo as this device holds it. */
+  photoOf(groupIdB64: string): StoredGroupPhoto | undefined;
+  /** `reactions-and-emoji.md` section 9 — what the group takes (all when
+   *  nothing is held). */
+  reactionsOf(groupIdB64: string): AllowedSetting;
+  /** ADR-0087 section 11 — the group's `@name`, as received or set here. */
+  handleOf(groupIdB64: string): StoredConversationHandle | undefined;
+  /** The role-gated receive of a photo or reactions setting (a handle is
+   *  taken from any member: its signature is the gate). */
+  receiveSetting(entry: ActiveGroup, event: GroupSettingEvent): Promise<void>;
+  /** Owner or admin: set or remove the photo, and send it. */
+  setPhoto(entry: ActiveGroup, avatar: AvatarData | null): Promise<void>;
+  /** Owner or admin: set what the group takes, and send it. */
+  setReactions(entry: ActiveGroup, allowed: AllowedSetting): Promise<void>;
+  /** The owner set a new handle envelope: keep it and send it. */
+  setHandle(entry: ActiveGroup, value: StoredConversationHandle): Promise<void>;
 }
+
+export type GroupSettingEvent = Extract<IncomingChatEvent, { kind: "group-setting" }>;
 
 const GroupNameContext = createContext<GroupNameApi>();
 
@@ -123,6 +161,20 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
     console.warn("[group-name] store persist failed", err);
   });
   const unsubscribeStore = store.subscribe(bump);
+  const photos = new GroupSettingStore<StoredGroupPhoto>("group-photos", PHOTO_CODEC);
+  const reactionSettings = new GroupSettingStore<StoredGroupReactions>("group-reactions", REACTIONS_CODEC);
+  const handles = new GroupSettingStore<StoredConversationHandle>("group-handles", HANDLE_CODEC);
+  const unsubscribePhotos = photos.subscribe(() => {
+    bump();
+    avatarLookupChanged();
+  });
+  // UX 4.5.5 — the one avatar circle draws a group from this store.
+  setConversationAvatarLookup((groupIdB64) => photos.get(groupIdB64)?.avatar ?? null);
+  const unsubscribeReactions = reactionSettings.subscribe(bump);
+  const unsubscribeHandles = handles.subscribe(bump);
+  // ADR-0087 section 5 — the knock reader asks whether a group is public.
+  installGroupPublicLookup((groupIdB64) => handles.get(groupIdB64)?.isPublic === true);
+  let settingsOpened: Promise<boolean> = Promise.resolve(true);
   /** Resolves once the current account's row is loaded; `false` when the row
    *  could not be read at all (the verdict then refuses a changed name). */
   let opened: Promise<boolean> = Promise.resolve(true);
@@ -173,14 +225,24 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
     const entry = chats.get(groupIdB64);
     if (entry === undefined) return;
     if (readIsActive(entry.group) === false) return;
-    const held = store.get(groupIdB64);
-    if (held === undefined || held.name.length === 0) return;
-    if ((await liveRole(entry.group)) === "member") return;
     const wasm = await loadWasm();
+    // ADR-0087 section 11 — the handle is signed by the handle key, so any
+    // member relays it to a newcomer, verbatim.
+    const handle = handles.get(groupIdB64);
+    if (handle !== undefined) await send(entry, handle.envelope);
+    if ((await liveRole(entry.group)) === "member") return;
+    const held = store.get(groupIdB64);
     // The stamp is re-emitted VERBATIM (the ADR-0044 lesson): re-stamping
     // would make this re-send newer than a rename that happened since.
-    const envelope = wasm.composeGroupNameEnvelope(held.name, held.updatedAtMs);
-    await send(entry, envelope);
+    if (held !== undefined && held.name.length > 0) {
+      await send(entry, wasm.composeGroupNameEnvelope(held.name, held.updatedAtMs));
+    }
+    // ADR-0087 section 18.1 and reactions section 9 — the photo and the
+    // allowed reactions travel the same way, with their stamps.
+    const photo = photos.get(groupIdB64);
+    if (photo !== undefined) await send(entry, composePhotoEnvelope(wasm, photo));
+    const reactions = reactionSettings.get(groupIdB64);
+    if (reactions !== undefined) await send(entry, composeReactionsEnvelope(wasm, reactions));
   }
 
   const scheduler = new ProfilePublishScheduler<ReturnType<typeof setTimeout>>({
@@ -205,11 +267,19 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
       if (account === null) {
         scheduler.stop();
         store.close();
+        photos.close();
+        reactionSettings.close();
+        handles.close();
         opened = Promise.resolve(true);
+        settingsOpened = Promise.resolve(true);
         return;
       }
       scheduler.start();
       opened = store.open(account);
+      void openRequestsSent(account);
+      settingsOpened = Promise.all([photos.open(account), reactionSettings.open(account), handles.open(account)]).then(
+        (r) => r.every((x) => x),
+      );
       void takeCarried(account);
     });
   });
@@ -254,6 +324,11 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
   });
   onCleanup(() => {
     unsubscribeStore();
+    unsubscribePhotos();
+    setConversationAvatarLookup(null);
+    installGroupPublicLookup(null);
+    unsubscribeReactions();
+    unsubscribeHandles();
     unsubscribeCarried();
     scheduler.stop();
   });
@@ -292,8 +367,138 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
       if (account === null) return;
       await withRoutingRowLock(account, groupIdB64, async () => {
         await opened;
+        await settingsOpened;
         await store.forget(account, groupIdB64);
+        await photos.forget(account, groupIdB64);
+        await reactionSettings.forget(account, groupIdB64);
+        await handles.forget(account, groupIdB64);
       });
+    },
+    photoOf(groupIdB64) {
+      version();
+      return photos.get(groupIdB64);
+    },
+    reactionsOf(groupIdB64) {
+      version();
+      return reactionSettings.get(groupIdB64)?.allowed ?? ALLOW_ALL;
+    },
+    handleOf(groupIdB64) {
+      version();
+      return handles.get(groupIdB64);
+    },
+    async receiveSetting(entry, event) {
+      const account = accountId();
+      if (account === null) return;
+      const setting = event.setting;
+      if (setting === undefined || setting.kind === "knockSeed") return;
+      const groupIdB64 = entry.groupIdB64;
+      const wasm = await loadWasm();
+      if (setting.kind === "handle") {
+        // Section 11: any member may relay it; the signature by the handle
+        // key the certificate names is the gate, and the strictly newer
+        // stamp wins.
+        if (!(await handleVerifies(wasm, entry.group.groupId, setting.value))) return;
+        await withRoutingRowLock(account, groupIdB64, async () => {
+          await settingsOpened;
+          const held = handles.get(groupIdB64);
+          if (held !== undefined && !wasm.conversationHandleIsNewer(setting.value.updatedAtMs, held.updatedAtMs)) {
+            return;
+          }
+          await handles.set(account, groupIdB64, setting.value);
+        });
+        return;
+      }
+      await withRoutingRowLock(account, groupIdB64, async () => {
+        const readable = await settingsOpened;
+        const isPhoto = setting.kind === "photo";
+        const storedValue = isPhoto ? photos.get(groupIdB64) : reactionSettings.get(groupIdB64);
+        const keyOf = (v: StoredGroupPhoto | StoredGroupReactions): string =>
+          isPhoto ? photoKey(v as StoredGroupPhoto) : reactionsKey(v as StoredGroupReactions);
+        let ownerKey: Uint8Array | undefined;
+        const adminKeys: Uint8Array[] = [];
+        let verifyFailed = false;
+        try {
+          ownerKey = entry.group.roleTableOwner() ?? undefined;
+          const flat = entry.group.roleTableAdmins();
+          for (let i = 0; i + 32 <= flat.length; i += 32) adminKeys.push(flat.slice(i, i + 32));
+        } catch {
+          verifyFailed = true;
+        }
+        let senderKey: Uint8Array | undefined;
+        try {
+          senderKey = event.senderKey === undefined ? undefined : base64Decode(event.senderKey);
+        } catch {
+          senderKey = undefined;
+        }
+        // The group name's gate, over a canonical string of the value: owner
+        // or admin resolved at receipt, strictly newer stamp, an identical
+        // re-send accepted.
+        const verdict = groupNameVerdict({
+          kind: conversationKindOf(entry.group),
+          ownerKey,
+          adminKeys,
+          senderKey,
+          stored:
+            storedValue === undefined ? null : { name: keyOf(storedValue), updatedAtMs: storedValue.updatedAtMs },
+          storedUnreadable: !readable,
+          incoming: { name: keyOf(setting.value), updatedAtMs: setting.value.updatedAtMs },
+          verifyFailed,
+          isNewer: (a, b) => (isPhoto ? wasm.groupPhotoIsNewer(a, b) : wasm.groupReactionsIsNewer(a, b)),
+        });
+        if (!groupNameVerdictAccepts(verdict) || verdict === "accept-identical") return;
+        if (setting.kind === "photo") await photos.set(account, groupIdB64, setting.value);
+        else await reactionSettings.set(account, groupIdB64, setting.value);
+      });
+    },
+    async setPhoto(entry, avatar) {
+      const account = accountId();
+      if (account === null) throw new Error("Sign in again.");
+      await withRoutingRowLock(account, entry.groupIdB64, async () => {
+        await settingsOpened;
+        const wasm = await loadWasm();
+        const held = photos.get(entry.groupIdB64);
+        const now = BigInt(Date.now());
+        const stamp = held !== undefined && held.updatedAtMs >= now ? held.updatedAtMs + 1n : now;
+        const value: StoredGroupPhoto = { avatar, updatedAtMs: stamp };
+        await send(entry, composePhotoEnvelope(wasm, value));
+        await photos.set(account, entry.groupIdB64, value);
+        // ADR-0087 section 18.5 — the replaced photo is deleted by the
+        // devices of whoever set it: durable (owed until the server answers),
+        // and a photo another account uploaded answers 403, which ends it.
+        const replaced = avatarBlobIdsHex(held?.avatar ?? null).filter(
+          (id) => !avatarBlobIdsHex(avatar).includes(id),
+        );
+        if (replaced.length > 0) void deleteBlobs(account, replaced);
+      });
+    },
+    async setReactions(entry, allowed) {
+      const account = accountId();
+      if (account === null) throw new Error("Sign in again.");
+      await withRoutingRowLock(account, entry.groupIdB64, async () => {
+        await settingsOpened;
+        const wasm = await loadWasm();
+        const held = reactionSettings.get(entry.groupIdB64);
+        const now = BigInt(Date.now());
+        const stamp = held !== undefined && held.updatedAtMs >= now ? held.updatedAtMs + 1n : now;
+        const value: StoredGroupReactions = { allowed, updatedAtMs: stamp };
+        await send(entry, composeReactionsEnvelope(wasm, value));
+        await reactionSettings.set(account, entry.groupIdB64, value);
+      });
+    },
+    async setHandle(entry, value) {
+      const account = accountId();
+      if (account === null) throw new Error("Sign in again.");
+      await withRoutingRowLock(account, entry.groupIdB64, async () => {
+        await settingsOpened;
+        await handles.set(account, entry.groupIdB64, value);
+      });
+      try {
+        await send(entry, value.envelope);
+      } catch (err) {
+        // Kept; the growth re-send carries it.
+        // eslint-disable-next-line no-console
+        console.warn("[group-handle] send failed", err instanceof Error ? err.name : "");
+      }
     },
     async receive(entry, event) {
       const account = accountId();
@@ -415,3 +620,91 @@ export function useGroupNames(): GroupNameApi {
   if (ctx === undefined) throw new Error("useGroupNames() called outside <GroupNameProvider>");
   return ctx;
 }
+
+function composePhotoEnvelope(wasm: Awaited<ReturnType<typeof loadWasm>>, v: StoredGroupPhoto): Uint8Array {
+  const avatar = v.avatar === null ? undefined : avatarToWasm<WasmProfileAvatar>(wasm, v.avatar);
+  const photo = new wasm.GroupPhoto(avatar, v.updatedAtMs);
+  try {
+    return wasm.composeGroupPhotoEnvelope(photo);
+  } finally {
+    photo.free();
+  }
+}
+
+function composeReactionsEnvelope(wasm: Awaited<ReturnType<typeof loadWasm>>, v: StoredGroupReactions): Uint8Array {
+  const a =
+    v.allowed.mode === "off"
+      ? wasm.AllowedReactions.off()
+      : v.allowed.mode === "only"
+        ? wasm.AllowedReactions.only([...v.allowed.emoji])
+        : wasm.AllowedReactions.all();
+  const value = new wasm.GroupReactions(a, v.updatedAtMs);
+  try {
+    return wasm.composeGroupReactionsEnvelope(value);
+  } finally {
+    value.free();
+  }
+}
+
+/** Section 11 — a handle envelope counts only when its signature verifies
+ *  under the write key its certificate names, and the certificate verifies
+ *  under the discovery key for the lookup key of the shown name. */
+async function handleVerifies(
+  wasm: Awaited<ReturnType<typeof loadWasm>>,
+  groupId: Uint8Array,
+  value: StoredConversationHandle,
+): Promise<boolean> {
+  try {
+    const lookupKey = await handleLookupKey(value.handle);
+    if (lookupKey === null) return false;
+    const cert = wasm.verifyHandleBinding(value.certificate, await usernameCertKey(), lookupKey);
+    const writePk = cert.writePk;
+    cert.free();
+    const h = wasm.decodeConversationHandleEnvelope(value.envelope);
+    try {
+      h.verify(groupId, writePk);
+    } finally {
+      h.free();
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** One lookup key per name, kept for the page: a name is evaluated once. */
+const lookupKeyCache = new Map<string, Promise<Uint8Array | null>>();
+
+function handleLookupKey(handle: string): Promise<Uint8Array | null> {
+  const held = lookupKeyCache.get(handle);
+  if (held !== undefined) return held;
+  const run = lookupKeyForName(handle).catch(() => {
+    lookupKeyCache.delete(handle);
+    return null;
+  });
+  lookupKeyCache.set(handle, run);
+  return run;
+}
+
+const HANDLE_CODEC = {
+  encode: (v: StoredConversationHandle): unknown => ({
+    h: v.handle,
+    p: v.isPublic,
+    t: v.updatedAtMs.toString(),
+    c: bytesToB64(v.certificate),
+    e: bytesToB64(v.envelope),
+  }),
+  decode: (raw: unknown): StoredConversationHandle | null => {
+    if (raw === null || typeof raw !== "object") return null;
+    const r = raw as { h?: unknown; p?: unknown; t?: unknown; c?: unknown; e?: unknown };
+    if (typeof r.h !== "string" || typeof r.p !== "boolean" || typeof r.c !== "string" || typeof r.e !== "string") {
+      return null;
+    }
+    if (typeof r.t !== "string" || !/^\d+$/.test(r.t)) return null;
+    try {
+      return { handle: r.h, isPublic: r.p, updatedAtMs: BigInt(r.t), certificate: b64ToBytes(r.c), envelope: b64ToBytes(r.e) };
+    } catch {
+      return null;
+    }
+  },
+};

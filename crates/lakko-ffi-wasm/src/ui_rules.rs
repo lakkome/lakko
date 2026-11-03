@@ -2385,6 +2385,10 @@ mod tests {
         let sections =
             conversation_info_sections("group", "owner", true, false, false, true).unwrap();
         assert_eq!(sections.first().map(String::as_str), Some("handle"));
+        assert!(sections.iter().any(|s| s == "reactions"));
+        let channel_admin =
+            conversation_info_sections("channel", "admin", false, false, false, true).unwrap();
+        assert!(!channel_admin.iter().any(|s| s == "reactions"));
         assert!(conversation_info_sections("dm", "owner", true, false, false, true).is_err());
         assert!(suggest_handle("Book Club", "group", false, 0)
             .unwrap()

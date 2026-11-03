@@ -67,10 +67,17 @@ public fun LakkoAvatar(
     large: Boolean = false,
     localStill: Bitmap? = null,
     localVideo: File? = null,
+    /** ADR-0087 4.5.4 — for a group, its id (hex): the circle shows the
+     *  group's photo when this device holds it. */
+    groupIdHex: String? = null,
 ) {
     val tint = avatarTintFor(seed, isLakkoDark())
     val inspection = LocalInspectionMode.current
-    val refs = if (inspection || group) avatar else avatar ?: personAvatar(personKey)
+    val refs = when {
+        inspection -> avatar
+        group -> avatar ?: groupAvatar(groupIdHex)
+        else -> avatar ?: personAvatar(personKey)
+    }
     Box(
         contentAlignment = Alignment.Center,
         modifier = modifier
@@ -103,6 +110,22 @@ public fun LakkoAvatar(
                 if (large && localVideo != null) AvatarVideo(localVideo)
             }
             refs != null && !inspection -> StoredAvatar(refs, large)
+        }
+    }
+}
+
+/** The stored photo of the group [groupIdHex] (ADR-0087 18.1). */
+@Composable
+private fun groupAvatar(groupIdHex: String?): AvatarRefs? {
+    if (groupIdHex.isNullOrEmpty()) return null
+    val context = LocalContext.current
+    val version by me.lakko.app.chat.GroupSettingsStore.version.collectAsState()
+    val account = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64
+    return remember(groupIdHex, version, account) {
+        try {
+            me.lakko.app.chat.GroupSettingsStore.photo(context, account, groupIdHex)?.avatar
+        } catch (_: Throwable) {
+            null
         }
     }
 }

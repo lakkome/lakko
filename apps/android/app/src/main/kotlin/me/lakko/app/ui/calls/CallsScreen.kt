@@ -273,6 +273,7 @@ private fun CallHistoryRow(
                 size = 40.dp,
                 group = entry.kind == me.lakko.app.chat.ConversationKind.Group,
                 personKey = personKey,
+                groupIdHex = entry.conversationIdHex.takeIf { entry.kind == me.lakko.app.chat.ConversationKind.Group },
             )
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {

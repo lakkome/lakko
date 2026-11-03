@@ -2575,6 +2575,7 @@ input.lk-sas-code {
    reaction bar and a menu rather than one panel. */
 .lk-msg-menu-reactions {
   display: flex;
+  flex-direction: column;
   gap: 2px;
   width: max-content;
   padding: 4px 6px;
@@ -2593,6 +2594,31 @@ input.lk-sas-code {
   line-height: 1;
   color: inherit;
   cursor: pointer;
+}
+.lk-msg-menu-reactions:has(.lk-msg-menu-reaction-cap) {
+  border-radius: var(--radius-lg, 16px);
+}
+.lk-msg-menu-reaction-row {
+  display: flex;
+  gap: 2px;
+}
+/* docs/ux/reactions-and-emoji.md section 5: an emoji the person already gave
+   sits on the accent-soft circle; at three, the others are dimmed. */
+.lk-msg-menu-reactions button.mine {
+  background: var(--accent-soft);
+  border-radius: 999px;
+}
+.lk-msg-menu-reactions button.dimmed {
+  opacity: 0.35;
+  cursor: default;
+}
+.lk-msg-menu-reaction-cap,
+.lk-reaction-cap {
+  margin: 2px 6px 0;
+  max-width: 16rem;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--surface-muted);
 }
 .lk-msg-menu-reactions button.more {
   display: inline-flex;
@@ -4110,6 +4136,126 @@ a.ghost.small:hover {
 }
 button.lk-reaction {
   cursor: pointer;
+}
+.lk-reaction.more {
+  color: var(--surface-muted);
+}
+/* Section 7: a group chip shows up to three reactors' avatars, overlapping. */
+.lk-reaction-avatars {
+  display: inline-flex;
+}
+.lk-reaction-avatars .lk-reaction-avatar {
+  width: 16px;
+  height: 16px;
+  font-size: 8px;
+  border: 1px solid var(--surface-elevated);
+}
+.lk-reaction-avatars .lk-reaction-avatar + .lk-reaction-avatar {
+  margin-left: -5px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .lk-reaction {
+    animation: lk-reaction-in 150ms ease-out;
+  }
+}
+@keyframes lk-reaction-in {
+  from {
+    transform: scale(0.8);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+/* Section 8.1: who reacted, a popover at the chip. */
+.lk-reactors-list {
+  position: fixed;
+  z-index: 1001;
+  width: 280px;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  border-radius: var(--radius-lg, 16px);
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  box-shadow: var(--shadow-2);
+}
+.lk-reactors-tabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--surface-border);
+}
+.lk-reactors-tabs button {
+  min-height: 0;
+  padding: 2px 8px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: inherit;
+  white-space: nowrap;
+}
+.lk-reactors-tabs button[aria-selected="true"] {
+  background: var(--accent-soft);
+}
+.lk-reactors-rows {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0 0;
+  overflow-y: auto;
+}
+.lk-reactors-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 0;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+}
+button.lk-reactors-row:hover,
+button.lk-reactors-row:focus-visible {
+  background: var(--surface-hover);
+}
+.lk-reactors-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Section 13: one to three emoji only, drawn large with no bubble; the time
+   sits in a small pill under it. */
+.lk-bubble.emoji-only .lk-bubble-text {
+  line-height: 1.15;
+}
+.lk-bubble.emoji-only-1 .lk-bubble-text {
+  font-size: 56px;
+}
+.lk-bubble.emoji-only-2 .lk-bubble-text {
+  font-size: 44px;
+}
+.lk-bubble.emoji-only-3 .lk-bubble-text {
+  font-size: 36px;
+}
+.lk-bubble.emoji-only .lk-bubble-meta {
+  align-self: flex-end;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-elevated);
+}
+.lakko-picker-notice {
+  margin: 4px 8px;
+  font-size: 12px;
+  color: var(--surface-muted);
+}
+.lakko-emoji-grid button.dimmed {
+  opacity: 0.35;
+  cursor: default;
 }
 /* The quick reaction bar used to be its own popover positioned INSIDE the
    bubble (`top: 1.2rem`), i.e. over the play button on a voice message, one
@@ -7935,4 +8081,139 @@ button.lk-folder-new {
   width: 24px;
   height: 24px;
   border-radius: var(--radius-pill);
+}
+
+/* docs/ux/reactions-and-emoji.md section 12 — the unseen-reactions button,
+   a round button with a heart and a count at the timeline's end. */
+.lk-unseen-reactions {
+  position: sticky;
+  bottom: 12px;
+  margin-left: auto;
+  margin-right: 8px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 0;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--surface-border);
+  background: var(--surface-elevated);
+  color: var(--accent);
+  box-shadow: var(--shadow-2);
+  float: right;
+}
+.lk-unseen-reactions-count {
+  font-size: 13px;
+  color: var(--surface-fg);
+}
+.lk-list-unseen-reactions {
+  display: inline-flex;
+  color: var(--accent);
+}
+/* docs/ux/reactions-and-emoji.md section 13 — the `:` suggestion strip. */
+.lk-colon-strip {
+  display: flex;
+  gap: 2px;
+  margin: 0 12px 4px;
+  padding: 4px 6px;
+  width: max-content;
+  max-width: calc(100% - 24px);
+  overflow-x: auto;
+  border-radius: 999px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  box-shadow: var(--shadow-2);
+}
+.lk-colon-strip button {
+  min-height: 0;
+  padding: 3px 6px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+}
+.lk-colon-strip button.active,
+.lk-colon-strip button:focus-visible {
+  background: var(--accent-soft);
+}
+/* ADR-0087 — the group info header (docs/ux/group-and-channel-privacy.md 4). */
+.lk-info-header {
+  align-items: center;
+}
+.lk-info-header-line {
+  margin: 0;
+  color: var(--surface-muted);
+  font-size: 14px;
+}
+.lk-info-header .lk-card-row {
+  width: 100%;
+}
+/* Uploading: a ring around the circle, the edit button disabled. */
+.lk-profile-avatar.uploading > .lk-avatar {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .lk-profile-avatar.uploading > .lk-avatar {
+    animation: lk-upload-pulse 1.2s ease-in-out infinite;
+  }
+}
+@keyframes lk-upload-pulse {
+  50% {
+    outline-color: var(--accent-soft);
+  }
+}
+button.lk-card-row-button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.lk-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--surface-border);
+  background: var(--surface-bg);
+}
+.lk-banner > span {
+  flex: 1;
+}
+.lk-radio-row {
+  cursor: pointer;
+}
+.lk-reactions-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.lk-reactions-grid button {
+  min-height: 0;
+  padding: 4px 6px;
+  font-size: 22px;
+  border: 1px solid var(--surface-border);
+  border-radius: 8px;
+  background: var(--surface-elevated);
+}
+/* ADR-0087 section 10 — a group of one. */
+.lk-solo-group {
+  margin: 16px auto;
+  padding: 12px 16px;
+  max-width: 360px;
+  text-align: center;
+  color: var(--surface-muted);
+}
+.lk-solo-group .lk-actions {
+  justify-content: center;
 }

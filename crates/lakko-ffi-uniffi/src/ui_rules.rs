@@ -385,6 +385,10 @@ pub enum InfoSection {
     Subscribers,
     /// ADR-0087 section 15: a channel's publishers.
     Admins,
+    /// `docs/ux/reactions-and-emoji.md` section 9: which reactions the
+    /// conversation takes (a group's owner and admins, a channel's owner).
+    /// Appended last: uniffi lowers this enum by ordinal.
+    Reactions,
 }
 
 impl From<RustInfoSection> for InfoSection {
@@ -418,6 +422,7 @@ impl From<RustInfoSection> for InfoSection {
             RustInfoSection::InvitePeople => Self::InvitePeople,
             RustInfoSection::Subscribers => Self::Subscribers,
             RustInfoSection::Admins => Self::Admins,
+            RustInfoSection::Reactions => Self::Reactions,
         }
     }
 }
@@ -2272,6 +2277,18 @@ mod tests {
         let sections = conversation_info_sections(caps);
         assert_eq!(sections.first(), Some(&InfoSection::Handle));
         assert!(sections.contains(&InfoSection::DeleteGroup));
+        assert!(sections.contains(&InfoSection::Reactions));
+        let channel_admin = conversation_info_sections(ConversationInfoCapabilities {
+            kind: ConversationInfoKind::Channel,
+            role: ConversationRole::Admin,
+            ..caps
+        });
+        assert!(!channel_admin.contains(&InfoSection::Reactions));
+        assert_eq!(
+            InfoSection::Reactions as u32,
+            InfoSection::Admins as u32 + 1,
+            "Reactions is appended after the last earlier variant"
+        );
         let handle = suggest_handle("Book Club".into(), HandleKind::Group, false, 0);
         assert!(handle.starts_with("book_club"), "{handle}");
     }

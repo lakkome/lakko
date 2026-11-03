@@ -2070,6 +2070,10 @@
       "text": "Ten rengi seçenekleri: {name}",
       "status": "machine"
     },
+    "chat.emoji.suggestions": {
+      "text": "Emoji önerileri",
+      "status": "machine"
+    },
     "chat.emoji.tab": {
       "text": "Emoji",
       "status": "machine"
@@ -2470,12 +2474,32 @@
       "text": "Katılma istekleri ({count})",
       "status": "machine"
     },
+    "chat.members.join.heading_full": {
+      "text": "Katılma istekleri (64+)",
+      "status": "machine"
+    },
     "chat.members.join.link_unknown": {
       "text": "Davet bağlantısı bilinmiyor",
       "status": "machine"
     },
+    "chat.members.join.more_waiting": {
+      "text": "Bekleyen başka istekler var. Bunları yanıtladıkça görünürler.",
+      "status": "machine"
+    },
     "chat.members.join.reject": {
       "text": "Reddet",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all": {
+      "text": "Tümünü reddet",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all_body": {
+      "text": "Bu, henüz görmedikleriniz dahil bekleyen tüm istekleri kaldırır.",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all_title": {
+      "text": "Tüm istekler reddedilsin mi?",
       "status": "machine"
     },
     "chat.members.join.rejected": {
@@ -2766,6 +2790,26 @@
       "text": "Tepki ver - Tepki verenler: {names}",
       "status": "machine"
     },
+    "chat.reaction.cap_reached": {
+      "text": "En fazla 3 tepki ekleyebilirsiniz. Başka bir tane eklemek için birini kaldırın.",
+      "status": "machine"
+    },
+    "chat.reaction.chip_a11y": {
+      "text": "{emoji}, {count, plural, one {# tepki} other {# tepki}}",
+      "status": "machine"
+    },
+    "chat.reaction.chip_yours_a11y": {
+      "text": "{emoji}, sizin tepkiniz",
+      "status": "machine"
+    },
+    "chat.reaction.list_all": {
+      "text": "Tümü {count}",
+      "status": "machine"
+    },
+    "chat.reaction.list_title": {
+      "text": "Tepkiler",
+      "status": "machine"
+    },
     "chat.reaction.reacted_by": {
       "text": "Tepki verenler: {names}",
       "status": "machine"
@@ -2778,8 +2822,16 @@
       "text": "Tepkinizi kaldırın - Tepki verenler: {names}",
       "status": "machine"
     },
+    "chat.reaction.show_who_a11y": {
+      "text": "Kimin tepki verdiğini göster",
+      "status": "machine"
+    },
     "chat.reaction.single_emoji": {
       "text": "Tepki tek bir emoji olmalıdır.",
+      "status": "machine"
+    },
+    "chat.reaction.unseen_a11y": {
+      "text": "Mesajlarınıza yeni tepkiler, {count}",
       "status": "machine"
     },
     "chat.reauth.action": {
@@ -3488,6 +3540,10 @@
     },
     "chats.row.unread_overflow": {
       "text": "99+",
+      "status": "machine"
+    },
+    "chats.row.unseen_reactions": {
+      "text": "Yeni tepkiler",
       "status": "machine"
     },
     "chats.search.clear": {
@@ -5774,6 +5830,274 @@
       "text": "Bir şey olmazsa isteği yeniden gönderebilirsiniz.",
       "status": "machine"
     },
+    "group_delete.action": {
+      "text": "Grubu sil",
+      "status": "machine"
+    },
+    "group_delete.body": {
+      "text": "Bu, grubu ve mesajlarını tüm cihazlarınızdan kaldırır ve @{name} adını 30 gün sonra serbest bırakır. Geri alınamaz.",
+      "status": "machine"
+    },
+    "group_delete.confirm": {
+      "text": "Sil",
+      "status": "machine"
+    },
+    "group_delete.title": {
+      "text": "Bu grup silinsin mi?",
+      "status": "machine"
+    },
+    "group_handle.error.bad_form": {
+      "text": "3 ile 32 karakter: a-z harfleri, rakamlar ve _.",
+      "status": "machine"
+    },
+    "group_handle.error.failed": {
+      "text": "Kaydedilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "group_handle.error.held": {
+      "text": "Bu @ad kullanılamıyor. Başka birini deneyin.",
+      "status": "machine"
+    },
+    "group_handle.error.offline": {
+      "text": "Lakko'ya ulaşılamadı. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "group_handle.error.taken": {
+      "text": "Bu @ad alınmış.",
+      "status": "machine"
+    },
+    "group_handle.error.too_many": {
+      "text": "Bugün çok sayıda grup oluşturdunuz. Yarın tekrar deneyin.",
+      "status": "machine"
+    },
+    "group_info.handle.choose": {
+      "text": "Seç",
+      "status": "machine"
+    },
+    "group_info.handle.copy_a11y": {
+      "text": "@adı kopyala",
+      "status": "machine"
+    },
+    "group_info.handle.lapsed": {
+      "text": "Bu grubun @adı yok. Bir tane seçin.",
+      "status": "machine"
+    },
+    "group_info.header.aria": {
+      "text": "Grup",
+      "status": "machine"
+    },
+    "group_info.header.private": {
+      "text": "Özel grup · {count, plural, one {# üye} other {# üye}}",
+      "status": "machine"
+    },
+    "group_info.header.public": {
+      "text": "Herkese açık grup · {count, plural, one {# üye} other {# üye}}",
+      "status": "machine"
+    },
+    "group_photo.error.limit": {
+      "text": "Dosya gönderme sınırına ulaştınız. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "group_photo.error.not_allowed": {
+      "text": "Fotoğrafı yalnızca sahip ve yöneticiler değiştirebilir.",
+      "status": "machine"
+    },
+    "group_photo.error.upload": {
+      "text": "Fotoğraf yüklenemedi. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "group_photo.gone": {
+      "text": "Fotoğraf artık kullanılamıyor. Başka bir tane seç.",
+      "status": "machine"
+    },
+    "group_photo.owed": {
+      "text": "Yeniden çevrimiçi olduğunuzda uygulanacak.",
+      "status": "machine"
+    },
+    "group_photo.remove.body": {
+      "text": "Gruptaki herkes onun yerine baş harfleri görecek.",
+      "status": "machine"
+    },
+    "group_photo.remove.confirm": {
+      "text": "Kaldır",
+      "status": "machine"
+    },
+    "group_photo.remove.title": {
+      "text": "Grup fotoğrafı kaldırılsın mı?",
+      "status": "machine"
+    },
+    "group_reactions.add": {
+      "text": "Ekle",
+      "status": "machine"
+    },
+    "group_reactions.all": {
+      "text": "Tüm tepkiler",
+      "status": "machine"
+    },
+    "group_reactions.all_sub": {
+      "text": "Üyeler herhangi bir emojiyle tepki verebilir.",
+      "status": "machine"
+    },
+    "group_reactions.choose_one": {
+      "text": "En az birini seçin.",
+      "status": "machine"
+    },
+    "group_reactions.max": {
+      "text": "En fazla 100 seçebilirsiniz.",
+      "status": "machine"
+    },
+    "group_reactions.none": {
+      "text": "Tepki yok",
+      "status": "machine"
+    },
+    "group_reactions.none_sub": {
+      "text": "Üyeler mesajlara tepki veremez.",
+      "status": "machine"
+    },
+    "group_reactions.remove_a11y": {
+      "text": "{emoji} kaldır",
+      "status": "machine"
+    },
+    "group_reactions.save_failed": {
+      "text": "Kaydedilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "group_reactions.some": {
+      "text": "Bazı tepkiler",
+      "status": "machine"
+    },
+    "group_reactions.some_sub": {
+      "text": "Üyeler yalnızca seçtiğiniz emojilerle tepki verebilir.",
+      "status": "machine"
+    },
+    "group_reactions.title": {
+      "text": "Tepkiler",
+      "status": "machine"
+    },
+    "group_reactions.unsaved_body": {
+      "text": "Kaydetmezseniz değişiklikleriniz kaybolacak.",
+      "status": "machine"
+    },
+    "group_reactions.value.all": {
+      "text": "Tümü",
+      "status": "machine"
+    },
+    "group_reactions.value.count": {
+      "text": "{count, plural, one {# tepki} other {# tepki}}",
+      "status": "machine"
+    },
+    "group_reactions.value.off": {
+      "text": "Kapalı",
+      "status": "machine"
+    },
+    "group_solo.add_members": {
+      "text": "Üye ekle",
+      "status": "machine"
+    },
+    "group_solo.copy_invite": {
+      "text": "Davet bağlantısını kopyala",
+      "status": "machine"
+    },
+    "group_solo.created": {
+      "text": "Bu grubu sen oluşturdun",
+      "status": "machine"
+    },
+    "group_solo.only_you": {
+      "text": "Burada yalnızca siz varsınız.",
+      "status": "machine"
+    },
+    "group_type.confirm.private.body": {
+      "text": "Aramadan çıkar. Yalnızca sahip veya bir yönetici davet ederse katılınabilir. Gruptaki herkes kalır.",
+      "status": "machine"
+    },
+    "group_type.confirm.private.confirm": {
+      "text": "Özel yap",
+      "status": "machine"
+    },
+    "group_type.confirm.private.title": {
+      "text": "Bu grup özel yapılsın mı?",
+      "status": "machine"
+    },
+    "group_type.confirm.private.waiting": {
+      "text": "{count, plural, one {# kişi katılmayı bekliyor. Hâlâ yanıt verebilirsiniz.} other {# kişi katılmayı bekliyor. Hâlâ yanıt verebilirsiniz.}}",
+      "status": "machine"
+    },
+    "group_type.confirm.public.body": {
+      "text": "Herkes onu bulup katılmak isteyebilir. Adı, fotoğrafı, açıklaması ve yaklaşık boyutu herkese görünür olur.",
+      "status": "machine"
+    },
+    "group_type.confirm.public.confirm": {
+      "text": "Herkese açık yap",
+      "status": "machine"
+    },
+    "group_type.confirm.public.title": {
+      "text": "Bu grup herkese açık yapılsın mı?",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.body": {
+      "text": "Eski @ad hemen çalışmayı bırakır. 30 gün boyunca bu grup için ayrılmış kalır.",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.confirm": {
+      "text": "Değiştir",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.title": {
+      "text": "@ad değiştirilsin mi?",
+      "status": "machine"
+    },
+    "group_type.handle": {
+      "text": "@ad",
+      "status": "machine"
+    },
+    "group_type.handle_private": {
+      "text": "Bunu yalnızca üyeler görür.",
+      "status": "machine"
+    },
+    "group_type.handle_public": {
+      "text": "Herkes bu grubu bu adla bulabilir.",
+      "status": "machine"
+    },
+    "group_type.needs_name": {
+      "text": "Herkese açık bir grubun adı olmalı.",
+      "status": "machine"
+    },
+    "group_type.not_saved": {
+      "text": "Kimlerin katılabileceği değişikliği kaydedilemedi. Yeniden denemek için açın.",
+      "status": "machine"
+    },
+    "group_type.owed": {
+      "text": "Yeniden çevrimiçi olduğunda uygulanacak.",
+      "status": "machine"
+    },
+    "group_type.pending": {
+      "text": "Kaydedilmeyi bekliyor",
+      "status": "machine"
+    },
+    "group_type.private": {
+      "text": "Özel",
+      "status": "machine"
+    },
+    "group_type.private_desc": {
+      "text": "Yalnızca bir yöneticinin davet ettiği kişiler katılabilir. Aramada görünmez.",
+      "status": "machine"
+    },
+    "group_type.public": {
+      "text": "Herkese açık",
+      "status": "machine"
+    },
+    "group_type.public_desc": {
+      "text": "Herkes bu grubu bulup katılmak isteyebilir.",
+      "status": "machine"
+    },
+    "group_type.title": {
+      "text": "Grup türü",
+      "status": "machine"
+    },
+    "group_type.who_can_join": {
+      "text": "Kimler katılabilir",
+      "status": "machine"
+    },
     "guest.claim.error.generic": {
       "text": "Hesap oluşturulamadı. Yeniden deneyin.",
       "status": "machine"
@@ -6422,6 +6746,10 @@
       "text": "Gruplar",
       "status": "machine"
     },
+    "new_group.error.secure_setup": {
+      "text": "Bu grup oluşturulamadı. Hiçbir şey oluşturulmadı. Tekrar deneyin.",
+      "status": "machine"
+    },
     "new_group.error.sign_in": {
       "text": "Grup oluşturmak için tekrar giriş yapın.",
       "status": "machine"
@@ -6512,6 +6840,10 @@
     },
     "notification.message.new": {
       "text": "Yeni mesaj",
+      "status": "machine"
+    },
+    "notification.reaction.body": {
+      "text": "{name} mesajınıza {emoji} tepkisi verdi",
       "status": "machine"
     },
     "open_in_app.button": {
@@ -7282,6 +7614,22 @@
       "text": "kelime {position}",
       "status": "machine"
     },
+    "requests_sent.ask_again": {
+      "text": "Tekrar iste",
+      "status": "machine"
+    },
+    "requests_sent.no_answer": {
+      "text": "Henüz yanıt yok.",
+      "status": "machine"
+    },
+    "requests_sent.title": {
+      "text": "Gönderilen istekler",
+      "status": "machine"
+    },
+    "requests_sent.waiting": {
+      "text": "Bir yönetici bekleniyor.",
+      "status": "machine"
+    },
     "restore_identity.device_intro": {
       "text": "Oturumu hâlâ açık olan bir cihaz altı haneli bir kod gösterir; kodu buraya yazın. Kamera gerekmez; isterseniz QR kodu da kullanabilirsiniz.",
       "status": "machine"
@@ -7424,6 +7772,46 @@
     },
     "restore_identity.title": {
       "text": "Hesap anahtarlarınızı geri yükleyin",
+      "status": "machine"
+    },
+    "search.conversation.channel_line": {
+      "text": "Herkese açık kanal · {band} abone",
+      "status": "machine"
+    },
+    "search.conversation.group_line": {
+      "text": "Herkese açık grup · {band} üye",
+      "status": "machine"
+    },
+    "search.conversation.open": {
+      "text": "Aç",
+      "status": "machine"
+    },
+    "search.conversation.out_of_requests": {
+      "text": "Bugün çok sayıda gruba katılmak istediniz. Yarın tekrar deneyin.",
+      "status": "machine"
+    },
+    "search.conversation.queue_full": {
+      "text": "Bu grupta şu an çok fazla istek var. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "search.conversation.request": {
+      "text": "Katılmak iste",
+      "status": "machine"
+    },
+    "search.conversation.request_sent": {
+      "text": "İstek gönderildi. Bir yönetici Lakko'yu bir sonraki açışında görecek.",
+      "status": "machine"
+    },
+    "search.conversation.request_sent_button": {
+      "text": "İstek gönderildi",
+      "status": "machine"
+    },
+    "search.conversation.subscribe": {
+      "text": "Abone ol",
+      "status": "machine"
+    },
+    "search.conversations.heading": {
+      "text": "Gruplar ve kanallar",
       "status": "machine"
     },
     "search.people.add_contact": {
@@ -7662,6 +8050,18 @@
       "text": "Bu cihazdaki tema.",
       "status": "machine"
     },
+    "settings.appearance.quick_reaction": {
+      "text": "Hızlı tepki",
+      "status": "machine"
+    },
+    "settings.appearance.quick_reaction_change": {
+      "text": "Hızlı tepkiyi değiştir",
+      "status": "machine"
+    },
+    "settings.appearance.quick_reaction_sub": {
+      "text": "Göndermek için bir mesaja iki kez dokunun.",
+      "status": "machine"
+    },
     "settings.appearance.theme": {
       "text": "Tema",
       "status": "machine"
@@ -7884,6 +8284,14 @@
     },
     "settings.notifications.off.title": {
       "text": "Bildirimleri açın",
+      "status": "machine"
+    },
+    "settings.notifications.reactions": {
+      "text": "Tepkiler",
+      "status": "machine"
+    },
+    "settings.notifications.reactions_sub": {
+      "text": "Biri mesajlarınıza tepki verdiğinde",
       "status": "machine"
     },
     "settings.passkeys.add": {

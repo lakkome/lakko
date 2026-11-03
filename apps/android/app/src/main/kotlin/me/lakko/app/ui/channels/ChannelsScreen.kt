@@ -340,14 +340,18 @@ public fun NewChannelScreen(
                             // channel. An empty handle skips discovery.
                             if (wantedHandle.isNotEmpty()) {
                                 try {
-                                    ChannelDiscovery.registerChannelHandle(
-                                        handle = wantedHandle,
-                                        channelIdHex = id,
-                                        sessionToken = sessionToken,
-                                    )
-                                } catch (e: DiscoveryHttpError) {
-                                    Log.w(TAG, "handle registration failed: ${e.status}", e)
-                                    error = if (e.status == 409) {
+                                    publisher.withIdentity { identity ->
+                                        ChannelDiscovery.claimChannelHandle(
+                                            identity = identity,
+                                            handle = wantedHandle,
+                                            channelIdHex = id,
+                                            name = name.trim(),
+                                            description = description.trim(),
+                                        )
+                                    }
+                                } catch (e: me.lakko.app.discovery.HandleWriteError) {
+                                    Log.w(TAG, "handle claim failed: ${e.status}", e)
+                                    error = if (e.code == "name-taken") {
                                         // Bound to another channel id: not ours.
                                         claims.forget(claimAccount, wantedHandle)
                                         UiText(

@@ -97,14 +97,17 @@ import { defaultAnonTokenStore, type AnonTokenStore } from "./anon-token-store";
 
 /**
  * The token contexts, in wire order: the names `anonTokenContexts()` returns
- * (`lakko_anon_token::TokenContext::ALL`, wire bytes 1..=13), pinned against
+ * (`lakko_anon_token::TokenContext::ALL`, wire bytes 1..=15), pinned against
  * the wasm core by `anon-token-contexts.test.ts`. `channel-subscribe` and
  * `directory-search` are ADR-0059; `vault-claim` is ADR-0064 (nothing spends
  * it yet); `blob-upload` and `blob-read` are ADR-0065, one per hour-long
  * blob pass (`storage/blob-access.ts`);
  * `mailbox-write` is ADR-0078 section 1: a mailbox write with no reach proof;
  * `call-join` is ADR-0078 section 2: one SFU call admission;
- * `circle-claim` is ADR-0086: claiming a circle directory.
+ * `circle-claim` is ADR-0086: claiming a circle directory;
+ * `channel-react` and `channel-comment` are ADR-0087 section 13a: one per
+ * write under a channel post (nothing on the web spends them yet: channel
+ * reactions and comments are phase B).
  */
 export const ANON_TOKEN_CONTEXTS = [
   "discovery-lookup",
@@ -120,6 +123,8 @@ export const ANON_TOKEN_CONTEXTS = [
   "mailbox-write",
   "call-join",
   "circle-claim",
+  "channel-react",
+  "channel-comment",
 ] as const;
 
 /** One token context (see {@link ANON_TOKEN_CONTEXTS}). */
@@ -147,6 +152,10 @@ export const POOL_TARGET: Readonly<Record<AnonTokenContext, number>> = {
   // ADR-0086: claiming this account's one circle directory. Chosen, not
   // measured.
   "circle-claim": 2,
+  // ADR-0087 section 13a: channel reactions and comments. Chosen, not
+  // measured.
+  "channel-react": 4,
+  "channel-comment": 4,
 };
 
 /** The pool target of `context`. */

@@ -111,8 +111,22 @@ let cache = new AvatarCache({
   verify,
   now: () => Date.now(),
 });
-let unsubscribe = cache.subscribe(bump);
 const urls = new Map<string, string>();
+let unsubscribe = subscribeCache();
+
+/** Listen to the cache: a change redraws, an eviction revokes the URL. */
+function subscribeCache(): () => void {
+  const a = cache.subscribe(bump);
+  const b = cache.onEvict((id) => {
+    const url = urls.get(id);
+    if (url !== undefined) URL.revokeObjectURL(url);
+    urls.delete(id);
+  });
+  return () => {
+    a();
+    b();
+  };
+}
 
 function revokeAll(): void {
   for (const url of urls.values()) URL.revokeObjectURL(url);
@@ -134,7 +148,7 @@ export function bindAvatarRuntime(accountId: string | null): void {
     verify,
     now: () => Date.now(),
   });
-  unsubscribe = cache.subscribe(bump);
+  unsubscribe = subscribeCache();
   bump();
 }
 
@@ -145,7 +159,10 @@ export function seedAvatarBytes(blobIdB64: string, bytes: Uint8Array): void {
 
 function urlFor(ref: AvatarRefData, kind: AvatarMediaKind): string | null {
   const held = urls.get(ref.blobIdB64);
-  if (held !== undefined) return held;
+  if (held !== undefined) {
+    cache.drew(ref.blobIdB64);
+    return held;
+  }
   const bytes = cache.bytes(ref.blobIdB64);
   if (bytes === null) {
     void cache.want(ref, kind);
@@ -169,6 +186,30 @@ export interface AvatarMedia {
  * Reactive: the photo replaces the initials when it arrives. `withVideo` is
  * for the large views only; elsewhere the still is shown.
  */
+let conversationLookup: (groupIdB64: string) => AvatarData | null = () => null;
+
+/** ADR-0087 section 18 / UX 4.5.5 — groups and channels drawn by the same
+ *  circle: the photo of a conversation, looked up by its id. */
+export function setConversationAvatarLookup(fn: ((groupIdB64: string) => AvatarData | null) | null): void {
+  conversationLookup = fn ?? (() => null);
+  bump();
+}
+
+/** The photo of a conversation (a group's id, base64), as {@link avatarMediaFor}. */
+export function conversationAvatarMediaFor(groupIdB64: string | undefined, withVideo: boolean): AvatarMedia | null {
+  tick();
+  if (groupIdB64 === undefined || groupIdB64.length === 0) return null;
+  return mediaOf(conversationLookup(groupIdB64), withVideo);
+}
+
+function mediaOf(a: AvatarData | null, withVideo: boolean): AvatarMedia | null {
+  if (a === null) return null;
+  const stillUrl = urlFor(a.still, "still");
+  const videoUrl = withVideo && a.video !== null ? urlFor(a.video.ref, "video") : null;
+  if (stillUrl === null && videoUrl === null) return null;
+  return { stillUrl, videoUrl };
+}
+
 export function avatarMediaFor(keyB64: string | undefined, withVideo: boolean): AvatarMedia | null {
   tick();
   if (keyB64 === undefined || keyB64.length === 0) return null;
@@ -182,3 +223,9 @@ export function avatarMediaFor(keyB64: string | undefined, withVideo: boolean): 
 
 /** Reactive tick, for a caller that derives from the lookup itself. */
 export const avatarTick: Accessor<number> = tick;
+
+/** The decrypted bytes of a photo this device holds in memory, or `null`
+ *  (ADR-0087 section 18.3: a re-upload under a fresh key). */
+export function avatarCacheBytes(blobIdB64: string): Uint8Array | null {
+  return cache.bytes(blobIdB64);
+}

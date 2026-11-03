@@ -694,6 +694,11 @@ export async function decryptPushWake(wake, deps) {
     let latest = null;
     /** @type {string | null} */
     let latestSenderKeyB64 = null;
+    /** Reactions section 12 — the reaction the preview stands for, when it is
+     *  one: a later remove of the same emoji by the same person in this batch
+     *  takes it back before it is shown. */
+    /** @type {{ senderKeyB64: string | null, emoji: string, target: string } | null} */
+    let latestReaction = null;
     /** @type {{ notice: CallNotice, senderKeyB64: string | null } | null} */
     let latestCall = null;
     // One reading for the whole batch, so two rows a millisecond apart cannot
@@ -748,8 +753,38 @@ export async function decryptPushWake(wake, deps) {
       // resolved against the roster of the epoch the frame decrypted at.
       const senderPerson = personKeyAtLeaf(group, processed?.senderLeaf);
       if (senderPerson !== null && senderPerson === ownPersonKey(group)) continue;
+      // Reactions section 12 — a reaction to this person's own message is a
+      // notification of its own ("Anna reacted ❤️ to your message"); a
+      // reaction to anybody else's message, a remove, and every reaction
+      // when the switch is off are silent. The target author is the
+      // reactor's claim, compared with this account's key; nothing else
+      // reads it.
+      const reaction = reactionFromProcessed(deps.wasm, processed, ownPersonKey(group));
+      if (reaction !== null) {
+        const senderKey = senderKeyOf(group, processed);
+        if (reaction.action === "remove") {
+          if (
+            latestReaction !== null &&
+            latestReaction.emoji === reaction.emoji &&
+            latestReaction.target === reaction.target &&
+            latestReaction.senderKeyB64 === senderKey
+          ) {
+            latest = null;
+            latestReaction = null;
+            latestSenderKeyB64 = null;
+          }
+          continue;
+        }
+        if (reaction.toOwn && words.reactionsOff !== true) {
+          latest = { title: "Lakko", body: reaction.emoji, tag: groupHex };
+          latestReaction = { senderKeyB64: senderKey, emoji: reaction.emoji, target: reaction.target };
+          latestSenderKeyB64 = senderKey;
+        }
+        continue;
+      }
       const preview = previewFromProcessed(deps.wasm, processed, words);
       if (preview !== null) {
+        latestReaction = null;
         latest = { title: "Lakko", body: preview, tag: groupHex };
         // ADR-0048 / C-68 — resolve the sender's KEY now, against the roster
         // of the epoch this frame decrypted at; a leaf resolved later could
@@ -847,6 +882,18 @@ export async function decryptPushWake(wake, deps) {
       if (typeof name === "string" && name.length > 0) {
         latest = { ...latest, title: name };
       }
+      if (latestReaction !== null) {
+        const who = typeof name === "string" && name.length > 0 ? name : "Lakko";
+        latest = {
+          ...latest,
+          body: words.reactedToYourMessage.replace("\u0001", who).replace("\u0002", latestReaction.emoji),
+        };
+      }
+    } else if (latest !== null && latestReaction !== null) {
+      latest = {
+        ...latest,
+        body: words.reactedToYourMessage.replace("\u0001", "Lakko").replace("\u0002", latestReaction.emoji),
+      };
     }
     return { preview: latest, readRan: true, unreadableRows };
   } finally {
@@ -1090,7 +1137,40 @@ function isServiceEnvelope(wasm, bytes) {
   //     account's own DeviceGroup, which this worker never reads; in a
   //     conversation it is somebody's stray bytes and is never rendered.
   if (isKeyRotationEnvelope(wasm, bytes)) return true;
+  // 12. ADR-0087 — the group photo, the allowed reactions, the conversation
+  //     handle and the knock and admission seeds. Classification ONLY: never
+  //     decoded for their fields, never kept (C-59), and no photo is ever
+  //     downloaded here.
+  if (isDispatchKind(wasm, bytes, ["GroupPhoto", "GroupReactions", "ConversationHandle", "KnockSeed", "AdmissionSeed"])) {
+    return true;
+  }
   return false;
+}
+
+/**
+ * Whether the core's `dispatchIncomingEnvelope` classifies `bytes` as one of
+ * `names` (an `IncomingEnvelopeKind` member name). A `lakko/...` envelope only.
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} bytes
+ * @param {readonly string[]} names
+ * @returns {boolean}
+ */
+function isDispatchKind(wasm, bytes, names) {
+  if (bytes.length === 0 || bytes[0] !== 0x6c) return false;
+  if (typeof wasm.dispatchIncomingEnvelope !== "function" || wasm.IncomingEnvelopeKind === undefined) {
+    return false;
+  }
+  let env;
+  try {
+    env = wasm.dispatchIncomingEnvelope(bytes);
+  } catch {
+    return false;
+  }
+  const kind = env === null || env === undefined ? undefined : env.kind;
+  freeQuietly(env);
+  const kinds = /** @type {Record<string, number>} */ (wasm.IncomingEnvelopeKind);
+  return names.some((n) => kinds[n] !== undefined && kinds[n] === kind);
 }
 
 /**
@@ -1991,6 +2071,53 @@ function isCommitterBeaconEnvelope(wasm, bytes) {
     return false;
   }
   return true;
+}
+
+/**
+ * Reactions section 12 — a reaction op, or `null` for anything else. `toOwn`
+ * when the reactor said the reacted-to message is this account's (the
+ * envelope's target author, a claim compared with this account's key).
+ *
+ * @param {DecryptWasm} wasm
+ * @param {any} processed
+ * @param {string | null} ownKeyB64
+ * @returns {{ emoji: string, action: "add" | "remove", toOwn: boolean, target: string } | null}
+ */
+function reactionFromProcessed(wasm, processed, ownKeyB64) {
+  if (
+    processed === null ||
+    processed === undefined ||
+    processed.kind !== "Application" ||
+    processed.applicationData === undefined ||
+    processed.applicationData === null
+  ) {
+    return null;
+  }
+  const bytes = processed.applicationData;
+  // A chat envelope is JSON; a reaction is one.
+  if (bytes.length === 0 || bytes[0] !== 0x7b) return null;
+  let parsed;
+  try {
+    parsed = wasm.parseBodyEnvelope(bytes);
+  } catch {
+    return null;
+  }
+  try {
+    if (parsed.kind !== "reaction") return null;
+    const emoji = typeof parsed.emoji === "string" ? parsed.emoji : "";
+    if (emoji.length === 0) return null;
+    const author = parsed.reactionTargetAuthor;
+    const toOwn =
+      ownKeyB64 !== null && author instanceof Uint8Array && author.length === 32 && bytesToBase64(author) === ownKeyB64;
+    return {
+      emoji,
+      action: parsed.reactionAction === "remove" ? "remove" : "add",
+      toOwn,
+      target: String(parsed.target ?? ""),
+    };
+  } finally {
+    freeQuietly(parsed);
+  }
 }
 
 /**

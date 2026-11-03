@@ -90,6 +90,7 @@ impl Group {
             updated_at_ms: 1,
             id: vec![0x33; 32],
             key: [0x44; 32],
+            knock_version: 1,
             handle: "hiking_club".to_string(),
             name: "Hiking club".to_string(),
             description: String::new(),

@@ -432,6 +432,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// not re-render every screen that observes one map.
     private func refreshDerived() {
         let s = syncedState
+        QuickReactionSetting.shared.adopt((try? s.quickReaction()).flatMap { $0 })
         var d: [String: DraftState] = [:]
         for r in (try? s.allDrafts()) ?? [] {
             d[groupIdHex(r.groupId)] = DraftState(
@@ -829,6 +830,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if isRecoveryEmailEnvelope(bytes: envelope) { return "recovery-email" }
         // ADR-0076 — likewise the own-username register.
         if isOwnUsernameEnvelope(bytes: envelope) { return "own-username" }
+        // Reactions-and-emoji spec section 6 (D3) — the quick-reaction register.
+        if isQuickReactionEnvelope(bytes: envelope) { return "quick-reaction" }
         // UX 17.6 — every device acknowledgement is its own slot.
         if isDeviceAckEnvelope(bytes: envelope) { return "device-ack:" + envelope.base64EncodedString() }
         // ADR-0079 — every link record is its own slot.
@@ -1234,6 +1237,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         await flushUnsentRecoveryEmail()
         guard bound.isCurrent else { return }
         await flushUnsentOwnUsername()
+        await flushUnsentQuickReaction()
         guard bound.isCurrent else { return }
         await flushUnsentLinkRecords()
         guard bound.isCurrent else { return }
@@ -1979,6 +1983,19 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 }
                 return
             }
+            // Reactions-and-emoji spec section 6 (D3) — the quick reaction,
+            // the same way.
+            if isQuickReactionEnvelope(bytes: envelope) {
+                do {
+                    if try syncedState.applyQuickReactionEnvelope(envelope: envelope) {
+                        if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+                        stateChanged()
+                    }
+                } catch {
+                    NSLog("quick-reaction: envelope refused")
+                }
+                return
+            }
             // ADR-0076 — the own-username register, the same way.
             if isOwnUsernameEnvelope(bytes: envelope) {
                 do {
@@ -2130,6 +2147,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
         // ADR-0076 — and the own-username register.
         if let envelope = (try? syncedState.ownUsernameEnvelope()).flatMap({ $0 }) {
+            await sendServiceEnvelope(envelope)
+        }
+        // D3 — and the quick reaction.
+        if let envelope = (try? syncedState.quickReactionEnvelope()).flatMap({ $0 }) {
             await sendServiceEnvelope(envelope)
         }
         // ADR-0079 — and every link record, with its original stamp.
@@ -2367,6 +2388,57 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             UserDefaults.standard.removeObject(forKey: Self.ownUsernameUnsentKey(accountIdB64: account))
         } catch {
             NSLog("ADR-0076: own-username register send failed; retried at the next start")
+        }
+        return true
+    }
+
+    // MARK: - Reactions-and-emoji spec section 6: the quick-reaction register
+
+    static func quickReactionUnsentKey(accountIdB64: String) -> String {
+        "lakko.quick-reaction.unsent.v1.\(accountIdB64)"
+    }
+
+    /// The account's quick reaction, `nil` for the default.
+    public var quickReaction: String? { (try? syncedState.quickReaction()).flatMap { $0 } }
+
+    /// Send the register again when an earlier send was not confirmed.
+    func flushUnsentQuickReaction() async {
+        guard let account = activeAccountIdB64 else { return }
+        let key = Self.quickReactionUnsentKey(accountIdB64: account)
+        guard UserDefaults.standard.object(forKey: key) != nil else { return }
+        do {
+            if let envelope = try syncedState.quickReactionEnvelope() {
+                try await sendLineageEnvelopes([envelope])
+            }
+            UserDefaults.standard.removeObject(forKey: key)
+        } catch {
+            NSLog("quick-reaction: register send failed; retried at the next start")
+        }
+    }
+
+    /// D3 — write the account's quick reaction (last writer wins), persist it
+    /// and send it to the account's other devices.
+    @discardableResult
+    public func setQuickReaction(_ emoji: String) async -> Bool {
+        guard ready, !deviceRemoved, let account = activeAccountIdB64 else { return false }
+        let written: Bool
+        do {
+            written = try syncedState.setQuickReaction(hlc: Hlc.mint(), emoji: emoji)
+        } catch {
+            NSLog("quick-reaction: register refused")
+            return false
+        }
+        guard written else { return true }
+        stateChanged()
+        persistSyncState()
+        UserDefaults.standard.set(true, forKey: Self.quickReactionUnsentKey(accountIdB64: account))
+        do {
+            if let envelope = try syncedState.quickReactionEnvelope() {
+                try await sendLineageEnvelopes([envelope])
+            }
+            UserDefaults.standard.removeObject(forKey: Self.quickReactionUnsentKey(accountIdB64: account))
+        } catch {
+            NSLog("quick-reaction: register send failed; retried at the next start")
         }
         return true
     }

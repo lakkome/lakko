@@ -2166,6 +2166,10 @@
       "text": "Оттенки кожи: {name}",
       "status": "machine"
     },
+    "chat.emoji.suggestions": {
+      "text": "Подсказки эмодзи",
+      "status": "machine"
+    },
     "chat.emoji.tab": {
       "text": "Эмодзи",
       "status": "machine"
@@ -2570,12 +2574,32 @@
       "text": "Запросы на вступление ({count})",
       "status": "machine"
     },
+    "chat.members.join.heading_full": {
+      "text": "Запросы на вступление (64+)",
+      "status": "machine"
+    },
     "chat.members.join.link_unknown": {
       "text": "Ссылка-приглашение неизвестна",
       "status": "machine"
     },
+    "chat.members.join.more_waiting": {
+      "text": "Есть ещё запросы. Они появятся, когда вы ответите на эти.",
+      "status": "machine"
+    },
     "chat.members.join.reject": {
       "text": "Отклонить",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all": {
+      "text": "Отклонить все",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all_body": {
+      "text": "Будут удалены все ожидающие запросы, включая те, что вы ещё не видели.",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all_title": {
+      "text": "Отклонить все запросы?",
       "status": "machine"
     },
     "chat.members.join.rejected": {
@@ -2878,6 +2902,26 @@
       "text": "Отреагировать — Отреагировали: {names}",
       "status": "machine"
     },
+    "chat.reaction.cap_reached": {
+      "text": "Можно поставить не больше 3 реакций. Уберите одну, чтобы добавить другую.",
+      "status": "machine"
+    },
+    "chat.reaction.chip_a11y": {
+      "text": "{emoji}, {count, plural, one {# реакция} few {# реакции} many {# реакций} other {# реакции}}",
+      "status": "machine"
+    },
+    "chat.reaction.chip_yours_a11y": {
+      "text": "{emoji}, ваша реакция",
+      "status": "machine"
+    },
+    "chat.reaction.list_all": {
+      "text": "Все {count}",
+      "status": "machine"
+    },
+    "chat.reaction.list_title": {
+      "text": "Реакции",
+      "status": "machine"
+    },
     "chat.reaction.reacted_by": {
       "text": "Отреагировали: {names}",
       "status": "machine"
@@ -2890,8 +2934,16 @@
       "text": "Убрать свою реакцию — Отреагировали: {names}",
       "status": "machine"
     },
+    "chat.reaction.show_who_a11y": {
+      "text": "Показать, кто отреагировал",
+      "status": "machine"
+    },
     "chat.reaction.single_emoji": {
       "text": "Реакция должна быть одним эмодзи.",
+      "status": "machine"
+    },
+    "chat.reaction.unseen_a11y": {
+      "text": "Новые реакции на ваши сообщения: {count}",
       "status": "machine"
     },
     "chat.reauth.action": {
@@ -3604,6 +3656,10 @@
     },
     "chats.row.unread_overflow": {
       "text": "99+",
+      "status": "machine"
+    },
+    "chats.row.unseen_reactions": {
+      "text": "Новые реакции",
       "status": "machine"
     },
     "chats.search.clear": {
@@ -5890,6 +5946,274 @@
       "text": "Если ничего не происходит, запрос можно отправить снова.",
       "status": "machine"
     },
+    "group_delete.action": {
+      "text": "Удалить группу",
+      "status": "machine"
+    },
+    "group_delete.body": {
+      "text": "Группа и её сообщения будут удалены со всех ваших устройств, а @{name} освободится через 30 дней. Это нельзя отменить.",
+      "status": "machine"
+    },
+    "group_delete.confirm": {
+      "text": "Удалить",
+      "status": "machine"
+    },
+    "group_delete.title": {
+      "text": "Удалить эту группу?",
+      "status": "machine"
+    },
+    "group_handle.error.bad_form": {
+      "text": "От 3 до 32 символов: буквы a-z, цифры и _.",
+      "status": "machine"
+    },
+    "group_handle.error.failed": {
+      "text": "Не удалось сохранить. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "group_handle.error.held": {
+      "text": "Это @имя недоступно. Попробуйте другое.",
+      "status": "machine"
+    },
+    "group_handle.error.offline": {
+      "text": "Не удалось связаться с Lakko. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "group_handle.error.taken": {
+      "text": "Это @имя занято.",
+      "status": "machine"
+    },
+    "group_handle.error.too_many": {
+      "text": "Вы сегодня создали много групп. Попробуйте завтра.",
+      "status": "machine"
+    },
+    "group_info.handle.choose": {
+      "text": "Выбрать",
+      "status": "machine"
+    },
+    "group_info.handle.copy_a11y": {
+      "text": "Копировать @имя",
+      "status": "machine"
+    },
+    "group_info.handle.lapsed": {
+      "text": "У этой группы нет @имени. Выберите его.",
+      "status": "machine"
+    },
+    "group_info.header.aria": {
+      "text": "Группа",
+      "status": "machine"
+    },
+    "group_info.header.private": {
+      "text": "Закрытая группа · {count, plural, one {# участник} few {# участника} many {# участников} other {# участника}}",
+      "status": "machine"
+    },
+    "group_info.header.public": {
+      "text": "Открытая группа · {count, plural, one {# участник} few {# участника} many {# участников} other {# участника}}",
+      "status": "machine"
+    },
+    "group_photo.error.limit": {
+      "text": "Вы достигли лимита на отправку файлов. Попробуйте позже.",
+      "status": "machine"
+    },
+    "group_photo.error.not_allowed": {
+      "text": "Фото могут менять только владелец и администраторы.",
+      "status": "machine"
+    },
+    "group_photo.error.upload": {
+      "text": "Не удалось загрузить фото. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "group_photo.gone": {
+      "text": "Фото больше недоступно. Выберите другое.",
+      "status": "machine"
+    },
+    "group_photo.owed": {
+      "text": "Применится, когда вы снова будете в сети.",
+      "status": "machine"
+    },
+    "group_photo.remove.body": {
+      "text": "Все в группе увидят вместо него инициалы.",
+      "status": "machine"
+    },
+    "group_photo.remove.confirm": {
+      "text": "Удалить",
+      "status": "machine"
+    },
+    "group_photo.remove.title": {
+      "text": "Удалить фото группы?",
+      "status": "machine"
+    },
+    "group_reactions.add": {
+      "text": "Добавить",
+      "status": "machine"
+    },
+    "group_reactions.all": {
+      "text": "Все реакции",
+      "status": "machine"
+    },
+    "group_reactions.all_sub": {
+      "text": "Участники могут реагировать любым эмодзи.",
+      "status": "machine"
+    },
+    "group_reactions.choose_one": {
+      "text": "Выберите хотя бы одну.",
+      "status": "machine"
+    },
+    "group_reactions.max": {
+      "text": "Можно выбрать до 100.",
+      "status": "machine"
+    },
+    "group_reactions.none": {
+      "text": "Без реакций",
+      "status": "machine"
+    },
+    "group_reactions.none_sub": {
+      "text": "Участники не могут реагировать на сообщения.",
+      "status": "machine"
+    },
+    "group_reactions.remove_a11y": {
+      "text": "Убрать {emoji}",
+      "status": "machine"
+    },
+    "group_reactions.save_failed": {
+      "text": "Не удалось сохранить. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "group_reactions.some": {
+      "text": "Некоторые реакции",
+      "status": "machine"
+    },
+    "group_reactions.some_sub": {
+      "text": "Участники могут реагировать только выбранными вами эмодзи.",
+      "status": "machine"
+    },
+    "group_reactions.title": {
+      "text": "Реакции",
+      "status": "machine"
+    },
+    "group_reactions.unsaved_body": {
+      "text": "Изменения пропадут, если их не сохранить.",
+      "status": "machine"
+    },
+    "group_reactions.value.all": {
+      "text": "Все",
+      "status": "machine"
+    },
+    "group_reactions.value.count": {
+      "text": "{count, plural, one {# реакция} few {# реакции} many {# реакций} other {# реакции}}",
+      "status": "machine"
+    },
+    "group_reactions.value.off": {
+      "text": "Выкл.",
+      "status": "machine"
+    },
+    "group_solo.add_members": {
+      "text": "Добавить участников",
+      "status": "machine"
+    },
+    "group_solo.copy_invite": {
+      "text": "Копировать ссылку-приглашение",
+      "status": "machine"
+    },
+    "group_solo.created": {
+      "text": "Вы создали эту группу",
+      "status": "machine"
+    },
+    "group_solo.only_you": {
+      "text": "Здесь только вы.",
+      "status": "machine"
+    },
+    "group_type.confirm.private.body": {
+      "text": "Группа исчезнет из поиска. Вступить можно будет только по приглашению владельца или администратора. Все участники останутся.",
+      "status": "machine"
+    },
+    "group_type.confirm.private.confirm": {
+      "text": "Сделать закрытой",
+      "status": "machine"
+    },
+    "group_type.confirm.private.title": {
+      "text": "Сделать группу закрытой?",
+      "status": "machine"
+    },
+    "group_type.confirm.private.waiting": {
+      "text": "{count, plural, one {# человек ждёт вступления. Вы ещё можете ему ответить.} few {# человека ждут вступления. Вы ещё можете им ответить.} many {# человек ждут вступления. Вы ещё можете им ответить.} other {# человека ждут вступления. Вы ещё можете им ответить.}}",
+      "status": "machine"
+    },
+    "group_type.confirm.public.body": {
+      "text": "Любой сможет найти её и попросить вступить. Её название, фото, описание и примерный размер станут видны всем.",
+      "status": "machine"
+    },
+    "group_type.confirm.public.confirm": {
+      "text": "Сделать открытой",
+      "status": "machine"
+    },
+    "group_type.confirm.public.title": {
+      "text": "Сделать группу открытой?",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.body": {
+      "text": "Старое @имя сразу перестанет работать. Оно останется за этой группой 30 дней.",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.confirm": {
+      "text": "Изменить",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.title": {
+      "text": "Изменить @имя?",
+      "status": "machine"
+    },
+    "group_type.handle": {
+      "text": "@имя",
+      "status": "machine"
+    },
+    "group_type.handle_private": {
+      "text": "Это видят только участники.",
+      "status": "machine"
+    },
+    "group_type.handle_public": {
+      "text": "По этому имени группу может найти любой.",
+      "status": "machine"
+    },
+    "group_type.needs_name": {
+      "text": "У открытой группы должно быть название.",
+      "status": "machine"
+    },
+    "group_type.not_saved": {
+      "text": "Не удалось сохранить, кто может вступить. Откройте, чтобы попробовать снова.",
+      "status": "machine"
+    },
+    "group_type.owed": {
+      "text": "Применится, когда вы снова будете в сети.",
+      "status": "machine"
+    },
+    "group_type.pending": {
+      "text": "Ждёт сохранения",
+      "status": "machine"
+    },
+    "group_type.private": {
+      "text": "Закрытая",
+      "status": "machine"
+    },
+    "group_type.private_desc": {
+      "text": "Вступить можно только по приглашению администратора. Группы нет в поиске.",
+      "status": "machine"
+    },
+    "group_type.public": {
+      "text": "Открытая",
+      "status": "machine"
+    },
+    "group_type.public_desc": {
+      "text": "Любой может найти эту группу и попросить вступить.",
+      "status": "machine"
+    },
+    "group_type.title": {
+      "text": "Тип группы",
+      "status": "machine"
+    },
+    "group_type.who_can_join": {
+      "text": "Кто может вступить",
+      "status": "machine"
+    },
     "guest.claim.error.generic": {
       "text": "Не удалось создать аккаунт. Попробуйте ещё раз.",
       "status": "machine"
@@ -6538,6 +6862,10 @@
       "text": "Группы",
       "status": "machine"
     },
+    "new_group.error.secure_setup": {
+      "text": "Не удалось создать группу. Ничего не создано. Попробуйте ещё раз.",
+      "status": "machine"
+    },
     "new_group.error.sign_in": {
       "text": "Войдите снова, чтобы создать группу.",
       "status": "machine"
@@ -6628,6 +6956,10 @@
     },
     "notification.message.new": {
       "text": "Новое сообщение",
+      "status": "machine"
+    },
+    "notification.reaction.body": {
+      "text": "{name} отреагировал(а) {emoji} на ваше сообщение",
       "status": "machine"
     },
     "open_in_app.button": {
@@ -7518,6 +7850,22 @@
       "text": "слово {position}",
       "status": "machine"
     },
+    "requests_sent.ask_again": {
+      "text": "Спросить снова",
+      "status": "machine"
+    },
+    "requests_sent.no_answer": {
+      "text": "Пока нет ответа.",
+      "status": "machine"
+    },
+    "requests_sent.title": {
+      "text": "Отправленные запросы",
+      "status": "machine"
+    },
+    "requests_sent.waiting": {
+      "text": "Ждём администратора.",
+      "status": "machine"
+    },
     "restore_identity.device_intro": {
       "text": "Устройство, на котором вы ещё не вышли из аккаунта, покажет шестизначный код; введите его здесь. Камера не нужна; при желании можно использовать QR-код.",
       "status": "machine"
@@ -7692,6 +8040,46 @@
     },
     "saved.title": {
       "text": "Сохранённые",
+      "status": "machine"
+    },
+    "search.conversation.channel_line": {
+      "text": "Открытый канал · {band} подписчиков",
+      "status": "machine"
+    },
+    "search.conversation.group_line": {
+      "text": "Открытая группа · {band} участников",
+      "status": "machine"
+    },
+    "search.conversation.open": {
+      "text": "Открыть",
+      "status": "machine"
+    },
+    "search.conversation.out_of_requests": {
+      "text": "Вы сегодня попросились во много групп. Попробуйте завтра.",
+      "status": "machine"
+    },
+    "search.conversation.queue_full": {
+      "text": "В этой группе сейчас слишком много запросов. Попробуйте позже.",
+      "status": "machine"
+    },
+    "search.conversation.request": {
+      "text": "Попросить вступить",
+      "status": "machine"
+    },
+    "search.conversation.request_sent": {
+      "text": "Запрос отправлен. Администратор увидит его, когда в следующий раз откроет Lakko.",
+      "status": "machine"
+    },
+    "search.conversation.request_sent_button": {
+      "text": "Запрос отправлен",
+      "status": "machine"
+    },
+    "search.conversation.subscribe": {
+      "text": "Подписаться",
+      "status": "machine"
+    },
+    "search.conversations.heading": {
+      "text": "Группы и каналы",
       "status": "machine"
     },
     "search.people.add_contact": {
@@ -7930,6 +8318,18 @@
       "text": "Тема на этом устройстве.",
       "status": "machine"
     },
+    "settings.appearance.quick_reaction": {
+      "text": "Быстрая реакция",
+      "status": "machine"
+    },
+    "settings.appearance.quick_reaction_change": {
+      "text": "Изменить быструю реакцию",
+      "status": "machine"
+    },
+    "settings.appearance.quick_reaction_sub": {
+      "text": "Дважды коснитесь сообщения, чтобы отправить её.",
+      "status": "machine"
+    },
     "settings.appearance.theme": {
       "text": "Тема",
       "status": "machine"
@@ -8152,6 +8552,14 @@
     },
     "settings.notifications.off.title": {
       "text": "Включите уведомления",
+      "status": "machine"
+    },
+    "settings.notifications.reactions": {
+      "text": "Реакции",
+      "status": "machine"
+    },
+    "settings.notifications.reactions_sub": {
+      "text": "Когда кто-то реагирует на ваши сообщения",
       "status": "machine"
     },
     "settings.passkeys.add": {

@@ -226,6 +226,14 @@ public final class JoinGroupLandingViewModel: ObservableObject {
                 nowMs: nowMs,
                 blobId: resolved.blobId
             )
+            // Section 6.2 — the request shows under `Requests sent` until the
+            // group appears.
+            if let accountIdB64 = AcceptedContactsStore.boundAccountIdB64 {
+                RequestsSentStore.record(
+                    groupId: result.groupId, name: preview?.groupName,
+                    capabilityWire: resolved.capabilityWire, blobId: resolved.blobId,
+                    accountIdB64: accountIdB64, nowMs: Int64(nowMs))
+            }
             state = .waiting
             startPolling(groupId: result.groupId)
         } catch {

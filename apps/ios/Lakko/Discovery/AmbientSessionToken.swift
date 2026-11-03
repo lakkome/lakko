@@ -6,8 +6,8 @@ import Foundation
 /// The signed-in session's bearer token, readable from any thread, for one
 /// purpose only: keying `services/discovery`'s rate limiter.
 ///
-/// Discovery charges `/discovery/oprf`, `/discovery/lookup` and
-/// `/discovery/channel/lookup` to the **account** when the request carries a
+/// Discovery charges `/discovery/oprf` and `/discovery/lookup`
+/// to the **account** when the request carries a
 /// valid session token and to the source **IP** otherwise, so everyone behind
 /// one NAT shares a single anonymous bucket. Most `DiscoveryClient()` call
 /// sites are constructed without a token, so without this holder a signed-in

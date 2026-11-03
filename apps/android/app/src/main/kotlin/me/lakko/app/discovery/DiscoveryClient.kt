@@ -14,6 +14,7 @@ import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.put
+import io.ktor.client.request.request
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
@@ -617,12 +618,13 @@ public class DiscoveryClient(
             val lookupKeyB64 = base64Encode(blinder.finalize(oprfResp.evaluated).lookupKey)
 
             val resp = lookupRaw(LookupRequest(oprf_hash = lookupKeyB64))
-            if (resp == null) {
+            val accountB64 = resp?.account_id?.takeIf { resp.kind != "handle" }
+            if (resp == null || accountB64 == null) {
                 LookupResult(normalisedUsername = normalisedUsername, account = null)
             } else {
                 LookupResult(
                     normalisedUsername = normalisedUsername,
-                    account = base64Decode(resp.account_id),
+                    account = base64Decode(accountB64),
                 )
             }
         }
@@ -718,8 +720,10 @@ public class DiscoveryClient(
             setBody(NameLookupRequest(oprf_hash_b64 = base64Encode(lookupKey)))
         } ?: return emptyList()
         return resp.results.mapNotNull { r ->
+            if (r.kind == "handle") return@mapNotNull null
+            val idB64 = r.account_id_b64 ?: return@mapNotNull null
             val id = try {
-                base64Decode(r.account_id_b64).takeIf { id -> id.size == ACCOUNT_ID_LEN }
+                base64Decode(idB64).takeIf { id -> id.size == ACCOUNT_ID_LEN }
             } catch (_: IllegalArgumentException) {
                 null
             } ?: return@mapNotNull null
@@ -735,10 +739,111 @@ public class DiscoveryClient(
      */
     public suspend fun lookupPublic(lookupKey: ByteArray): PublicAccountHit? {
         val resp = lookupRaw(LookupRequest(oprf_hash = base64Encode(lookupKey))) ?: return null
-        val id = base64Decode(resp.account_id)
+        if (resp.kind == "handle") return null
+        val id = base64Decode(resp.account_id ?: return null)
         if (id.size != ACCOUNT_ID_LEN) return null
         return PublicAccountHit(accountId = id, publicRecord = decodeRecordOrNull(resp.public_record_b64))
     }
+
+    // -----------------------------------------------------------------
+    // ADR-0087 sections 1 to 4 — @names of groups (and channels)
+    // -----------------------------------------------------------------
+
+    /** `POST /discovery/lookup` by a name's lookup key: the sealed record of a
+     *  public group or channel holding it, or `null` (a person, a private
+     *  name and an unknown one all answer nothing here). */
+    public suspend fun lookupHandleRecord(lookupKey: ByteArray): ByteArray? {
+        val resp = lookupRaw(LookupRequest(oprf_hash = base64Encode(lookupKey))) ?: return null
+        if (resp.kind != "handle") return null
+        return decodeRecordOrNull(resp.public_record_b64)
+    }
+
+    /** Section 3.3 — whether a name answers a lookup (a person in Everyone,
+     *  or a public group or channel): `That @name is taken.` Private names
+     *  answer nothing, by design. */
+    public suspend fun nameAnswers(name: String): Boolean {
+        val pair = oprfUsername(name)
+        return lookupRaw(LookupRequest(oprf_hash = base64Encode(pair.lookupKey))) != null
+    }
+
+    /** `POST /discovery/name/lookup` keeping only the public groups and
+     *  channels: their sealed records. */
+    public suspend fun nameLookupHandles(lookupKey: ByteArray): List<ByteArray> {
+        val resp = doPostNullableOn404<NameLookupResponse>("/discovery/name/lookup", anonymous = true) {
+            contentType(ContentType.Application.Json)
+            setBody(NameLookupRequest(oprf_hash_b64 = base64Encode(lookupKey)))
+        } ?: return emptyList()
+        return resp.results.filter { it.kind == "handle" }.mapNotNull { decodeRecordOrNull(it.public_record_b64) }
+    }
+
+    /**
+     * One signed handle statement to its route (section 3): `claim` and
+     * `replace` spend one `discovery-register` token, `update` / `rekey` /
+     * `retire` none. No session. The certificate of a write, or `null` for a
+     * retire. A refusal throws [HandleWriteError] with the server's code.
+     */
+    public suspend fun handleWrite(
+        route: HandleRoute,
+        statementB64: String,
+        record: ByteArray? = null,
+        terms: List<ByteArray> = emptyList(),
+    ): ByteArray? {
+        val endpoint = when (route) {
+            HandleRoute.CLAIM -> "/discovery/handle/claim"
+            HandleRoute.REPLACE -> "/discovery/handle/replace"
+            HandleRoute.REKEY -> "/discovery/handle/rekey"
+            HandleRoute.UPDATE, HandleRoute.RETIRE -> "/discovery/handle"
+        }
+        val body = buildString {
+            append("{\"statement_b64\":\"").append(statementB64).append('"')
+            if (record != null) append(",\"public_record_b64\":\"").append(base64Encode(record)).append('"')
+            if (terms.isNotEmpty()) {
+                append(",\"terms_b64\":[")
+                append(terms.joinToString(",") { "\"" + base64Encode(it) + "\"" })
+                append(']')
+            }
+            append('}')
+        }
+        val url = "$baseUrl$endpoint"
+        val send: suspend (String?, String?) -> HttpResponse = { name, value ->
+            try {
+                anonClient.request(url) {
+                    method = when (route) {
+                        HandleRoute.UPDATE -> io.ktor.http.HttpMethod.Put
+                        HandleRoute.RETIRE -> io.ktor.http.HttpMethod.Delete
+                        else -> io.ktor.http.HttpMethod.Post
+                    }
+                    if (name != null && value != null) header(name, value)
+                    setBody(io.ktor.http.content.TextContent(body, ContentType.Application.Json))
+                }
+            } catch (cause: CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                throw DiscoveryNetworkError(endpoint, cause)
+            }
+        }
+        val response = if (route == HandleRoute.CLAIM || route == HandleRoute.REPLACE) {
+            anonTokens.sendWithToken(AnonTokenContext.DISCOVERY_REGISTER) { name, value -> send(name, value) }
+        } else {
+            send(null, null)
+        }
+        if (!response.status.isSuccess()) {
+            val text = response.safeReadBody()
+            val code = Regex("\"error\"\\s*:\\s*\"([a-z0-9-]+)\"").find(text)?.groupValues?.get(1)
+            throw HandleWriteError(response.status.value, code)
+        }
+        if (route == HandleRoute.RETIRE || response.status.value == 204) return null
+        val text = response.bodyAsText()
+        val cert = Regex("\"handle_certificate_b64\"\\s*:\\s*\"([A-Za-z0-9+/=]+)\"").find(text)?.groupValues?.get(1)
+            ?: return null
+        lastLeaseUntilMs = Regex("\"lease_until_ms\"\\s*:\\s*([0-9]+)").find(text)?.groupValues?.get(1)?.toLongOrNull()
+        return base64Decode(cert)
+    }
+
+    /** The lease end of the last handle write that answered one (section 3). */
+    @Volatile
+    public var lastLeaseUntilMs: Long? = null
+        private set
 
     private fun decodeRecordOrNull(b64: String?): ByteArray? = b64?.let {
         try {
@@ -785,7 +890,7 @@ public class DiscoveryClient(
         if (channelId.size != CHANNEL_ID_LEN) {
             throw DiscoveryClientArgError("channelId must be $CHANNEL_ID_LEN bytes")
         }
-        return OprfBlinder.blindChannel(handle).use { blinder ->
+        return OprfBlinder.blind(handle).use { blinder ->
             val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
 
             val lookupKeyB64 = base64Encode(blinder.finalize(oprfResp.evaluated).lookupKey)
@@ -817,16 +922,15 @@ public class DiscoveryClient(
      * Unauthenticated (the lookup path is open); anonymous-safe.
      */
     public suspend fun lookupChannel(handle: String): String? {
-        return OprfBlinder.blindChannel(handle).use { blinder ->
-            val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
-
-            val lookupKeyB64 = base64Encode(blinder.finalize(oprfResp.evaluated).lookupKey)
-
-            val resp = channelLookupRaw(
-                ChannelLookupRequest(oprf_hash = lookupKeyB64),
-            ) ?: return@use null
-            bytesToHexLower(base64Decode(resp.channel_id))
-        }
+        // ADR-0087 section 1 — one namespace: a channel's @name is a handle,
+        // found by its lookup key and opened from its sealed record.
+        val name = me.lakko.app.chat.canonicalHandleInput(handle)
+        if (!me.lakko.app.chat.handleWellFormed(name)) return null
+        val pair = oprfUsername(name)
+        val record = lookupHandleRecord(pair.lookupKey) ?: return null
+        val found = me.lakko.app.chat.openFoundConversation(record, pair.output) ?: return null
+        if (found.kind != uniffi.lakko_ffi_uniffi.FfiHandleRecordKind.CHANNEL || found.id.size != CHANNEL_ID_LEN) return null
+        return bytesToHexLower(found.id)
     }
 
     /**
@@ -1948,3 +2052,11 @@ public class DiscoveryNetworkError(
 
 /** A ledger row as [DiscoveryClient.fetchInviteRow] answers it. */
 public class FetchedInvite(public val sealed: ByteArray, public val usedUp: Boolean)
+
+/** ADR-0087 section 3 — the handle routes. */
+public enum class HandleRoute { CLAIM, UPDATE, REPLACE, REKEY, RETIRE }
+
+/** A refused handle write, with the server's error code (`name-taken`, ...),
+ *  mapped to copy by the caller, never shown as is. */
+public class HandleWriteError(public val status: Int, public val code: String?) :
+    RuntimeException("handle write refused: $status ${code ?: ""}")

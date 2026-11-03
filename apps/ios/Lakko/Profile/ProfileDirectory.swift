@@ -719,6 +719,17 @@ public final class ProfileDirectory: ObservableObject {
             expectedAccountId: accountId)) != nil
     }
 
+    /// ADR-0087 section 3 — the handle key a group or channel `@name`
+    /// certificate binds to the name whose lookup key is `lookupKey`, or
+    /// `nil` when the certificate does not verify under discovery's key.
+    func handleWriteKey(certificate: Data, lookupKey: Data) async -> Data? {
+        guard let key = try? await usernameCertKey(),
+              let cert = try? verifyHandleBinding(
+                  certificate: certificate, verifyingKey: key, expectedLookupKey: lookupKey)
+        else { return nil }
+        return cert.writePk
+    }
+
     private func usernameCertKey() async throws -> Data {
         if let certKey { return certKey }
         if let pinned = Self.pinnedUsernameCertKey {

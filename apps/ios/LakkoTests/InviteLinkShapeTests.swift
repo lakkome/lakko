@@ -199,7 +199,9 @@ final class InviteLinkShapeTests: XCTestCase {
     /// without one; the secret already opened the blob.
     func testACapabilityWithoutAPreviewShowsNone() throws {
         let mint = try composeGroupInviteCapability(
-            issuerSigningSeed: issuerSeed, groupId: Data(repeating: 7, count: 32), expiryMs: 0)
+            issuerSigningSeed: issuerSeed, groupId: Data(repeating: 7, count: 32), expiryMs: 0,
+            knockPublicKey: try groupKnockPublicKey(knockSeed: Data(repeating: 3, count: 32)),
+            knockVersion: 0)
         let cap = try GroupInviteCapability.openLink(sealed: mint.sealed, linkSecret: mint.linkSecret)
         XCTAssertEqual(JoinGroupLandingViewModel.previewOutcome(of: cap, secret: mint.linkSecret), .none)
     }
@@ -578,7 +580,9 @@ final class InviteLinkShapeTests: XCTestCase {
             expiryMs: 0,
             groupName: "Hiking club",
             inviterName: "Anna",
-            memberCount: 5)
+            memberCount: 5,
+            knockPublicKey: try groupKnockPublicKey(knockSeed: Data(repeating: 3, count: 32)),
+            knockVersion: 0)
     }
 
     private func landing(

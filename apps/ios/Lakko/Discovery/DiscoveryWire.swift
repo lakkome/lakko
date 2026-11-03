@@ -18,7 +18,7 @@ import Foundation
 /// invite codec endpoints land with 1.14e6.
 ///
 /// No body carries a proof of work since ADR-0054 S3: the anonymous routes
-/// (`/discovery/oprf`, `/discovery/channel/register`, the three consumes)
+/// (`/discovery/oprf`, `/discovery/handle/claim`, the three consumes)
 /// spend an anonymous token in the `x-lakko-anon-token` header instead, and
 /// the bearer routes are counted per account server-side.
 
@@ -111,18 +111,24 @@ public struct LookupRequest: Codable, Equatable {
 /// ``DiscoveryClient/lookupRaw(_:)``; this type only describes
 /// the 200-OK path.
 public struct LookupResponse: Codable, Equatable {
-    public let accountId: String
+    /// `"person"`, or `"handle"` for a public group or channel (ADR-0087:
+    /// one namespace, one lookup). Absent on an older server.
+    public let kind: String?
+    /// A person only: a group or channel names no account.
+    public let accountId: String?
     /// base64 of the account's public record (ADR-0060 section 5), opened
     /// with the OPRF **output** of the looked-up username (`openPublicRecord`).
     /// Optional on the wire so an older server still decodes.
     public let publicRecord: String?
 
-    public init(accountId: String, publicRecord: String? = nil) {
+    public init(accountId: String?, publicRecord: String? = nil, kind: String? = nil) {
+        self.kind = kind
         self.accountId = accountId
         self.publicRecord = publicRecord
     }
 
     enum CodingKeys: String, CodingKey {
+        case kind
         case accountId = "account_id"
         case publicRecord = "public_record_b64"
     }
@@ -492,79 +498,3 @@ public struct InviteRevokeRequest: Codable, Equatable {
     }
 }
 
-// ----------------------------------------------------------------------------
-// /discovery/channel/{register,lookup}
-//   (services/discovery/src/channel_names.rs — G4-5, ADR-0010)
-// ----------------------------------------------------------------------------
-// Mirror of `apps/web/src/discovery/wire.ts` (channel section). Same OPRF
-// ciphersuite + wire shape as the username `RegisterRequest` / `LookupRequest`
-// (Ristretto255-SHA512, 64-byte hash) — the `/discovery/oprf` evaluate endpoint
-// is namespace-agnostic, so the client reuses `OprfBlinder.blind(handle)`
-// verbatim. Only the second endpoint + the id type (a 16-byte channel_id
-// pseudonym rather than a 16-byte account UUIDv7) differ.
-
-/// Body of `POST /discovery/channel/register`. Binds an OPRF-hashed
-/// `@channelname` to a 16-byte `channel_id` pseudonym. First-come-
-/// first-served via a UNIQUE on `oprf_hash`; a repeat of the same hash
-/// with a different channel id is 409 Conflict.
-public struct ChannelRegisterRequest: Codable, Equatable {
-    /// base64 of the 64-byte lookup key (`OprfResult.lookupKey`), never the
-    /// OPRF output — same rule as ``RegisterRequest/oprfHash``.
-    public let oprfHash: String
-    /// base64(channel_id) — raw 16 bytes (ADR-0010 §"Wire surfaces").
-    public let channelId: String
-
-    public init(oprfHash: String, channelId: String) {
-        self.oprfHash = oprfHash
-        self.channelId = channelId
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case oprfHash = "oprf_hash"
-        case channelId = "channel_id"
-    }
-}
-
-/// Response body of `POST /discovery/channel/register`. Server returns
-/// 409 on handle collision; that surfaces as
-/// ``DiscoveryClientError/http(status:endpoint:body:)`` with
-/// `status == 409`. The type only describes the 200-OK path.
-public struct ChannelRegisterResponse: Codable, Equatable {
-    public let ok: Bool
-
-    public init(ok: Bool) {
-        self.ok = ok
-    }
-}
-
-/// Body of `POST /discovery/channel/lookup`. Resolves an OPRF-hashed
-/// `@channelname` to its `channel_id`. Exact-match only.
-public struct ChannelLookupRequest: Codable, Equatable {
-    /// Same shape as ``ChannelRegisterRequest/oprfHash``.
-    public let oprfHash: String
-
-    public init(oprfHash: String) {
-        self.oprfHash = oprfHash
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case oprfHash = "oprf_hash"
-    }
-}
-
-/// Response body of `POST /discovery/channel/lookup`. The server
-/// returns 404 for an unknown `@channelname`; the high-level client
-/// surfaces that as a `nil` rather than an error class. This type only
-/// describes the 200-OK path.
-public struct ChannelLookupResponse: Codable, Equatable {
-    /// base64(channel_id) — raw 16 bytes.
-    public let channelId: String
-
-    public init(channelId: String) {
-        self.channelId = channelId
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case channelId = "channel_id"
-    }
-}

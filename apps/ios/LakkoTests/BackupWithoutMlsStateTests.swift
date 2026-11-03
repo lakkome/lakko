@@ -266,12 +266,14 @@ final class PendingChannelHandleTests: XCTestCase {
     }
 }
 
-/// D3: Create needs a name or a person, not a person.
+/// ADR-0087 UX 3.1: Create needs a well-formed @name and, when public, a
+/// name; nobody has to be picked.
 final class NewGroupCreateRuleTests: XCTestCase {
-    func testANameAloneCreates() {
-        XCTAssertTrue(NewGroupScreen.canCreate(name: "Book club", picks: 0))
-        XCTAssertTrue(NewGroupScreen.canCreate(name: "", picks: 1))
-        XCTAssertFalse(NewGroupScreen.canCreate(name: "   ", picks: 0))
+    func testCreateNeedsAWellFormedNameAndAPublicGroupANamedOne() {
+        XCTAssertTrue(NewGroupScreen.canCreate(name: "", handle: "group_k3x9", isPublic: false))
+        XCTAssertTrue(NewGroupScreen.canCreate(name: "Book club", handle: "book_club", isPublic: true))
+        XCTAssertFalse(NewGroupScreen.canCreate(name: "   ", handle: "book_club", isPublic: true))
+        XCTAssertFalse(NewGroupScreen.canCreate(name: "Book club", handle: "ab", isPublic: false))
     }
 }
 
@@ -343,7 +345,7 @@ final class BackupApplyTests: XCTestCase {
             contacts: [contactRecord(0x01, "Alice")],
             groupIds: [g1],
             syncedState: try syncedStateBytes(pinning: g1))
-        XCTAssertEqual(parsed.syncedState.first, 0x07)
+        XCTAssertEqual(parsed.syncedState.first, 0x0A)
         parsed.syncedState[parsed.syncedState.startIndex] = 0x01
 
         let announced = expectation(forNotification: .lakkoSyncedStateRestored, object: nil)

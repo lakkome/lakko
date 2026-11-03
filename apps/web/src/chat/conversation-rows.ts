@@ -108,6 +108,7 @@ export function createConversationRows() {
         ?.displayName,
       nameOf: (k) => memberNameOf(profiles.resolve(k)),
       groupTitle,
+      handle: groupNames.handleOf(g.groupIdB64)?.handle ?? null,
     });
   };
 

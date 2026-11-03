@@ -142,6 +142,33 @@ export interface PeopleSearchDeps {
   introductionRecordsHeld?(): number;
   /** Called once when a search finishes. */
   logCounts?(counts: SearchCounts): void;
+  /** ADR-0087 section 4 — the sealed record of a public group or channel the
+   *  exact `@name` names, or `null` (`/discovery/lookup` answering `handle`).
+   *  Absent: groups are not asked. */
+  conversationRecordOfLookupKey?(lookupKey: Uint8Array): Promise<Uint8Array | null>;
+  /** The sealed records of public groups and channels carrying a name term. */
+  conversationRecordsOfTermLookupKey?(lookupKey: Uint8Array): Promise<Uint8Array[]>;
+  /** `openSearchRecord` for a conversation, with the OUTPUT of the round that
+   *  found it; `null` when it does not open. Never throws. */
+  openConversationRecord?(record: Uint8Array, oprfOutput: Uint8Array): FoundConversation | null;
+}
+
+/** ADR-0087 section 5 — a public group or channel found by search. */
+export interface FoundConversation {
+  readonly kind: "group" | "channel";
+  /** The group id (32 bytes) or channel id (16), base64. */
+  readonly idB64: string;
+  readonly handle: string;
+  readonly name: string;
+  readonly description: string;
+  /** The ADR-0059 band, 0..5. */
+  readonly sizeBand: number;
+  /** A group's knock public key, a channel's read key. */
+  readonly key: Uint8Array;
+  /** The version of a group's knock key: the request names it (ADR-0087
+   *  section 5). 0 for a channel. */
+  readonly knockVersion: number;
+  readonly avatar: import("../profile/avatar-model").AvatarData | null;
 }
 
 /** What one finished search went through: counts only, never a name, key,
@@ -161,6 +188,8 @@ export interface PeopleSearchOutcome {
   readonly people: readonly PersonResult[];
   readonly channel: { readonly idHex: string; readonly handle: string } | null;
   readonly state: PeopleSearchState;
+  /** ADR-0087 section 5 — public groups and channels (absent: not asked). */
+  readonly conversations?: readonly FoundConversation[];
 }
 
 /** At most this many usernames that a public record or an introduction states
@@ -300,7 +329,7 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
 
   // ---- the username ---------------------------------------------------
   // Written by the username question, read after all questions settled.
-  const rounds: { username: OprfPair | null } = { username: null };
+  const rounds: { username: OprfPair | null; term: OprfPair | null } = { username: null, term: null };
   const usernameLeg = (async (): Promise<PersonResult[]> => {
     if (username === null) return [];
     try {
@@ -346,6 +375,7 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
     if (term === null) return [];
     try {
       const round = await deps.nameTermOprf(term);
+      rounds.term = round;
       probes.push({ oprfOutput: round.output, via: "term" });
       const hits = await deps.accountsOfNameTermLookupKey(round.lookupKey);
       const out: PersonResult[] = [];
@@ -384,6 +414,33 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
   })();
 
   const [channel, byUsername, byNameOnly] = await Promise.all([channelLeg, usernameLeg, nameLeg]);
+
+  // ---- public groups and channels (ADR-0087 section 5) ----------------
+  // The same OPRF rounds: a search costs no token more than before. Matched
+  // by `@name` exactly, or by the whole query against the name.
+  const conversations: FoundConversation[] = [];
+  if (deps.openConversationRecord !== undefined) {
+    const seen = new Set<string>();
+    const keep = (found: FoundConversation | null, byHandle: boolean): void => {
+      if (found === null || seen.has(found.idB64)) return;
+      if (byHandle ? found.handle !== username : !deps.nameMatches(found.name, query)) return;
+      seen.add(found.idB64);
+      conversations.push(found);
+    };
+    try {
+      if (rounds.username !== null && deps.conversationRecordOfLookupKey !== undefined) {
+        const rec = await deps.conversationRecordOfLookupKey(rounds.username.lookupKey);
+        if (rec !== null) keep(deps.openConversationRecord(rec, rounds.username.output), true);
+      }
+      if (rounds.term !== null && deps.conversationRecordsOfTermLookupKey !== undefined) {
+        for (const rec of await deps.conversationRecordsOfTermLookupKey(rounds.term.lookupKey)) {
+          keep(deps.openConversationRecord(rec, rounds.term.output), false);
+        }
+      }
+    } catch {
+      // A failed conversation question costs only the conversations.
+    }
+  }
 
   // ---- usernames a record states ------------------------------------
   let extraChecks = 0;
@@ -496,8 +553,13 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
     refusedByReachCheck,
     people: people.length,
   });
-  const found = people.length + (channel === null ? 0 : 1);
-  return { people, channel, state: foldSearch(found, legs) };
+  const found = people.length + (channel === null ? 0 : 1) + conversations.length;
+  return {
+    people,
+    channel,
+    state: foldSearch(found, legs),
+    ...(deps.openConversationRecord === undefined ? {} : { conversations }),
+  };
 }
 
 /**

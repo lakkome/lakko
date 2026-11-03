@@ -47,7 +47,39 @@ struct AvatarDiskCache: @unchecked Sendable {
     }
 
     func read(blobIdHex: String, kind: Kind) -> Data? {
-        existing(blobIdHex: blobIdHex, kind: kind).flatMap { try? Data(contentsOf: $0) }
+        guard let url = existing(blobIdHex: blobIdHex, kind: kind) else { return nil }
+        touch(url)
+        return try? Data(contentsOf: url)
+    }
+
+    /// ADR-0087 section 18 / UX 4.5.5 — one store for people, groups and
+    /// channels, bounded in size: when it is full, the photo drawn least
+    /// recently goes first (it is downloaded again the next time it is
+    /// drawn). The bound is chosen, not measured.
+    static let maxBytes: Int = 64 * 1024 * 1024
+
+    /// Mark a file as drawn now (its modification date orders eviction).
+    func touch(_ url: URL) {
+        try? fileManager.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+    }
+
+    /// Delete the least recently drawn files until the store is under
+    /// ``maxBytes``.
+    func evictIfNeeded(maxBytes: Int = AvatarDiskCache.maxBytes) {
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
+        guard let files = try? fileManager.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: keys) else { return }
+        var entries: [(url: URL, date: Date, size: Int)] = files.compactMap { url in
+            guard let values = try? url.resourceValues(forKeys: Set(keys)) else { return nil }
+            return (url, values.contentModificationDate ?? .distantPast, values.fileSize ?? 0)
+        }
+        var total = entries.reduce(0) { $0 + $1.size }
+        guard total > maxBytes else { return }
+        entries.sort { $0.date < $1.date }
+        for entry in entries where total > maxBytes {
+            try? fileManager.removeItem(at: entry.url)
+            total -= entry.size
+        }
     }
 
     @discardableResult
@@ -59,6 +91,7 @@ struct AvatarDiskCache: @unchecked Sendable {
         try? dir.setResourceValues(values)
         let url = url(blobIdHex: blobIdHex, kind: kind)
         try data.write(to: url, options: [.atomic, .completeFileProtection])
+        evictIfNeeded()
         return url
     }
 
@@ -122,6 +155,12 @@ final class AvatarImages: ObservableObject {
     private let disk: AvatarDiskCache
     private let images = NSCache<NSString, UIImage>()
     private var failures: [String: Date] = [:]
+    /// Blob ids the storage answered "gone" for (expired or deleted, ADR-0065),
+    /// as distinct from a failed download (UX 4.5.2 "Photo gone").
+    private(set) var gone: Set<String> = []
+
+    /// Whether `avatar`'s still is known to be gone.
+    func isGone(_ avatar: ProfileAvatar) -> Bool { gone.contains(avatar.still.blobIdHex) }
     private var inflight: Set<String> = []
 
     /// Download and decrypt one blob. A seam for tests.
@@ -140,7 +179,11 @@ final class AvatarImages: ObservableObject {
     func still(_ avatar: ProfileAvatar) -> UIImage? {
         let ref = avatar.still
         let hex = ref.blobIdHex
-        if let image = images.object(forKey: hex as NSString) { return image }
+        if let image = images.object(forKey: hex as NSString) {
+            // Drawn now: keeps the file at the young end of the disk store.
+            if let url = disk.existing(blobIdHex: hex, kind: .still) { disk.touch(url) }
+            return image
+        }
         if let data = disk.read(blobIdHex: hex, kind: .still), let image = AvatarFormatCheck.still(data, ref: ref) {
             images.setObject(image, forKey: hex as NSString)
             return image
@@ -153,7 +196,10 @@ final class AvatarImages: ObservableObject {
     /// still).
     func videoURL(_ avatar: ProfileAvatar) -> URL? {
         guard let ref = avatar.video else { return nil }
-        if let url = disk.existing(blobIdHex: ref.blobIdHex, kind: .video) { return url }
+        if let url = disk.existing(blobIdHex: ref.blobIdHex, kind: .video) {
+            disk.touch(url)
+            return url
+        }
         load(ref, kind: .video)
         return nil
     }
@@ -209,6 +255,10 @@ final class AvatarImages: ObservableObject {
             } catch {
                 // Initials stay; never logged with the blob id.
                 failures[key] = now()
+                if case .missing? = error as? AttachmentBridgeError {
+                    gone.insert(ref.blobIdHex)
+                    revision &+= 1
+                }
                 NSLog("[avatar] WARN an avatar could not be loaded; retried after a minute")
             }
         }

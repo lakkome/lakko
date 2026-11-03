@@ -10,15 +10,16 @@
 //! its own:
 //!
 //! ```text
-//! payload = version(1)=0x42 ‖ kind(1: 1 group, 2 channel) ‖ updated_at_ms(8, BE)
-//!           ‖ id_len(1) ‖ id ‖ key(32)
+//! payload = version(1)=0x43 ‖ kind(1: 1 group, 2 channel) ‖ updated_at_ms(8, BE)
+//!           ‖ id_len(1) ‖ id ‖ key(32) ‖ knock_version(2, BE)
 //!           ‖ handle_len(1) ‖ handle ‖ name_len(1) ‖ name
 //!           ‖ description_len(2, BE) ‖ description ‖ size_band(1)
 //!           ‖ avatar_len(1: 0 | 84 | 170) ‖ avatar
 //! ```
 //!
-//! Version `0x42` added the photo (ADR-0087 section 18.3, flag day): a
-//! `0x41` payload is refused like any other unknown first byte.
+//! Version `0x42` added the photo (ADR-0087 section 18.3), version `0x43`
+//! the knock version (both flag days): a `0x41` or `0x42` payload is refused
+//! like any other unknown first byte.
 //!
 //! - **The first byte** is the payload's kind as well as its version: a
 //!   person's payload starts with its own version byte (`0x03`), so one
@@ -30,6 +31,12 @@
 //!   (16 bytes) of a channel; any other length for the kind is refused.
 //! - **`key`** is the group's knock public key ([`crate::knock`]) or the
 //!   channel's read key.
+//! - **`knock_version`** is the version of that knock key
+//!   ([`crate::group_invite::GroupKnockKey::version`]): a searcher names it
+//!   in the knock row it seals ([`crate::knock::seal_knock`]), since removing
+//!   an admin moves the group to a new version and the admins open a row only
+//!   under the version it names. A channel has no knock key, so its record
+//!   carries `0` and any other value refuses the payload.
 //! - **`handle`** is the canonical `@name`. ADR-0087 section 4's payload
 //!   omits it; it is carried because a search by name returns a record the
 //!   searcher did not find by `@name`, and the card shows the `@name`
@@ -71,10 +78,13 @@ use crate::username::{
     check_canonical_username, UsernameError, USERNAME_MAX_LEN, USERNAME_MIN_LEN,
 };
 
-/// The payload's first byte: version 2 of a group's or channel's payload
-/// (ADR-0087 section 18.3; version 1, `0x41`, carried no photo and is
-/// refused). Distinct from every person payload version.
-pub const HANDLE_RECORD_PAYLOAD_VERSION_V2: u8 = 0x42;
+/// The payload's first byte: version 3 of a group's or channel's payload
+/// (version 1, `0x41`, carried no photo; version 2, `0x42`, no knock
+/// version; both are refused). Distinct from every person payload version.
+pub const HANDLE_RECORD_PAYLOAD_VERSION_V3: u8 = 0x43;
+
+/// Length of the knock version in the payload (big-endian `u16`).
+pub const HANDLE_RECORD_KNOCK_VERSION_LEN: usize = 2;
 
 /// Length of a group id in the payload.
 pub const HANDLE_RECORD_GROUP_ID_LEN: usize = 32;
@@ -96,6 +106,7 @@ pub const HANDLE_RECORD_PAYLOAD_MIN_LEN: usize = 1
     + 1
     + HANDLE_RECORD_CHANNEL_ID_LEN
     + HANDLE_RECORD_KEY_LEN
+    + HANDLE_RECORD_KNOCK_VERSION_LEN
     + 1
     + USERNAME_MIN_LEN
     + 1
@@ -112,6 +123,7 @@ pub const HANDLE_RECORD_PAYLOAD_MAX_LEN: usize = 1
     + 1
     + HANDLE_RECORD_GROUP_ID_LEN
     + HANDLE_RECORD_KEY_LEN
+    + HANDLE_RECORD_KNOCK_VERSION_LEN
     + 1
     + USERNAME_MAX_LEN
     + 1
@@ -172,6 +184,9 @@ pub struct HandleRecordPayload {
     pub id: Vec<u8>,
     /// The knock public key or read key.
     pub key: [u8; HANDLE_RECORD_KEY_LEN],
+    /// The version of the group's knock key, named in a knock row sealed to
+    /// it; always `0` for a channel.
+    pub knock_version: u16,
     /// The canonical `@name`.
     pub handle: String,
     /// The name, non-empty.
@@ -187,7 +202,7 @@ pub struct HandleRecordPayload {
 /// Why a group's or channel's record payload was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum HandleRecordError {
-    /// The payload's first byte is not [`HANDLE_RECORD_PAYLOAD_VERSION_V2`].
+    /// The payload's first byte is not [`HANDLE_RECORD_PAYLOAD_VERSION_V3`].
     #[error("unknown handle record payload version {0:#04x}")]
     UnknownVersion(u8),
     /// The kind byte is neither group nor channel.
@@ -199,6 +214,9 @@ pub enum HandleRecordError {
     /// The id length does not match the kind.
     #[error("handle record id has the wrong length for its kind")]
     BadId,
+    /// A channel record names a knock version other than `0`.
+    #[error("a channel record carries knock version {0}, not 0")]
+    ChannelKnockVersion(u16),
     /// The `@name` is not canonical.
     #[error("handle record name: {0}")]
     Handle(UsernameError),
@@ -232,6 +250,7 @@ impl HandleRecordError {
             Self::UnknownKind(_) => "unknownKind".to_string(),
             Self::BadLength => "badLength".to_string(),
             Self::BadId => "badId".to_string(),
+            Self::ChannelKnockVersion(_) => "channelKnockVersion".to_string(),
             Self::Handle(e) => format!("handle.{}", e.code()),
             Self::MissingName => "missingName".to_string(),
             Self::GroupName(e) => format!("name.{}", e.code()),
@@ -268,6 +287,9 @@ impl HandleRecordPayload {
         if self.id.len() != self.kind.id_len() {
             return Err(HandleRecordError::BadId);
         }
+        if self.kind == HandleRecordKind::Channel && self.knock_version != 0 {
+            return Err(HandleRecordError::ChannelKnockVersion(self.knock_version));
+        }
         check_canonical_username(&self.handle).map_err(HandleRecordError::Handle)?;
         if self.name.is_empty() {
             return Err(HandleRecordError::MissingName);
@@ -301,12 +323,13 @@ impl HandleRecordPayload {
         let description_len =
             u16::try_from(self.description.len()).map_err(|_| HandleRecordError::BadLength)?;
         let mut out = Vec::with_capacity(HANDLE_RECORD_PAYLOAD_MAX_LEN);
-        out.push(HANDLE_RECORD_PAYLOAD_VERSION_V2);
+        out.push(HANDLE_RECORD_PAYLOAD_VERSION_V3);
         out.push(self.kind.to_byte());
         out.extend_from_slice(&self.updated_at_ms.to_be_bytes());
         out.push(len8(self.id.len())?);
         out.extend_from_slice(&self.id);
         out.extend_from_slice(&self.key);
+        out.extend_from_slice(&self.knock_version.to_be_bytes());
         out.push(len8(self.handle.len())?);
         out.extend_from_slice(self.handle.as_bytes());
         out.push(len8(self.name.len())?);
@@ -327,7 +350,7 @@ impl HandleRecordPayload {
     pub fn decode(bytes: &[u8]) -> CoreResult<Self, HandleRecordError> {
         let mut cur = bytes;
         let version = take_u8(&mut cur)?;
-        if version != HANDLE_RECORD_PAYLOAD_VERSION_V2 {
+        if version != HANDLE_RECORD_PAYLOAD_VERSION_V3 {
             return Err(HandleRecordError::UnknownVersion(version));
         }
         let kind_byte = take_u8(&mut cur)?;
@@ -340,6 +363,10 @@ impl HandleRecordPayload {
         }
         let id = take(&mut cur, id_len)?.to_vec();
         let key = take_array::<HANDLE_RECORD_KEY_LEN>(&mut cur)?;
+        let knock_version = u16::from_be_bytes(take_array::<2>(&mut cur)?);
+        if kind == HandleRecordKind::Channel && knock_version != 0 {
+            return Err(HandleRecordError::ChannelKnockVersion(knock_version));
+        }
         let handle_len = usize::from(take_u8(&mut cur)?);
         let handle = utf8(
             take(&mut cur, handle_len)?,
@@ -370,6 +397,7 @@ impl HandleRecordPayload {
             updated_at_ms,
             id,
             key,
+            knock_version,
             handle,
             name,
             description,
@@ -447,7 +475,7 @@ pub fn open_search_record(
     else {
         return Ok(None);
     };
-    if plaintext.first() == Some(&HANDLE_RECORD_PAYLOAD_VERSION_V2) {
+    if plaintext.first() == Some(&HANDLE_RECORD_PAYLOAD_VERSION_V3) {
         return HandleRecordPayload::decode(&plaintext)
             .map(|p| Some(SearchRecord::Conversation(Box::new(p))));
     }
@@ -516,6 +544,7 @@ mod tests {
             updated_at_ms: 1_800_000_000_000,
             id: vec![0x33; 32],
             key: [0x44; 32],
+            knock_version: 0x0102,
             handle: "hiking_club".to_string(),
             name: "Hiking club".to_string(),
             description: "Weekend walks around Berlin.".to_string(),
@@ -615,6 +644,11 @@ mod tests {
         let mut p = group();
         p.kind = HandleRecordKind::Channel;
         p.id = vec![0; 16];
+        assert_eq!(
+            p.encode(),
+            Err(HandleRecordError::ChannelKnockVersion(0x0102))
+        );
+        p.knock_version = 0;
         assert!(p.encode().is_ok());
 
         let wire = group().encode().unwrap();
@@ -641,7 +675,7 @@ mod tests {
         let mut p = group();
         p.avatar = Some(photo());
         let wire = p.encode().unwrap();
-        assert_eq!(wire[0], 0x42);
+        assert_eq!(wire[0], 0x43);
         assert_eq!(wire.len(), group().encode().unwrap().len() + 170);
         assert_eq!(HandleRecordPayload::decode(&wire), Ok(p.clone()));
         let sealed = compose_handle_record(&p, &[HANDLE_OPRF], 3).unwrap();
@@ -666,19 +700,57 @@ mod tests {
     }
 
     #[test]
-    fn a_version_one_payload_is_refused() {
-        let mut wire = group().encode().unwrap();
-        wire[0] = 0x41;
+    fn earlier_payload_versions_are_refused() {
+        for old in [0x41, 0x42] {
+            let mut wire = group().encode().unwrap();
+            wire[0] = old;
+            assert_eq!(
+                HandleRecordPayload::decode(&wire),
+                Err(HandleRecordError::UnknownVersion(old))
+            );
+        }
+    }
+
+    #[test]
+    fn the_knock_version_rides_after_the_key_big_endian() {
+        let wire = group().encode().unwrap();
+        // version, kind, updated_at_ms, id_len, id, key.
+        let at = 1 + 1 + 8 + 1 + HANDLE_RECORD_GROUP_ID_LEN + HANDLE_RECORD_KEY_LEN;
+        assert_eq!(&wire[at..at + 2], &[0x01, 0x02]);
+        let mut p = group();
+        p.knock_version = u16::MAX;
+        let wire = p.encode().unwrap();
+        assert_eq!(HandleRecordPayload::decode(&wire), Ok(p.clone()));
+        let sealed = compose_handle_record(&p, &[HANDLE_OPRF], 3).unwrap();
+        assert_eq!(
+            open_handle_record(&sealed, &HANDLE_OPRF)
+                .unwrap()
+                .map(|q| q.knock_version),
+            Some(u16::MAX)
+        );
+    }
+
+    #[test]
+    fn a_channel_record_with_a_knock_version_is_refused_on_decode() {
+        let mut channel = group();
+        channel.kind = HandleRecordKind::Channel;
+        channel.id = vec![0x55; HANDLE_RECORD_CHANNEL_ID_LEN];
+        channel.knock_version = 0;
+        let mut wire = channel.encode().unwrap();
+        assert_eq!(HandleRecordPayload::decode(&wire), Ok(channel));
+        let at = 1 + 1 + 8 + 1 + HANDLE_RECORD_CHANNEL_ID_LEN + HANDLE_RECORD_KEY_LEN;
+        wire[at + 1] = 1;
         assert_eq!(
             HandleRecordPayload::decode(&wire),
-            Err(HandleRecordError::UnknownVersion(0x41))
+            Err(HandleRecordError::ChannelKnockVersion(1))
         );
     }
 
     #[test]
     fn payload_bounds_are_the_documented_construction() {
-        assert_eq!(HANDLE_RECORD_PAYLOAD_MAX_LEN, 1562);
-        assert_eq!(PUBLIC_RECORD_MAX_LEN, 7582);
+        assert_eq!(HANDLE_RECORD_PAYLOAD_MIN_LEN, 71);
+        assert_eq!(HANDLE_RECORD_PAYLOAD_MAX_LEN, 1564);
+        assert_eq!(PUBLIC_RECORD_MAX_LEN, 7584);
     }
 
     proptest! {

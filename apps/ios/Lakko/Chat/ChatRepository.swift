@@ -193,7 +193,7 @@ public final class ChatRepository: ObservableObject {
     /// carry. During Stage A that is the old key, everywhere; what derives
     /// from the seed OUTSIDE MLS (journal roots, the mailbox, the reach keys,
     /// channel owner keys) uses ``accountIdentity``.
-    private var conversationAccountIdentity: Identity? {
+    var conversationAccountIdentity: Identity? {
         predecessorAccountIdentity ?? accountIdentity
     }
 
@@ -528,6 +528,21 @@ public final class ChatRepository: ObservableObject {
     /// from ``groupNameStore`` on demand; this only says "read it again".
     @Published public internal(set) var groupNameRevision: Int = 0
 
+    /// ADR-0087 — the per-account, per-group photo, allowed reactions, @name
+    /// and knock seeds (``GroupSettingsStore``).
+    public let groupSettingsStore = GroupSettingsStore()
+
+    /// ADR-0087 — bumped on every accepted group photo or reactions setting,
+    /// so the list, the open chat and the info screen re-read them.
+    /// Reactions-and-emoji spec section 12 — own messages with unseen
+    /// reactions from others, per conversation, and its revision.
+    public let unseenReactionsStore = UnseenReactionsStore()
+    @Published public internal(set) var unseenReactionsRevision: Int = 0
+
+    @Published public internal(set) var groupSettingsRevision: Int = 0 {
+        didSet { refreshGroupPhotos() }
+    }
+
     /// ADR-0052 decision 3 — bumped on every accepted pin action (received or
     /// taken here, shared or personal), so the open chat rebuilds its pinned
     /// bar in place. The pins themselves are read from the two stores on
@@ -621,6 +636,63 @@ public final class ChatRepository: ObservableObject {
             },
             envelope: { [weak self] groupIdHex in
                 self?.groupNameEnvelopeForResend(groupIdHex: groupIdHex)
+            },
+            nowMs: { Self.nowMs() },
+            jitterMs: { Int64.random(in: 0...ProfilePublisher.maxJitterMs) },
+            sleep: { ms in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+            }
+        )
+    )
+
+    /// ADR-0087 section 18.1 — the growth re-send of the group photo, the
+    /// group-name publisher's throttle and jitter, the stored stamp verbatim.
+    lazy var groupPhotoPublisher = GroupNamePublisher(
+        ports: GroupNamePublisher.Ports(
+            send: { [weak self] groupIdHex, bytes in
+                guard let self else { return }
+                try await self.publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
+            },
+            envelope: { [weak self] groupIdHex in
+                self?.groupPhotoEnvelopeForResend(groupIdHex: groupIdHex)
+            },
+            nowMs: { Self.nowMs() },
+            jitterMs: { Int64.random(in: 0...ProfilePublisher.maxJitterMs) },
+            sleep: { ms in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+            }
+        )
+    )
+
+    /// ADR-0087 section 11 — the growth re-send of the group's `@name`, the
+    /// same shape; any member may relay it.
+    lazy var groupHandlePublisher = GroupNamePublisher(
+        ports: GroupNamePublisher.Ports(
+            send: { [weak self] groupIdHex, bytes in
+                guard let self else { return }
+                try await self.publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
+            },
+            envelope: { [weak self] groupIdHex in
+                self?.groupHandleEnvelopeForResend(groupIdHex: groupIdHex)
+            },
+            nowMs: { Self.nowMs() },
+            jitterMs: { Int64.random(in: 0...ProfilePublisher.maxJitterMs) },
+            sleep: { ms in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+            }
+        )
+    )
+
+    /// Reactions-and-emoji spec section 17.1 — the growth re-send of the
+    /// group's allowed reactions, the same shape.
+    lazy var groupReactionsPublisher = GroupNamePublisher(
+        ports: GroupNamePublisher.Ports(
+            send: { [weak self] groupIdHex, bytes in
+                guard let self else { return }
+                try await self.publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
+            },
+            envelope: { [weak self] groupIdHex in
+                self?.groupReactionsEnvelopeForResend(groupIdHex: groupIdHex)
             },
             nowMs: { Self.nowMs() },
             jitterMs: { Int64.random(in: 0...ProfilePublisher.maxJitterMs) },
@@ -1062,6 +1134,10 @@ public final class ChatRepository: ObservableObject {
         profilePublisher.reset()
         // ADR-0051 — same for a scheduled group-name re-send.
         groupNamePublisher.reset()
+        // ADR-0087 — and for the photo and reactions re-sends.
+        groupPhotoPublisher.reset()
+        groupReactionsPublisher.reset()
+        groupHandlePublisher.reset()
         // ADR-0052 — and for a scheduled shared-pin re-send.
         pinPublisher.reset()
         // ADR-0059 — and the shared-channels row + its growth re-sends.
@@ -1242,6 +1318,9 @@ public final class ChatRepository: ObservableObject {
             scheduleRootTakeover(groupIdHex: groupIdHex)
             scheduled += 1
         }
+        // ADR-0087 section 5 rotation rule — the root moved, so every
+        // knock seed moved with it: bump each owned group's knock version.
+        bumpKnockVersionsAfterRotation(predecessorSeed: predecessorSeed)
         NSLog("ADR-0074: %d owned journal root transfer(s) scheduled", scheduled)
         return scheduled
     }
@@ -1542,7 +1621,12 @@ public final class ChatRepository: ObservableObject {
     /// ``foundGroup(recipientAccountId:recipientSignaturePubkey:kind:recipientPlan:answeringRequest:)``
     /// does. A Welcome to this account's own mailbox that fails does not undo
     /// the group: the re-admission check brings those devices in.
-    public func foundGroupWithNobodyElse() async throws -> String {
+    public func foundGroupWithNobodyElse(
+        /// ADR-0087 sections 3 and 10 — run with the new group's id BEFORE
+        /// anything about the group leaves this device (the @name claim): a
+        /// throw here creates nothing.
+        beforePublish: ((Data) async throws -> Void)? = nil
+    ) async throws -> String {
         guard let identity = canonicalIdentity else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
         }
@@ -1564,6 +1648,10 @@ public final class ChatRepository: ObservableObject {
         }
         let groupId = try group.groupId()
         let groupIdHex = DsClient.pseudonymHex(groupId)
+        if let beforePublish {
+            try await beforePublish(groupId)
+            try bound.require()
+        }
         do {
             try await JournalOwnership.claim(
                 root: try journalRootSigner(groupId: groupId),
@@ -1970,6 +2058,16 @@ public final class ChatRepository: ObservableObject {
                 name: conversationTitle(groupIdHex: groupIdHex)
             )
         }
+        // Reactions-and-emoji spec section 12 — the people in these
+        // conversations, by account key, for the reaction notification.
+        var names: [String: String] = [:]
+        for record in groups.values {
+            for key in PersonKey.people((try? record.group.members()) ?? []) {
+                let resolved = ProfileDirectory.shared.resolve(signatureKey: key)
+                if resolved.source != .placeholder { names[key.base64EncodedString()] = resolved.name }
+            }
+        }
+        PersonNameMirror.replace(accountIdB64: accountIdB64, names: names)
     }
 
     /// `docs/ux/calls.md` section 6 — write a finished call's row into the
@@ -2568,9 +2666,22 @@ public final class ChatRepository: ObservableObject {
         // until it does, and the schedule exists for the other members.
         if ownAdd {
             let publisher = groupNamePublisher
-            Task { await publisher.publishNow(groupIdHex: groupIdHex) }
+            let photo = groupPhotoPublisher
+            let reactions = groupReactionsPublisher
+            let handle = groupHandlePublisher
+            Task {
+                await publisher.publishNow(groupIdHex: groupIdHex)
+                await photo.publishNow(groupIdHex: groupIdHex)
+                await reactions.publishNow(groupIdHex: groupIdHex)
+                await handle.publishNow(groupIdHex: groupIdHex)
+            }
         } else {
             groupNamePublisher.noteGrowth(groupIdHex: groupIdHex)
+            // ADR-0087 section 18.1 — the photo and the allowed reactions
+            // travel the same way.
+            groupPhotoPublisher.noteGrowth(groupIdHex: groupIdHex)
+            groupReactionsPublisher.noteGrowth(groupIdHex: groupIdHex)
+            groupHandlePublisher.noteGrowth(groupIdHex: groupIdHex)
         }
         // ADR-0052 decision 3 — nor the epochs the shared pins were sent in.
         pinPublisher.noteGrowth(groupIdHex: groupIdHex)
@@ -2644,45 +2755,33 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped("reply key registration failed", underlying: error)
         }
         try bound.require()
-        // ADR-0053 point 6 — the knock. A probe learns the epoch the group's
-        // access key is registered at (no journal read: a non-member cannot
-        // read a claimed journal, and paging one it is not in was the old
-        // shape), the proposal is built for that epoch, and a second knock
-        // carries the attribution and the proposal. Each knock spends one
-        // `ds-knock` anonymous token (ADR-0054 S3).
+        // ADR-0087 section 5 — the request is a fresh KeyPackage sealed to the
+        // group's knock key (named by the link) with the reply grant, a
+        // profile and the link's capability. It carries no epoch, so it waits
+        // through every commit. One knock, one `ds-knock` token (ADR-0054).
+        guard let knockKey = cap.knock() else {
+            throw ChatError.argument("group invite link names no knock key")
+        }
         let client = dsClient
         do {
-            try await DsKnockJoin(
-                knock: { payloads in
-                    try await client.knock(groupId: groupId, payloads: payloads).epoch
-                },
-                createProposal: { epoch in
-                    try identity.createExternalJoinProposal(groupId: groupId, epoch: epoch)
-                },
-                // ADR-0028 OQ2 — which member's link this request arrived on.
-                // Advisory: the admin approval gate is the security boundary,
-                // so a failure to compose it does not block the join.
-                attribution: {
-                    try? composeGroupJoinAttribution(
-                        joinerSigningSeed: identity.ed25519Seed(),
-                        capabilityBytes: capabilityWire,
-                        replyGrant: replyGrant)
-                },
-                // The proposal's KeyPackage private key is the only thing that
-                // can open the Welcome the committer sends later. It is made
-                // durable BEFORE the proposal is published, fail closed: a
-                // request whose key is not on disk is never sent.
-                persistBeforeKnock: { @MainActor [weak self] in
-                    guard let self else { throw StaleBindingError() }
-                    try bound.require()
-                    try self.persistJoinRequestOrThrow(
-                        identity: identity, accountIdB64: joinerAccountIdB64)
-                }
-            ).run()
+            let keyPackage = try identity.createKeyPackage()
+            // The KeyPackage's private key is the only thing that can open the
+            // Welcome the sweep sends later: durable BEFORE the knock, fail
+            // closed. A request whose key is not on disk is never sent.
+            try bound.require()
+            try persistJoinRequestOrThrow(identity: identity, accountIdB64: joinerAccountIdB64)
+            let row = try sealKnockRow(
+                knockPublicKey: knockKey.publicKey,
+                version: knockKey.version,
+                keyPackage: keyPackage,
+                replyGrant: replyGrant,
+                profile: ProfileDirectory.shared.ownDeviceEnvelope() ?? Data(),
+                capability: capabilityWire)
+            _ = try await client.knock(groupId: groupId, payloads: [row])
         } catch let error as DsKnockJoinError {
             throw error
         } catch {
-            throw ChatError.wrapped("DS knock (external-join request) failed", underlying: error)
+            throw ChatError.wrapped("DS knock (request to join) failed", underlying: error)
         }
         try bound.require()
         // The key was made durable before the knock; this also writes the
@@ -2991,6 +3090,12 @@ public final class ChatRepository: ObservableObject {
         // ADR-0051 — the name; the notice holds its own copy.
         groupNameStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         groupNameRevision &+= 1
+        // ADR-0087 section 9 step 4 — the photo, the reactions setting, the
+        // @name and the knock seeds go with it.
+        groupSettingsStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        groupSettingsRevision &+= 1
+        unseenReactionsStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        unseenReactionsRevision &+= 1
         // ADR-0059 section 6 — the lists members shared there and the switch.
         sharedChannels.forgetGroup(groupIdHex: groupIdHex)
         if groupCalls.removeValue(forKey: groupIdHex) != nil {
@@ -3889,6 +3994,11 @@ public final class ChatRepository: ObservableObject {
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
+        // ADR-0087 section 5 — a link carries the group's knock key, so the
+        // request it brings is a row only an owner or admin can open.
+        guard let knock = knockKey(groupIdHex: groupIdHex) else {
+            throw ChatError.argument("no knock key for \(groupIdHex) on this device")
+        }
         let mint: InviteLinkMint
         do {
             mint = try composeGroupInviteCapabilityWithPreview(
@@ -3897,7 +4007,10 @@ public final class ChatRepository: ObservableObject {
                 expiryMs: 0,
                 groupName: groupName(groupIdHex: groupIdHex),
                 inviterName: ProfileDirectory.shared.ownProfile?.displayName,
-                memberCount: UInt16(clamping: memberCount(groupIdHex: groupIdHex) ?? 0)
+                memberCount: UInt16(clamping: memberCount(groupIdHex: groupIdHex) ?? 0),
+                knockPublicKey: knock.publicKey,
+                knockVersion: knock.version,
+                avatar: groupPhoto(groupIdHex: groupIdHex)?.ffi
             )
         } catch {
             throw ChatError.wrapped(
@@ -4289,7 +4402,7 @@ public final class ChatRepository: ObservableObject {
         try await publishMessageOpLocked(
             groupIdHex: groupIdHex,
             envelopeBytes: envelopeBytes
-        ) { record in
+        ) { record, _ in
             record.applyLocalEdit(target: target, newText: newText)
         }
     }
@@ -4310,48 +4423,66 @@ public final class ChatRepository: ObservableObject {
         try await publishMessageOpLocked(
             groupIdHex: groupIdHex,
             envelopeBytes: envelopeBytes
-        ) { record in
+        ) { record, _ in
             record.applyLocalDelete(target: target)
         }
     }
 
-    /// ADR-0023 — react to message `target` with `emoji`.
-    /// Composes the reaction op envelope, publishes it, and
-    /// toggles our own `(ownLeaf, emoji)` pair locally. Any
-    /// member may react (no author gate); re-reacting with the
-    /// same emoji removes it.
+    /// ADR-0023 as amended — add or remove `emoji` on message `target`.
+    ///
+    /// The op is explicit (reactions-and-emoji spec section 17.3): the caller
+    /// decides add or remove from ``reactionTapVerdict``, which also refuses a
+    /// 4th reaction or a kind the conversation does not take, so this method
+    /// never sends what the fold would ignore. `targetAuthor` is the target
+    /// message's author account key, carried so a receiver's background reader
+    /// can tell a reaction to one of its own messages. A reaction publishes
+    /// with a message wake (section 12: a reaction to someone's message
+    /// notifies them).
     public func reactToMessage(
         groupIdHex: String,
         target: Int64,
-        emoji: String
+        emoji: String,
+        add: Bool,
+        targetAuthorB64: MemberIdentity?
     ) async throws {
         let envelopeBytes: Data
         do {
             envelopeBytes = try AttachmentBridge.composeReactionBytes(
                 target: target,
-                emoji: emoji
+                emoji: emoji,
+                add: add,
+                targetAuthor: targetAuthorB64.flatMap { Data(base64Encoded: $0) }
+                    .flatMap { $0.count == 32 ? $0 : nil }
             )
         } catch {
             throw ChatError.wrapped("reaction envelope compose failed", underlying: error)
         }
         try await publishMessageOpLocked(
             groupIdHex: groupIdHex,
-            envelopeBytes: envelopeBytes
-        ) { record in
+            envelopeBytes: envelopeBytes,
+            wake: add ? .message : nil
+        ) { [weak self] record, publishedId in
             // Read off the RE-READ record, for the same reason the record is
             // re-read at all — a predecessor's persist-abort replaces it.
             //
-            // Our own identity, not our own leaf: the chip's "mine" test and
+            // Our own person key, not our own leaf: the chip's "mine" test and
             // the peers' fold have to agree on one value that survives a
-            // renumber. A torn roster read falls back to the sentinel, which
-            // still toggles and still counts locally and — being outside the
-            // base64 alphabet — can never collide with a real member.
+            // renumber and a second device of the same person.
             record.applyLocalReaction(
                 target: target,
                 emoji: emoji,
-                reactor: AuthorIdentity.own(group: record.group)
-                    ?? AuthorIdentity.ownReactionSentinel)
+                reactor: self?.ownReactorKey(record: record) ?? AuthorIdentity.ownReactionSentinel,
+                add: add,
+                at: publishedId)
         }
+    }
+
+    /// The key this device files its own reactions under: the person key the
+    /// roster resolves this device's leaf to, else the conversation account
+    /// key itself (both are the ADR-0050 account key on a bound leaf).
+    func ownReactorKey(record: GroupRecord) -> MemberIdentity? {
+        if let own = AuthorIdentity.own(group: record.group) { return own }
+        return conversationAccountIdentity.map { base64Encode($0.signaturePublicKey()) }
     }
 
     /// The serialized body the three ADR-0023 message ops share: seal + persist
@@ -4385,7 +4516,8 @@ public final class ChatRepository: ObservableObject {
     private func publishMessageOpLocked(
         groupIdHex: String,
         envelopeBytes: Data,
-        applyLocally: @escaping @MainActor (GroupRecord) -> Void
+        wake: DsWake.Kind? = nil,
+        applyLocally: @escaping @MainActor (GroupRecord, Int64) -> Void
     ) async throws {
         // ADR-0073 R.7 case 1 — an op on a message of a dead one-to-one is
         // applied on this device alone: its target exists only in the old
@@ -4394,14 +4526,16 @@ public final class ChatRepository: ObservableObject {
             kind: isOneToOne(groupIdHex: groupIdHex) ? .chat : .group,
             unrepairableKeyB64: unrepairableKeyB64(groupIdHex: groupIdHex)) == .localOnly
         try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+            var publishedId: Int64 = 0
             if !localOnly {
-                _ = try await sealAndPublishLocked(
+                publishedId = try await sealAndPublishLocked(
                     groupIdHex: groupIdHex,
-                    plaintextBytes: envelopeBytes
-                )
+                    plaintextBytes: envelopeBytes,
+                    wake: wake
+                ).messageId
             }
             guard let record = groups[groupIdHex] else { return }
-            applyLocally(record)
+            applyLocally(record, publishedId)
         }
         if localOnly { persistMessageLogBestEffort() }
         persistSnapshotBestEffort()
@@ -5277,6 +5411,14 @@ public final class ChatRepository: ObservableObject {
                 self?.receiveGroupClosed(
                     groupIdHex: groupIdHex, messageId: messageId,
                     successorGroupId: successorGroupId, senderLeaf: senderLeaf)
+            },
+            // ADR-0087 — fire-and-forget (it only spawns a `Task`), so the
+            // name chain it takes is never awaited under the commit chain.
+            groupSettingSink: { [weak self] setting, senderLeaf in
+                self?.receiveGroupSetting(groupIdHex: groupIdHex, setting: setting, senderLeaf: senderLeaf)
+            },
+            reactionToOwnSink: { [weak self] messageId in
+                self?.noteUnseenReaction(groupIdHex: groupIdHex, messageId: messageId)
             }
         )
         // Membership rows — before the log is written below.
@@ -6941,6 +7083,13 @@ public final class ChatRepository: ObservableObject {
                             self?.receiveGroupClosed(
                                 groupIdHex: groupIdHex, messageId: messageId,
                                 successorGroupId: successorGroupId, senderLeaf: senderLeaf)
+                        },
+                        groupSettingSink: { [weak self] setting, senderLeaf in
+                            self?.receiveGroupSetting(
+                                groupIdHex: groupIdHex, setting: setting, senderLeaf: senderLeaf)
+                        },
+                        reactionToOwnSink: { [weak self] messageId in
+                            self?.noteUnseenReaction(groupIdHex: groupIdHex, messageId: messageId)
                         }
                     )
                     // Membership rows — the same rule as the poll, per row.
@@ -8127,6 +8276,7 @@ public final class ChatRepository: ObservableObject {
                 guard bound.isCurrent else { return }
                 self.registrarReconcileRerun.remove(groupIdHex)
                 await self.reconcileJournalRegistrars(groupIdHex: groupIdHex)
+                await self.reconcileKnockSeeds(groupIdHex: groupIdHex)
             } while bound.isCurrent && self.registrarReconcileRerun.contains(groupIdHex)
             if bound.isCurrent { self.registrarReconcileInflight.remove(groupIdHex) }
         }
@@ -8243,7 +8393,7 @@ public final class ChatRepository: ObservableObject {
     /// the bundle is accepted only when it names the same account signature
     /// key the roster does — so a wrong claim finds no key rather than a
     /// stranger's. Cached per session.
-    private func memberX25519PublicKey(accountKey: Data) async -> Data? {
+    func memberX25519PublicKey(accountKey: Data) async -> Data? {
         if let cached = memberX25519Cache[accountKey] { return cached }
         let keyB64 = accountKey.base64EncodedString()
         var accountId: Data? = memberAccountIdHints[accountKey]
@@ -8684,6 +8834,62 @@ public final class ChatRepository: ObservableObject {
 
     /// Keep the `reply` grant of a `/g/` join attribution for this group,
     /// filed under the joiner's account key (its pending KeyPackage's binding).
+    /// What one sealed knock row came to.
+    enum SealedKnockStep: Equatable { case keep, drop, stop }
+
+    /// ADR-0087 section 5 — open one sealed knock row and keep its KeyPackage
+    /// as a request to join; the joiner's reply grant is kept for its account
+    /// so the sweep can write the Welcome into its mailbox.
+    private func openSealedKnock(
+        record: GroupRecord, groupIdHex: String, identity: Identity, row: Data
+    ) -> SealedKnockStep {
+        guard let version = knockRowVersion(row: row),
+              var seed = knockSeed(record: record, groupIdHex: groupIdHex, version: version) else { return .drop }
+        defer { RootHandover.wipe(&seed) }
+        guard let request = try? openKnockRow(knockSeed: seed, row: row) else { return .drop }
+        let byLink: Bool = {
+            guard let capability = request.capability,
+                  let cap = try? GroupInviteCapability.decodeAndVerify(wire: capability) else { return false }
+            return cap.groupId() == record.groupId
+        }()
+        // A public group (ADR-0087 section 1) also takes a row with no link;
+        // a private one only a row carrying a capability of this group.
+        guard byLink || groupHandle(groupIdHex: groupIdHex)?.isPublic == true else { return .drop }
+        guard let kept = try? record.group.retainJoinRequest(identity: identity, keyPackage: request.keyPackage)
+        else { return .drop }
+        switch kept.outcome {
+        case .retained, .alreadyPending:
+            // UX section 8 — the name the request carries, shown unverified.
+            if let accountIdB64 = currentAccountIdB64,
+               let name = request.profile?.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !name.isEmpty {
+                groupSettingsStore.keepRequestName(
+                    accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+                    joinerKeyB64: base64Encode(kept.joinerSignatureKey), name: name)
+            }
+            let account = ((try? keyPackageAccountKey(keyPackage: request.keyPackage)) ?? nil)
+                ?? kept.joinerSignatureKey
+            ReachCenter.shared.keep(
+                request.replyGrant, carrier: .request,
+                fromAccountKeyB64: base64Encode(account), scopeHex: nil)
+            return .keep
+        case .queueFull:
+            return .stop
+        case .alreadyMember, .notAdmissible:
+            return .drop
+        }
+    }
+
+    /// The knock seed of `version` for this group: derived from the journal
+    /// root on the owner's devices, else the one the owner handed this admin.
+    private func knockSeed(record: GroupRecord, groupIdHex: String, version: UInt16) -> Data? {
+        if ownsGroup(groupIdHex: groupIdHex) {
+            return knockSeedForOwner(groupIdHex: groupIdHex, groupId: record.groupId, version: version)
+        }
+        guard let accountIdB64 = currentAccountIdB64 else { return nil }
+        return groupSettingsStore.knockSeeds(accountIdB64: accountIdB64, groupIdHex: groupIdHex)[version]
+    }
+
     private func keepJoinAttributionGrant(record: GroupRecord, payload: Data) {
         guard let attr = try? parseGroupJoinAttribution(bytes: payload),
               attr.groupId == record.groupId,
@@ -9174,22 +9380,20 @@ public final class ChatRepository: ObservableObject {
         try? await withCommitLock(groupIdHex: groupIdHex) { [self] in
             guard let identity = canonicalIdentity, let record = groups[groupIdHex],
                   record.knockCursor == after else { return }
+            // ADR-0087 section 5 — a knock row is a KeyPackage sealed to the
+            // group's knock key: opened with the seed of the row's own version
+            // and kept through `retainJoinRequest`. A private group takes a
+            // row only with a capability of this group. A full pending set
+            // stops the cursor BEFORE the row, so the backlog stays on the DS
+            // instead of being lost.
             for row in raw.messages {
-                record.knockCursor = max(record.knockCursor, row.id)
-                guard let processed = try? record.group.processKnock(
-                    identity: identity, bytes: row.payload) else { continue }
-                if case .externalJoinProposal(_, let retained) = processed,
-                   case .informational = externalJoinAffordance(retained: retained) {
+                let step = openSealedKnock(
+                    record: record, groupIdHex: groupIdHex, identity: identity, row: row.payload)
+                if step == .stop {
                     record.sawUnkeptExternalJoin = true
+                    break
                 }
-            }
-            // ADR-0060 section 6 — a joiner's attribution carries its `reply`
-            // grant: the Welcome of the sweep that admits it is written with
-            // it. Filed under the joiner's ACCOUNT key, resolved through its
-            // retained KeyPackage's device binding, so only after the
-            // proposals of this batch were retained.
-            for row in raw.messages {
-                keepJoinAttributionGrant(record: record, payload: row.payload)
+                record.knockCursor = max(record.knockCursor, row.id)
             }
             // An accepted proposal enters the retained request set, which lives
             // in the MLS storage snapshot, so the cursor may move past these rows
@@ -9955,7 +10159,7 @@ public struct ChatMessage: Equatable, Identifiable {
         var order: [String] = []
         var counts: [String: Int] = [:]
         var mine: Set<String> = []
-        for r in reactions {
+        for r in heldReactions {
             if counts[r.emoji] == nil { order.append(r.emoji) }
             counts[r.emoji, default: 0] += 1
             if r.reactor == mineKey { mine.insert(r.emoji) }
@@ -9967,6 +10171,27 @@ public struct ChatMessage: Equatable, Identifiable {
                 reactedByMe: mine.contains($0)
             )
         }
+    }
+
+    /// Reactions-and-emoji spec section 10 — what the reaction op log comes
+    /// to: per person (account key) at most 3, in journal order, a 4th
+    /// ignored for good. Decided by the one Rust fold (`foldReactions`) every
+    /// member runs. An op whose reactor is not a 32-byte key (the own
+    /// sentinel of a torn roster read) is kept aside and applied after, in
+    /// order, with the same rules, so this device still shows its own tap.
+    public var heldReactions: [Reaction] { ReactionFold.held(ops: reactions) }
+
+    /// The emoji `reactor` holds on this message, in the order the fold kept.
+    public func heldEmoji(of reactor: MemberIdentity?) -> [String] {
+        guard let reactor else { return [] }
+        return heldReactions.filter { $0.reactor == reactor }.map(\.emoji)
+    }
+
+    /// The distinct emoji held on this message by anyone.
+    public var heldKinds: [String] {
+        var seen: [String] = []
+        for r in heldReactions where !seen.contains(r.emoji) { seen.append(r.emoji) }
+        return seen
     }
 }
 
@@ -10034,10 +10259,19 @@ public struct ForwardRef: Equatable, Codable {
 public struct Reaction: Equatable {
     public let reactor: MemberIdentity
     public let emoji: String
+    /// Reactions-and-emoji spec section 17.3 — an explicit add or remove.
+    /// `ChatMessage.reactions` is the op log; ``ChatMessage/heldReactions``
+    /// is what the Rust fold keeps of it.
+    public let add: Bool
+    /// The op's DS message id: ops fold in ascending order (0 for an op
+    /// whose id is not known, which sorts first).
+    public let at: Int64
 
-    public init(reactor: MemberIdentity, emoji: String) {
+    public init(reactor: MemberIdentity, emoji: String, add: Bool = true, at: Int64 = 0) {
         self.reactor = reactor
         self.emoji = emoji
+        self.add = add
+        self.at = at
     }
 }
 
@@ -10329,8 +10563,10 @@ final class GroupRecord {
     }
 
     /// ADR-0023 — toggle our own reaction locally on `target`.
-    func applyLocalReaction(target: Int64, emoji: String, reactor: MemberIdentity) {
-        toggleReaction(target: target, reactor: reactor, emoji: emoji)
+    func applyLocalReaction(
+        target: Int64, emoji: String, reactor: MemberIdentity, add: Bool, at: Int64
+    ) {
+        recordReaction(target: target, reactor: reactor, emoji: emoji, add: add, at: at)
     }
 
     /// Consume a batch of receive-path events — the ONE place a decoded event
@@ -10373,7 +10609,9 @@ final class GroupRecord {
         registrarSeedSink: ((Data, UInt32?) -> Void)? = nil,
         scopedDiscoverySink: ((ScopedDiscoveryEnvelope, MemberIdentity?) -> Void)? = nil,
         sharedChannelsSink: ((FfiSharedChannels, MemberIdentity?) -> Void)? = nil,
-        groupClosedSink: ((Int64, Data?, UInt32?) -> Void)? = nil
+        groupClosedSink: ((Int64, Data?, UInt32?) -> Void)? = nil,
+        groupSettingSink: ((GroupSettingEnvelope, UInt32?) -> Void)? = nil,
+        reactionToOwnSink: ((Int64) -> Void)? = nil
     ) {
         for event in events {
             switch event {
@@ -10413,7 +10651,7 @@ final class GroupRecord {
                         unsupportedVersion: version
                     )
                 )
-            case .op(_, let op, let target, let text, let emoji, let senderKey, let createdAt):
+            case .op(let opMessageId, let op, let target, let text, let emoji, let senderKey, let createdAt):
                 // ADR-0024 — typing / read-receipt ops render NO bubble
                 // and never touch the timeline. They surface to the view
                 // model via `chatStatusSink` (ephemeral typing state +
@@ -10450,8 +10688,15 @@ final class GroupRecord {
                         target: target,
                         text: text,
                         emoji: emoji,
-                        senderKey: senderKey
+                        senderKey: senderKey,
+                        at: opMessageId
                     )
+                    // Reactions-and-emoji spec section 12 — someone else added
+                    // a reaction to one of this person's own messages.
+                    if case .reaction(true, _) = op, let senderKey, senderKey != ownAuthorKey,
+                       messages.contains(where: { $0.messageId == target && $0.direction == .outgoing }) {
+                        reactionToOwnSink?(target)
+                    }
                 }
             case .system(let messageId, let systemKind, let createdAt):
                 if heldFromBundle(messageId) { continue }
@@ -10533,6 +10778,11 @@ final class GroupRecord {
                 // owner / admins can set it; the stamp so the strictly-newer
                 // order can refuse a stale re-send.
                 groupNameSink?(name, updatedAtMs, senderLeaf)
+            case .groupSetting(_, let setting, let senderLeaf, _):
+                // ADR-0087 — the group's photo, allowed reactions, @name or a
+                // knock seed. Not a timeline row: routed out to the
+                // repository, which gates it against the live group.
+                groupSettingSink?(setting, senderLeaf)
             case .groupClosed(let messageId, _, let successorGroupId, let senderLeaf, _):
                 // ADR-0073 R.6 — a successor claim. Never a timeline row and
                 // never anything a person sees: routed out to the repository,
@@ -10603,7 +10853,8 @@ final class GroupRecord {
         target: Int64,
         text: String,
         emoji: String?,
-        senderKey: MemberIdentity?
+        senderKey: MemberIdentity?,
+        at: Int64
     ) {
         guard let senderKey = senderKey else { return }
         guard let idx = messages.firstIndex(where: { $0.messageId == target }) else { return }
@@ -10618,9 +10869,9 @@ final class GroupRecord {
             guard AuthorIdentity.editDeleteAuthorized(
                 author: messages[idx].authorKeyB64, opSender: senderKey) else { return }
             messages[idx].deleted = true
-        case .reaction:
+        case .reaction(let add, _):
             guard let emoji = emoji, !emoji.isEmpty else { return }
-            toggleReaction(target: target, reactor: senderKey, emoji: emoji)
+            recordReaction(target: target, reactor: senderKey, emoji: emoji, add: add, at: at)
         case .typing, .readReceipt:
             // ADR-0024 — typing / read-receipt ops are routed out of
             // the timeline fold in `consumeEvents` (they render no
@@ -10630,24 +10881,24 @@ final class GroupRecord {
         }
     }
 
-    /// Toggle a `(reactor, emoji)` pair on `target`: present
-    /// → remove, else add. Shared by the incoming-op fold + the
+    /// Append one reaction op to `target`'s op log. The fold
+    /// (``ChatMessage/heldReactions``) decides what it comes to: an add of an
+    /// emoji the person holds and a remove of one they do not are no-ops, and
+    /// a 4th add is ignored for good. Shared by the incoming-op fold and the
     /// local own-reaction path.
     ///
-    /// `reactor` is a signature key: keyed on the leaf, a newcomer at a
-    /// vacated leaf matched the departed member's entry and REMOVED it, so
-    /// their reaction did not add — it destroyed one.
-    private func toggleReaction(target: Int64, reactor: MemberIdentity, emoji: String) {
+    /// `reactor` is the account key the sender leaf resolved to at receipt:
+    /// keyed on the leaf, a newcomer at a vacated leaf would act on the
+    /// departed member's reactions.
+    private func recordReaction(
+        target: Int64, reactor: MemberIdentity, emoji: String, add: Bool, at: Int64
+    ) {
         guard let idx = messages.firstIndex(where: { $0.messageId == target }) else { return }
-        if let existing = messages[idx].reactions.firstIndex(
-            where: { $0.reactor == reactor && $0.emoji == emoji }
-        ) {
-            messages[idx].reactions.remove(at: existing)
-        } else {
-            messages[idx].reactions.append(
-                Reaction(reactor: reactor, emoji: emoji)
-            )
-        }
+        // The same op seen twice (a re-poll of a row already applied) is one op.
+        if at > 0, messages[idx].reactions.contains(where: {
+            $0.at == at && $0.reactor == reactor && $0.emoji == emoji
+        }) { return }
+        messages[idx].reactions.append(Reaction(reactor: reactor, emoji: emoji, add: add, at: at))
     }
 
     func toThread(

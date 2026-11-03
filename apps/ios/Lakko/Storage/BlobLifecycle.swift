@@ -81,6 +81,9 @@ struct KeepSchedule: Equatable, Codable {
 enum KeepSelection {
     static let savedKey = "saved"
     static let profileKey = "profile"
+    /// ADR-0087 section 18.5 — the photos of the groups this device is owner
+    /// or admin of (the key web and Android use too).
+    static let conversationPhotosKey = "conversation-photos"
 
     /// A group's pinned files: `pins:<MLS group id, lowercase hex>` (pins are
     /// kept per group), the key web and Android use too (it decides the
@@ -93,7 +96,8 @@ enum KeepSelection {
         threads: [ChatThread],
         pinnedIds: (_ groupIdHex: String) -> Set<Int64>,
         savedBlobIds: [Data],
-        profileBlobIds: [Data]
+        profileBlobIds: [Data],
+        conversationPhotoBlobIds: [Data] = []
     ) -> [String: [Data]] {
         var out: [String: [Data]] = [:]
         for thread in threads {
@@ -106,6 +110,7 @@ enum KeepSelection {
         }
         if !savedBlobIds.isEmpty { out[savedKey] = savedBlobIds }
         if !profileBlobIds.isEmpty { out[profileKey] = profileBlobIds }
+        if !conversationPhotoBlobIds.isEmpty { out[conversationPhotosKey] = conversationPhotoBlobIds }
         return out
     }
 }
@@ -202,7 +207,8 @@ public final class BlobLifecycle {
             savedBlobIds: sync?.savedBlobIds() ?? [],
             profileBlobIds: ProfileDirectory.shared.ownProfile?.avatar.map {
                 [$0.still.blobId] + ($0.video.map { [$0.blobId] } ?? [])
-            } ?? [])
+            } ?? [],
+            conversationPhotoBlobIds: chat.keptConversationPhotoBlobIds())
         var schedule = store.schedule(accountIdB64: account)
         let keys = Array(sets.keys)
         schedule.retain(Set(keys))

@@ -154,6 +154,12 @@ public final class NotificationService: UNNotificationServiceExtension {
                 best.body = preview.body
                 var info = best.userInfo
                 info.removeValue(forKey: LakkoGenericNotification.userInfoKey)
+                // Reactions-and-emoji spec section 12 — a reaction carries its
+                // identity so a later removal can withdraw it, and its title.
+                if let reactionKey = preview.reactionKey {
+                    info[LakkoReactionNotification.userInfoKey] = reactionKey
+                    best.title = preview.title
+                }
                 best.userInfo = info
                 // ADR-0073 R.5 — the wake is grouped by its routing id, which
                 // is per GROUP; a group that continues a conversation is
@@ -168,6 +174,9 @@ public final class NotificationService: UNNotificationServiceExtension {
             case .callEnded(let callIdHex):
                 await self.deliverCallEnded(callIdHex: callIdHex, into: best)
             case .quiet(let tag):
+                self.deliverQuietly(tag: tag, into: best)
+            case .withdrawReactions(let keys, let tag):
+                await LakkoReactionNotification.withdraw(keys: Set(keys))
                 self.deliverQuietly(tag: tag, into: best)
             case .none:
                 self.deliver(best)

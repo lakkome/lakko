@@ -181,6 +181,8 @@ public struct NseProcessedRow: Equatable {
     /// ADR-0073 R.7 case 1 — the re-send marker of a chat row, when its
     /// sealed envelope carried one: where the message was ORIGINALLY sent.
     public let resendOrigin: NseResendOrigin?
+    /// Reactions-and-emoji spec section 12 — a reaction row's op.
+    public let reaction: NseReaction?
 
     public init(
         kind: NseProcessedKind,
@@ -189,8 +191,10 @@ public struct NseProcessedRow: Equatable {
         singleAttachmentKind: String? = nil,
         callIdHex: String? = nil,
         senderKeyB64: String? = nil,
-        resendOrigin: NseResendOrigin? = nil
+        resendOrigin: NseResendOrigin? = nil,
+        reaction: NseReaction? = nil
     ) {
+        self.reaction = kind == .reaction ? reaction : nil
         self.kind = kind
         self.text = text
         self.attachmentCount = attachmentCount
@@ -206,8 +210,44 @@ public struct NseProcessedRow: Equatable {
         NseProcessedRow(
             kind: kind, text: text, attachmentCount: attachmentCount,
             singleAttachmentKind: singleAttachmentKind, callIdHex: callIdHex,
-            senderKeyB64: senderKeyB64, resendOrigin: resendOrigin)
+            senderKeyB64: senderKeyB64, resendOrigin: resendOrigin, reaction: reaction)
     }
+}
+
+/// Reactions-and-emoji spec section 12 — what a reaction row carried.
+public struct NseReaction: Equatable {
+    public let targetMessageId: Int64
+    public let emoji: String
+    public let add: Bool
+    /// The target message's author account key (standard base64) as the
+    /// reactor stated it; compared with this account's own key.
+    public let targetAuthorB64: String?
+
+    public init(targetMessageId: Int64, emoji: String, add: Bool, targetAuthorB64: String?) {
+        self.targetMessageId = targetMessageId
+        self.emoji = emoji
+        self.add = add
+        self.targetAuthorB64 = targetAuthorB64
+    }
+
+    /// The notification's identity: one reaction of one person on one
+    /// message, so its removal can withdraw it.
+    public func key(groupIdHex: String, senderKeyB64: String) -> String {
+        "\(groupIdHex)|\(targetMessageId)|\(emoji)|\(senderKeyB64)"
+    }
+}
+
+/// "{name} reacted {emoji} to your message" in the interface language: the
+/// app stores the rendered template with two markers (``nseReactionNameMark``
+/// / ``nseReactionEmojiMark``); English when it has not.
+let nseReactionNameMark = "\u{E000}"
+let nseReactionEmojiMark = "\u{E001}"
+
+public func nseReactionBody(name: String, emoji: String) -> String {
+    let template = nseWord("notification.reaction.body", english: "\(nseReactionNameMark) reacted \(nseReactionEmojiMark) to your message")
+    return template
+        .replacingOccurrences(of: nseReactionNameMark, with: name)
+        .replacingOccurrences(of: nseReactionEmojiMark, with: emoji)
 }
 
 /// ADR-0073 R.7 case 1 — where a re-sent message was originally sent: the
@@ -304,6 +344,9 @@ public enum NsePushOutcome: Equatable {
     /// quietest thing it can: passive and silent, in the conversation's
     /// stack (``tag``).
     case quiet(tag: String)
+    /// Reactions-and-emoji spec section 12 — reactions were taken back before
+    /// anything else was said: withdraw their notifications, deliver quietly.
+    case withdrawReactions(keys: [String], tag: String)
     /// Nothing to say — the extension shows its generic fallback.
     case none
 }
@@ -321,11 +364,17 @@ public struct NsePushPreview: Equatable {
     /// notification is grouped under rather than the wake's own routing id.
     public let movedConversation: Bool
 
-    public init(title: String, body: String, tag: String, movedConversation: Bool = false) {
+    /// Reactions-and-emoji spec section 12 — set on a reaction notification.
+    public let reactionKey: String?
+
+    public init(
+        title: String, body: String, tag: String, movedConversation: Bool = false, reactionKey: String? = nil
+    ) {
         self.title = title
         self.body = body
         self.tag = tag
         self.movedConversation = movedConversation
+        self.reactionKey = reactionKey
     }
 }
 
@@ -361,6 +410,13 @@ public protocol NseThrowawayGroup: AnyObject {
 /// — there is deliberately NO write path (no snapshot persist, no cursor
 /// advance). The protocol simply cannot persist, which is the structural
 /// enforcement of the read-only-throwaway discipline.
+/// Reactions-and-emoji spec section 12 — reaction notifications need a
+/// reactor's name and the Reactions switch; a test double may answer none.
+public extension NsePushDecryptDeps {
+    func personName(accountIdB64: String, keyB64: String) -> String? { nil }
+    func reactionNotificationsOn() -> Bool { true }
+}
+
 public protocol NsePushDecryptDeps {
     /// ADR-0042 (amended 2026-09-30) — the ONE account this wake may be
     /// handled for, or `nil` when it may not be handled at all.
@@ -650,6 +706,7 @@ public func decryptPushOutcome(
     let conversationTag = deps.conversationHex(
         accountIdB64: account.accountIdB64, groupIdHex: realGroupHex)
     var latest: NsePushPreview?
+    var reactionRemovals: [String] = []
     var latestCall: (row: NseProcessedRow, createdAt: String)?
     // Rows that did not decrypt and that the app's log does not hold: a
     // message this device cannot read yet, which only the generic banner can
@@ -688,6 +745,26 @@ public func decryptPushOutcome(
             // A message from another device of this same person is not a
             // notification. Calls keep their own rules above.
             if let sender = processed.senderKeyB64, let own = ownPersonKey, sender == own { continue }
+            // Section 12 — a reaction to one of this person's own messages.
+            if processed.kind == .reaction {
+                guard let reaction = processed.reaction, let sender = processed.senderKeyB64,
+                      let own = ownPersonKey, reaction.targetAuthorB64 == own else { continue }
+                let key = reaction.key(groupIdHex: realGroupHex, senderKeyB64: sender)
+                if !reaction.add {
+                    reactionRemovals.append(key)
+                    if latest?.reactionKey == key { latest = nil }
+                    continue
+                }
+                guard deps.reactionNotificationsOn(),
+                      !deps.isMuted(accountIdB64: account.accountIdB64, groupIdHex: realGroupHex) else { continue }
+                let title = deps.callerName(accountIdB64: account.accountIdB64, groupIdHex: realGroupHex) ?? "Lakko"
+                let name = deps.personName(accountIdB64: account.accountIdB64, keyB64: sender) ?? title
+                latest = NsePushPreview(
+                    title: title, body: nseReactionBody(name: name, emoji: reaction.emoji), tag: conversationTag,
+                    movedConversation: conversationTag.caseInsensitiveCompare(realGroupHex) != .orderedSame,
+                    reactionKey: key)
+                continue
+            }
             guard let body = previewBody(of: processed) else { continue }
             latest = NsePushPreview(
                 title: "Lakko", body: body, tag: conversationTag,
@@ -736,6 +813,7 @@ public func decryptPushOutcome(
         }
     }
     if let latest { return .preview(latest) }
+    if !reactionRemovals.isEmpty { return .withdrawReactions(keys: reactionRemovals, tag: conversationTag) }
     // The read ran to the end and found no message from someone else. A row
     // this device could not read may be one, so it keeps the generic line.
     // Otherwise the wake brought only this device's own message, a message
@@ -1363,9 +1441,15 @@ public func nseIsServiceEnvelope(
     // acted on. A yes / no from the slim FFI (`isLinkFoundedEnvelope`).
     // Defaulted for the reason above.
     isLinkFounded: (Data) -> Bool = { _ in false },
-    linkFoundedEnvelopeLens: ClosedRange<Int> = 0...0
+    linkFoundedEnvelopeLens: ClosedRange<Int> = 0...0,
+    // ADR-0087 — the group photo, the allowed reactions, the @name, and the
+    // knock and admission seeds. Each rides an ordinary group journal row;
+    // recognised and suppressed like every service envelope, never stored
+    // (C-59). A yes / no from the slim FFI. Defaulted for the reason above.
+    isGroupSetting: (Data) -> Bool = { _ in false }
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
+    if bytes.first == 0x6C, isGroupSetting(bytes) { return true }
     if nseLooksLikeLinkFounded(bytes, envelopeLens: linkFoundedEnvelopeLens), isLinkFounded(bytes) {
         return true
     }

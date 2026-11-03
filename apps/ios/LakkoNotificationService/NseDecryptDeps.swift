@@ -355,7 +355,12 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             // ADR-0079 (order of 2026-10-17) — a link-founded note: a yes /
             // no from the slim FFI.
             isLinkFounded: { isLinkFoundedEnvelope(plaintext: $0) },
-            linkFoundedEnvelopeLens: Int(linkFoundedEnvelopeMinLen())...Int(linkFoundedEnvelopeMaxLen())
+            linkFoundedEnvelopeLens: Int(linkFoundedEnvelopeMinLen())...Int(linkFoundedEnvelopeMaxLen()),
+            isGroupSetting: { bytes in
+                isGroupPhotoEnvelope(plaintext: bytes) || isGroupReactionsEnvelope(plaintext: bytes)
+                    || isConversationHandleEnvelope(plaintext: bytes) || isKnockSeedEnvelope(plaintext: bytes)
+                    || isAdmissionSeedEnvelope(plaintext: bytes)
+            }
         ) {
             return nil
         }
@@ -376,14 +381,34 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         // empty by contract; the preview is the extension's own sentence.
         case .unsupported: kind = .unsupported
         }
+        // Reactions-and-emoji spec section 12 — what a reaction row says, for
+        // the "reacted to your message" notification.
+        var reaction: NseReaction?
+        if kind == .reaction, let target = body.target, let emoji = body.emoji, !emoji.isEmpty {
+            reaction = NseReaction(
+                targetMessageId: target, emoji: emoji, add: body.reactionAction != .remove,
+                targetAuthorB64: body.reactionTargetAuthor?.base64EncodedString())
+        }
         return NseProcessedRow(
             kind: kind,
             text: body.text,
             attachmentCount: body.attachments.count,
             singleAttachmentKind: body.attachments.count == 1 ? body.attachments[0].kind : nil,
             senderKeyB64: senderKeyB64,
-            resendOrigin: Self.resendOrigin(of: body)
+            resendOrigin: Self.resendOrigin(of: body),
+            reaction: reaction
         )
+    }
+
+    /// The reactor's name, from the App Group mirror the app writes
+    /// (``PersonNameMirror``). READ-ONLY (C-59).
+    func personName(accountIdB64: String, keyB64: String) -> String? {
+        PersonNameMirror.name(accountIdB64: accountIdB64, keyB64: keyB64)
+    }
+
+    /// The Settings > Notifications > Reactions switch (App Group mirror).
+    func reactionNotificationsOn() -> Bool {
+        ReactionNotificationMirror.isOn
     }
 
     /// ADR-0073 R.7 case 1 — the re-send marker of a chat body.

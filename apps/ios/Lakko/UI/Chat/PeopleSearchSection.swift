@@ -32,6 +32,8 @@ struct PeopleSearchSection: View {
     let onOpenChannel: (_ channelIdHex: String, _ handle: String) -> Void
     /// The name of a channel this device holds, `nil` when it knows none.
     let channelName: (_ channelIdHex: String) -> String?
+    /// ADR-0087 section 5 — a public group or channel row was opened (its card).
+    var onOpenConversation: (ConversationHandles.Found) -> Void = { _ in }
     @ObservedObject private var l10n = Localization.shared
 
     init(
@@ -43,8 +45,10 @@ struct PeopleSearchSection: View {
         chatPeers: Set<Data> = [],
         onOpenPerson: @escaping (FoundPerson) -> Void,
         onOpenChannel: @escaping (String, String) -> Void = { _, _ in },
-        channelName: @escaping (String) -> String? = { _ in nil }
+        channelName: @escaping (String) -> String? = { _ in nil },
+        onOpenConversation: @escaping (ConversationHandles.Found) -> Void = { _ in }
     ) {
+        self.onOpenConversation = onOpenConversation
         self.channelName = channelName
         self.model = model
         self.session = model.session
@@ -100,6 +104,20 @@ struct PeopleSearchSection: View {
                         .font(.footnote)
                         .foregroundStyle(Color.lakkoTextMuted)
                         .accessibilityAddTraits(.updatesFrequently)
+                }
+            }
+            // ADR-0087 section 5 — "Groups and channels", below People.
+            let conversations = includesChannels ? (model.answer?.conversations ?? []) : []
+            if !conversations.isEmpty {
+                Text(l10n.t("search.conversations.heading"))
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .accessibilityAddTraits(.isHeader)
+                ForEach(conversations) { found in
+                    Button { onOpenConversation(found) } label: {
+                        ConversationFoundRow(found: found)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             if let channel {
@@ -209,5 +227,41 @@ private struct FoundPersonRow: View {
                 EmptyView()
             }
         }
+    }
+}
+
+
+/// ADR-0087 section 5 — one public group or channel: avatar, name, `@name`,
+/// and its kind and size band.
+struct ConversationFoundRow: View {
+    let found: ConversationHandles.Found
+    @ObservedObject private var l10n = Localization.shared
+
+    var body: some View {
+        HStack(spacing: 12) {
+            InitialsAvatar(
+                name: found.name, identity: found.idHex, size: 40, isGroup: true,
+                photo: found.avatar.map(AvatarPhoto.avatar))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(found.name).foregroundStyle(Color.lakkoText).lineLimit(1)
+                Text("@" + found.handle)
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .environment(\.layoutDirection, .leftToRight)
+                Text(Self.line(found, l10n: l10n))
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
+            Spacer()
+        }
+        .contentShape(Rectangle())
+    }
+
+    /// "Public group · 100+ members" / "Public channel · 10k+ subscribers".
+    static func line(_ found: ConversationHandles.Found, l10n: Localization) -> String {
+        let band = ["<10", "10+", "100+", "1k+", "10k+", "100k+"][Int(min(found.sizeBand, 5))]
+        return l10n.t(
+            found.kind == .channel ? "search.conversation.channel_line" : "search.conversation.group_line",
+            texts: ["band": band])
     }
 }

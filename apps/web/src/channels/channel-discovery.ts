@@ -2,32 +2,26 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `@channel` discovery — web client wiring for G4-5 / ADR-0010.
+ * `@channel` discovery — ADR-0087 sections 1 to 4 (one namespace).
  *
- * A channel's on-the-wire identity is a 16-byte `channel_id`
- * pseudonym (hex-encoded in every `services/channels` REST route).
- * That is unfriendly to type or share, so — exactly like
- * `@username` — a channel may claim a human-readable `@handle`.
- * The mapping lives in the zero-trust discovery service behind the
- * SAME OPRF mechanism as usernames (`services/discovery/src/
- * channel_names.rs`): the server stores only
- * `OPRF(K, normalize(@handle)) -> channel_id`, never the plaintext
- * handle.
+ * A channel's on-the-wire identity is a 16-byte `channel_id` (hex in every
+ * `services/channels` route). Its `@name` lives in the same namespace as
+ * people and groups: a handle claimed with the channel's handle key (derived
+ * from the journal root of its PublisherGroup, so it names no account), with
+ * a public record sealed under the name and its words. Finding a channel by
+ * `@name` is the handle lookup plus `openSearchRecord` with the name's own
+ * OPRF output. The old `/discovery/channel/*` routes are gone.
  *
- * This module is a thin channel-facing wrapper over
- * `DiscoveryClient.registerChannelName` / `lookupChannel` (which
- * own the multi-round-trip blind → evaluate (one anonymous token) → finalize →
- * register/lookup dance and reuse the wasm `OprfBlinder`
- * blind/finalize primitives — no OPRF is reimplemented here). It
- * only bridges the hex `channel_id` the channels UI speaks to the
- * raw-16-byte form the discovery client speaks.
+ * Phase B (public / private channels, the read key's use, comments) is not
+ * built: a named channel is public, found by its `@name` and its name.
  */
 
-import {
-  DiscoveryClient,
-  DiscoveryHttpError,
-  type ChannelRegisterResult,
-} from "../discovery/client";
+import { DiscoveryHttpError } from "../discovery/client";
+import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
+import { claimChannelHandle, lookupChannelByHandle, type PublicChannelFacts } from "../chat/group-handle";
+import { HandleWriteError } from "../discovery/handle-lookup";
+import { noteHandleWrite } from "../chat/handle-owed";
+import { loadWasm } from "../wasm";
 import { bytesToHex, channelIdFromHex } from "./composer";
 
 /** Raw 16-byte channel_id ⇒ 32 lowercase hex chars. */
@@ -48,49 +42,54 @@ export function looksLikeChannelIdHex(input: string): boolean {
 }
 
 /**
- * Register the `@handle → channel_id` mapping at channel-create
- * time. Since ADR-0054 S3 the write carries NO session: it spends one
- * anonymous `discovery-register` token (the OPRF evaluation before it one
- * `discovery-lookup` token), drawn with the session the app installed.
- * Ownership lives at the PublisherGroup layer, see the service module docs.
+ * Claim the channel's `@name` at channel-create time (ADR-0087 section 3):
+ * one `discovery-register` token for the claim, one `discovery-lookup` token
+ * per name term of the public record.
  *
- * @param handle       User-typed handle, with or without a leading
- *                     `@` — normalised inside `OprfBlinder.blind`.
- * @param channelIdHex The freshly-minted 32-char hex channel id.
- * @param sessionToken Kept for the callers; the register itself sends no
- *                     session (ADR-0054 S3).
- * @returns The canonical normalised handle actually claimed, so
- *          the UI can echo it back.
- * @throws  `DiscoveryHttpError` with `status === 409` when the
- *          handle is already taken (first-come-first-served).
+ * @param handle        User-typed handle, with or without a leading `@`.
+ * @param channelIdHex  The freshly minted 32-char hex channel id.
+ * @param ownerIdentity The identity the PublisherGroup is founded under.
+ * @param facts         The channel's name and description, for its record.
+ * @returns The canonical name actually claimed.
+ * @throws  `HandleWriteError` with `code === "name-taken"` (409) when the
+ *          name is held.
  */
 export async function registerChannelHandle(
   handle: string,
   channelIdHex: string,
-  sessionToken: string,
-): Promise<ChannelRegisterResult> {
-  const channelId = channelIdFromHex(channelIdHex);
-  const client = new DiscoveryClient();
-  client.setSessionToken(sessionToken);
-  return client.registerChannelName(channelId, handle);
+  ownerIdentity: WasmIdentity,
+  facts: PublicChannelFacts,
+  accountIdB64?: string | null,
+): Promise<{ readonly handle: string }> {
+  const wasm = await loadWasm();
+  const written = await claimChannelHandle({
+    wasm,
+    ownerIdentity,
+    channelId: channelIdFromHex(channelIdHex),
+    handle,
+    facts,
+  });
+  if (accountIdB64 !== undefined && accountIdB64 !== null) {
+    await noteHandleWrite({
+      kind: "channel",
+      id: channelIdHex,
+      handle: written.handle,
+      isPublic: true,
+      lastWriteMs: Date.now(),
+      leaseUntilMs: written.leaseUntilMs,
+    }).catch(() => undefined);
+  }
+  return { handle: written.handle };
 }
 
 /**
- * Resolve a typed `@handle` to its channel id hex, or `null` when
- * no channel has claimed that handle. Unauthenticated (the lookup
- * path is open); anonymous-safe.
- *
- * @param handle User-typed handle, with or without a leading `@`.
- * @returns 32-char hex `channel_id`, or `null` on an unknown
- *          handle (the server's 404 not-found path).
+ * Resolve a typed `@handle` to its channel id hex, or `null` when no public
+ * channel holds that name.
  */
-export async function resolveChannelHandle(
-  handle: string,
-): Promise<string | null> {
-  const client = new DiscoveryClient();
-  const result = await client.lookupChannel(handle);
-  if (result.channel === null) return null;
-  return bytesToHex(result.channel);
+export async function resolveChannelHandle(handle: string): Promise<string | null> {
+  const wasm = await loadWasm();
+  const id = await lookupChannelByHandle(wasm, handle);
+  return id === null ? null : bytesToHex(id);
 }
 
 /**
@@ -111,6 +110,6 @@ export async function resolveChannelIdOrHandle(
   return resolveChannelHandle(trimmed);
 }
 
-/** Re-export so callers can branch on a 409-taken register without
- *  re-importing from the discovery module. */
-export { DiscoveryHttpError };
+/** Re-export so callers can branch on a refused claim without re-importing
+ *  from the discovery module. */
+export { DiscoveryHttpError, HandleWriteError };

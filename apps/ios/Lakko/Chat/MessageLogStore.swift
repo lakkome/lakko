@@ -505,10 +505,17 @@ public struct PersistedReply: Codable, Equatable {
 public struct PersistedReaction: Codable, Equatable {
     public let reactorKeyB64: String
     public let emoji: String
+    /// Reactions-and-emoji spec section 17.3 — the op's action; `nil` reads
+    /// as an add.
+    public let remove: Bool?
+    /// The op's DS message id (`nil` reads as 0).
+    public let at: Int64?
 
-    public init(reactorKeyB64: String, emoji: String) {
+    public init(reactorKeyB64: String, emoji: String, remove: Bool? = nil, at: Int64? = nil) {
         self.reactorKeyB64 = reactorKeyB64
         self.emoji = emoji
+        self.remove = remove
+        self.at = at
     }
 }
 

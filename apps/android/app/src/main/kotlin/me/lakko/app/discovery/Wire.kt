@@ -133,8 +133,11 @@ data class NameLookupRequest(
  *  `NameLookupResult`). */
 @Serializable
 data class NameLookupResult(
-    /** Standard base64 of the 16-byte account id. */
-    val account_id_b64: String,
+    /** ADR-0087 section 1 — `"person"`, or `"handle"` for a public group or
+     *  channel, which names no account. */
+    val kind: String = "person",
+    /** Standard base64 of the 16-byte account id (a person only). */
+    val account_id_b64: String? = null,
     /** Standard base64 of their public record; the searcher opens it with
      *  the OPRF OUTPUT of the term it looked up (`openPublicRecord`). */
     val public_record_b64: String? = null,
@@ -162,7 +165,10 @@ data class LookupRequest(
  *  this type only describes the 200-OK path. */
 @Serializable
 data class LookupResponse(
-    val account_id: String,
+    /** ADR-0087 section 1 — `"person"`, or `"handle"` for a public group or
+     *  channel (no account id; its ids are inside the sealed record). */
+    val kind: String = "person",
+    val account_id: String? = null,
     /** ADR-0060 §5 — standard base64 of the account's public record, opened
      *  with the OPRF output of the username the lookup used. */
     val public_record_b64: String? = null,

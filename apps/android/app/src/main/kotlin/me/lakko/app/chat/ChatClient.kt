@@ -897,6 +897,18 @@ internal fun toEvent(
                     senderKey = processed.senderLeaf?.let(resolveSender),
                     createdAt = createdAt,
                 )
+            } else if (groupSettingKindOf(processed.data) != null) {
+                // ADR-0087 — a group setting: the photo, the allowed reactions,
+                // the @name, or the knock seed for one admin. Never a timeline
+                // bubble. The sender is resolved to its account KEY here
+                // (C-68); the repository decodes the bytes and runs its gate.
+                IncomingChatEvent.GroupSetting(
+                    messageId = messageId,
+                    kind = groupSettingKindOf(processed.data)!!,
+                    bytes = processed.data,
+                    senderKey = processed.senderLeaf?.let(resolveSender),
+                    createdAt = createdAt,
+                )
             } else if (looksLikeProfileEnvelope(processed.data)) {
                 // ADR-0048 — a member's profile. Never a timeline bubble.
                 // The sender is resolved to its signature KEY here, one line
@@ -1082,6 +1094,10 @@ internal fun toEvent(
                         senderLeaf = senderLeaf,
                         senderKey = senderKey,
                         createdAt = createdAt,
+                        // reactions-and-emoji section 17 — add or take off;
+                        // a reaction always carries one (the core degrades
+                        // one without to Chat).
+                        reactionAdd = body.reactionAction != uniffi.lakko_ffi_uniffi.ReactionAction.REMOVE,
                     )
                     // ADR-0024 — an ephemeral typing signal. Never a
                     // bubble; the repository folds it into the per-leaf
@@ -1283,6 +1299,8 @@ public sealed interface IncomingChatEvent {
          *  `null` ⇒ the op is dropped (fail-closed). */
         val senderKey: MemberIdentity?,
         val createdAt: String,
+        /** Reactions: add (`true`) or take off. */
+        val reactionAdd: Boolean = true,
     ) : IncomingChatEvent
 
     /** ADR-0024 — an ephemeral typing signal carried in the same
@@ -1664,6 +1682,18 @@ public sealed interface IncomingChatEvent {
      *  ReachState that reached a conversation is dropped by the repository). Never a timeline row. [senderKey] is the
      *  sender's account key resolved at receipt (C-68); [bytes] the whole
      *  plaintext, decoded by the repository. */
+    /** ADR-0087 — a group-setting envelope ([GroupSettingKind]). Never a
+     *  timeline row. [senderKey] is the sender's account key resolved at
+     *  receipt (C-68); [bytes] the whole plaintext, decoded by the
+     *  repository, which drops one that does not decode. */
+    public class GroupSetting(
+        public val messageId: Long,
+        public val kind: GroupSettingKind,
+        public val bytes: ByteArray,
+        public val senderKey: MemberIdentity?,
+        public val createdAt: String,
+    ) : IncomingChatEvent
+
     public class ScopedDiscovery(
         public val messageId: Long,
         public val kind: me.lakko.app.reach.ScopedEnvelopeKind,

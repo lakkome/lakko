@@ -1815,7 +1815,13 @@ private fun SessionRoot(
                     val own = me.lakko.app.profile.OwnProfileStore.load(chatRepository.context, secrets.accountId)?.avatar
                     val buckets = chatRepository.pinnedKeepBuckets() +
                         me.lakko.app.storage.KeepBucket("saved", me.lakko.app.storage.blobHexes(deviceGroupSync.savedBlobIds())) +
-                        me.lakko.app.storage.KeepBucket("profile", me.lakko.app.storage.blobHexes(me.lakko.app.profile.avatarBlobIds(own)))
+                        me.lakko.app.storage.KeepBucket("profile", me.lakko.app.storage.blobHexes(me.lakko.app.profile.avatarBlobIds(own))) +
+                        // ADR-0087 18.5 — the photos of the groups this device
+                        // owns or administers, with no control or message.
+                        me.lakko.app.storage.KeepBucket(
+                            "conversation-photos",
+                            me.lakko.app.storage.blobHexes(chatRepository.conversationPhotoBlobIds()),
+                        )
                     me.lakko.app.storage.BlobLifetime.tick(chatRepository.context, buckets)
                 } catch (cause: Throwable) {
                     if (cause is kotlinx.coroutines.CancellationException) throw cause
@@ -2423,6 +2429,7 @@ private fun SessionRoot(
                     val ownProfile = remember(secrets?.accountId, ownProfileRevision) {
                         secrets?.let { me.lakko.app.profile.OwnProfileStore.load(chatRepository.context, it.accountId) }
                     }
+                    val quickReactionScope = androidx.compose.runtime.rememberCoroutineScope()
                     SettingsScreen(
                         displayName = ownProfile?.displayName,
                         ownAvatar = ownProfile?.avatar,
@@ -2440,6 +2447,9 @@ private fun SessionRoot(
                         onLogout = logout,
                         onForgetDevice = forgetDevice,
                         onOpenWhoCanFindMe = { navController.navigate(Routes.WHO_CAN_FIND_ME) },
+                        onSetQuickReaction = { emoji ->
+                            quickReactionScope.launch { runCatching { deviceGroupSync.setQuickReaction(emoji) } }
+                        },
                         accountProtection = {
                             me.lakko.app.ui.auth.AccountProtectionSection(
                                 repository = authRepository,

@@ -66,9 +66,9 @@ extension ChatRepository {
     }
 
     /// Step 1. Synchronous: this runs inside the commit lock's apply region.
-    private func recordEnd(groupIdHex: String, epoch: UInt64, heard: Bool) {
+    private func recordEnd(groupIdHex: String, epoch: UInt64, heard: Bool, quiet: Bool = false) {
         guard let accountIdB64 = currentAccountIdB64 else { return }
-        let left = leaveRequestedAt(groupIdHex: groupIdHex) != nil
+        let left = quiet || leaveRequestedAt(groupIdHex: groupIdHex) != nil
         let end = OwedMembershipEnd(
             groupIdHex: groupIdHex, endedEpoch: epoch, heard: heard,
             oneToOne: isOneToOne(groupIdHex: groupIdHex),
@@ -86,6 +86,53 @@ extension ChatRepository {
         state = state.with(threads: buildThreadList())
         onMembershipEndRecorded?(groupIdHex, left)
         resumeEnd(groupIdHex: groupIdHex)
+    }
+
+    /// ADR-0087 sections 10 and 11 — `Delete group`, for an owner alone in
+    /// the group: the group and its messages go from every device of the
+    /// person, through the same owed pipeline as a leave (no notice: the
+    /// person asked for it). `false` when the person is not alone in it or is
+    /// not its owner. The @name is not built on this client, so there is none
+    /// to retire.
+    @discardableResult
+    public func deleteAloneGroup(groupIdHex: String) -> Bool {
+        guard let record = groups[groupIdHex], !isEnding(groupIdHex: groupIdHex),
+              isAloneInGroup(groupIdHex: groupIdHex), ownRole(groupIdHex: groupIdHex) == .owner,
+              let epoch = try? record.group.epoch() else { return false }
+        recordEnd(groupIdHex: groupIdHex, epoch: epoch, heard: false, quiet: true)
+        return true
+    }
+
+    /// Section 11 — retire the group's `@name` first (freed in 30 days), then
+    /// end the group as ``deleteAloneGroup(groupIdHex:)`` does. A failed
+    /// retire changes nothing and throws.
+    public func deleteAloneGroupRetiringName(groupIdHex: String) async throws -> Bool {
+        guard isAloneInGroup(groupIdHex: groupIdHex), ownRole(groupIdHex: groupIdHex) == .owner else {
+            return false
+        }
+        if let held = groupHandle(groupIdHex: groupIdHex), let record = groups[groupIdHex],
+           let accountIdentity {
+            do {
+                try await ConversationHandles.retire(
+                    discovery: DiscoveryClient(), accountSeed: accountIdentity.ed25519Seed(),
+                    journalId: record.groupId, handle: held.handle)
+            } catch let refusal as DiscoveryClient.HandleWriteError where refusal.code == "no-such-handle" {
+                // Already gone (lapsed): nothing to retire.
+            }
+            if let accountIdB64 = currentAccountIdB64 {
+                HeldHandleStore.remove(journalIdHex: AttachmentBridge.hex(record.groupId), accountIdB64)
+            }
+        }
+        return deleteAloneGroup(groupIdHex: groupIdHex)
+    }
+
+    /// ADR-0087 section 10 — nobody but this person (all of whose devices
+    /// count as one) is in the group.
+    public func isAloneInGroup(groupIdHex: String) -> Bool {
+        guard let record = groups[groupIdHex], conversationKind(groupIdHex: groupIdHex) == .group,
+              let members = try? record.group.members() else { return false }
+        let own = ownRosterKeys()
+        return PersonKey.people(members).allSatisfy { own.contains($0) }
     }
 
     /// The title the list draws, while the roster can still be read.

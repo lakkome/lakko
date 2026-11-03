@@ -11,7 +11,7 @@
  */
 import { createSignal, Match, Switch, type JSX } from "solid-js";
 
-import { avatarMediaFor, type AvatarMedia } from "../profile/avatar-runtime";
+import { avatarMediaFor, conversationAvatarMediaFor, type AvatarMedia } from "../profile/avatar-runtime";
 
 /** Up to two initials from a display label. */
 export function initialsOf(label: string): string {
@@ -41,6 +41,9 @@ export function Avatar(props: {
   /** The person's key (the one their profile is filed under), or `self` for
    *  the signed-in account: the photo is looked up for it. */
   personKey?: string | undefined;
+  /** A group or channel (its id, base64): its photo is looked up instead of
+   *  a person's (ADR-0087 section 18, UX 4.5.5). */
+  conversationKey?: string | undefined;
   /** Media to show instead of the looked-up photo (a pending change on the
    *  profile screen); `null` forces the initials. */
   media?: AvatarMedia | null | undefined;
@@ -50,6 +53,9 @@ export function Avatar(props: {
   const [broken, setBroken] = createSignal<string | null>(null);
   const media = (): AvatarMedia | null => {
     if (props.media !== undefined) return props.media;
+    if (props.conversationKey !== undefined) {
+      return conversationAvatarMediaFor(props.conversationKey, props.playVideo === true);
+    }
     return avatarMediaFor(props.personKey, props.playVideo === true);
   };
   const video = (): string | null => {

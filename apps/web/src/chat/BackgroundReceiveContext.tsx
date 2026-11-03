@@ -85,6 +85,7 @@ import {
 } from "./background-log";
 import { planBackgroundEvents, type MessageOpEvent } from "./background-events";
 import { foldOpsIntoStored } from "./message-ops-store";
+import { markUnseenReaction } from "./unseen-reactions";
 import {
   BACKGROUND_CONCURRENCY,
   BACKGROUND_SWEEP_INTERVAL_MS,
@@ -1983,6 +1984,13 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         console.warn("background receive: group name receive failed", err);
       });
     }
+    // ADR-0087 — the group photo, allowed reactions and handle, the same way.
+    for (const g of plan.groupSettings) {
+      void groupNames.receiveSetting(entry, g).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("background receive: group setting receive failed", err);
+      });
+    }
     // ADR-0073 R.6 — a successor claim, through the claim rule under the
     // per-group lock. Never a row, whatever the verdict.
     for (const c of plan.groupClosed) {
@@ -2110,9 +2118,21 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       // takes its pin records with it (section 4.1). Which deletes the
       // author gate accepted is read off the fold's result, not off the ops.
       const newlyDeleted: number[] = [];
+      // Reactions section 12 — others' reactions to this person's own
+      // messages, for the unseen-reactions button.
+      const unseen: number[] = [];
+      const ownKey = ownPersonKeyB64(chats.identity());
       await updateMessageLog(account, deviceKey, (current) => {
         const groups = current?.groups ?? {};
         const appended = appendToGroupSlot(groups[hex], messages, cursor);
+        unseen.length = 0;
+        if (ownKey !== null) {
+          for (const op of ops) {
+            if (op.op !== "reaction" || op.reactionAction === "remove" || op.senderKey === ownKey) continue;
+            const target = appended.messages.find((m) => Number(m.messageId) === op.target);
+            if (target?.authorKeyB64 === ownKey) unseen.push(op.target);
+          }
+        }
         const folded = foldOpsIntoStored(appended.messages, ops);
         newlyDeleted.length = 0;
         if (folded !== appended.messages) {
@@ -2133,6 +2153,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
           },
         };
       });
+      for (const id of unseen) markUnseenReaction(account, entry.groupIdB64, id);
       // The pin store is the live session's.
       if (!scope.current()) return;
       for (const id of newlyDeleted) {

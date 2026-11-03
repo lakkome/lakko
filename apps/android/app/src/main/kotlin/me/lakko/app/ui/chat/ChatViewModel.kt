@@ -30,6 +30,7 @@ import me.lakko.app.chat.UploadStage
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ChatThread
+import me.lakko.app.chat.toFfiAllowed
 import me.lakko.app.calls.CallKind
 import me.lakko.app.calls.GroupCallStartOutcome
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
@@ -2431,6 +2432,26 @@ public class ChatViewModel(
         mutableNotApplied.value = repo.notAppliedRequests(groupIdHex)
     }
 
+    /** ADR-0087 section 5 — the `64+` heading and its line. */
+    public fun knockQueueFull(): Boolean = repo.knockQueueFull(groupIdHex)
+
+    /** ADR-0087 section 5 — `Reject all`, after its confirmation. */
+    public fun onRejectAllJoins() {
+        if (mutableMembershipBusy.value) return
+        mutableMembershipBusy.value = true
+        mutableMembershipError.value = null
+        viewModelScope.launch {
+            try {
+                repo.rejectAllJoinRequests(groupIdHex)
+                refreshMembers()
+            } catch (e: Throwable) {
+                reportMembershipFailure(e, "onRejectAllJoins", "chat.error.reject_join")
+            } finally {
+                mutableMembershipBusy.value = false
+            }
+        }
+    }
+
     public fun onRejectJoin(proposalRef: ByteArray) {
         if (mutableMembershipBusy.value) return
         mutableMembershipBusy.value = true
@@ -3248,12 +3269,40 @@ public class ChatViewModel(
         // ADR-0047 §3 — a reaction is exactly one emoji grapheme, checked
         // before anything is composed (the wire only bounds the byte length).
         if (!me.lakko.app.media.isSingleEmojiGrapheme(emoji)) return
+        // reactions-and-emoji sections 5, 7 and 10 — the core decides what a
+        // tap does: add, take off, nothing (not allowed / a twelfth kind) or
+        // the 3-reactions line under the chips.
+        val msg = state.value.messages.firstOrNull { it.messageId == targetMessageId } ?: return
+        val own = me.lakko.app.chat.ownReactionEmoji(msg.reactions, ownChatIdentity())
+        val verdict = try {
+            uniffi.lakko_ffi_uniffi.reactionTapVerdict(
+                emoji,
+                own,
+                allowedReactions().toFfiAllowed(),
+                me.lakko.app.chat.reactionKinds(msg.reactions),
+            )
+        } catch (_: Throwable) {
+            if (emoji in own) uniffi.lakko_ffi_uniffi.FfiReactionTapVerdict.REMOVE
+            else uniffi.lakko_ffi_uniffi.FfiReactionTapVerdict.ADD
+        }
+        val add = when (verdict) {
+            uniffi.lakko_ffi_uniffi.FfiReactionTapVerdict.ADD -> true
+            uniffi.lakko_ffi_uniffi.FfiReactionTapVerdict.REMOVE -> false
+            uniffi.lakko_ffi_uniffi.FfiReactionTapVerdict.CAP_REACHED -> {
+                showReactionCapNotice(targetMessageId)
+                return
+            }
+            uniffi.lakko_ffi_uniffi.FfiReactionTapVerdict.NOT_ALLOWED,
+            uniffi.lakko_ffi_uniffi.FfiReactionTapVerdict.KIND_LIMIT,
+            -> return
+        }
         viewModelScope.launch {
             try {
                 repo.reactToMessage(
                     groupIdHex = groupIdHex,
                     targetMessageId = targetMessageId,
                     emoji = emoji,
+                    add = add,
                 )
             } catch (err: Throwable) {
                 me.lakko.app.rethrowIfCancelled(err)
@@ -3261,6 +3310,139 @@ public class ChatViewModel(
                 android.util.Log.w("ChatViewModel", "onReactToMessage failed", err)
             }
         }
+    }
+
+    /** reactions-and-emoji section 6 — the double tap: the person's quick
+     *  reaction, through the same verdict as a tap (a second double tap takes
+     *  it back). Nothing at all when it is not allowed here. */
+    public fun onQuickReact(targetMessageId: Long) {
+        onReactToMessage(targetMessageId, quickReaction())
+    }
+
+    /** The account's quick reaction (synced, D3), else the default. */
+    public fun quickReaction(): String = me.lakko.app.chat.QuickReaction.current()
+
+    /** What this conversation's messages take (section 9). */
+    public fun allowedReactions(): me.lakko.app.chat.AllowedReactions = repo.groupAllowedReactions(groupIdHex)
+
+    private val mutableReactionCapNotice = MutableStateFlow<Long?>(null)
+
+    /** Section 10 — the message under whose chips the 3-reactions line shows
+     *  for about three seconds, or `null`. */
+    public val reactionCapNotice: StateFlow<Long?> = mutableReactionCapNotice.asStateFlow()
+
+    private var reactionCapJob: Job? = null
+
+    /** Show the 3-reactions line under [messageId] for three seconds. */
+    public fun showReactionCapNotice(messageId: Long) {
+        reactionCapJob?.cancel()
+        mutableReactionCapNotice.value = messageId
+        reactionCapJob = viewModelScope.launch {
+            delay(REACTION_CAP_NOTICE_MS)
+            if (mutableReactionCapNotice.value == messageId) mutableReactionCapNotice.value = null
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0087 — group photo (4.5), allowed reactions (reactions-and-emoji 9)
+    // and the @name (4)
+    // -----------------------------------------------------------------
+
+    /** The group's photo as this device holds it, or `null`. */
+    public fun groupPhoto(): me.lakko.app.chat.StoredGroupPhoto? = repo.groupPhoto(groupIdHex)
+
+    /** 4.5.2 — a photo uploaded and not yet sent, or `null`. */
+    public fun owedGroupPhoto(): me.lakko.app.chat.StoredGroupPhoto? = repo.owedGroupPhoto(groupIdHex)
+
+    /** The group's @name as this device holds it, or `null`. */
+    public fun groupHandle(): me.lakko.app.chat.StoredGroupHandle? = repo.groupHandle(groupIdHex)
+
+    /**
+     * Section 4.5.2 — `Use` on the crop screen: upload the still (and the
+     * video), then send the photo to every member. Throws on a failed upload
+     * or send; the caller shows the state.
+     */
+    public suspend fun uploadAndSetGroupPhoto(encoded: me.lakko.app.avatar.AvatarMedia.Encoded) {
+        // 4.5.2 — demoted while the crop screen was open: nothing is uploaded.
+        if (repo.ownRole(groupIdHex) == uniffi.lakko_ffi_uniffi.Role.MEMBER) throw me.lakko.app.chat.GroupPhotoNotAllowed()
+        val still = me.lakko.app.chat.AttachmentBridge.encryptAndUpload(
+            bytes = encoded.still,
+            mime = "image/jpeg",
+            name = null,
+        )
+        val stillBlob = me.lakko.app.profile.avatarBlobOf(
+            still.blobId,
+            still.key,
+            still.nonce,
+            encoded.still.size.toLong(),
+            encoded.stillSide,
+        )
+        val ctx = repo.context
+        me.lakko.app.avatar.AvatarImages.putOwn(ctx, stillBlob, encoded.still)
+        val videoFile = encoded.video
+        val videoSide = encoded.videoSide
+        val videoMs = encoded.videoDurationMs
+        val videoBlob = if (videoFile != null && videoSide != null && videoMs != null) {
+            val bytes = withContext(kotlinx.coroutines.Dispatchers.IO) { videoFile.readBytes() }
+            val ref = me.lakko.app.chat.AttachmentBridge.encryptAndUpload(bytes = bytes, mime = "video/mp4", name = null)
+            me.lakko.app.profile.avatarBlobOf(ref.blobId, ref.key, ref.nonce, bytes.size.toLong(), videoSide).also {
+                me.lakko.app.avatar.AvatarImages.putOwn(ctx, it, bytes)
+            }
+        } else {
+            null
+        }
+        repo.setGroupPhoto(
+            groupIdHex,
+            me.lakko.app.profile.AvatarRefs(
+                still = stillBlob,
+                video = videoBlob,
+                videoDurationMs = if (videoBlob != null) videoMs else null,
+            ),
+        )
+    }
+
+    /** Section 4.5.2 — `Remove photo`, after the confirmation. */
+    public suspend fun removeGroupPhoto() {
+        repo.setGroupPhoto(groupIdHex, null)
+    }
+
+    /** Section 3.3 — the live "taken" check of a public @name. */
+    public suspend fun handleVisiblyTaken(handle: String): Boolean? = repo.handleVisiblyTaken(handle)
+
+    /** ADR-0087 section 4.1 — the owner's Group type: flip public / private
+     *  and, when it differs, move to [handle]. */
+    public suspend fun changeGroupType(public: Boolean, handle: String) {
+        repo.changeGroupType(groupIdHex, public, handle)
+    }
+
+    /** ADR-0087 section 10 — `Copy invite link` in a group of one: mint the
+     *  link and put it on the clipboard (no system share sheet). */
+    public fun copySoloInviteLink(context: android.content.Context) {
+        viewModelScope.launch {
+            try {
+                val link = repo.createGroupInviteLink(groupIdHex)
+                mutableInviteLink.value = link
+                val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                    as? android.content.ClipboardManager
+                clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("", link))
+            } catch (e: Throwable) {
+                reportMembershipFailure(e, "copySoloInviteLink", "chat.error.create_link")
+            }
+        }
+    }
+
+    /** ADR-0087 section 11 — `Delete group`, an owner alone. Throws on a
+     *  network failure; nothing changes then. */
+    public suspend fun deleteSoloGroup() {
+        repo.deleteSoloGroup(groupIdHex)
+    }
+
+    /** Section 10 — this device created the group (the creation row). */
+    public fun createdGroup(): Boolean = repo.createdGroup(groupIdHex)
+
+    /** Reactions-and-emoji section 9 — save what the group's messages take. */
+    public suspend fun setGroupReactions(value: me.lakko.app.chat.AllowedReactions) {
+        repo.setGroupReactions(groupIdHex, value)
     }
 
     /** ADR-0023 — our own IDENTITY in this chat group, used by the UI to
@@ -3888,3 +4070,6 @@ public data class JoinableGroupCall(
  */
 internal fun inviteLinkRevokeNotice(revoked: Boolean): UiText =
     if (revoked) UiText("chat.invite_link.revoked") else UiText("chat.invite_link.cleared")
+
+/** reactions-and-emoji sections 6 and 7 — how long the 3-reactions line stays. */
+internal const val REACTION_CAP_NOTICE_MS: Long = 3_000L

@@ -556,7 +556,8 @@ final class SendEpochStraddleTests: XCTestCase {
         let repo = fx.repo
 
         try await driveIntoStagedSweepWindow(fx) {
-            try? await repo.reactToMessage(groupIdHex: hex, target: 1, emoji: "👍")
+            try? await repo.reactToMessage(
+                groupIdHex: hex, target: 1, emoji: "👍", add: true, targetAuthorB64: nil)
         }
 
         XCTAssertEqual(

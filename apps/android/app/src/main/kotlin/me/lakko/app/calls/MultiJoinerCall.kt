@@ -717,6 +717,14 @@ class MultiJoinerCall private constructor(
             FfiIncomingEnvelopeKind.REACH_STATE,
             FfiIncomingEnvelopeKind.REGISTRAR_SEED,
             FfiIncomingEnvelopeKind.COMMITTER_DELEGATION,
+            // ADR-0087 — handle, knock and admission seeds, group photo and
+            // group reactions likewise ride a conversation journal or the
+            // DeviceGroup, never the SFU signal-relay. Dropped.
+            FfiIncomingEnvelopeKind.CONVERSATION_HANDLE,
+            FfiIncomingEnvelopeKind.KNOCK_SEED,
+            FfiIncomingEnvelopeKind.ADMISSION_SEED,
+            FfiIncomingEnvelopeKind.GROUP_PHOTO,
+            FfiIncomingEnvelopeKind.GROUP_REACTIONS,
             -> Unit
             // ADR-0059 - a shared-channels list rides the GROUP JOURNAL and
             // speaks for its MLS sender, never the SFU signal-relay; dropped.

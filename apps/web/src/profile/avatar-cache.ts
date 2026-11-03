@@ -25,7 +25,21 @@ export const RETRY_AFTER_MS = 60_000;
 export interface AvatarCacheBackend {
   get(blobIdB64: string): Promise<Uint8Array | null>;
   put(blobIdB64: string, bytes: Uint8Array): Promise<void>;
+  /** The blob was drawn now (least recently drawn goes first). Optional. */
+  touch?(blobIdB64: string): Promise<void>;
+  /** Drop the least recently drawn rows until at most `maxBytes` remain.
+   *  Optional. */
+  trim?(maxBytes: number): Promise<void>;
 }
+
+/**
+ * ADR-0087 section 18 / UX 4.5.5 — ONE store of downloaded photos for people,
+ * groups and channels, bounded in size: when full, the photo drawn least
+ * recently goes first and is downloaded again the next time it is drawn,
+ * showing initials until then. Chosen, not measured.
+ */
+export const MAX_MEMORY_BYTES = 24 * 1024 * 1024;
+export const MAX_DISK_BYTES = 64 * 1024 * 1024;
 
 export interface AvatarCacheDeps {
   readonly backend: AvatarCacheBackend;
@@ -44,13 +58,58 @@ type Entry =
 export class AvatarCache {
   private readonly entries = new Map<string, Entry>();
   private readonly listeners = new Set<() => void>();
+  private readonly evictListeners = new Set<(blobIdB64: string) => void>();
+  /** When each blob was last drawn, for the least-recently-drawn eviction. */
+  private readonly drawnAt = new Map<string, number>();
+  /** Blobs whose draw this session already reached the backend. */
+  private readonly touched = new Set<string>();
 
   constructor(private readonly deps: AvatarCacheDeps) {}
 
   /** The decrypted bytes, when held. */
   bytes(blobIdB64: string): Uint8Array | null {
     const e = this.entries.get(blobIdB64);
-    return e?.status === "ready" ? e.bytes : null;
+    if (e?.status !== "ready") return null;
+    this.drew(blobIdB64);
+    return e.bytes;
+  }
+
+  /** A circle drew this blob now. */
+  drew(blobIdB64: string): void {
+    this.drawnAt.set(blobIdB64, this.deps.now());
+    if (!this.touched.has(blobIdB64)) {
+      this.touched.add(blobIdB64);
+      void this.deps.backend.touch?.(blobIdB64).catch(() => undefined);
+    }
+  }
+
+  /** Called when a blob leaves memory (the runtime revokes its URL). */
+  onEvict(listener: (blobIdB64: string) => void): () => void {
+    this.evictListeners.add(listener);
+    return () => this.evictListeners.delete(listener);
+  }
+
+  /** Memory over its bound: the least recently drawn ready blobs go. */
+  private enforceMemory(keep: string): void {
+    let total = 0;
+    for (const e of this.entries.values()) if (e.status === "ready") total += e.bytes.length;
+    if (total <= MAX_MEMORY_BYTES) return;
+    const ready = [...this.entries.entries()]
+      .filter(([id, e]) => e.status === "ready" && id !== keep)
+      .sort((a, b) => (this.drawnAt.get(a[0]) ?? 0) - (this.drawnAt.get(b[0]) ?? 0));
+    for (const [id, e] of ready) {
+      if (total <= MAX_MEMORY_BYTES) break;
+      if (e.status !== "ready") continue;
+      total -= e.bytes.length;
+      this.entries.delete(id);
+      for (const l of this.evictListeners) {
+        try {
+          l(id);
+        } catch {
+          /* a listener's failure is its own */
+        }
+      }
+    }
   }
 
   /** Whether a load for `blobIdB64` would start now. */
@@ -70,6 +129,8 @@ export class AvatarCache {
     return this.load(ref, kind).then(
       (bytes) => {
         this.entries.set(id, { status: "ready", bytes });
+        this.drew(id);
+        this.enforceMemory(id);
         this.notify();
       },
       () => {
@@ -82,7 +143,12 @@ export class AvatarCache {
   /** Put bytes this device produced itself (its own upload): no download. */
   seed(blobIdB64: string, bytes: Uint8Array): void {
     this.entries.set(blobIdB64, { status: "ready", bytes });
-    void this.deps.backend.put(blobIdB64, bytes).catch(() => undefined);
+    this.drew(blobIdB64);
+    this.enforceMemory(blobIdB64);
+    void this.deps.backend
+      .put(blobIdB64, bytes)
+      .then(() => this.deps.backend.trim?.(MAX_DISK_BYTES))
+      .catch(() => undefined);
     this.notify();
   }
 
@@ -110,6 +176,7 @@ export class AvatarCache {
     if (!(await this.deps.verify(bytes, kind))) throw new Error("avatar does not decode");
     try {
       await this.deps.backend.put(ref.blobIdB64, bytes);
+      await this.deps.backend.trim?.(MAX_DISK_BYTES);
     } catch {
       // Kept in memory for this session; fetched again next time.
     }

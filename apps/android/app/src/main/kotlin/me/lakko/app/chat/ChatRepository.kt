@@ -1103,6 +1103,7 @@ public class ChatRepository(
             canonicalIdentity.set(identity)
             accountIdentity.getAndSet(account)?.close()
             currentAccountIdB64.set(newAccountIdB64)
+            UnseenReactions.bind(applicationContext, newAccountIdB64)
             feedRefresh.bind(newAccountIdB64)
             seedGroupCalls(persistedGroupCalls)
 
@@ -1372,9 +1373,16 @@ public class ChatRepository(
      * alone, plus this account's other devices. People are added afterwards
      * as in any group.
      */
-    public suspend fun startGroupAlone(): String = forSession { startGroupAloneOnMlsThread() }
+    public suspend fun startGroupAlone(
+        /** ADR-0087 sections 3 and 10 — run with the new group's id and knock
+         *  public key BEFORE anything about the group leaves this device (the
+         *  @name claim): a throw here creates nothing. */
+        beforePublish: (suspend (groupId: ByteArray, knockPublicKey: ByteArray) -> Unit)? = null,
+    ): String = forSession { startGroupAloneOnMlsThread(beforePublish) }
 
-    private suspend fun startGroupAloneOnMlsThread(): String {
+    private suspend fun startGroupAloneOnMlsThread(
+        beforePublish: (suspend (groupId: ByteArray, knockPublicKey: ByteArray) -> Unit)? = null,
+    ): String {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
@@ -1382,6 +1390,27 @@ public class ChatRepository(
         val created = foundGroupOnMlsThread(identity, ownOtherDevices(identity), GroupKind.GROUP)
         val createdHex = DsClient.pseudonymHex(created.groupId)
         persistFoundedGroupBeforeWelcome(created.group, createdHex)
+        if (beforePublish != null) {
+            try {
+                val account = rootAccountIdentity() ?: throw IllegalStateException("no account")
+                val root = uniffi.lakko_ffi_uniffi.dsJournalRootSeed(account.ed25519Seed(), created.groupId)
+                val knock = try {
+                    val seed = uniffi.lakko_ffi_uniffi.groupKnockSeed(root, CURRENT_KNOCK_VERSION)
+                    try {
+                        uniffi.lakko_ffi_uniffi.groupKnockPublicKey(seed)
+                    } finally {
+                        seed.fill(0)
+                    }
+                } finally {
+                    root.fill(0)
+                }
+                beforePublish(created.groupId, knock)
+            } catch (e: Throwable) {
+                currentAccountIdB64.get()?.let { runCatching { knownGroupsStore.remove(it, createdHex) } }
+                runCatching { created.group.close() }
+                throw e
+            }
+        }
         for (account in created.recipientAccounts) {
             try {
                 publishWelcomeToMailbox(
@@ -1397,7 +1426,10 @@ public class ChatRepository(
                 throw ChatError(dsErrorMessage(e, "DS publishMailbox (Welcome) failed"), e)
             }
         }
-        return registerFoundedGroup(identity, created.group, created.groupId)
+        val registered = registerFoundedGroup(identity, created.group, created.groupId)
+        // Section 10 — the creation row of a group this device founded.
+        currentAccountIdB64.get()?.let { GroupSettingsStore.markCreated(applicationContext, it, registered) }
+        return registered
     }
 
     /** Whether the directory lists another device of this account. A failed
@@ -4066,6 +4098,25 @@ public class ChatRepository(
         }
     }
 
+    /** ADR-0087 section 5 — more requests wait on the server than the pending
+     *  set holds. */
+    public fun knockQueueFull(groupIdHex: String): Boolean = groups[groupIdHex]?.knockQueueFull ?: false
+
+    /**
+     * ADR-0087 section 5 — `Reject all`: every retained request is rejected
+     * here, and the server deletes the knock rows up to the newest this device
+     * read (a request that arrived after stays).
+     */
+    public suspend fun rejectAllJoinRequests(groupIdHex: String) {
+        val record = groups[groupIdHex] ?: throw IllegalStateException("unknown group")
+        for (key in pendingExternalJoins(groupIdHex)) rejectExternalJoin(groupIdHex, key)
+        val through = maxOf(record.lastSeenKnockId, record.knockCursor)
+        if (through > 0) dsClient.deleteKnocks(record.groupId, through)
+        record.knockCursor = through
+        record.knockQueueFull = false
+        record.sawUnkeptExternalJoin = false
+    }
+
     /**
      * ADR-0028 (G-3) — mint a group invite-link (owner/admin side). Signs a
      * GroupInviteCapability over this group's raw MLS group_id with the local
@@ -4100,6 +4151,10 @@ public class ChatRepository(
         val members = (memberCount(groupIdHex) ?: 0).coerceIn(0, UShort.MAX_VALUE.toInt()).toUShort()
         val seed = identity.ed25519Seed()
         val groupId = record.group.groupId()
+        // ADR-0087 section 5 — the link names the group's knock key; an admin
+        // the owner has not handed the seed to yet cannot mint one.
+        val (knockPublicKey, knockVersion) = providerLock.sessionLock { groupKnockKeyFor(record, groupIdHex) }
+            ?: throw ChatError("no knock key for this group yet", IllegalStateException("no knock seed"))
         val mint = try {
             uniffi.lakko_ffi_uniffi.composeGroupInviteCapabilityWithPreview(
                 seed,
@@ -4108,6 +4163,8 @@ public class ChatRepository(
                 groupName,
                 inviterName,
                 members,
+                knockPublicKey,
+                knockVersion,
             )
         } catch (e: FfiException) {
             // A stored name that fails the display-name rule (it should not:
@@ -4122,6 +4179,8 @@ public class ChatRepository(
                     null,
                     null,
                     members,
+                    knockPublicKey,
+                    knockVersion,
                 )
             } catch (again: FfiException) {
                 throw ChatError("composeGroupInviteCapabilityWithPreview failed", again)
@@ -4353,11 +4412,18 @@ public class ChatRepository(
         }
         val groupId: ByteArray
         val valid: Boolean
+        val knockKey: uniffi.lakko_ffi_uniffi.FfiGroupKnockKey?
         try {
             valid = cap.isValidNow(nowMs)
             groupId = cap.groupId()
+            knockKey = cap.knock()
         } finally {
             cap.close()
+        }
+        // ADR-0087 section 5 — the request is sealed to the knock key the link
+        // names; a link without one cannot carry a request.
+        if (knockKey == null) {
+            throw ChatError("group invite link names no knock key", IllegalStateException("no knock key"))
         }
         if (!valid) {
             throw ChatError(
@@ -4406,49 +4472,33 @@ public class ChatRepository(
         } catch (e: Throwable) {
             throw ChatError(dsErrorMessage(e, "Could not prepare the request. Try again."), e)
         }
-        // ADR-0053 section 4 / client contract point 6 — a claimed journal
-        // answers only its members, so the joiner never reads it: an empty
-        // knock learns the epoch, and a second knock carries the attribution
-        // (advisory, ADR-0028 OQ2) and the proposal built for that epoch. Each
-        // knock spends its own `ds-knock` token (ADR-0054).
+        // ADR-0087 section 5 — the request is a fresh KeyPackage sealed to the
+        // group's knock key with the reply grant, a profile and the link's
+        // capability; it carries no epoch, so it waits through every commit.
+        // One knock, one `ds-knock` token (ADR-0054).
         try {
-            runLinkJoinKnock(
-                knock = { payloads ->
-                    dsClient.knock(groupId, payloads).epoch
-                },
-                buildProposal = { epoch ->
-                    providerLock.sessionLock {
-                        val proposal = identity.createExternalJoinProposal(groupId, epoch)
-                        // The proposal's KeyPackage private key is the only thing
-                        // that can open the Welcome the sweep will send later.
-                        // Durable BEFORE the knock, fail-closed: a persist that
-                        // failed or was refused (the session ended) throws here,
-                        // and the proposal never leaves the device. Published
-                        // with nothing on disk, an approval would send a Welcome
-                        // this device cannot open after a restart.
-                        persistSnapshotDurableOrThrow()
-                        proposal
-                    }
-                },
-                buildAttribution = {
-                    uniffi.lakko_ffi_uniffi.composeGroupJoinAttribution(
-                        identity.ed25519Seed(),
-                        capabilityWire,
-                        // ADR-0060 §6 — this account's reply key, registered on
-                        // its mailbox before the knock, so the committer can
-                        // write the Welcome in. Retired once the group arrives.
-                        joinReplyGrant,
-                    )
-                },
-            )
+            val row = providerLock.sessionLock {
+                val keyPackage = identity.createKeyPackage()
+                // The KeyPackage's private key is the only thing that can open
+                // the Welcome the sweep sends later: durable BEFORE the knock,
+                // fail-closed.
+                persistSnapshotDurableOrThrow()
+                uniffi.lakko_ffi_uniffi.sealKnockRow(
+                    knockKey.publicKey,
+                    knockKey.version,
+                    keyPackage,
+                    joinReplyGrant,
+                    ownKnockProfile(),
+                    capabilityWire,
+                )
+            }
+            dsClient.knock(groupId, listOf(row))
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
-        } catch (e: GroupNotAcceptingRequests) {
-            throw ChatError(GROUP_NOT_ACCEPTING_REQUESTS, e)
         } catch (e: FfiException) {
-            throw ChatError("createExternalJoinProposal failed", e)
+            throw ChatError("knock row could not be sealed", e)
         } catch (e: Throwable) {
-            throw ChatError(dsErrorMessage(e, "DS knock (external-join request) failed"), e)
+            throw ChatError(dsErrorMessage(e, "DS knock (request to join) failed"), e)
         }
         return Pair(groupId, identity.signaturePublicKey())
     }
@@ -4975,13 +5025,17 @@ public class ChatRepository(
         groupIdHex: String,
         targetMessageId: Long,
         emoji: String,
+        add: Boolean = true,
     ): Unit =
-        forSession { reactToMessageOnMlsThread(groupIdHex = groupIdHex, targetMessageId = targetMessageId, emoji = emoji) }
+        forSession {
+            reactToMessageOnMlsThread(groupIdHex = groupIdHex, targetMessageId = targetMessageId, emoji = emoji, add = add)
+        }
 
     private suspend fun reactToMessageOnMlsThread(
         groupIdHex: String,
         targetMessageId: Long,
         emoji: String,
+        add: Boolean,
     ): Unit {
         // ADR-0073 R.5 — a row of an older segment is read-only history: its
         // on-screen id is negative and names no message of this group.
@@ -4990,7 +5044,7 @@ public class ChatRepository(
         // applied on this device alone and never sent ([opRoute]): its target
         // exists only in the old session.
         if (deadOneToOne(groupIdHex)) {
-            applyOwnOpLocally(groupIdHex, MessageOp.Reaction, targetMessageId, "", emoji)
+            applyOwnOpLocally(groupIdHex, MessageOp.Reaction, targetMessageId, "", emoji, reactionAdd = add)
             return
         }
         val identity = canonicalIdentity.get()
@@ -5000,10 +5054,25 @@ public class ChatRepository(
                 "no live Group handle for $groupIdHex",
                 IllegalStateException("unknown group"),
             )
+        // reactions-and-emoji section 12 — the op names the target's author
+        // (the account key this device holds for it), so the author's devices
+        // can tell from the background that a reaction is to their message.
+        val targetAuthor = record.messageAuthorKey(targetMessageId)?.let {
+            try {
+                java.util.Base64.getDecoder().decode(it).takeIf { b -> b.size == 32 }
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        }
+        // An add wakes the conversation like a message; taking one off stays
+        // quiet.
+        val wake = if (add) sealedWakeFor(groupIdHex, DsWakeKind.MESSAGE) else null
         groupLock(groupIdHex).sessionLock {
             val envelopeBytes = uniffi.lakko_ffi_uniffi.composeReactionEnvelope(
                 target = targetMessageId,
                 emoji = emoji,
+                action = if (add) uniffi.lakko_ffi_uniffi.ReactionAction.ADD else uniffi.lakko_ffi_uniffi.ReactionAction.REMOVE,
+                targetAuthor = targetAuthor,
             )
             // SECURITY (nonce-reuse-on-crash) — persist the (N+1)
             // ratchet durably, fail-closed, BEFORE publish.
@@ -5021,13 +5090,15 @@ public class ChatRepository(
                 val ownKey = ownIdentity(record.group)
                 prepared to ownKey
             }
-            chatClient.publishPreparedSend(prepared)
+            val sent = chatClient.publishPreparedSend(prepared, wake = wake)
             record.applyOwnOp(
                 op = MessageOp.Reaction,
                 target = targetMessageId,
                 text = "",
                 emoji = emoji,
                 ownKey = ownKey,
+                reactionAdd = add,
+                opId = sent.messageId,
             )
             persistMessageLogBestEffort()
             publishThreadList()
@@ -6010,6 +6081,8 @@ public class ChatRepository(
             // committed the add sends at once: the newcomer's list has no name
             // until it does, and the schedule exists for the other members.
             if (ownAdd) groupNameRepublish.publishNow(groupIdHex) else groupNameRepublish.onGrowth(groupIdHex)
+            // ADR-0087 18.1 — and the photo, the reactions and the @name.
+            if (ownAdd) groupSettingsRepublish.publishNow(groupIdHex) else groupSettingsRepublish.onGrowth(groupIdHex)
             // ADR-0052 decision 3 — and the shared pins, verbatim with their
             // original stamps, on the same schedule.
             pinRepublish.onGrowth(groupIdHex)
@@ -6528,6 +6601,1095 @@ public class ChatRepository(
     }
 
     // -----------------------------------------------------------------
+    // ADR-0087 — the group photo (18.1), the allowed reactions
+    // (reactions-and-emoji section 9), the @name inside the group (11) and
+    // the knock key (5).
+    // -----------------------------------------------------------------
+
+    /** The growth re-send of the photo, the reactions and the handle, on the
+     *  group-name schedule (one per-group throttle + jitter). */
+    private val groupSettingsRepublish: me.lakko.app.profile.ProfileRepublishScheduler =
+        me.lakko.app.profile.ProfileRepublishScheduler(
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+            publish = { groupIdHex -> republishGroupSettingsIfHolder(groupIdHex) },
+        )
+
+    /** Admin knock seeds this session already sent, `groupHex:adminHex`. */
+    private val knockSeedsSent: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** The group's stored photo, or `null`. */
+    public fun groupPhoto(groupIdHex: String): StoredGroupPhoto? =
+        GroupSettingsStore.photo(applicationContext, currentAccountIdB64.get(), groupIdHex)
+
+    /** What [groupIdHex]'s messages take. A one-to-one always takes every
+     *  reaction (reactions-and-emoji section 9). */
+    public fun groupAllowedReactions(groupIdHex: String): AllowedReactions {
+        val record = groups[groupIdHex] ?: return AllowedReactions.All
+        val oneToOne = try {
+            record.group.groupKind() == GroupKind.ONE_TO_ONE
+        } catch (_: Throwable) {
+            false
+        }
+        if (oneToOne) return AllowedReactions.All
+        return GroupSettingsStore.reactions(applicationContext, currentAccountIdB64.get(), groupIdHex)?.reactions
+            ?: AllowedReactions.All
+    }
+
+    /** The group's @name, or `null` while none is held or the one held is not
+     *  verified (ADR-0087 section 3: fail closed, an unverifiable name is not
+     *  shown). */
+    public fun groupHandle(groupIdHex: String): StoredGroupHandle? =
+        GroupSettingsStore.handle(applicationContext, currentAccountIdB64.get(), groupIdHex)?.takeIf { it.verified }
+
+    /** When a handle verification last ran per group (in memory). */
+    private val handleVerifyAtMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    @Volatile
+    private var handleCertKeyCache: ByteArray? = null
+
+    /** The username / handle certificate verifying key: the build-time pin,
+     *  else the well-known key fetched once (the ADR-0060 username path). */
+    private suspend fun handleCertKey(): ByteArray? {
+        handleCertKeyCache?.let { return it }
+        val pinned = me.lakko.app.BuildConfig.LAKKO_USERNAME_CERT_KEY
+        val key = if (pinned.isNotBlank()) {
+            try {
+                me.lakko.app.auth.base64UrlDecodeNoPad(pinned).takeIf { it.size == 32 }
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        } else {
+            try {
+                discovery.fetchUsernameCertKey()
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (_: Throwable) {
+                null
+            }
+        }
+        handleCertKeyCache = key
+        return key
+    }
+
+    /**
+     * ADR-0087 section 3 — check a received @name's certificate against
+     * discovery's verifying key and the lookup key of the name it shows (one
+     * `discovery-lookup` token), and that the certificate's write key is the
+     * key that signed the in-group value. At most once a minute per group;
+     * a name that cannot be checked stays hidden.
+     */
+    private suspend fun verifyGroupHandleIfDue(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val stored = GroupSettingsStore.handle(applicationContext, accountIdB64, groupIdHex) ?: return
+        if (stored.verified) return
+        val now = System.currentTimeMillis()
+        val last = handleVerifyAtMs[groupIdHex]
+        if (last != null && now - last < HANDLE_VERIFY_RETRY_MS) return
+        handleVerifyAtMs[groupIdHex] = now
+        val key = handleCertKey() ?: return
+        val lookupKey = try {
+            discovery.oprfUsername(stored.handle).lookupKey
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (_: Throwable) {
+            return
+        }
+        val ok = try {
+            val cert = uniffi.lakko_ffi_uniffi.verifyHandleBinding(stored.certificate, key, lookupKey)
+            cert.writePk.contentEquals(
+                stored.certificate.copyOfRange(HANDLE_CERT_WRITE_KEY_START, HANDLE_CERT_WRITE_KEY_END),
+            )
+        } catch (_: Throwable) {
+            false
+        }
+        if (!ok) {
+            android.util.Log.i("ChatRepository", "ADR-0087 conversation handle certificate refused")
+            return
+        }
+        // Only if the row did not change while the check ran.
+        val now2 = GroupSettingsStore.handle(applicationContext, accountIdB64, groupIdHex)
+        if (now2 == stored) {
+            GroupSettingsStore.saveHandle(applicationContext, accountIdB64, groupIdHex, stored.copy(verified = true))
+            publishThreadList()
+        }
+    }
+
+    /** A stamp strictly above [stored] and not below the clock. */
+    private fun nextSettingStamp(stored: ULong?): ULong {
+        val now = System.currentTimeMillis().toULong()
+        return if (stored != null && stored >= now) stored + 1u else now
+    }
+
+    private fun receiveGroupSettingBestEffort(
+        group: Group,
+        groupIdHex: String,
+        senderKey: MemberIdentity?,
+        kind: GroupSettingKind,
+        bytes: ByteArray,
+    ) {
+        try {
+            receiveGroupSetting(group, groupIdHex, senderKey, kind, bytes)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0087 group setting ${kind.name} not applied", cause)
+        }
+    }
+
+    /**
+     * ADR-0087 — the receive gate of a group setting, inside the poll's locked
+     * apply region (per-group lock + provider lock held), so the role-table
+     * read, the stored-row read, the verdict and the write are one
+     * read-decide-write against CURRENT state (C-62 sub-invariant 5).
+     */
+    private fun receiveGroupSetting(
+        group: Group,
+        groupIdHex: String,
+        senderKey: MemberIdentity?,
+        kind: GroupSettingKind,
+        bytes: ByteArray,
+    ) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val senderBytes = senderKey?.let {
+            try {
+                java.util.Base64.getDecoder().decode(it)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        }
+        val groupKind = try {
+            group.groupKind()
+        } catch (_: Throwable) {
+            null
+        }
+        when (kind) {
+            GroupSettingKind.PHOTO -> {
+                if (!groupNameAppliesTo(groupKind)) return
+                val decoded = try {
+                    uniffi.lakko_ffi_uniffi.decodeGroupPhotoEnvelope(bytes)
+                } catch (_: Throwable) {
+                    return
+                }
+                val stored = GroupSettingsStore.photo(applicationContext, accountIdB64, groupIdHex)
+                val incoming = StoredGroupPhoto(me.lakko.app.profile.avatarRefsOf(decoded.avatar), decoded.updatedAtMs)
+                val verdict = ownerOrAdminVerdict(
+                    senderKey = senderBytes,
+                    owner = roleTableOwner(group),
+                    hasStored = stored != null,
+                    identical = stored == incoming,
+                    newer = { uniffi.lakko_ffi_uniffi.groupPhotoIsNewer(incoming.updatedAtMs, stored!!.updatedAtMs) },
+                )
+                if (!verdict.accepts || verdict == GroupNameVerdict.ACCEPT_IDENTICAL) {
+                    if (!verdict.accepts) android.util.Log.i("ChatRepository", "ADR-0087 group photo refused: $verdict")
+                    return
+                }
+                GroupSettingsStore.savePhoto(applicationContext, accountIdB64, groupIdHex, incoming)
+                deleteReplacedOwnGroupPhotoBlobs(accountIdB64, groupIdHex, incoming.avatar)
+            }
+            GroupSettingKind.REACTIONS -> {
+                if (!groupNameAppliesTo(groupKind)) return
+                val decoded = try {
+                    uniffi.lakko_ffi_uniffi.decodeGroupReactionsEnvelope(bytes)
+                } catch (_: Throwable) {
+                    return
+                }
+                val stored = GroupSettingsStore.reactions(applicationContext, accountIdB64, groupIdHex)
+                val incoming = StoredGroupReactions(allowedReactionsOf(decoded.reactions), decoded.updatedAtMs)
+                val verdict = ownerOrAdminVerdict(
+                    senderKey = senderBytes,
+                    owner = roleTableOwner(group),
+                    hasStored = stored != null,
+                    identical = stored == incoming,
+                    newer = { uniffi.lakko_ffi_uniffi.groupReactionsIsNewer(incoming.updatedAtMs, stored!!.updatedAtMs) },
+                )
+                if (!verdict.accepts || verdict == GroupNameVerdict.ACCEPT_IDENTICAL) {
+                    if (!verdict.accepts) android.util.Log.i("ChatRepository", "ADR-0087 group reactions refused: $verdict")
+                    return
+                }
+                GroupSettingsStore.saveReactions(applicationContext, accountIdB64, groupIdHex, incoming)
+            }
+            GroupSettingKind.HANDLE -> {
+                // Section 11 — no role check: the handle key's signature over
+                // the group id and the fields proves it, so any member relays
+                // it. The key is the one the certificate names
+                // (`version(1) ‖ lookup_key(64) ‖ write_pk(32) ‖ ...`).
+                val decoded = try {
+                    uniffi.lakko_ffi_uniffi.decodeConversationHandleEnvelope(bytes)
+                } catch (_: Throwable) {
+                    return
+                }
+                val cert = decoded.certificate
+                if (cert.size < HANDLE_CERT_WRITE_KEY_END) return
+                val writeKey = cert.copyOfRange(HANDLE_CERT_WRITE_KEY_START, HANDLE_CERT_WRITE_KEY_END)
+                val groupId = try {
+                    group.groupId()
+                } catch (_: Throwable) {
+                    return
+                }
+                try {
+                    uniffi.lakko_ffi_uniffi.verifyConversationHandle(decoded, groupId, writeKey)
+                } catch (_: Throwable) {
+                    android.util.Log.i("ChatRepository", "ADR-0087 conversation handle refused: signature")
+                    return
+                }
+                val stored = GroupSettingsStore.handle(applicationContext, accountIdB64, groupIdHex)
+                if (stored != null &&
+                    !uniffi.lakko_ffi_uniffi.conversationHandleIsNewer(decoded.updatedAtMs, stored.updatedAtMs)
+                ) {
+                    return
+                }
+                // A re-sent name with the same certificate keeps its check.
+                val sameCert = stored != null && stored.verified && stored.handle == decoded.handle &&
+                    stored.certificate.contentEquals(decoded.certificate)
+                GroupSettingsStore.saveHandle(
+                    applicationContext,
+                    accountIdB64,
+                    groupIdHex,
+                    StoredGroupHandle(
+                        handle = decoded.handle,
+                        public = decoded.public,
+                        updatedAtMs = decoded.updatedAtMs,
+                        certificate = decoded.certificate,
+                        signature = decoded.signature,
+                        verified = sameCert,
+                    ),
+                )
+                if (!sameCert) {
+                    handleVerifyAtMs.remove(groupIdHex)
+                    pushScope.launchSession {
+                        try {
+                            verifyGroupHandleIfDue(groupIdHex)
+                        } catch (cause: kotlinx.coroutines.CancellationException) {
+                            throw cause
+                        } catch (cause: Throwable) {
+                            android.util.Log.w("ChatRepository", "ADR-0087 handle verify failed", cause)
+                        }
+                    }
+                }
+                publishThreadList()
+            }
+            GroupSettingKind.KNOCK_SEED -> {
+                // Section 5 — the owner hands one admin `knock_seed(v)`, sealed
+                // to that admin's account key. Kept only when addressed to this
+                // account and sent by the live role table's owner (C-68).
+                val decoded = try {
+                    uniffi.lakko_ffi_uniffi.decodeKnockSeedEnvelope(bytes)
+                } catch (_: Throwable) {
+                    return
+                }
+                val groupId = try {
+                    group.groupId()
+                } catch (_: Throwable) {
+                    return
+                }
+                if (!decoded.journalId.contentEquals(groupId)) return
+                val own = ownAccountKey() ?: return
+                if (!decoded.memberAccountKey.contentEquals(own)) return
+                val owner = roleTableOrNull(group)?.owner ?: return
+                if (senderBytes == null || !owner.contentEquals(senderBytes)) return
+                val account = accountIdentity.get() ?: return
+                val seed = try {
+                    uniffi.lakko_ffi_uniffi.openKnockSeedEnvelope(bytes, account)
+                } catch (_: Throwable) {
+                    return
+                }
+                try {
+                    // The first seed given for a version is kept: a device of
+                    // the owner that derived a version from the wrong root
+                    // (before it learned of a rotation) cannot replace it.
+                    val held = GroupSettingsStore.knockSeed(applicationContext, accountIdB64, groupIdHex, decoded.knockVersion)
+                    if (held == null) {
+                        GroupSettingsStore.saveKnockSeed(applicationContext, accountIdB64, groupIdHex, decoded.knockVersion, seed)
+                    } else {
+                        held.fill(0)
+                    }
+                    // Section 5 — a newer version is the one new links carry.
+                    if (decoded.knockVersion > GroupSettingsStore.knockVersion(applicationContext, accountIdB64, groupIdHex)) {
+                        GroupSettingsStore.saveKnockVersion(applicationContext, accountIdB64, groupIdHex, decoded.knockVersion)
+                    }
+                } finally {
+                    seed.fill(0)
+                }
+            }
+        }
+    }
+
+    /**
+     * ADR-0087 18.1 — set (or with a `null` [avatar] remove) the group photo:
+     * compose, publish into the group, then store. Owner or admin only (the
+     * peers refuse anyone else); throws on a refused value or a failed send.
+     */
+    public suspend fun setGroupPhoto(groupIdHex: String, avatar: me.lakko.app.profile.AvatarRefs?) {
+        val identity = canonicalIdentity.get() ?: throw IllegalStateException("not bootstrapped")
+        val record = groups[groupIdHex] ?: throw IllegalStateException("unknown group")
+        val accountIdB64 = currentAccountIdB64.get() ?: throw IllegalStateException("no session")
+        // 4.5.2 — demoted while the crop screen was open: nothing is sent.
+        if (!mayChangeGroupSettings(groupIdHex)) throw GroupPhotoNotAllowed()
+        val ffi = avatar?.let { it.toFfi() ?: throw IllegalStateException("malformed photo") }
+        val stored = groupPhoto(groupIdHex)
+        val stamp = nextSettingStamp(stored?.updatedAtMs)
+        val envelope = forSession {
+            uniffi.lakko_ffi_uniffi.composeGroupPhotoEnvelope(
+                uniffi.lakko_ffi_uniffi.FfiGroupPhoto(avatar = ffi, updatedAtMs = stamp),
+            )
+        }
+        try {
+            forSession { broadcastControlToGroup(identity, groupIdHex, record.group, envelope) }
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException || !isNetworkFailure(cause)) throw cause
+            // 4.5.2 — uploaded, the device went offline: kept owed and sent
+            // when the device is back, also after a restart.
+            GroupSettingsStore.saveOwedPhoto(applicationContext, accountIdB64, groupIdHex, StoredGroupPhoto(avatar, stamp))
+            throw GroupPhotoOwed()
+        }
+        GroupSettingsStore.saveOwedPhoto(applicationContext, accountIdB64, groupIdHex, null)
+        GroupSettingsStore.savePhoto(applicationContext, accountIdB64, groupIdHex, StoredGroupPhoto(avatar, stamp))
+        if (avatar != null) {
+            val own = GroupSettingsStore.owedDeletes(applicationContext, accountIdB64, groupIdHex)
+            val mine = listOfNotNull(avatar.still, avatar.video).map { it.blobIdHex }
+            GroupSettingsStore.saveOwedDeletes(applicationContext, accountIdB64, groupIdHex, own + mine)
+        }
+        deleteReplacedOwnGroupPhotoBlobs(accountIdB64, groupIdHex, avatar)
+        publishThreadList()
+    }
+
+    /** Owner or admin of the group (or a group with no role table): may set
+     *  the photo, the reactions and the name. */
+    private suspend fun mayChangeGroupSettings(groupIdHex: String): Boolean {
+        val identity = canonicalIdentity.get() ?: return false
+        val record = groups[groupIdHex] ?: return false
+        return providerLock.sessionLock {
+            try {
+                when (record.group.ownRole(identity)) {
+                    Role.OWNER, Role.ADMIN -> true
+                    Role.MEMBER -> false
+                    null -> record.group.groupRoles() == null
+                }
+            } catch (_: Throwable) {
+                false
+            }
+        }
+    }
+
+    private fun isNetworkFailure(cause: Throwable): Boolean {
+        var c: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (c != null && seen.add(c)) {
+            if (c is me.lakko.app.ds.DsNetworkError || c is java.io.IOException) return true
+            c = c.cause
+        }
+        return false
+    }
+
+    /** 4.5.2 — send an owed photo once the device is back. Best effort. */
+    private suspend fun sendOwedGroupPhotoIfAny(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val owed = GroupSettingsStore.owedPhoto(applicationContext, accountIdB64, groupIdHex) ?: return
+        try {
+            setGroupPhoto(groupIdHex, owed.avatar)
+        } catch (_: GroupPhotoNotAllowed) {
+            GroupSettingsStore.saveOwedPhoto(applicationContext, accountIdB64, groupIdHex, null)
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (_: Throwable) {
+            // Still owed.
+        }
+    }
+
+    /** The photo shown while it is owed, for the header. */
+    public fun owedGroupPhoto(groupIdHex: String): StoredGroupPhoto? =
+        GroupSettingsStore.owedPhoto(applicationContext, currentAccountIdB64.get(), groupIdHex)
+
+    /**
+     * ADR-0087 18.5 — a photo this account uploaded that is no longer the
+     * group's goes from the server. The record of own uploads is this
+     * account's; [me.lakko.app.storage.BlobLifetime] keeps the delete owed
+     * and retries it.
+     */
+    private fun deleteReplacedOwnGroupPhotoBlobs(
+        accountIdB64: String,
+        groupIdHex: String,
+        current: me.lakko.app.profile.AvatarRefs?,
+    ) {
+        val own = GroupSettingsStore.owedDeletes(applicationContext, accountIdB64, groupIdHex)
+        if (own.isEmpty()) return
+        val keep = listOfNotNull(current?.still, current?.video).map { it.blobIdHex }.toSet()
+        val gone = own.filter { it !in keep }
+        if (gone.isEmpty()) return
+        val ids = gone.mapNotNull { hexToBytes(it)?.takeIf { b -> b.size == 32 } }
+        try {
+            if (ids.isNotEmpty()) me.lakko.app.storage.BlobLifetime.delete(applicationContext, ids)
+        } finally {
+            GroupSettingsStore.saveOwedDeletes(applicationContext, accountIdB64, groupIdHex, own.filter { it in keep })
+        }
+    }
+
+    /** ADR-0065 / ADR-0087 18.5 — the blob ids of the photos of the groups
+     *  this device owns or administers, for the keep tick. */
+    public suspend fun conversationPhotoBlobIds(): List<ByteArray> {
+        val accountIdB64 = currentAccountIdB64.get() ?: return emptyList()
+        val identity = canonicalIdentity.get() ?: return emptyList()
+        val out = ArrayList<ByteArray>()
+        for (groupIdHex in GroupSettingsStore.photoGroups(applicationContext, accountIdB64)) {
+            val record = groups[groupIdHex] ?: continue
+            val keeps = providerLock.sessionLock {
+                try {
+                    val role = record.group.ownRole(identity)
+                    role == Role.OWNER || role == Role.ADMIN
+                } catch (_: Throwable) {
+                    false
+                }
+            }
+            if (!keeps) continue
+            out += me.lakko.app.profile.avatarBlobIds(groupPhoto(groupIdHex)?.avatar)
+        }
+        return out
+    }
+
+    /**
+     * Reactions-and-emoji section 9 — set what the group's messages take.
+     * Owner or admin only; throws on a refused value or a failed send.
+     */
+    public suspend fun setGroupReactions(groupIdHex: String, reactions: AllowedReactions) {
+        val identity = canonicalIdentity.get() ?: throw IllegalStateException("not bootstrapped")
+        val record = groups[groupIdHex] ?: throw IllegalStateException("unknown group")
+        val accountIdB64 = currentAccountIdB64.get() ?: throw IllegalStateException("no session")
+        val ffi = reactions.toFfiAllowed()
+        uniffi.lakko_ffi_uniffi.validateAllowedReactions(ffi)
+        val stored = GroupSettingsStore.reactions(applicationContext, accountIdB64, groupIdHex)
+        val stamp = nextSettingStamp(stored?.updatedAtMs)
+        val envelope = forSession {
+            uniffi.lakko_ffi_uniffi.composeGroupReactionsEnvelope(
+                uniffi.lakko_ffi_uniffi.FfiGroupReactions(reactions = ffi, updatedAtMs = stamp),
+            )
+        }
+        forSession { broadcastControlToGroup(identity, groupIdHex, record.group, envelope) }
+        GroupSettingsStore.saveReactions(applicationContext, accountIdB64, groupIdHex, StoredGroupReactions(reactions, stamp))
+        publishThreadList()
+    }
+
+    /**
+     * The growth re-send: an owner / admin re-sends the stored photo and
+     * reactions with their ORIGINAL stamps; any member relays the stored
+     * handle verbatim (its signature is the owner's).
+     */
+    private suspend fun republishGroupSettingsIfHolder(groupIdHex: String): Boolean {
+        val identity = canonicalIdentity.get() ?: return false
+        val record = groups[groupIdHex] ?: return false
+        if (readIsActive { record.group.isActive() } == false) return false
+        val accountIdB64 = currentAccountIdB64.get() ?: return false
+        val mayResend = try {
+            when (record.group.ownRole(identity)) {
+                Role.OWNER, Role.ADMIN -> true
+                Role.MEMBER -> false
+                null -> record.group.groupRoles() == null
+            }
+        } catch (_: Throwable) {
+            false
+        }
+        val envelopes = ArrayList<ByteArray>()
+        if (mayResend) {
+            GroupSettingsStore.photo(applicationContext, accountIdB64, groupIdHex)?.let { p ->
+                val ffi = p.avatar?.toFfi()
+                if (p.avatar == null || ffi != null) {
+                    runCatching {
+                        uniffi.lakko_ffi_uniffi.composeGroupPhotoEnvelope(
+                            uniffi.lakko_ffi_uniffi.FfiGroupPhoto(avatar = ffi, updatedAtMs = p.updatedAtMs),
+                        )
+                    }.getOrNull()?.let(envelopes::add)
+                }
+            }
+            GroupSettingsStore.reactions(applicationContext, accountIdB64, groupIdHex)?.let { r ->
+                runCatching {
+                    uniffi.lakko_ffi_uniffi.composeGroupReactionsEnvelope(
+                        uniffi.lakko_ffi_uniffi.FfiGroupReactions(reactions = r.reactions.toFfiAllowed(), updatedAtMs = r.updatedAtMs),
+                    )
+                }.getOrNull()?.let(envelopes::add)
+            }
+        }
+        GroupSettingsStore.handle(applicationContext, accountIdB64, groupIdHex)?.let { h ->
+            runCatching { uniffi.lakko_ffi_uniffi.composeConversationHandleEnvelope(h.toFfi()) }
+                .getOrNull()?.let(envelopes::add)
+        }
+        if (envelopes.isEmpty()) return false
+        var sent = false
+        for (envelope in envelopes) {
+            try {
+                broadcastControlToGroup(identity, groupIdHex, record.group, envelope)
+                sent = true
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0087 group setting not re-sent", cause)
+            }
+        }
+        return sent
+    }
+
+    /**
+     * ADR-0087 — whether this account is the group's owner, for the knock key,
+     * links and handle writes. The role table names the owner by an account
+     * key; after an ADR-0074 rotation that may be the conversation key this
+     * device's leaf is bound under rather than the current identity key, so
+     * every key this account answers to is accepted. Provider critical path.
+     */
+    private fun ownsGroupAsOwner(group: Group): Boolean {
+        val owner = roleTableOrNull(group)?.owner ?: return false
+        val candidates = listOfNotNull(
+            ownAccountKey(),
+            try {
+                publishedAccountIdentity.get()?.signaturePublicKey()
+            } catch (_: Throwable) {
+                null
+            },
+            ownIdentity(group)?.let {
+                try {
+                    java.util.Base64.getDecoder().decode(it)
+                } catch (_: IllegalArgumentException) {
+                    null
+                }
+            },
+        )
+        return candidates.any { it.contentEquals(owner) }
+    }
+
+    /** Section 5 — the knock seed of [version] this device can read rows
+     *  with: derived when this account owns the journal, else the one the
+     *  owner handed this admin. The caller wipes it. */
+    private fun knockSeedFor(record: GroupRecord, groupIdHex: String, version: UShort): ByteArray? {
+        // A stored seed first: one the owner handed this admin, or a version
+        // derived from a predecessor's root before an ADR-0074 rotation moved
+        // the root (section 5).
+        GroupSettingsStore.knockSeed(applicationContext, currentAccountIdB64.get(), groupIdHex, version)?.let { return it }
+        if (ownsGroupAsOwner(record.group)) {
+            val account = rootAccountIdentity() ?: return null
+            val root = try {
+                uniffi.lakko_ffi_uniffi.dsJournalRootSeed(account.ed25519Seed(), record.groupId)
+            } catch (_: Throwable) {
+                return null
+            }
+            return try {
+                uniffi.lakko_ffi_uniffi.groupKnockSeed(root, version)
+            } catch (_: Throwable) {
+                null
+            } finally {
+                root.fill(0)
+            }
+        }
+        return null
+    }
+
+    /** Section 5 — the knock key a link names (the group's current version),
+     *  or with [version] a given one; `null` when this device holds no seed. */
+    private fun groupKnockKeyFor(
+        record: GroupRecord,
+        groupIdHex: String,
+        version: UShort = GroupSettingsStore.knockVersion(applicationContext, currentAccountIdB64.get(), groupIdHex),
+    ): Pair<ByteArray, UShort>? {
+        val seed = knockSeedFor(record, groupIdHex, version) ?: return null
+        return try {
+            uniffi.lakko_ffi_uniffi.groupKnockPublicKey(seed) to version
+        } catch (_: Throwable) {
+            null
+        } finally {
+            seed.fill(0)
+        }
+    }
+
+    /** Section 5 — the owner hands each admin the knock seed, once per session
+     *  per admin (the receiver keeps the newest; a repeat is harmless). */
+    private suspend fun deliverKnockSeedsBestEffort(
+        identity: Identity,
+        record: GroupRecord,
+        groupIdHex: String,
+        admins: List<ByteArray>,
+    ) {
+        val own = ownAccountKey() ?: return
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        // Section 5 — removing an admin bumps the version: the owner hands the
+        // next seed only to the admins who remain, and new links carry it.
+        // Older versions stay derivable, so requests sealed to them still open.
+        val current = admins.filter { !it.contentEquals(own) }.map { me.lakko.app.ds.hexOf(it) }.toSet()
+        val held = GroupSettingsStore.knockVersion(applicationContext, accountIdB64, groupIdHex)
+        val version = nextKnockVersion(GroupSettingsStore.knockAdmins(applicationContext, accountIdB64, groupIdHex), current, held)
+        if (version != held) {
+            GroupSettingsStore.saveKnockVersion(applicationContext, accountIdB64, groupIdHex, version)
+            knockSeedsSent.removeAll { it.startsWith("$groupIdHex:") }
+            // The account's other devices learn the bump from the seeds this
+            // device addresses to its own account (owed until sent).
+            GroupSettingsStore.saveKnockSelfOwed(applicationContext, accountIdB64, groupIdHex, true)
+            // The public record is republished after a bump: recorded owed now,
+            // durably, and sent by the handle maintenance until it lands.
+            GroupSettingsStore.handle(applicationContext, accountIdB64, groupIdHex)?.takeIf { it.public }?.let { h ->
+                if (GroupSettingsStore.owedTypeChange(applicationContext, accountIdB64, groupIdHex) == null) {
+                    GroupSettingsStore.saveOwedTypeChange(applicationContext, accountIdB64, groupIdHex, true to h.handle)
+                }
+            }
+        }
+        GroupSettingsStore.saveKnockAdmins(applicationContext, accountIdB64, groupIdHex, current)
+        // Every version up to the current one, so rows from older links (and
+        // from before a rotation) still open on an admin's device; a removed
+        // admin gets nothing new.
+        val versions = (0..version.toInt()).map { it.toUShort() }
+        // Section 5 — after a bump or a rotation on THIS device, the owner's
+        // other devices are told: the seeds of every version it holds, sealed
+        // to the own account key. A receiving device of the account keeps them
+        // as given seeds and raises its current version from them.
+        if (GroupSettingsStore.knockSelfOwed(applicationContext, accountIdB64, groupIdHex)) {
+            try {
+                val x25519 = accountIdentity.get()?.x25519PublicKey()
+                if (x25519 != null) {
+                    for (v in versions) {
+                        val seed = knockSeedFor(record, groupIdHex, v) ?: continue
+                        val envelope = try {
+                            uniffi.lakko_ffi_uniffi.composeKnockSeedEnvelope(record.groupId, own, x25519, v, seed)
+                        } finally {
+                            seed.fill(0)
+                        }
+                        broadcastControlToGroup(identity, groupIdHex, record.group, envelope)
+                    }
+                    GroupSettingsStore.saveKnockSelfOwed(applicationContext, accountIdB64, groupIdHex, false)
+                }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0087 own knock seeds not delivered; still owed", cause)
+            }
+        }
+        for (admin in admins) {
+            if (admin.contentEquals(own)) continue
+            val tag = groupIdHex + ":" + me.lakko.app.ds.hexOf(admin)
+            if (tag in knockSeedsSent) continue
+            try {
+                val x25519 = memberX25519KeyOrNull(admin) ?: continue
+                for (v in versions) {
+                    val seed = knockSeedFor(record, groupIdHex, v) ?: continue
+                    val envelope = try {
+                        uniffi.lakko_ffi_uniffi.composeKnockSeedEnvelope(
+                            record.groupId,
+                            admin,
+                            x25519,
+                            v,
+                            seed,
+                        )
+                    } finally {
+                        seed.fill(0)
+                    }
+                    broadcastControlToGroup(identity, groupIdHex, record.group, envelope)
+                }
+                knockSeedsSent.add(tag)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0087 knock seed not delivered", cause)
+            }
+        }
+    }
+
+    /** What one sealed knock row opened to. */
+    private class OpenedKnock(
+        val joinerSignatureKey: ByteArray,
+        val keyPackage: ByteArray,
+        val replyGrant: uniffi.lakko_ffi_uniffi.FfiReachGrant,
+    )
+
+    /**
+     * Section 5 — open one sealed knock row and keep its KeyPackage as a
+     * request to join. A private group takes a row only with a capability of
+     * this group; a full queue stops the cursor before the row.
+     */
+    private fun openSealedKnock(
+        record: GroupRecord,
+        groupIdHex: String,
+        identity: Identity,
+        bytes: ByteArray,
+    ): Pair<SealedKnockStep, OpenedKnock?> {
+        val version = uniffi.lakko_ffi_uniffi.knockRowVersion(bytes) ?: return SealedKnockStep.DROP to null
+        val seed = knockSeedFor(record, groupIdHex, version) ?: return SealedKnockStep.DROP to null
+        val request = try {
+            uniffi.lakko_ffi_uniffi.openKnockRow(seed, bytes)
+        } catch (_: Throwable) {
+            return SealedKnockStep.DROP to null
+        } finally {
+            seed.fill(0)
+        }
+        val capability = request.capability
+        val byLink = capability != null && try {
+            uniffi.lakko_ffi_uniffi.GroupInviteCapability.decodeAndVerify(capability).use {
+                it.groupId().contentEquals(record.groupId)
+            }
+        } catch (_: Throwable) {
+            false
+        }
+        val public = groupHandle(groupIdHex)?.public == true
+        if (!byLink && !public) return SealedKnockStep.DROP to null
+        val kept = try {
+            record.group.retainJoinRequest(identity, request.keyPackage)
+        } catch (_: Throwable) {
+            return SealedKnockStep.DROP to null
+        }
+        return when (kept.outcome) {
+            uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.RETAINED,
+            uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.ALREADY_PENDING,
+            -> SealedKnockStep.KEEP to OpenedKnock(kept.joinerSignatureKey, request.keyPackage, request.replyGrant)
+            uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.QUEUE_FULL -> SealedKnockStep.STOP to null
+            uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.ALREADY_MEMBER,
+            uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.NOT_ADMISSIBLE,
+            -> SealedKnockStep.DROP to null
+        }
+    }
+
+    /** ADR-0060 section 6 — keep the reply key a knock carried for the
+     *  joiner's account, so the sweep can write the Welcome into its mailbox. */
+    private fun keepKnockReplyGrant(opened: OpenedKnock) {
+        if (opened.replyGrant.`class` != uniffi.lakko_ffi_uniffi.FfiReachClass.REPLY) return
+        val account = try {
+            uniffi.lakko_ffi_uniffi.keyPackageAccountKey(opened.keyPackage)
+        } catch (_: Throwable) {
+            null
+        } ?: opened.joinerSignatureKey
+        if (!me.lakko.app.contacts.grantBindsTo(opened.replyGrant, account, mailboxCrypto)) return
+        try {
+            me.lakko.app.reach.ReachManager.get(applicationContext).keepHeld(account, opened.replyGrant, scopeHex = "")
+        } catch (_: Throwable) {
+            // Best effort: the Welcome waits owed until a grant arrives.
+        }
+    }
+
+    /** The profile a knock carries: name and photo, no grants. Empty when
+     *  none is stored. */
+    private fun ownKnockProfile(): ByteArray {
+        val accountIdB64 = currentAccountIdB64.get() ?: return ByteArray(0)
+        val accountId = try {
+            java.util.Base64.getDecoder().decode(accountIdB64)
+        } catch (_: IllegalArgumentException) {
+            return ByteArray(0)
+        }
+        return try {
+            me.lakko.app.profile.OwnProfileStore.load(applicationContext, accountId)
+                ?.toFfi(accountId = accountId, shareUsername = false)
+                ?.let { uniffi.lakko_ffi_uniffi.composeProfileEnvelope(it) }
+                ?: ByteArray(0)
+        } catch (_: Throwable) {
+            ByteArray(0)
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0087 sections 2-5, 8 and 11 — the group's @name and type, and a
+    // request to join from search
+    // -----------------------------------------------------------------
+
+    /** What a public record of [groupIdHex] says, or `null` when the group
+     *  has no name (a public group needs one) or no knock key. */
+    private suspend fun publicFactsFor(groupIdHex: String): PublicGroupFacts? {
+        val record = groups[groupIdHex] ?: return null
+        val name = groupName(groupIdHex)?.name?.takeIf { it.isNotBlank() } ?: return null
+        // Section 5 — the record names the group's current knock key and its
+        // version; a searcher seals to that version.
+        val knock = providerLock.sessionLock { groupKnockKeyFor(record, groupIdHex) } ?: return null
+        return PublicGroupFacts(
+            name = name,
+            description = "",
+            memberCount = memberCount(groupIdHex) ?: 1,
+            knockPublicKey = knock.first,
+            avatar = groupPhoto(groupIdHex)?.avatar,
+            knockVersion = knock.second,
+        )
+    }
+
+    /**
+     * Section 11 — `Delete group`, for an owner alone: retire the @name (a
+     * network failure throws and changes nothing), then end the conversation
+     * as section 9 does, so the `conversation_ended` register reaches every
+     * device of the account and each wipes it (`deleteAfterEndedElsewhere`).
+     */
+    public suspend fun deleteSoloGroup(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: throw IllegalStateException("no session")
+        val record = groups[groupIdHex] ?: throw IllegalStateException("unknown group")
+        val account = rootAccountIdentity() ?: throw IllegalStateException("no account")
+        groupHandle(groupIdHex)?.let { h ->
+            retireGroupHandle(discovery, account.ed25519Seed(), record.groupId, h.handle)
+        }
+        val epoch = providerLock.sessionLock { runCatching { record.group.epoch() }.getOrDefault(0uL) }
+        val hex = groupIdHex.lowercase()
+        if (!membershipEnds.save(accountIdB64, appliedEnd(hex, groupName(hex)?.name.orEmpty(), true, epoch))) {
+            throw IllegalStateException("end not recorded")
+        }
+        endingGroups += hex
+        publishThreadList()
+        pushScope.launchSession { runOwedMembershipEnds() }
+    }
+
+    /** Section 3.3 — the live check while typing a public @name: `true` when
+     *  the name answers a lookup, `null` when it could not be asked. */
+    public suspend fun handleVisiblyTaken(handle: String): Boolean? = try {
+        discovery.nameAnswers(canonicalHandleInput(handle))
+    } catch (cause: kotlinx.coroutines.CancellationException) {
+        throw cause
+    } catch (_: Throwable) {
+        null
+    }
+
+    /** Section 5 — the public groups and channels matching [query]. */
+    public suspend fun searchPublicConversations(query: String): List<FoundConversation> =
+        me.lakko.app.chat.searchPublicConversations(discovery, query)
+
+    /** Section 10 — whether this device created the group. */
+    public fun createdGroup(groupIdHex: String): Boolean =
+        GroupSettingsStore.created(applicationContext, currentAccountIdB64.get(), groupIdHex)
+
+    /** Whether this device holds the group [groupIdHex] (search's `Open`).
+     *  A held group also clears its `Requests sent` row (joined, 6.2). */
+    public fun holdsGroup(groupIdHex: String): Boolean {
+        val held = groups.containsKey(groupIdHex.lowercase())
+        if (held) RequestsSentStore.drop(applicationContext, groupIdHex)
+        return held
+    }
+
+    /** Section 6.2 — the requests this device sent, opened for the bound
+     *  account; joined ones leave. */
+    public fun requestsSent(): StateFlow<List<SentRequest>> {
+        currentAccountIdB64.get()?.let { RequestsSentStore.open(applicationContext, it) }
+        for (r in RequestsSentStore.rows.value) {
+            if (groups.containsKey(r.idHex)) RequestsSentStore.drop(applicationContext, r.idHex)
+        }
+        return RequestsSentStore.rows
+    }
+
+    /** Section 3.1 — the @name claim a New group form runs before the group
+     *  leaves the device ([startGroupAlone]'s hook). */
+    public suspend fun claimHandleForNewGroup(
+        groupId: ByteArray,
+        handle: String,
+        public: Boolean,
+        facts: PublicGroupFacts?,
+    ): SignedGroupHandle {
+        val account = rootAccountIdentity() ?: throw IllegalStateException("no account")
+        return claimGroupHandle(discovery, account.ed25519Seed(), groupId, handle, public, facts)
+    }
+
+    /** Store a handle this owner just wrote and send it into the group. */
+    public suspend fun adoptSignedHandle(groupIdHex: String, signed: SignedGroupHandle) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        // The owner's own write: the certificate came from discovery in the
+        // answer to this device's own signed statement.
+        GroupSettingsStore.saveHandle(applicationContext, accountIdB64, groupIdHex, signed.stored.copy(verified = true))
+        // Section 3 — the lease the write answered.
+        val lease = signed.leaseUntilMs ?: (System.currentTimeMillis() + HANDLE_LEASE_MS)
+        GroupSettingsStore.saveLeaseUntil(applicationContext, accountIdB64, groupIdHex, lease)
+        publishThreadList()
+        val identity = canonicalIdentity.get() ?: return
+        val record = groups[groupIdHex] ?: return
+        try {
+            forSession { broadcastControlToGroup(identity, groupIdHex, record.group, signed.envelope) }
+        } catch (cause: Throwable) {
+            // The growth re-send relays it later; the name is held either way.
+            android.util.Log.w("ChatRepository", "ADR-0087 handle envelope not sent", cause)
+        }
+    }
+
+    /**
+     * Section 3.1 / 4.4 — take [handle] for a group this account owns, public
+     * or private, and tell the members. Throws [me.lakko.app.discovery.HandleWriteError]
+     * (`name-taken`, ...) or a network error; the caller maps it to copy.
+     */
+    public suspend fun claimHandleForGroup(groupIdHex: String, handle: String, public: Boolean) {
+        val record = groups[groupIdHex] ?: throw IllegalStateException("unknown group")
+        val account = rootAccountIdentity() ?: throw IllegalStateException("no account")
+        val facts = if (public) publicFactsFor(groupIdHex) ?: throw IllegalStateException("public group needs a name") else null
+        val signed = claimGroupHandle(discovery, account.ed25519Seed(), record.groupId, handle, public, facts)
+        adoptSignedHandle(groupIdHex, signed)
+    }
+
+    /**
+     * Section 4.1 / 8 — the owner's Group type screen: flip public / private
+     * and, when [newHandle] differs, move to it. Going private re-sends the
+     * photo under a fresh key (18.3).
+     */
+    public suspend fun changeGroupType(groupIdHex: String, public: Boolean, newHandle: String) {
+        // Section 8 — recorded as owed before the first step, retried until it
+        // lands ([maintainGroupHandleIfDue]).
+        currentAccountIdB64.get()?.let {
+            GroupSettingsStore.saveOwedTypeChange(applicationContext, it, groupIdHex, public to canonicalHandleInput(newHandle))
+        }
+        changeGroupTypeNow(groupIdHex, public, newHandle)
+    }
+
+    private suspend fun changeGroupTypeNow(groupIdHex: String, public: Boolean, newHandle: String) {
+        val record = groups[groupIdHex] ?: throw IllegalStateException("unknown group")
+        val account = rootAccountIdentity() ?: throw IllegalStateException("no account")
+        val current = groupHandle(groupIdHex)
+        val facts = if (public) publicFactsFor(groupIdHex) ?: throw IllegalStateException("public group needs a name") else null
+        val wanted = canonicalHandleInput(newHandle)
+        val signed = when {
+            current == null -> claimGroupHandle(discovery, account.ed25519Seed(), record.groupId, wanted, public, facts)
+            current.handle != wanted ->
+                replaceGroupHandle(discovery, account.ed25519Seed(), record.groupId, current.handle, wanted, public, facts)
+            else -> updateGroupHandle(discovery, account.ed25519Seed(), record.groupId, wanted, public, facts)
+        }
+        adoptSignedHandle(groupIdHex, signed)
+        currentAccountIdB64.get()?.let { GroupSettingsStore.saveOwedTypeChange(applicationContext, it, groupIdHex, null) }
+        if (current?.public == true && !public) reuploadGroupPhotoBestEffort(groupIdHex)
+    }
+
+    /** Lease renewals this session (section 3: at most 20 per foreground
+     *  session). */
+    private val leaseRenewalsThisSession = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /**
+     * Section 3 / 8 — at the tail of a poll on an owner device: retry an owed
+     * public / private change, and renew a handle whose lease has fewer than
+     * 90 days left (at most 20 renewals a session). Best effort.
+     */
+    private suspend fun maintainGroupHandleIfDue(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val record = groups[groupIdHex] ?: return
+        val owner = providerLock.sessionLock { ownsGroupAsOwner(record.group) }
+        if (!owner) return
+        // Section 3 — a rekey owed after the owner's rotation goes first: every
+        // other handle write is signed with the new key.
+        GroupSettingsStore.owedRekeySeed(applicationContext, accountIdB64, groupIdHex)?.let { oldSeed ->
+            try {
+                val stored = GroupSettingsStore.handle(applicationContext, accountIdB64, groupIdHex)
+                if (stored == null) {
+                    GroupSettingsStore.saveOwedRekeySeed(applicationContext, accountIdB64, groupIdHex, null)
+                } else {
+                    val account = rootAccountIdentity() ?: return
+                    val signed = rekeyGroupHandle(
+                        discovery,
+                        oldSeed,
+                        account.ed25519Seed(),
+                        record.groupId,
+                        stored.handle,
+                        stored.public,
+                    )
+                    // Re-sends the in-group envelope under the new key.
+                    adoptSignedHandle(groupIdHex, signed)
+                    GroupSettingsStore.saveOwedRekeySeed(applicationContext, accountIdB64, groupIdHex, null)
+                }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (_: Throwable) {
+                android.util.Log.i("ChatRepository", "ADR-0087 owed handle rekey not applied yet")
+                return
+            } finally {
+                oldSeed.fill(0)
+            }
+        }
+        GroupSettingsStore.owedTypeChange(applicationContext, accountIdB64, groupIdHex)?.let { (public, handle) ->
+            try {
+                changeGroupTypeNow(groupIdHex, public, handle)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.i("ChatRepository", "ADR-0087 owed type change not applied yet")
+            }
+            return
+        }
+        val handle = groupHandle(groupIdHex) ?: return
+        val until = GroupSettingsStore.leaseUntil(applicationContext, accountIdB64, groupIdHex)
+        val now = System.currentTimeMillis()
+        if (until != null && until - now > HANDLE_RENEW_BEFORE_MS) return
+        if (leaseRenewalsThisSession.incrementAndGet() > HANDLE_RENEWALS_PER_SESSION) return
+        try {
+            changeGroupTypeNow(groupIdHex, handle.public, handle.handle)
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.i("ChatRepository", "ADR-0087 handle lease not renewed yet")
+        }
+    }
+
+    /** 18.3 — a group that went private sends its photo again under a fresh
+     *  key, so the keys the public record carried open nothing new. */
+    private suspend fun reuploadGroupPhotoBestEffort(groupIdHex: String) {
+        val photo = groupPhoto(groupIdHex)?.avatar ?: return
+        try {
+            val stillBytes = me.lakko.app.avatar.AvatarImages.cache(applicationContext).get(photo.still.blobIdHex) ?: return
+            val still = AttachmentBridge.encryptAndUpload(bytes = stillBytes, mime = "image/jpeg", name = null)
+            val stillBlob = me.lakko.app.profile.avatarBlobOf(still.blobId, still.key, still.nonce, stillBytes.size.toLong(), photo.still.side)
+            me.lakko.app.avatar.AvatarImages.putOwn(applicationContext, stillBlob, stillBytes)
+            setGroupPhoto(groupIdHex, me.lakko.app.profile.AvatarRefs(still = stillBlob))
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0087 18.3 photo not re-sent", cause)
+        }
+    }
+
+    /** Section 11 — retire the group's @name (Delete group), best effort. */
+    public suspend fun retireGroupHandleBestEffort(groupIdHex: String) {
+        val record = groups[groupIdHex] ?: return
+        val handle = groupHandle(groupIdHex) ?: return
+        val account = rootAccountIdentity() ?: return
+        try {
+            retireGroupHandle(discovery, account.ed25519Seed(), record.groupId, handle.handle)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0087 handle not retired", cause)
+        }
+    }
+
+    /**
+     * Section 5 / UX 5.1 — ask to join a public group found in search: a
+     * fresh KeyPackage sealed to the knock key its record names, with a
+     * reply grant and the own profile, no capability. One `ds-knock` token.
+     */
+    public suspend fun requestToJoinPublicGroup(found: FoundConversation) {
+        sendKnockFromSearch(found.id, found.knockOrReadKey, found.knockVersion, found.kind)
+        val hex = found.id.joinToString("") { "%02x".format(it) }
+        currentAccountIdB64.get()?.let { RequestsSentStore.open(applicationContext, it) }
+        RequestsSentStore.record(
+            applicationContext,
+            SentRequest(
+                idHex = hex,
+                name = found.name,
+                handle = found.handle,
+                sentAtMs = System.currentTimeMillis(),
+                avatar = found.avatar,
+                knockKeyB64 = java.util.Base64.getEncoder().encodeToString(found.knockOrReadKey),
+                knockVersion = found.knockVersion.toInt(),
+            ),
+        )
+    }
+
+    /** Section 6.2 — `Ask again` on a request older than 7 days. */
+    public suspend fun askAgain(request: SentRequest) {
+        val id = hexToBytes(request.idHex) ?: throw IllegalArgumentException("bad id")
+        val key = java.util.Base64.getDecoder().decode(request.knockKeyB64)
+        sendKnockFromSearch(id, key, request.knockVersion.toUShort(), uniffi.lakko_ffi_uniffi.FfiHandleRecordKind.GROUP)
+        RequestsSentStore.record(applicationContext, request.copy(sentAtMs = System.currentTimeMillis()))
+    }
+
+    private suspend fun sendKnockFromSearch(
+        groupId: ByteArray,
+        knockKey: ByteArray,
+        knockVersion: UShort,
+        kind: uniffi.lakko_ffi_uniffi.FfiHandleRecordKind,
+    ) {
+        val found = object {
+            val id = groupId
+            val knockOrReadKey = knockKey
+            val kind = kind
+        }
+        val identity = canonicalIdentity.get() ?: throw IllegalStateException("not bootstrapped")
+        if (found.kind != uniffi.lakko_ffi_uniffi.FfiHandleRecordKind.GROUP || found.id.size != 32) {
+            throw IllegalArgumentException("not a group")
+        }
+        ensureSession()
+        val grant = me.lakko.app.reach.ReachManager.get(applicationContext).mintReply(toKey = found.id)
+        val row = forSession {
+            providerLock.sessionLock {
+                val keyPackage = identity.createKeyPackage()
+                persistSnapshotDurableOrThrow()
+                uniffi.lakko_ffi_uniffi.sealKnockRow(
+                    found.knockOrReadKey,
+                    knockVersion,
+                    keyPackage,
+                    grant,
+                    ownKnockProfile(),
+                    null,
+                )
+            }
+        }
+        dsClient.knock(found.id, listOf(row))
+    }
+
+    // -----------------------------------------------------------------
     // ADR-0073 "Phase 2 revised: silent continuity" - a member's account-key
     // reset was ACCEPTED by the identity gate. Nothing here has a surface: no
     // copy, no row, no flag (R.0).
@@ -6654,11 +7816,19 @@ public class ChatRepository(
         targetMessageId: Long,
         text: String,
         emoji: String?,
+        reactionAdd: Boolean = true,
     ) {
         val record = groups[groupIdHex] ?: return
         groupLock(groupIdHex).withLock {
             val ownKey = providerLock.withLock { ownIdentity(record.group) }
-            record.applyOwnOp(op = op, target = targetMessageId, text = text, emoji = emoji, ownKey = ownKey)
+            record.applyOwnOp(
+                op = op,
+                target = targetMessageId,
+                text = text,
+                emoji = emoji,
+                ownKey = ownKey,
+                reactionAdd = reactionAdd,
+            )
             persistMessageLogBestEffort()
             publishThreadList()
         }
@@ -8909,6 +10079,10 @@ public class ChatRepository(
                 scopedSink = { senderKey, kind, bytes ->
                     receiveScopedEnvelopeBestEffort(record.group, groupIdHex, senderKey, kind, bytes)
                 },
+                groupSettingSink = { senderKey, kind, bytes ->
+                    // ADR-0087 — inside the locked apply region (C-62 sub-invariant 5).
+                    receiveGroupSettingBestEffort(record.group, groupIdHex, senderKey, kind, bytes)
+                },
                 groupNameSink = { senderKey, name ->
                     // ADR-0051 — inside the poll's locked apply region, where
                     // the role table read and the store write are serialized
@@ -9172,6 +10346,17 @@ public class ChatRepository(
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "ADR-0060 committer envelope pass failed", cause)
         }
+        // ADR-0087 sections 3 and 8 — the owner's lease renewal and any owed
+        // public / private change. Best effort.
+        try {
+            sendOwedGroupPhotoIfAny(groupIdHex)
+            verifyGroupHandleIfDue(groupIdHex)
+            maintainGroupHandleIfDue(groupIdHex)
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0087 handle maintenance failed", cause)
+        }
         // ADR-0053 client contract point 7 — an owner / admin also reads what
         // non-members knocked, into the same classifier. Best effort.
         try {
@@ -9233,26 +10418,28 @@ public class ChatRepository(
                 // the ordinary receive path: a knock is an unauthenticated
                 // write, and a member could knock a real commit (see
                 // `KnockGate.kt`). A refused row is dropped, the cursor moves.
-                val drained = drainKnockRows(raw.messages, after) { bytes ->
-                    record.group.processKnock(identity, bytes)
+                // ADR-0087 section 5 — a knock row is a KeyPackage sealed to
+                // the group's knock key: opened with the seed of the row's own
+                // version and kept through `retainJoinRequest`. A full pending
+                // set stops the cursor before the row.
+                val drained = drainSealedKnockRows(raw.messages, after) { bytes ->
+                    openSealedKnock(record, groupIdHex, identity, bytes)
                 }
-                val events = drained.accepted.mapNotNull { (row, processed) ->
-                    if (processed !is uniffi.lakko_ffi_uniffi.ProcessedMessage.ExternalJoinProposal) {
-                        return@mapNotNull null
-                    }
+                val events = drained.accepted.map { (row, opened) ->
                     IncomingChatEvent.ExternalJoinRequest(
                         messageId = row.id,
-                        joinerSignatureKey = processed.joinerSignatureKey,
-                        retained = processed.retained,
+                        joinerSignatureKey = opened.joinerSignatureKey,
+                        retained = true,
                         createdAt = row.createdAt,
                     )
                 }
                 record.consumeEvents(events = events)
-                // ADR-0060 §6 — a `/g/` joiner's attribution carries its reply
-                // key: kept for the joiner's account (named by the retained
-                // KeyPackage's device binding), so the sweep that admits it
-                // can write the Welcome into its closed mailbox.
-                keepJoinerReplyGrantsBestEffort(record, raw.messages)
+                // ADR-0060 §6 — the knock carries the joiner's reply key: kept
+                // for the joiner's account, so the sweep that admits it can
+                // write the Welcome into its closed mailbox.
+                for ((_, opened) in drained.accepted) keepKnockReplyGrant(opened)
+                record.knockQueueFull = drained.cursor < (raw.messages.lastOrNull()?.id ?: drained.cursor)
+                record.lastSeenKnockId = maxOf(record.lastSeenKnockId, raw.messages.lastOrNull()?.id ?: 0L)
                 // The retained request set lives in the provider (ADR-0027).
                 if (drained.accepted.isNotEmpty()) persistSnapshotBestEffort()
                 record.knockCursor = drained.cursor
@@ -10220,6 +11407,8 @@ public class ChatRepository(
         profileRepublish.reset()
         // ADR-0051 — and the group-name re-send timing with it.
         groupNameRepublish.reset()
+        groupSettingsRepublish.reset()
+        knockSeedsSent.clear()
         // ADR-0052 decision 3 — and the pin re-send timing.
         pinRepublish.reset()
         // A previous session's group-call records name calls in groups this
@@ -11095,6 +12284,8 @@ public class ChatRepository(
                 ensureSession()
                 result.sentSet?.let { sentRegistrarSets[groupIdHex] = it }
                 store.put(accountIdB64, groupIdHex, result.delivered)
+                // ADR-0087 section 5 — and the knock seed to each admin.
+                deliverKnockSeedsBestEffort(identity, record, groupIdHex, table.admins)
                 if (result.complete) appointmentAttemptAtMs.remove(groupIdHex) else appointmentAttemptAtMs[groupIdHex] = now
                 android.util.Log.i(
                     "ChatRepository",
@@ -11568,6 +12759,9 @@ public class ChatRepository(
             val oldAccountSeed = Identity.fromSeed(predecessorSeed).use { it.ed25519Seed() }
             try {
                 for ((groupIdHex, groupId) in owned) {
+                    // ADR-0087 sections 3 and 5 — the moved root moves every
+                    // knock seed and the handle key: owed steps of the rotation.
+                    moveKnockAndHandleOnRotation(accountIdB64, groupIdHex, groupId, oldAccountSeed)
                     val held = journalOwnershipStore.pendingRootSeeds.get(accountIdB64, groupIdHex)
                     if (held != null) {
                         // An earlier run (or an ownership handover) already
@@ -11596,6 +12790,77 @@ public class ChatRepository(
             android.util.Log.i("ChatRepository", "ADR-0074: ${owned.size} owned journal root transfer(s) scheduled")
             owned.size
         }
+
+    /**
+     * ADR-0087 section 5 (added 2026-11-03) and section 3 — on the owner's
+     * ADR-0074 rotation: versions up to the current `v` stay derived from the
+     * predecessor's root (kept as stored seeds), the version is bumped so the
+     * next and later ones derive from the new root, the boundary is recorded,
+     * the new seed goes to the admins, a public group's record is republished
+     * (owed), and the held @name owes a `rekey` signed with the old handle
+     * seed. Idempotent: a re-run for the same predecessor changes nothing.
+     * Throws when a write did not land, so the caller keeps its step owed.
+     */
+    private fun moveKnockAndHandleOnRotation(
+        accountIdB64: String,
+        groupIdHex: String,
+        groupId: ByteArray,
+        oldAccountSeed: ByteArray,
+    ) {
+        val oldRoot = uniffi.lakko_ffi_uniffi.dsJournalRootSeed(oldAccountSeed, groupId)
+        try {
+            val ctx = applicationContext
+            val boundary = GroupSettingsStore.knockBoundary(ctx, accountIdB64, groupIdHex)
+            if (boundary != null) {
+                val stored = GroupSettingsStore.knockSeed(ctx, accountIdB64, groupIdHex, boundary)
+                val derived = uniffi.lakko_ffi_uniffi.groupKnockSeed(oldRoot, boundary)
+                val applied = stored != null && stored.contentEquals(derived)
+                stored?.fill(0)
+                derived.fill(0)
+                if (applied) return
+            }
+            val current = GroupSettingsStore.knockVersion(ctx, accountIdB64, groupIdHex)
+            for (v in 0..current.toInt()) {
+                val version = v.toUShort()
+                val held = GroupSettingsStore.knockSeed(ctx, accountIdB64, groupIdHex, version)
+                if (held != null) {
+                    held.fill(0)
+                    continue
+                }
+                val seed = uniffi.lakko_ffi_uniffi.groupKnockSeed(oldRoot, version)
+                try {
+                    GroupSettingsStore.saveKnockSeed(ctx, accountIdB64, groupIdHex, version, seed)
+                } finally {
+                    seed.fill(0)
+                }
+            }
+            GroupSettingsStore.saveKnockBoundary(ctx, accountIdB64, groupIdHex, current)
+            if (current < UShort.MAX_VALUE) {
+                GroupSettingsStore.saveKnockVersion(ctx, accountIdB64, groupIdHex, (current + 1u).toUShort())
+            }
+            GroupSettingsStore.saveKnockSelfOwed(ctx, accountIdB64, groupIdHex, true)
+            knockSeedsSent.removeAll { it.startsWith("$groupIdHex:") }
+            val handle = GroupSettingsStore.handle(ctx, accountIdB64, groupIdHex)
+            if (handle != null) {
+                val oldHandleSeed = uniffi.lakko_ffi_uniffi.handleWriteSeed(oldRoot)
+                try {
+                    GroupSettingsStore.saveOwedRekeySeed(ctx, accountIdB64, groupIdHex, oldHandleSeed)
+                } finally {
+                    oldHandleSeed.fill(0)
+                }
+                if (handle.public) {
+                    GroupSettingsStore.saveOwedTypeChange(ctx, accountIdB64, groupIdHex, true to handle.handle)
+                }
+            }
+            // The store's writes report nothing: read the bump back.
+            if (GroupSettingsStore.knockBoundary(ctx, accountIdB64, groupIdHex) != current) {
+                throw IllegalStateException("the knock boundary was not kept")
+            }
+        } finally {
+            oldRoot.fill(0)
+        }
+        reconcileAppointmentsBestEffort(groupIdHex, force = true)
+    }
 
     /** Groups whose takeover is running now. */
     private val takeoverInFlight: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
@@ -12591,6 +13856,10 @@ public class ChatRepository(
         }
         step("own echoes") { if (chatClientLazy.isInitialized()) chatClient.forgetOwnEchoesOf(groupIdHex) }
         step("group name") { GroupNameStore.delete(applicationContext, accountIdB64, groupIdHex) }
+        // ADR-0087 section 9 — and its photo, reactions setting, @name and
+        // knock seeds, and its unseen reactions.
+        step("group settings") { GroupSettingsStore.deleteGroup(applicationContext, accountIdB64, groupIdHex) }
+        step("unseen reactions") { UnseenReactions.clear(groupIdHex) }
         step("joined moment") { ConversationJoinedStore.delete(applicationContext, accountIdB64, groupIdHex) }
         step("push secret") { PushRoutingSecretStore.remove(applicationContext, accountIdB64, groupIdHex) }
         step("held") {
@@ -13399,6 +14668,9 @@ public class ChatRepository(
                             },
                             scopedSink = { senderKey, kind, bytes ->
                                 receiveScopedEnvelopeBestEffort(record.group, groupIdHex, senderKey, kind, bytes)
+                            },
+                            groupSettingSink = { senderKey, kind, bytes ->
+                                receiveGroupSettingBestEffort(record.group, groupIdHex, senderKey, kind, bytes)
                             },
                             groupNameSink = { senderKey, name ->
                                 receiveGroupName(record.group, groupIdHex, senderKey, name)
@@ -14510,10 +15782,11 @@ public data class ChatMessage(
      *  tombstoned the message; the UI renders a muted "message
      *  deleted" placeholder and drops the text + attachments. */
     val deleted: Boolean = false,
-    /** ADR-0023 — accumulated reactions, attributed per reactor identity.
-     *  Rendered as emoji chips with counts; re-sending the same
-     *  `(reactor, emoji)` toggles it off. */
+    /** What is held after the fold of [reactionOps] (reactions-and-emoji
+     *  section 10): per person, at most three, ordered by the add. */
     val reactions: List<Reaction> = emptyList(),
+    /** The reaction ops that reached this message, in DS order. */
+    val reactionOps: List<ReactionOpRecord> = emptyList(),
     /**
      * `docs/ux/calls.md` section 6 — set when this row is a finished call
      * rather than a message. Always a [Direction.System] row, so every existing
@@ -14665,6 +15938,9 @@ public enum class Ack {
 public data class Reaction(
     val reactor: MemberIdentity,
     val emoji: String,
+    /** The DS message id of the add that gave it (orders chips); 0 when
+     *  unknown. */
+    val at: Long = 0L,
 )
 
 public enum class Direction { Outgoing, Incoming, System }
@@ -14713,6 +15989,23 @@ private class GroupRecord(
 
     @Volatile
     var lastKnockPollMs: Long = 0L
+
+    /** ADR-0087 section 5 — the knock cursor stopped on a full pending set:
+     *  more requests wait on the server (the `64+` heading). */
+    @Volatile
+    var knockQueueFull: Boolean = false
+
+    /** The newest knock row id this device read (`Reject all`'s `through`). */
+    @Volatile
+    var lastSeenKnockId: Long = 0L
+
+    /** reactions-and-emoji section 10 — the core's reaction fold (a test may
+     *  swap it; the host JVM has no native library). */
+    var reactionFold: ReactionFold = NativeReactionFold
+
+    /** The stored author identity of message [messageId], or `null`. */
+    fun messageAuthorKey(messageId: Long): MemberIdentity? =
+        synchronized(messages) { messages.firstOrNull { it.messageId == messageId }?.authorKey }
 
     /**
      * ADR-0040 F1 (lakko-security) — swap in a freshly-[loadGroup]ed handle after a
@@ -14932,6 +16225,10 @@ private class GroupRecord(
         text: String,
         emoji: String?,
         ownKey: MemberIdentity?,
+        /** Reactions: add (`true`) or take off. */
+        reactionAdd: Boolean = true,
+        /** Reactions: the op's DS message id, `null` for a local-only op. */
+        opId: Long? = null,
     ) {
         applyOpInternal(
             op = op,
@@ -14939,6 +16236,8 @@ private class GroupRecord(
             text = text,
             emoji = emoji,
             sender = if (op == MessageOp.Reaction) ownKey ?: OWN_REACTION_SENTINEL else ownKey,
+            reactionAdd = reactionAdd,
+            opId = opId,
         )
     }
 
@@ -14980,6 +16279,7 @@ private class GroupRecord(
         sharedChannelsSink: ((MemberIdentity?, me.lakko.app.discover.SharedList) -> Unit)? = null,
         registrarSeedSink: ((MemberIdentity?, ByteArray) -> Unit)? = null,
         scopedSink: ((MemberIdentity?, me.lakko.app.reach.ScopedEnvelopeKind, ByteArray) -> Unit)? = null,
+        groupSettingSink: ((MemberIdentity?, GroupSettingKind, ByteArray) -> Unit)? = null,
         groupClosedSink: ((Long, MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiGroupClosed) -> Unit)? = null,
         /** ADR-0073 R.7 case 2 / UX 16.5 — the batch changed which devices the
          *  group holds and not which PEOPLE: its commit rows are not drawn
@@ -15036,6 +16336,8 @@ private class GroupRecord(
                     text = event.text,
                     emoji = event.emoji,
                     sender = event.senderKey,
+                    reactionAdd = event.reactionAdd,
+                    opId = event.messageId,
                 )
                 is IncomingChatEvent.Typing -> applyTyping(
                     sender = event.senderKey,
@@ -15131,6 +16433,11 @@ private class GroupRecord(
                     // row; the sink runs the addressee + owner gate against the
                     // live role table and stores the seed only on accept.
                     registrarSeedSink?.invoke(event.senderKey, event.envelope)
+                }
+                is IncomingChatEvent.GroupSetting -> {
+                    // ADR-0087 — a group setting. Not a timeline row; the sink
+                    // decodes it and runs its gate under the per-group lock.
+                    groupSettingSink?.invoke(event.senderKey, event.kind, event.bytes)
                 }
                 is IncomingChatEvent.ScopedDiscovery -> {
                     // ADR-0060 — a scoped-discovery service envelope. Not a
@@ -15239,6 +16546,8 @@ private class GroupRecord(
         text: String,
         emoji: String?,
         sender: MemberIdentity?,
+        reactionAdd: Boolean = true,
+        opId: Long? = null,
     ) {
         synchronized(messages) {
             val idx = messages.indexOfFirst { it.messageId == target }
@@ -15259,11 +16568,38 @@ private class GroupRecord(
                     )
                 }
                 MessageOp.Reaction -> {
+                    // reactions-and-emoji section 10 — the op is kept and the
+                    // held set is the core's fold over every op, so every
+                    // member draws the same chips whatever order the rows
+                    // were applied in.
                     val e = emoji ?: return
                     if (sender == null) return
-                    messages[idx] = current.copy(
-                        reactions = toggleReaction(current.reactions, sender, e),
+                    val ops = appendReactionOp(
+                        current.reactionOps,
+                        ReactionOpRecord(
+                            person = sender,
+                            emoji = e,
+                            add = reactionAdd,
+                            at = opId ?: localOpId(current.reactionOps),
+                        ),
                     )
+                    val held = reactionFold.fold(ops) ?: current.reactions
+                    messages[idx] = current.copy(reactions = held, reactionOps = ops)
+                    // Section 12 — someone else's new reaction on one of this
+                    // person's own messages is an unseen reaction.
+                    val author = current.authorKey
+                    if (reactionAdd && author != null && sender != author &&
+                        held.any { it.reactor == sender && it.emoji == e }
+                    ) {
+                        val own = try {
+                            ownIdentity(group)
+                        } catch (_: Throwable) {
+                            null
+                        }
+                        if (own != null && own == author) {
+                            UnseenReactions.mark(groupId.joinToString("") { "%02x".format(it) }, target)
+                        }
+                    }
                 }
             }
         }
@@ -15535,3 +16871,21 @@ private class GroupRecord(
  *  person's. Together about one sweep. Chosen, not measured. */
 private const val JOINED_GROUP_POLLS: Int = 3
 private const val JOINED_GROUP_POLL_WAIT_SECS: Int = 10
+
+/** ADR-0087 section 3 — renew a handle with fewer than 90 days left. */
+private const val HANDLE_RENEW_BEFORE_MS: Long = 90L * 24 * 60 * 60 * 1000
+
+/** Section 3 — the lease a write grants when its answer named none. */
+private const val HANDLE_LEASE_MS: Long = 180L * 24 * 60 * 60 * 1000
+
+/** Section 3 — at most this many renewals in one foreground session. */
+private const val HANDLE_RENEWALS_PER_SESSION: Int = 20
+
+/** ADR-0087 4.5.2 — the device is no longer owner or admin: nothing sent. */
+public class GroupPhotoNotAllowed : IllegalStateException("not allowed to change the group photo")
+
+/** ADR-0087 4.5.2 — uploaded, not sent yet (offline): kept owed. */
+public class GroupPhotoOwed : IllegalStateException("group photo owed")
+
+/** ADR-0087 section 3 — wait before checking an unverified @name again. */
+private const val HANDLE_VERIFY_RETRY_MS: Long = 60_000L

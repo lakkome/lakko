@@ -209,6 +209,9 @@ internal fun buildBackgroundDecryptDeps(
         // ADR-0073 R.5 — mute is a fact of the CONVERSATION: a successor
         // group is muted exactly when its conversation is. The lineage is
         // read from its plain mirror (a READ, C-59).
+        override fun reactionNotificationsOn(accountIdB64: String): Boolean =
+            me.lakko.app.chat.ReactionNotifyPref.isOn(appContext)
+
         override fun isMuted(accountIdB64: String, groupHex: String): Boolean =
             me.lakko.app.devices.sync.ConversationMute.isMuted(
                 context = appContext,
@@ -355,6 +358,15 @@ private class RealThrowawayGroup(
             senderName = senderNameOf(app.senderLeaf),
             senderAccountB64 = senderAccountOf(app),
             resendOrigin = me.lakko.app.chat.resendOriginFrom(body.resendOriginGroupB64, body.resendOriginMessageId),
+            // reactions-and-emoji section 12 — what a reaction notification
+            // needs: add or take off, the emoji, and whose message it names.
+            reactionAdd = if (body.kind == uniffi.lakko_ffi_uniffi.MessageBodyKind.REACTION) {
+                body.reactionAction != uniffi.lakko_ffi_uniffi.ReactionAction.REMOVE
+            } else {
+                null
+            },
+            reactionEmoji = body.emoji,
+            reactionTargetAuthorB64 = body.reactionTargetAuthor?.let { java.util.Base64.getEncoder().encodeToString(it) },
         )
     }
 

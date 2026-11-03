@@ -264,6 +264,11 @@ pub struct FfiHandleRecordPayload {
     pub id: Vec<u8>,
     /// The 32-byte knock public key (group) or read key (channel).
     pub key: Vec<u8>,
+    /// The version of the group's knock key, named in the knock row a
+    /// searcher seals to it; always `0` for a channel (any other value is
+    /// refused).
+    #[uniffi(default = 0)]
+    pub knock_version: u16,
     /// The canonical `@name`.
     pub handle: String,
     /// The name, non-empty.
@@ -284,6 +289,7 @@ impl From<HandleRecordPayload> for FfiHandleRecordPayload {
             updated_at_ms: p.updated_at_ms,
             id: p.id,
             key: p.key.to_vec(),
+            knock_version: p.knock_version,
             handle: p.handle,
             name: p.name,
             description: p.description,
@@ -302,6 +308,7 @@ impl TryFrom<FfiHandleRecordPayload> for HandleRecordPayload {
             updated_at_ms: p.updated_at_ms,
             id: p.id,
             key: fixed("record key", &p.key)?,
+            knock_version: p.knock_version,
             handle: p.handle,
             name: p.name,
             description: p.description,
@@ -415,6 +422,7 @@ mod tests {
             updated_at_ms: 3,
             id: vec![0x42; 32],
             key: vec![0x4B; 32],
+            knock_version: 7,
             handle: "book_club".into(),
             name: "Book club".into(),
             description: "Monthly".into(),
@@ -459,5 +467,31 @@ mod tests {
         assert_eq!(hit.kind, FfiSearchRecordKind::Conversation);
         assert_eq!(hit.conversation, Some(payload()));
         assert!(handle_record_max_size_band() >= 1);
+    }
+
+    #[test]
+    fn the_knock_version_crosses_and_a_channel_carries_none() {
+        let term = vec![0x33_u8; 64];
+        let mut group = payload();
+        group.knock_version = u16::MAX;
+        let record = compose_handle_record(group, vec![term.clone()], 10).unwrap();
+        assert_eq!(
+            open_handle_record(record, term.clone())
+                .unwrap()
+                .map(|p| p.knock_version),
+            Some(u16::MAX)
+        );
+
+        let mut channel = payload();
+        channel.kind = FfiHandleRecordKind::Channel;
+        channel.id = vec![0x42; 16];
+        let err = compose_handle_record(channel.clone(), vec![term.clone()], 10).unwrap_err();
+        assert!(
+            matches!(&err, FfiError::Contacts(m) if m.starts_with("handleRecord.channelKnockVersion")),
+            "{err:?}"
+        );
+        channel.knock_version = 0;
+        let record = compose_handle_record(channel.clone(), vec![term.clone()], 10).unwrap();
+        assert_eq!(open_handle_record(record, term).unwrap(), Some(channel));
     }
 }

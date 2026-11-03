@@ -46,6 +46,8 @@ describe("the token contexts against the core", () => {
       "mailbox-write",
       "call-join",
       "circle-claim",
+      "channel-react",
+      "channel-comment",
     ]);
   });
 

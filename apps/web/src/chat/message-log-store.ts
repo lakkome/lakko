@@ -243,6 +243,13 @@ export interface PersistedReaction {
    */
   readonly reactorKeyB64: string;
   readonly emoji: string;
+  /**
+   * The journal position (DS message id, decimal) of the add that gave it,
+   * so a later op re-folds against the same order on every device. Absent on
+   * a row written before the fold (UX reactions-and-emoji section 10): read
+   * as 0.
+   */
+  readonly at?: string;
 }
 
 export interface PersistedGroup {

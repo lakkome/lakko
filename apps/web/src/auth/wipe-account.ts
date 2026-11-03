@@ -102,6 +102,7 @@ import { clearRotationStatesForAccount } from "../channels/rotation-state-store"
 import { clearUnconfirmedFoundingsForAccount } from "../channels/composer";
 import { deleteProfileRow } from "../profile/profile-idb";
 import { deleteAvatarCache } from "../profile/avatar-cache-idb";
+import { deleteAccountKv } from "../storage/account-kv";
 import { clearOwnProfile } from "../profile/own-profile";
 import { clearMemberBaselinesForAccount } from "../profile/membership-baseline";
 import { clearProfileRequestsForAccount } from "../profile/profile-request";
@@ -221,6 +222,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "profiles", run: () => deleteProfileRow(accountIdB64) },
     { name: "avatars", run: () => deleteAvatarCache(accountIdB64) },
     { name: "group-names", run: () => deleteGroupNameRow(accountIdB64) },
+    { name: "account-kv", run: () => deleteAccountKv(accountIdB64) },
     { name: "group-closed", run: () => deleteGroupClosedRow(accountIdB64) },
     // ADR-0087 section 9: ends under way, the notices not yet closed and the
     // Welcomes held.
@@ -333,6 +335,10 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "leave-requested", run: () => clearLeaveRequestedForAccount(accountIdB64) },
     // ADR-0073 R.5: the "a lineage register is not confirmed sent" marker.
     { name: "lineage-unsent", run: () => removeLocal(`lakko.lineage.unsent.v1.${accountIdB64}`) },
+    // Reactions D3 and section 12: the quick-reaction send marker and the
+    // unseen-reactions list.
+    { name: "quick-reaction-unsent", run: () => removeLocal(`lakko.quick-reaction.unsent.v1.${accountIdB64}`) },
+    { name: "unseen-reactions", run: () => removeLocal(`lakko.unseen-reactions.v1:${accountIdB64}`) },
     // ADR-0080: the cards of the account's devices, this device's own card,
     // its city answer and its "Show my city" switch.
     { name: "device-cards", run: () => removeLocal(cardsStorageKey(accountIdB64)) },

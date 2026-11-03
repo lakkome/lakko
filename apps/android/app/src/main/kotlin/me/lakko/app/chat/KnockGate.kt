@@ -74,3 +74,42 @@ public fun <P> drainKnockRows(
  */
 internal fun readsKnocks(ownRole: Role?): Boolean =
     ownRole == Role.OWNER || ownRole == Role.ADMIN
+
+/** ADR-0087 section 5 — what one sealed knock row asks of the drain. */
+public enum class SealedKnockStep {
+    /** Opened and kept as a request to join. */
+    KEEP,
+
+    /** Not for this group, unreadable, or can never join: skipped. */
+    DROP,
+
+    /** The pending set is full: stop BEFORE this row, so it is read again
+     *  once a request is decided and the backlog stays on the server. */
+    STOP,
+}
+
+/**
+ * ADR-0087 section 5 — [drainKnockRows] for sealed knock rows: each row through
+ * [open] and nothing else; a throw drops the row; [SealedKnockStep.STOP] ends
+ * the batch with the cursor before that row.
+ */
+public fun <P> drainSealedKnockRows(
+    rows: List<MailboxMessage>,
+    after: Long,
+    open: (ByteArray) -> Pair<SealedKnockStep, P?>,
+): KnockDrain<P> {
+    val accepted = ArrayList<Pair<MailboxMessage, P>>(rows.size)
+    var refused = 0
+    var cursor = after
+    for (row in rows) {
+        val (step, value) = try {
+            open(row.payload)
+        } catch (_: Throwable) {
+            SealedKnockStep.DROP to null
+        }
+        if (step == SealedKnockStep.STOP) break
+        cursor = row.id
+        if (step == SealedKnockStep.KEEP && value != null) accepted += row to value else refused += 1
+    }
+    return KnockDrain(accepted = accepted, refused = refused, cursor = cursor)
+}

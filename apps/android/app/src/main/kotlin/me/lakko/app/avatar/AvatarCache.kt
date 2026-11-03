@@ -26,6 +26,9 @@ public class AvatarCache(
     private val seal: AvatarSeal,
     private val now: () -> Long = System::currentTimeMillis,
     private val memoryEntries: Int = 64,
+    /** ADR-0087 18.6 — the most the disk part holds; the least recently
+     *  drawn entries go first. Chosen, not measured. */
+    private val maxDiskBytes: Long = MAX_DISK_BYTES,
 ) {
     private val memory = object : LinkedHashMap<String, ByteArray>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ByteArray>?): Boolean =
@@ -44,6 +47,8 @@ public class AvatarCache(
         memory[blobIdHex]?.let { return it }
         val f = file(blobIdHex) ?: return null
         if (!f.exists()) return null
+        // Least recently drawn first: a read marks the entry as used now.
+        f.setLastModified(now())
         val opened = try {
             seal.open(f.readBytes())
         } catch (_: Throwable) {
@@ -76,9 +81,27 @@ public class AvatarCache(
             dir.mkdirs()
             val tmp = File(dir, "$blobIdHex.tmp")
             tmp.writeBytes(sealed)
-            tmp.renameTo(f)
+            tmp.renameTo(f).also { if (it) trimToBound(keep = f) }
         } catch (_: Throwable) {
             false
+        }
+    }
+
+    /** Delete the least recently drawn files until the disk part fits
+     *  [maxDiskBytes]; [keep] (just written) is never the one deleted. */
+    private fun trimToBound(keep: File) {
+        val files = dir.listFiles { f -> f.isFile && f.name.endsWith(".bin") }?.toMutableList() ?: return
+        var total = files.sumOf { it.length() }
+        if (total <= maxDiskBytes) return
+        files.sortBy { it.lastModified() }
+        for (f in files) {
+            if (total <= maxDiskBytes) break
+            if (f == keep) continue
+            val len = f.length()
+            if (f.delete()) {
+                total -= len
+                memory.remove(f.name.removeSuffix(".bin"))
+            }
         }
     }
 
@@ -112,6 +135,10 @@ public class AvatarCache(
         /** UX §7: a failed photo is tried again on the next display after a
          *  minute. */
         public const val RETRY_AFTER_MS: Long = 60_000L
+
+        /** The disk bound: 64 MiB (chosen: about 250 stills at the 256 KiB
+         *  bound, or 16 profile videos at 4 MiB). */
+        public const val MAX_DISK_BYTES: Long = 64L * 1024 * 1024
 
         /** The cache directory name under `noBackupFilesDir`. */
         public const val DIR: String = "avatars"

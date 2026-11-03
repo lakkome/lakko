@@ -16,10 +16,10 @@ import LakkoCore
 /// The rationed actions a token pays for. The raw values are the wire context
 /// names; `AnonTokenContextTests` pins them against `anonTokenContexts()`.
 public enum AnonTokenContext: String, CaseIterable, Sendable {
-    /// `POST /discovery/oprf` - every username or channel lookup, and the
-    /// OPRF step of a username / channel-name registration.
+    /// `POST /discovery/oprf` - every username or `@name` lookup, and the
+    /// OPRF step of a username / `@name` registration.
     case discoveryLookup = "discovery-lookup"
-    /// `POST /discovery/channel/register`.
+    /// `POST /discovery/handle/claim` (ADR-0087).
     case discoveryRegister = "discovery-register"
     /// The three ledger consumes (`/discovery/{invite,call-invite,group-invite}/{id}/consume`).
     case inviteConsume = "invite-consume"
@@ -45,6 +45,10 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
     case callJoin = "call-join"
     /// Claiming this account's one circle directory (ADR-0086).
     case circleClaim = "circle-claim"
+    /// ADR-0087 section 13a: one reaction write under a channel post.
+    case channelReact = "channel-react"
+    /// ADR-0087 section 13a: one comment write under a channel post.
+    case channelComment = "channel-comment"
 
     /// Tokens a context keeps on hand: about a day of use plus a reserve, so
     /// a spend finds a token without waiting for an issuance (ADR-0078
@@ -64,6 +68,9 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
         case .blobRead: return 4
         case .mailboxWrite: return 4
         case .circleClaim: return 2
+        // ADR-0087 section 13a. Chosen, not measured; the web number.
+        case .channelReact: return 4
+        case .channelComment: return 4
         // ADR-0078 section 2: a join, a reconnect, the TURN credential of a
         // one-to-one call. Chosen, not measured.
         case .callJoin: return 4

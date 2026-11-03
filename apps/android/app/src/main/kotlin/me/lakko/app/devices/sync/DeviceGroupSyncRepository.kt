@@ -595,6 +595,7 @@ public class DeviceGroupSyncRepository(
             try {
                 republishRecoveryEmail(state)
                 republishOwnUsername(state)
+                republishQuickReaction(state)
                 republishDeviceAcks(state)
                 republishLinkRecords(state)
                 republishLineage(state)
@@ -954,6 +955,61 @@ public class DeviceGroupSyncRepository(
                 state.applyRecoveryEmailEnvelope(envelope)
             } catch (cause: Throwable) {
                 Log.w(LOG_TAG, "recovery email envelope refused (${cause.javaClass.simpleName})")
+                false
+            }
+        }
+        if (changed) republish()
+    }
+
+    // ------------------------------------------------------------
+    // reactions-and-emoji D3 - the account's quick reaction
+    // ------------------------------------------------------------
+
+    /** Project the register into [me.lakko.app.chat.QuickReaction]. Under
+     *  [stateLock]. */
+    private fun republishQuickReaction(state: SyncedState) {
+        me.lakko.app.chat.QuickReaction.held(runCatching { state.quickReaction() }.getOrNull())
+    }
+
+    /**
+     * Set the account's quick reaction and tell its other devices. `false`
+     * when the state is not open or the value is refused. A failed publish is
+     * re-sent by a catch-up.
+     */
+    public suspend fun setQuickReaction(emoji: String): Boolean {
+        val envelope = synchronized(stateLock) {
+            val state = syncedState ?: return false
+            val written = try {
+                state.setQuickReaction(Hlc.mint(), emoji)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "quick reaction refused (${cause.javaClass.simpleName})")
+                false
+            }
+            if (!written) return false
+            runCatching { state.quickReactionEnvelope() }.getOrNull()
+        }
+        republish()
+        if (envelope != null) {
+            try {
+                sendServiceEnvelope(envelope)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "quick reaction not published (${cause.javaClass.simpleName})")
+                pendingFlag?.recordFailure()
+            }
+        }
+        return true
+    }
+
+    /** A received quick-reaction envelope, folded by its original stamp. */
+    private fun applyQuickReaction(envelope: ByteArray) {
+        val changed = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                state.applyQuickReactionEnvelope(envelope)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "quick reaction envelope refused (${cause.javaClass.simpleName})")
                 false
             }
         }
@@ -1459,6 +1515,8 @@ public class DeviceGroupSyncRepository(
         runCatching { restored.recoveryEmailEnvelope() }.getOrNull()?.let { applyRecoveryEmail(it) }
         // ADR-0076 - and the own-username register.
         runCatching { restored.ownUsernameEnvelope() }.getOrNull()?.let { applyOwnUsername(it) }
+        // reactions-and-emoji D3 - and the quick reaction.
+        runCatching { restored.quickReactionEnvelope() }.getOrNull()?.let { applyQuickReaction(it) }
         // UX 17.6 - and the device acknowledgements.
         for (envelope in runCatching { restored.deviceAckEnvelopes() }.getOrNull().orEmpty()) applyDeviceAck(envelope)
         // ADR-0079 - and the link records.
@@ -1746,6 +1804,11 @@ public class DeviceGroupSyncRepository(
             runCatching { syncedState?.ownUsernameEnvelope() }.getOrNull()
         }
         ownUsernameEnvelope?.let { sendServiceEnvelope(it) }
+        // reactions-and-emoji D3 - nor is the quick reaction.
+        val quickReactionEnvelope = synchronized(stateLock) {
+            runCatching { syncedState?.quickReactionEnvelope() }.getOrNull()
+        }
+        quickReactionEnvelope?.let { sendServiceEnvelope(it) }
         // UX 17.6 - nor are the device acknowledgements: this is also how an
         // acknowledgement whose live send failed is re-sent.
         val deviceAckEnvelopes = synchronized(stateLock) {
@@ -1997,6 +2060,12 @@ public class DeviceGroupSyncRepository(
                                 // ADR-0079 - one of the account's invite links
                                 // from another of its devices.
                                 applyLinkRecord(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
+                                uniffi.lakko_ffi_uniffi.isQuickReactionEnvelope(body.envelope)
+                            ) {
+                                // reactions-and-emoji D3 - the account's quick
+                                // reaction from another of its devices.
+                                applyQuickReaction(body.envelope)
                             } else if (body is DeviceGroupBody.ServiceEnvelope &&
                                 uniffi.lakko_ffi_uniffi.isOwnUsernameEnvelope(body.envelope)
                             ) {
@@ -3099,6 +3168,7 @@ internal object CoreSyncedStateBytes : SyncedStateBytes {
                 restored.recoveryEmailEnvelope()?.let { state.applyRecoveryEmailEnvelope(it) }
                 // ADR-0076 - and the own-username register.
                 restored.ownUsernameEnvelope()?.let { state.applyOwnUsernameEnvelope(it) }
+                restored.quickReactionEnvelope()?.let { state.applyQuickReactionEnvelope(it) }
                 // UX 17.6 - and the device acknowledgements.
                 for (envelope in restored.deviceAckEnvelopes()) state.applyDeviceAckEnvelope(envelope)
             }

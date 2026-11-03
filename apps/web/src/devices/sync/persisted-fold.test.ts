@@ -96,9 +96,9 @@ function versionOneBlobs(): Uint8Array[] {
 }
 
 describe("the encoding version", () => {
-  it("this build writes version 7", () => {
+  it("this build writes version 10", () => {
     const s = new wasm.SyncedState();
-    expect(s.toBytes()[0]).toBe(0x07);
+    expect(s.toBytes()[0]).toBe(0x0a);
     s.free();
   });
 
@@ -181,7 +181,7 @@ describe("openPersistedFold", () => {
     // The next write is the fresh fold's bytes, which read back.
     const rewritten = decodeSyncState(encodeSyncState({ synced: fold.toBytes(), pending: [] }));
     fold.free();
-    expect(rewritten!.synced[0]).toBe(0x07);
+    expect(rewritten!.synced[0]).toBe(0x0a);
     warn.mockClear();
     const reopened = openPersistedFold(wasm, rewritten!.synced, "stored");
     expect(reopened).not.toBeNull();
@@ -203,7 +203,7 @@ describe("the flag day of ADR-0087 section 9", () => {
     const ended = fresh.composeConversationEnded(mint(), 2, id, 7n);
     expect(ended).toBeDefined();
     const bytes = fresh.toBytes();
-    expect(bytes[0]).toBe(0x07);
+    expect(bytes[0]).toBe(0x0a);
     expect(openPersistedFold(wasm, bytes, "stored")).not.toBeNull();
   });
 
@@ -255,7 +255,7 @@ describe("mergeRestoredFoldBytes", () => {
       foldWithFolder(F2, "Backup"),
     );
     expect(out).not.toBeNull();
-    expect(out![0]).toBe(0x07);
+    expect(out![0]).toBe(0x0a);
     expect(folderNames(out!)).toEqual(["Backup", "Local"]);
     expect(warn).not.toHaveBeenCalled();
   });

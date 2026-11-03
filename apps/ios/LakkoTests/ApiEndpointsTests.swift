@@ -122,12 +122,10 @@ final class ApiEndpointsTests: XCTestCase {
 
         _ = try await client.oprfEvaluate(OprfRequest(blinded: "AA=="))
         _ = try await client.lookupRaw(LookupRequest(oprfHash: "AA=="))
-        _ = try await client.channelLookupRaw(ChannelLookupRequest(oprfHash: "AA=="))
         _ = try await client.register(RegisterRequest(accountId: "AA==", oprfHash: "AA=="))
 
         XCTAssertEqual(HeaderRecorder.authorization(for: "/discovery/oprf"), .some(nil))
         XCTAssertEqual(HeaderRecorder.authorization(for: "/discovery/lookup"), .some(nil))
-        XCTAssertEqual(HeaderRecorder.authorization(for: "/discovery/channel/lookup"), .some(nil))
         XCTAssertEqual(HeaderRecorder.authorization(for: "/discovery/register"), "Bearer own")
     }
 

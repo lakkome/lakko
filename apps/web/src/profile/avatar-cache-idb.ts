@@ -28,6 +28,8 @@ const IV_LEN = 12;
 interface PersistedRow {
   id: string;
   ciphertext: Uint8Array;
+  /** When the photo was last drawn, unix ms (absent on an older row: 0). */
+  drawnAt?: number;
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -102,7 +104,51 @@ export class IdbAvatarBackend implements AvatarCacheBackend {
     try {
       if (!accountStoresWritable(this.accountId)) return;
       const tx = db.transaction(STORE, "readwrite");
-      tx.objectStore(STORE).put({ id: this.rowId(blobIdB64), ciphertext } satisfies PersistedRow);
+      tx.objectStore(STORE).put({ id: this.rowId(blobIdB64), ciphertext, drawnAt: Date.now() } satisfies PersistedRow);
+      await awaitTx(tx);
+    } finally {
+      db.close();
+    }
+  }
+
+  /** The photo was drawn now: its row moves to the back of the eviction
+   *  order. */
+  async touch(blobIdB64: string): Promise<void> {
+    const db = await openDb();
+    try {
+      if (!accountStoresWritable(this.accountId)) return;
+      const tx = db.transaction(STORE, "readwrite");
+      const store = tx.objectStore(STORE);
+      const req = store.get(this.rowId(blobIdB64));
+      req.onsuccess = (): void => {
+        const row = req.result as PersistedRow | undefined;
+        if (row !== undefined) store.put({ ...row, drawnAt: Date.now() });
+      };
+      await awaitTx(tx);
+    } finally {
+      db.close();
+    }
+  }
+
+  /** Drop this account's least recently drawn rows past `maxBytes`. */
+  async trim(maxBytes: number): Promise<void> {
+    const db = await openDb();
+    try {
+      if (!accountStoresWritable(this.accountId)) return;
+      const tx = db.transaction(STORE, "readwrite");
+      const store = tx.objectStore(STORE);
+      const req = store.getAll();
+      req.onsuccess = (): void => {
+        const rows = (req.result as PersistedRow[]).filter((r) => r.id.startsWith(`${this.accountId}|`));
+        let total = rows.reduce((n, r) => n + r.ciphertext.length, 0);
+        if (total <= maxBytes) return;
+        rows.sort((a, b) => (a.drawnAt ?? 0) - (b.drawnAt ?? 0));
+        for (const r of rows) {
+          if (total <= maxBytes) break;
+          store.delete(r.id);
+          total -= r.ciphertext.length;
+        }
+      };
       await awaitTx(tx);
     } finally {
       db.close();

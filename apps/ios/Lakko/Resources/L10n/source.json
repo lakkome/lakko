@@ -2213,6 +2213,10 @@
       "text": "Skin tones for {name}",
       "comment": "Accessible name of the skin tone choices for an emoji; {name} is the emoji's name."
     },
+    "chat.emoji.suggestions": {
+      "text": "Emoji suggestions",
+      "comment": "Accessible name of the strip of emoji offered above the message field after typing ':' and a word."
+    },
     "chat.emoji.tab": {
       "text": "Emoji",
       "comment": "Tab of the picker that shows emoji."
@@ -2622,13 +2626,33 @@
       "text": "Join requests ({count})",
       "comment": "Heading of the list of people asking to join through a link."
     },
+    "chat.members.join.heading_full": {
+      "text": "Join requests (64+)",
+      "comment": "Heading of the join requests section when 64 are waiting."
+    },
     "chat.members.join.link_unknown": {
       "text": "Invite link not known",
       "comment": "Under a join request when it is not known whose link it came through."
     },
+    "chat.members.join.more_waiting": {
+      "text": "More requests are waiting. They appear as you answer these.",
+      "comment": "Line under the join requests heading when 64 are waiting."
+    },
     "chat.members.join.reject": {
       "text": "Reject",
       "comment": "Button that rejects a request to join the group."
+    },
+    "chat.members.join.reject_all": {
+      "text": "Reject all",
+      "comment": "Button rejecting every waiting join request; also its dialog's confirm button."
+    },
+    "chat.members.join.reject_all_body": {
+      "text": "This removes every request waiting, including ones you haven't seen.",
+      "comment": "Body of the dialog before rejecting every join request."
+    },
+    "chat.members.join.reject_all_title": {
+      "text": "Reject all requests?",
+      "comment": "Title of the dialog before rejecting every join request."
     },
     "chat.members.join.rejected": {
       "text": "Join request rejected.",
@@ -2932,6 +2956,26 @@
       "text": "React - Reacted by {names}",
       "comment": "Tooltip of a reaction someone else made: tapping adds the reader's; {names} lists who reacted."
     },
+    "chat.reaction.cap_reached": {
+      "text": "You can add up to 3 reactions. Take one off to add another.",
+      "comment": "Line under the reaction row or a message's reactions when the person already gave 3 reactions to it."
+    },
+    "chat.reaction.chip_a11y": {
+      "text": "{emoji}, {count, plural, one {# reaction} other {# reactions}}",
+      "comment": "Screen-reader name of a reaction chip under a message; {emoji} is the emoji."
+    },
+    "chat.reaction.chip_yours_a11y": {
+      "text": "{emoji}, your reaction",
+      "comment": "Screen-reader name of a reaction the person gave (a chip, or an emoji in the reaction row)."
+    },
+    "chat.reaction.list_all": {
+      "text": "All {count}",
+      "comment": "First tab of the list of who reacted to a message; {count} is the number of reactions."
+    },
+    "chat.reaction.list_title": {
+      "text": "Reactions",
+      "comment": "Accessible title of the popover listing who reacted to a message."
+    },
     "chat.reaction.reacted_by": {
       "text": "Reacted by {names}",
       "comment": "Tooltip of a reaction under a message; {names} lists who reacted with this emoji."
@@ -2944,9 +2988,17 @@
       "text": "Remove your reaction - Reacted by {names}",
       "comment": "Tooltip of a reaction the reader made: tapping removes it; {names} lists who reacted."
     },
+    "chat.reaction.show_who_a11y": {
+      "text": "Show who reacted",
+      "comment": "Screen-reader hint on a reaction chip: right-click opens the list of who reacted; also the name of the +N chip."
+    },
     "chat.reaction.single_emoji": {
       "text": "A reaction must be a single emoji.",
       "comment": "The reader tried to react with something that is not exactly one emoji."
+    },
+    "chat.reaction.unseen_a11y": {
+      "text": "New reactions to your messages, {count}",
+      "comment": "Screen-reader name of the round heart button in a conversation that goes to messages others reacted to."
     },
     "chat.reauth.action": {
       "text": "Sign in again",
@@ -3662,6 +3714,10 @@
     "chats.row.unread_overflow": {
       "text": "99+",
       "comment": "Unread badge on a chat list row when there are 100 or more unread messages."
+    },
+    "chats.row.unseen_reactions": {
+      "text": "New reactions",
+      "comment": "Tooltip of the small heart beside a chat-list row: others reacted to the person's own messages there."
     },
     "chats.search.clear": {
       "text": "Clear search",
@@ -6092,6 +6148,274 @@
       "text": "If nothing happens, you can send the request again.",
       "comment": "Second line on the group invite page while a join request is waiting: the request can be sent again."
     },
+    "group_delete.action": {
+      "text": "Delete group",
+      "comment": "Destructive control in a group's info for an owner alone in it."
+    },
+    "group_delete.body": {
+      "text": "This removes the group and its messages from all your devices and frees @{name} in 30 days. This cannot be undone.",
+      "comment": "Body of the dialog before deleting a group; {name} is its @name without the @."
+    },
+    "group_delete.confirm": {
+      "text": "Delete",
+      "comment": "Confirm button of the dialog deleting a group."
+    },
+    "group_delete.title": {
+      "text": "Delete this group?",
+      "comment": "Title of the dialog before deleting a group."
+    },
+    "group_handle.error.bad_form": {
+      "text": "3 to 32 characters: letters a-z, digits and _.",
+      "comment": "Under the @name field of a group when the typed name is malformed."
+    },
+    "group_handle.error.failed": {
+      "text": "Couldn't save. Try again.",
+      "comment": "Group type screen: saving the @name or the type failed."
+    },
+    "group_handle.error.held": {
+      "text": "That @name isn't available. Try another.",
+      "comment": "Under the @name field: the name is held by something the person cannot see. Never say 'taken' here."
+    },
+    "group_handle.error.offline": {
+      "text": "Could not reach Lakko. Check your connection and try again.",
+      "comment": "Creating a group or saving its type with no network."
+    },
+    "group_handle.error.taken": {
+      "text": "That @name is taken.",
+      "comment": "Under the @name field of a public group: a lookup found the name."
+    },
+    "group_handle.error.too_many": {
+      "text": "You've created a lot of groups today. Try again tomorrow.",
+      "comment": "Creating a group when the day's allowance of names is used up."
+    },
+    "group_info.handle.choose": {
+      "text": "Choose",
+      "comment": "Button in the banner of a group whose @name lapsed; opens Group type with a proposed name."
+    },
+    "group_info.handle.copy_a11y": {
+      "text": "Copy @name",
+      "comment": "Accessible name of the Copy button on a group's @name row."
+    },
+    "group_info.handle.lapsed": {
+      "text": "This group has no @name. Choose one.",
+      "comment": "Banner on a group's info, owner only, when the group's @name lapsed."
+    },
+    "group_info.header.aria": {
+      "text": "Group",
+      "comment": "Accessible name of the header block (photo, type line, @name) on a group's info screen."
+    },
+    "group_info.header.private": {
+      "text": "Private group · {count, plural, one {# member} other {# members}}",
+      "comment": "Header line of a private group's info screen."
+    },
+    "group_info.header.public": {
+      "text": "Public group · {count, plural, one {# member} other {# members}}",
+      "comment": "Header line of a public group's info screen."
+    },
+    "group_photo.error.limit": {
+      "text": "You have reached the limit for sending files. Try again later.",
+      "comment": "Under the group photo when the upload is over the file-sending limit."
+    },
+    "group_photo.error.not_allowed": {
+      "text": "Only the owner and admins can change the photo.",
+      "comment": "Under the group photo when the person was demoted while choosing a photo."
+    },
+    "group_photo.error.upload": {
+      "text": "Couldn't upload the photo. Check your connection and try again.",
+      "comment": "Under the group photo when its upload failed."
+    },
+    "group_photo.gone": {
+      "text": "The photo is no longer available. Choose another.",
+      "comment": "Line under a group's info header for the owner or an admin when the group photo's file expired or was deleted (ADR-0087 4.5.2)."
+    },
+    "group_photo.owed": {
+      "text": "Will apply when you're back online.",
+      "comment": "Group info, under the header photo: the new photo was uploaded but the device went offline before it was sent; it is sent when the device is back."
+    },
+    "group_photo.remove.body": {
+      "text": "Everyone in the group will see its initials instead.",
+      "comment": "Body of the dialog asking before removing a group's photo."
+    },
+    "group_photo.remove.confirm": {
+      "text": "Remove",
+      "comment": "Confirm button of the dialog removing a group's photo."
+    },
+    "group_photo.remove.title": {
+      "text": "Remove the group photo?",
+      "comment": "Title of the dialog asking before removing a group's photo."
+    },
+    "group_reactions.add": {
+      "text": "Add",
+      "comment": "Button under the chosen emoji on a group's Reactions screen; opens the emoji picker."
+    },
+    "group_reactions.all": {
+      "text": "All reactions",
+      "comment": "Choice on a group's Reactions screen."
+    },
+    "group_reactions.all_sub": {
+      "text": "Members can react with any emoji.",
+      "comment": "Line under 'All reactions' on a group's Reactions screen."
+    },
+    "group_reactions.choose_one": {
+      "text": "Choose at least one.",
+      "comment": "Under the empty emoji grid on a group's Reactions screen with 'Some reactions'."
+    },
+    "group_reactions.max": {
+      "text": "You can choose up to 100.",
+      "comment": "In the picker of a group's Reactions screen when 100 emoji are chosen."
+    },
+    "group_reactions.none": {
+      "text": "No reactions",
+      "comment": "Choice on a group's Reactions screen."
+    },
+    "group_reactions.none_sub": {
+      "text": "Members can't react to messages.",
+      "comment": "Line under 'No reactions' on a group's Reactions screen."
+    },
+    "group_reactions.remove_a11y": {
+      "text": "Remove {emoji}",
+      "comment": "Accessible name of an emoji in the chosen grid of a group's Reactions screen; a tap removes it."
+    },
+    "group_reactions.save_failed": {
+      "text": "Couldn't save. Try again.",
+      "comment": "Saving a group's allowed reactions failed; the screen stays open."
+    },
+    "group_reactions.some": {
+      "text": "Some reactions",
+      "comment": "Choice on a group's Reactions screen."
+    },
+    "group_reactions.some_sub": {
+      "text": "Members can react only with the emoji you choose.",
+      "comment": "Line under 'Some reactions' on a group's Reactions screen."
+    },
+    "group_reactions.title": {
+      "text": "Reactions",
+      "comment": "Row on a group's info (owner, admins) and the title of the screen it opens."
+    },
+    "group_reactions.unsaved_body": {
+      "text": "Your changes will be lost if you don't save them.",
+      "comment": "Body of the Save changes? dialog when leaving the group Reactions screen with unsaved changes."
+    },
+    "group_reactions.value.all": {
+      "text": "All",
+      "comment": "Value of the Reactions row on a group's info: every reaction is taken."
+    },
+    "group_reactions.value.count": {
+      "text": "{count, plural, one {# reaction} other {# reactions}}",
+      "comment": "Value of the Reactions row on a group's info when only some emoji are taken."
+    },
+    "group_reactions.value.off": {
+      "text": "Off",
+      "comment": "Value of the Reactions row on a group's info: no reactions."
+    },
+    "group_solo.add_members": {
+      "text": "Add members",
+      "comment": "Button in a group of one: add people."
+    },
+    "group_solo.copy_invite": {
+      "text": "Copy invite link",
+      "comment": "Button in a group of one: make an invite link and copy it."
+    },
+    "group_solo.created": {
+      "text": "You created this group",
+      "comment": "Timeline row at the top of a group that has only its creator (ADR-0087 section 10)."
+    },
+    "group_solo.only_you": {
+      "text": "Only you are here.",
+      "comment": "Shown in a group with nobody but its creator."
+    },
+    "group_type.confirm.private.body": {
+      "text": "It leaves search. People can join only if the owner or an admin invites them. Everyone in the group stays.",
+      "comment": "Body of the dialog before making a group private."
+    },
+    "group_type.confirm.private.confirm": {
+      "text": "Make private",
+      "comment": "Confirm button of the dialog making a group private."
+    },
+    "group_type.confirm.private.title": {
+      "text": "Make this group private?",
+      "comment": "Title of the dialog before making a group private."
+    },
+    "group_type.confirm.private.waiting": {
+      "text": "{count, plural, one {# person is waiting to join. You can still answer them.} other {# people are waiting to join. You can still answer them.}}",
+      "comment": "Added to the body of the dialog before making a group private when join requests are pending (ADR-0087, docs/ux/group-and-channel-privacy.md 4.1)."
+    },
+    "group_type.confirm.public.body": {
+      "text": "Anyone can find it and ask to join. Its name, photo, description and rough size become visible to everyone.",
+      "comment": "Body of the dialog before making a group public."
+    },
+    "group_type.confirm.public.confirm": {
+      "text": "Make public",
+      "comment": "Confirm button of the dialog making a group public."
+    },
+    "group_type.confirm.public.title": {
+      "text": "Make this group public?",
+      "comment": "Title of the dialog before making a group public."
+    },
+    "group_type.confirm.rename.body": {
+      "text": "The old @name stops working now. It stays reserved for this group for 30 days.",
+      "comment": "Body of the dialog before changing a group's @name."
+    },
+    "group_type.confirm.rename.confirm": {
+      "text": "Change",
+      "comment": "Confirm button of the dialog changing a group's @name."
+    },
+    "group_type.confirm.rename.title": {
+      "text": "Change @name?",
+      "comment": "Title of the dialog before changing a group's @name."
+    },
+    "group_type.handle": {
+      "text": "@name",
+      "comment": "Label of the @name field of a group (New group form, Group type screen). Keep '@name' as is."
+    },
+    "group_type.handle_private": {
+      "text": "Only members see this.",
+      "comment": "Helper under the @name field of a private group."
+    },
+    "group_type.handle_public": {
+      "text": "Anyone can find this group by this name.",
+      "comment": "Helper under the @name field of a public group."
+    },
+    "group_type.needs_name": {
+      "text": "A public group needs a name.",
+      "comment": "Shown when a public group has no name; Create or Save is disabled."
+    },
+    "group_type.not_saved": {
+      "text": "The change to who can join could not be saved. Open it to try again.",
+      "comment": "Banner on a group's info when an owed change of who can join or of the @name was refused for good (ADR-0087)."
+    },
+    "group_type.owed": {
+      "text": "Will apply when you're back online.",
+      "comment": "Line on the Group type screen when the change could not reach the server and will be sent later (group-and-channel-privacy 4.1)."
+    },
+    "group_type.pending": {
+      "text": "Waiting to be saved",
+      "comment": "Shown after the value of the Who can join row while a change of who can join or of the @name did not reach the server yet; it is retried by itself (ADR-0087)."
+    },
+    "group_type.private": {
+      "text": "Private",
+      "comment": "Value of 'Who can join' for a group."
+    },
+    "group_type.private_desc": {
+      "text": "Only people invited by an admin can join. It stays out of search.",
+      "comment": "Line under the 'Who can join' picker when Private is chosen."
+    },
+    "group_type.public": {
+      "text": "Public",
+      "comment": "Value of 'Who can join' for a group."
+    },
+    "group_type.public_desc": {
+      "text": "Anyone can find this group and ask to join.",
+      "comment": "Line under the 'Who can join' picker when Public is chosen."
+    },
+    "group_type.title": {
+      "text": "Group type",
+      "comment": "Title of the pushed screen where the owner changes who can join and the @name."
+    },
+    "group_type.who_can_join": {
+      "text": "Who can join",
+      "comment": "Label of the picker choosing Private or Public for a group; also the row on the group's info."
+    },
     "guest.claim.error.generic": {
       "text": "The account could not be created. Try again.",
       "comment": "Generic error on the guest form."
@@ -6752,6 +7076,10 @@
       "text": "Groups",
       "comment": "Web: back button to the groups list on a narrow screen."
     },
+    "new_group.error.secure_setup": {
+      "text": "Couldn't create this group. Nothing was created. Try again.",
+      "comment": "New group form: creating the group failed for another reason."
+    },
     "new_group.error.sign_in": {
       "text": "Sign in again to create a group.",
       "comment": "A group cannot be created because this session holds no keys."
@@ -6854,6 +7182,10 @@
     "notification.message.new": {
       "text": "New message",
       "comment": "Notification text when a new message arrived but its content could not be shown on this device."
+    },
+    "notification.reaction.body": {
+      "text": "{name} reacted {emoji} to your message",
+      "comment": "Notification body when someone reacts to the person's message. {name} is who reacted."
     },
     "open_in_app.button": {
       "text": "Open in the app",
@@ -7822,6 +8154,22 @@
       "comment": "Placeholder of one word slot; {position} is its number in the phrase, in Latin digits.",
       "security_critical": true
     },
+    "requests_sent.ask_again": {
+      "text": "Ask again",
+      "comment": "Button on a request to join with no answer after 7 days."
+    },
+    "requests_sent.no_answer": {
+      "text": "No answer yet.",
+      "comment": "Line of a request to join sent 7 days ago or more. Never say it was refused."
+    },
+    "requests_sent.title": {
+      "text": "Requests sent",
+      "comment": "Row at the top of Chats and the title of the list of requests to join this device sent."
+    },
+    "requests_sent.waiting": {
+      "text": "Waiting for an admin.",
+      "comment": "Line of a request to join sent less than 7 days ago. Never say it was refused."
+    },
     "restore_identity.device_intro": {
       "text": "A device that is still logged in shows a six-digit code; type it here. No camera needed; a QR code is there if you prefer.",
       "comment": "Line on the restore-identity screen when Another device is chosen: the signed-in device shows a code that the person types here.",
@@ -8020,6 +8368,46 @@
     "saved.title": {
       "text": "Saved",
       "comment": "Title of the Saved screen, and its row in the Chats screen menu."
+    },
+    "search.conversation.channel_line": {
+      "text": "Public channel · {band} subscribers",
+      "comment": "Second line of a public channel found by search; {band} is a size band like 10k+."
+    },
+    "search.conversation.group_line": {
+      "text": "Public group · {band} members",
+      "comment": "Second line of a public group found by search; {band} is a size band like 100+."
+    },
+    "search.conversation.open": {
+      "text": "Open",
+      "comment": "Button on a found group or channel the person is already in."
+    },
+    "search.conversation.out_of_requests": {
+      "text": "You've asked to join a lot of groups today. Try again tomorrow.",
+      "comment": "A request to join refused because the day's requests are used up."
+    },
+    "search.conversation.queue_full": {
+      "text": "This group has too many requests right now. Try again later.",
+      "comment": "A request to join refused because the group's queue is full."
+    },
+    "search.conversation.request": {
+      "text": "Request to join",
+      "comment": "Button on the card of a public group found by search."
+    },
+    "search.conversation.request_sent": {
+      "text": "Request sent. An admin will see it when they next open Lakko.",
+      "comment": "Line on the card after a request to join was sent."
+    },
+    "search.conversation.request_sent_button": {
+      "text": "Request sent",
+      "comment": "Disabled button on the card once a request to join was sent."
+    },
+    "search.conversation.subscribe": {
+      "text": "Subscribe",
+      "comment": "Button on the card of a public channel found by search."
+    },
+    "search.conversations.heading": {
+      "text": "Groups and channels",
+      "comment": "Heading of the search section listing public groups and channels, under People."
     },
     "search.people.add_contact": {
       "text": "Add contact",
@@ -8291,6 +8679,18 @@
       "text": "The theme on this device.",
       "comment": "Line under the Appearance title in Settings."
     },
+    "settings.appearance.quick_reaction": {
+      "text": "Quick reaction",
+      "comment": "Row in Settings > Appearance: the emoji a double-tap or double-click sends."
+    },
+    "settings.appearance.quick_reaction_change": {
+      "text": "Change quick reaction",
+      "comment": "Accessible name of the button that opens the picker for the quick reaction."
+    },
+    "settings.appearance.quick_reaction_sub": {
+      "text": "Double-tap a message to send it.",
+      "comment": "Line under 'Quick reaction' in Settings > Appearance."
+    },
     "settings.appearance.theme": {
       "text": "Theme",
       "comment": "Label of the light / dark theme choice."
@@ -8537,6 +8937,14 @@
     "settings.notifications.off.title": {
       "text": "Turn on notifications",
       "comment": "Settings row shown when notifications are off for Lakko; opens the system notification settings."
+    },
+    "settings.notifications.reactions": {
+      "text": "Reactions",
+      "comment": "Switch in Settings > Notifications for reaction notifications."
+    },
+    "settings.notifications.reactions_sub": {
+      "text": "When someone reacts to your messages",
+      "comment": "Line under the Reactions switch in Settings > Notifications."
     },
     "settings.passkeys.add": {
       "text": "Add passkey",

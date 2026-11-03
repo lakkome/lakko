@@ -22,6 +22,7 @@
  * on a deliberate gesture and rendered outside the bubble.
  */
 import { createSignal, For, Index, onCleanup, Show, type JSX } from "solid-js";
+import { Portal } from "solid-js/web";
 import { A } from "@solidjs/router";
 
 import { callInviteOf } from "../calls/call-invite-link";
@@ -36,7 +37,27 @@ import {
 } from "./attachments";
 import { useChats } from "./ChatContext";
 import { copyMessageText } from "./copy-message";
-import { OWN_REACTION_SENTINEL, type MessageOpState } from "./message-ops";
+import { heldBy, type MessageOpState } from "./message-ops";
+import {
+  chipRow,
+  maxPerPerson,
+  reactorsByEmoji,
+  rowExpands,
+  shownKinds,
+  type AllowedSetting,
+  type ChipConversation,
+  type ChipRowView,
+} from "./reaction-rules";
+import { emojiOnlyCount, maxReactionKindsShown } from "../../wasm/lakko_ffi_wasm";
+
+/** The most reaction kinds a message shows (11, UX D6). */
+const MAX_KINDS = ((): number => {
+  try {
+    return maxReactionKindsShown();
+  } catch {
+    return 11;
+  }
+})();
 import {
   LONG_PRESS_MS,
   LONG_PRESS_SLOP_PX,
@@ -103,6 +124,25 @@ export interface BubbleHost {
   onSaveEdit: (messageId: number) => void | Promise<void>;
   onDeleteMessage: (messageId: number) => void | Promise<void>;
   onReact: (messageId: number, emoji: string) => void | Promise<void>;
+  /** `docs/ux/reactions-and-emoji.md` section 6 — a double click on the
+   *  bubble outside its text and controls: the person's quick reaction. */
+  onQuickReact: (messageId: number) => void;
+  /** Section 9 — what this conversation takes. Reactive. */
+  reactionAllowed: () => AllowedSetting;
+  /** Section 7 — how the chips draw (one-to-one or group). */
+  chipConversation: ChipConversation;
+  /** Section 5 — the six emoji of this message's reaction row. Reactive. */
+  reactionRowFor: (messageId: number) => readonly string[];
+  /** The person's account key, base64: who "mine" means (ADR-0050). */
+  ownReactorKey: string | null;
+  /** Section 10 — the message whose chips show the three-reactions line for
+   *  about three seconds, or `null`. */
+  capNoticeId: number | null;
+  /** Section 8.1 — a row of a contact in the reactions list was pressed. */
+  onOpenPerson?: (personKeyB64: string) => void;
+  /** Section 8.1 — whether a reactor is a contact (only a contact's row is a
+   *  control). */
+  isContactKey?: (personKeyB64: string) => boolean;
   /** ADR-0052 — Reply was chosen on this message: the view snapshots it and
    *  arms the composer strip. */
   onReply: (messageId: number) => void;
@@ -252,9 +292,9 @@ export function TimelineBubble(
       // pushed into `rows()`. Defensive.
       return null;
     }
-    if (ev.kind === "group-name") {
-      // ADR-0051 — consumed by the group-name gate, never pushed into
-      // `rows()`. Defensive.
+    if (ev.kind === "group-name" || ev.kind === "group-setting") {
+      // ADR-0051 / ADR-0087 — consumed by the group-name gate, never pushed
+      // into `rows()`. Defensive.
       return null;
     }
     if (ev.kind === "group-closed") {
@@ -504,34 +544,46 @@ function ChatBubbleBody(
   };
   onCleanup(cancelPress);
 
-  // Reactions sorted for a stable chip order.
-  const reactionEntries = (): Array<{
-    emoji: string;
-    count: number;
-    mine: boolean;
-    reactedBy: string;
-  }> => {
-    const m = state()?.reactions;
-    if (m === undefined) return [];
-    const own = props.ownIdentity ?? OWN_REACTION_SENTINEL;
-    return [...m.entries()]
-      .map(([emoji, reactors]) => ({
-        emoji,
-        count: reactors.size,
-        mine: reactors.has(own),
-        // ADR-0048 UX section 5 — "Reacted by ...", names through the resolver.
-        reactedBy: joinList(
-          [...reactors].map((r) =>
-            r === own
-              ? t("chat.author.you")
-              : r === OWN_REACTION_SENTINEL
-                ? t("chat.author.a_member")
-                : profiles.resolve(r).name,
-          ),
-        ),
-      }))
-      .filter((e) => e.count > 0)
-      .sort((a, b) => a.emoji.localeCompare(b.emoji));
+  // Section 7 — the chips, from the core's chip rule. A message deleted for
+  // everyone shows none.
+  const chips = (): ChipRowView => {
+    const st = state();
+    if (st === undefined || st.held.length === 0 || isDeleted()) return { chips: [], overflow: 0 };
+    return chipRow(st.held, props.ownReactorKey, props.chipConversation, props.reactionAllowed());
+  };
+  const ownGiven = (): string[] => heldBy(state(), props.ownReactorKey);
+  const rowExpandsFor = (): boolean => rowExpands(props.reactionAllowed());
+  /** The reactions list (section 8.1): open at a chip, on the tab of its
+   *  emoji (`null` = All). */
+  const [reactorsList, setReactorsList] = createSignal<{ x: number; y: number; tab: string | null } | null>(null);
+  const reactorTabs = (): Array<{ emoji: string; people: string[] }> => {
+    const st = state();
+    if (st === undefined) return [];
+    const by = reactorsByEmoji(st.held);
+    const order = chips().chips.map((c) => c.emoji);
+    for (const e of by.keys()) if (!order.includes(e)) order.push(e);
+    return order
+      .filter((e) => by.has(e))
+      .map((emoji) => {
+        const people = [...(by.get(emoji) ?? [])];
+        // The person's own row reads "You" and comes first.
+        people.sort((a, b) => (a === props.ownReactorKey ? -1 : b === props.ownReactorKey ? 1 : 0));
+        return { emoji, people };
+      });
+  };
+  const personName = (k: string): string =>
+    k === props.ownReactorKey ? t("chat.author.you") : profiles.resolve(k).name;
+
+  /** Section 13 — a message of one to three emoji and nothing else, no
+   *  attachment, no quote, no forward line, is drawn large with no bubble. */
+  const emojiOnly = (): number => {
+    if (props.attachments.length > 0 || props.reply !== undefined || props.forward !== undefined) return 0;
+    if (isDeleted() || props.unsupported === true) return 0;
+    try {
+      return emojiOnlyCount(displayText());
+    } catch {
+      return 0;
+    }
   };
 
   // ADR-0047 — media attachments render as their own bubbles; anything the
@@ -720,7 +772,9 @@ function ChatBubbleBody(
         classList={{
           incoming: isIncoming,
           outgoing: !isIncoming,
-          chromeless: chromeless(),
+          chromeless: chromeless() || emojiOnly() > 0,
+          "emoji-only": emojiOnly() > 0,
+          [`emoji-only-${emojiOnly()}`]: emojiOnly() > 0,
           "media-only": mediaOnly(),
           pending: pending(),
           "run-start": props.startsRun,
@@ -776,6 +830,16 @@ function ChatBubbleBody(
         }}
         onPointerUp={cancelPress}
         onPointerCancel={cancelPress}
+        onDblClick={(e) => {
+          // Section 6 (D2) — a double click reacts with the quick reaction,
+          // except on the text (a double click there selects a word) and on a
+          // control (play, link, attachment, quote block).
+          if (!menuAvailable() || props.messageId === undefined || props.ack !== "sent") return;
+          if (startsOnControl(e.target)) return;
+          if (e.target instanceof Element && e.target.closest(".lk-bubble-text, .lk-reactions") !== null) return;
+          e.preventDefault();
+          props.onQuickReact(props.messageId);
+        }}
       >
         <Show when={props.senderName}>{(n) => <div class="lk-sender">{n()}</div>}</Show>
         <Show
@@ -938,41 +1002,47 @@ function ChatBubbleBody(
           </Show>
         </Show>
 
-        {/* Reaction chips — rendered under the body (incl. on a
-            deleted message: a reaction can outlive the text). */}
-        <Show when={reactionEntries().length > 0}>
+        {/* Section 7 — the reaction chips, from the core's chip rule: most
+            people first, at most eleven, `+N` for the rest; a group shows the
+            avatars of up to three reactors. None on a deleted message. */}
+        <Show when={chips().chips.length > 0}>
           <div class="lk-reactions">
-            <For each={reactionEntries()}>
+            <For each={chips().chips}>
               {(re) => {
                 // The chip carries BOTH a fact and an affordance, and
                 // ADR-0045 UX section 6.2.5 separates them: the count is
-                // transcript — part of the history section 6.2.6 keeps whole
-                // — while tapping it is the React op, which dies with Send.
-                // So once the membership has ended the chip renders as
-                // static text rather than as a button. It is not rendered
-                // disabled, for the same reason the composer is not: a
-                // greyed control on a group you will never be in again
-                // promises a future it does not have.
-                //
-                // A FUNCTION, not a stored element: Solid's JSX creates the
-                // DOM node where it is evaluated, so a single shared node
-                // placed in both branches would be MOVED between them rather
-                // than duplicated. Each branch builds its own.
+                // transcript, while tapping it is the React op, which dies
+                // with Send. Once the membership has ended the chip renders
+                // as static text rather than as a button.
                 const chipBody = (): JSX.Element => (
                   <>
-                    <span>{re.emoji}</span>
-                    <span class="lk-reaction-count">{re.count}</span>
+                    <span class="lk-reaction-emoji">{re.emoji}</span>
+                    <Show when={re.face === "avatars"}>
+                      <span class="lk-reaction-avatars" aria-hidden="true">
+                        <For each={re.reactors}>
+                          {(k) => <Avatar label={personName(k)} id={k} size="sm" personKey={k} class="lk-reaction-avatar" />}
+                        </For>
+                      </span>
+                    </Show>
+                    <Show when={re.face === "count"}>
+                      <span class="lk-reaction-count">{re.count}</span>
+                    </Show>
                   </>
                 );
+                const label = (): string =>
+                  re.mine
+                    ? t("chat.reaction.chip_yours_a11y", { emoji: re.emoji })
+                    : t("chat.reaction.chip_a11y", { emoji: re.emoji, count: re.count });
+                const openList = (e: MouseEvent): void => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setReactorsList({ x: e.clientX, y: e.clientY, tab: re.emoji });
+                };
                 return (
                   <Show
                     when={props.actionsAvailable}
                     fallback={
-                      <span
-                        class="lk-reaction"
-                        classList={{ mine: re.mine }}
-                        title={t("chat.reaction.reacted_by", { names: re.reactedBy })}
-                      >
+                      <span class="lk-reaction" classList={{ mine: re.mine }} aria-label={label()} onContextMenu={openList}>
                         {chipBody()}
                       </span>
                     }
@@ -981,8 +1051,11 @@ function ChatBubbleBody(
                       type="button"
                       class="lk-reaction"
                       classList={{ mine: re.mine }}
-                      title={re.mine ? t("chat.reaction.remove_title", { names: re.reactedBy }) : t("chat.reaction.add_title", { names: re.reactedBy })}
-                      onClick={() => {
+                      aria-label={label()}
+                      aria-description={t("chat.reaction.show_who_a11y")}
+                      onContextMenu={openList}
+                      onClick={(e) => {
+                        e.stopPropagation();
                         if (props.messageId !== undefined) {
                           void props.onReact(props.messageId, re.emoji);
                         }
@@ -994,7 +1067,38 @@ function ChatBubbleBody(
                 );
               }}
             </For>
+            <Show when={chips().overflow > 0}>
+              <button
+                type="button"
+                class="lk-reaction more"
+                aria-label={t("chat.reaction.show_who_a11y")}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setReactorsList({ x: e.clientX, y: e.clientY, tab: null });
+                }}
+              >
+                {`+${chips().overflow}`}
+              </button>
+            </Show>
           </div>
+        </Show>
+        <Show when={props.messageId !== undefined && props.capNoticeId === props.messageId}>
+          <p class="lk-reaction-cap" role="status">{t("chat.reaction.cap_reached")}</p>
+        </Show>
+        <Show when={reactorsList()}>
+          {(at) => (
+            <ReactorsList
+              x={at().x}
+              y={at().y}
+              initialTab={at().tab}
+              tabs={reactorTabs()}
+              nameOf={personName}
+              ownKey={props.ownReactorKey}
+              onOpenPerson={props.onOpenPerson}
+              isContact={(k) => props.isContactKey?.(k) === true}
+              onClose={() => setReactorsList(null)}
+            />
+          )}
         </Show>
 
         {/* The line itself is one function, called from wherever the slot
@@ -1028,6 +1132,12 @@ function ChatBubbleBody(
               onMoreReactions={() => {
                 if (props.messageId !== undefined) props.onOpenFullReactPicker(props.messageId);
               }}
+              reactionRow={
+                props.messageId !== undefined && props.ack === "sent" ? props.reactionRowFor(props.messageId) : []
+              }
+              ownReactions={ownGiven()}
+              showExpand={rowExpandsFor()}
+              capReached={ownGiven().length >= maxPerPerson()}
               onReply={() => {
                 if (props.messageId !== undefined) props.onReply(props.messageId);
               }}
@@ -1088,6 +1198,18 @@ function ChatBubbleBody(
         >
           <EmojiPicker
             mode="reaction"
+            allowedOnly={(() => {
+              const a = props.reactionAllowed();
+              return a.mode === "only" ? a.emoji : undefined;
+            })()}
+            isDisabled={(emoji) => {
+              const own = ownGiven();
+              if (own.includes(emoji)) return false;
+              if (own.length >= maxPerPerson()) return true;
+              const kinds = shownKinds(state(), props.reactionAllowed());
+              return kinds.length >= MAX_KINDS && !kinds.includes(emoji);
+            }}
+            notice={ownGiven().length >= maxPerPerson() ? t("chat.reaction.cap_reached") : undefined}
             onEmoji={(emoji) => {
               if (props.messageId !== undefined) void props.onReact(props.messageId, emoji);
             }}
@@ -1188,5 +1310,105 @@ function AttachmentChips(props: {
         }}
       </For>
     </div>
+  );
+}
+
+/**
+ * `docs/ux/reactions-and-emoji.md` section 8.1 — who reacted: a popover at
+ * the chip (web), tabs `All {count}` then one per emoji in chip order, rows of
+ * avatar and name, the emoji at the trailing end on `All`. The person's own
+ * row reads `You` and comes first. Built from what the device holds; nothing
+ * is fetched or sent.
+ */
+function ReactorsList(props: {
+  x: number;
+  y: number;
+  initialTab: string | null;
+  tabs: Array<{ emoji: string; people: string[] }>;
+  nameOf: (personKeyB64: string) => string;
+  ownKey: string | null;
+  onOpenPerson: ((personKeyB64: string) => void) | undefined;
+  isContact: (personKeyB64: string) => boolean;
+  onClose: () => void;
+}): JSX.Element {
+  const [tab, setTab] = createSignal<string | null>(props.initialTab);
+  const total = (): number => props.tabs.reduce((n, t) => n + t.people.length, 0);
+  const rows = (): Array<{ person: string; emoji: string | null }> => {
+    const current = tab();
+    if (current === null) {
+      const out: Array<{ person: string; emoji: string | null }> = [];
+      for (const tb of props.tabs) for (const person of tb.people) out.push({ person, emoji: tb.emoji });
+      out.sort((a, b) => (a.person === props.ownKey ? -1 : b.person === props.ownKey ? 1 : 0));
+      return out;
+    }
+    return (props.tabs.find((tb) => tb.emoji === current)?.people ?? []).map((person) => ({ person, emoji: null }));
+  };
+  const onKey = (e: KeyboardEvent): void => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      props.onClose();
+    }
+  };
+  globalThis.document?.addEventListener("keydown", onKey);
+  onCleanup(() => globalThis.document?.removeEventListener("keydown", onKey));
+  const left = (): number => Math.max(8, Math.min(props.x, (globalThis.innerWidth ?? 360) - 288));
+  const top = (): number => Math.max(8, Math.min(props.y, (globalThis.innerHeight ?? 640) - 320));
+  return (
+    <Portal>
+      <div class="lk-msg-menu-backdrop" onPointerDown={() => props.onClose()} />
+      <div
+        class="lk-reactors-list lk-msg-menu-surface"
+        role="dialog"
+        aria-label={t("chat.reaction.list_title")}
+        style={{ left: `${left()}px`, top: `${top()}px` }}
+      >
+        <Show when={props.tabs.length > 1}>
+          <div class="lk-reactors-tabs" role="tablist">
+            <button type="button" role="tab" aria-selected={tab() === null} onClick={() => setTab(null)}>
+              {t("chat.reaction.list_all", { count: total() })}
+            </button>
+            <For each={props.tabs}>
+              {(tb) => (
+                <button type="button" role="tab" aria-selected={tab() === tb.emoji} onClick={() => setTab(tb.emoji)}>
+                  {`${tb.emoji} ${tb.people.length}`}
+                </button>
+              )}
+            </For>
+          </div>
+        </Show>
+        <ul class="lk-reactors-rows">
+          <For each={rows()}>
+            {(r) => {
+              const body = (): JSX.Element => (
+                <>
+                  <Avatar label={props.nameOf(r.person)} id={r.person} size="sm" personKey={r.person} />
+                  <span class="lk-reactors-name">{props.nameOf(r.person)}</span>
+                  <Show when={r.emoji}>{(e) => <span class="lk-reactors-emoji">{e()}</span>}</Show>
+                </>
+              );
+              return (
+                <li>
+                  <Show
+                    when={props.onOpenPerson !== undefined && r.person !== props.ownKey && props.isContact(r.person)}
+                    fallback={<div class="lk-reactors-row">{body()}</div>}
+                  >
+                    <button
+                      type="button"
+                      class="lk-reactors-row"
+                      onClick={() => {
+                        props.onOpenPerson?.(r.person);
+                        props.onClose();
+                      }}
+                    >
+                      {body()}
+                    </button>
+                  </Show>
+                </li>
+              );
+            }}
+          </For>
+        </ul>
+      </div>
+    </Portal>
   );
 }

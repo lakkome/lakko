@@ -72,6 +72,7 @@
  * live-channel gate in the codebase.
  */
 
+import { INITIAL_KNOCK_VERSION } from "../ds/knock-seeds";
 import type { Wasm } from "../wasm";
 import { loadWasm } from "../wasm";
 import { DsClient } from "../ds/client";
@@ -215,13 +216,22 @@ export async function createCoPublisherLink(
   // the channel id (and its name) ride the sealed preview; the group id names
   // no channel.
   const name = channelsState.metaByChannel().get(bytesToHex(channelId))?.name;
+  // ADR-0087 section 5 — the co-publisher's request is a sealed knock row too;
+  // the owner (the only minter of this link) derives the knock key from its
+  // journal root.
+  const root = wasm.dsJournalRootSeed(identity.ed25519Seed, groupId);
+  const knockSeed = wasm.groupKnockSeed(root, INITIAL_KNOCK_VERSION);
+  root.fill(0);
   const mint = wasm.composeCoPublisherInviteCapability(
     identity.ed25519Seed,
     groupId,
     0n,
     channelId,
     name === undefined || name.length === 0 ? undefined : name,
+    wasm.groupKnockPublicKey(knockSeed),
+    INITIAL_KNOCK_VERSION,
   );
+  knockSeed.fill(0);
   const sealed = mint.sealed;
   const linkSecret = mint.linkSecret;
   mint.free();

@@ -689,6 +689,18 @@ public final class ChatClient {
                     createdAt: createdAt
                 )
             }
+            // ADR-0087 sections 5, 11 and 18 — the group's photo, its allowed
+            // reactions, its @name, and an owner's knock seed. Sniffed before
+            // the chat parser for the reason the arms above give; each codec
+            // is fail-closed and the receive side runs its own gate.
+            if let setting = Self.decodeGroupSettingIfEnvelope(data) {
+                return .groupSetting(
+                    messageId: messageId,
+                    setting: setting,
+                    senderLeaf: senderLeaf,
+                    createdAt: createdAt
+                )
+            }
             // ADR-0057 — a registrar-seed envelope from the journal root.
             // Sniffed before the chat parser for the same reason as the arms
             // above: the lossy-UTF-8 fallback would otherwise render it as a
@@ -838,7 +850,9 @@ public final class ChatClient {
             case .reaction:
                 return .op(
                     messageId: messageId,
-                    op: .reaction,
+                    op: .reaction(
+                        add: parsed.reactionAction != .remove,
+                        targetAuthor: parsed.reactionTargetAuthor),
                     target: parsed.target ?? 0,
                     text: "",
                     emoji: parsed.emoji,
@@ -1081,6 +1095,25 @@ public final class ChatClient {
               let decoded = try? decodeGroupClosedEnvelope(plaintext: bytes)
         else { return nil }
         return decoded
+    }
+
+    /// ADR-0087 — a group-setting service envelope (photo, allowed
+    /// reactions, @name, knock seed), or `nil`. The first-byte peek keeps the
+    /// FFI off the path for a chat envelope; each decoder is the verdict.
+    static func decodeGroupSettingIfEnvelope(_ bytes: Data) -> GroupSettingEnvelope? {
+        guard bytes.first == groupNameEnvelopeFirstByte else { return nil }
+        if let photo = try? decodeGroupPhotoEnvelope(plaintext: bytes) { return .photo(photo) }
+        if let reactions = try? decodeGroupReactionsEnvelope(plaintext: bytes) {
+            return .reactions(reactions)
+        }
+        if let handle = try? decodeConversationHandleEnvelope(plaintext: bytes) {
+            return .handle(handle)
+        }
+        if bytes.count == Int(knockSeedEnvelopeLen()),
+           (try? decodeKnockSeedEnvelope(plaintext: bytes)) != nil {
+            return .knockSeed(bytes)
+        }
+        return nil
     }
 
     /// ADR-0052 decision 3 — the shared-pin operation carried by this
@@ -1362,6 +1395,15 @@ public enum IncomingChatEvent: Equatable {
         senderLeaf: UInt32?,
         createdAt: String
     )
+    /// ADR-0087 — a group-setting envelope (photo, allowed reactions,
+    /// @name, knock seed). Never a timeline row; the repository gates it
+    /// against the live group under its per-group chain.
+    case groupSetting(
+        messageId: Int64,
+        setting: GroupSettingEnvelope,
+        senderLeaf: UInt32?,
+        createdAt: String
+    )
     /// ADR-0052 decision 3 — a shared pin or unpin of ONE message in this
     /// conversation. Never a timeline bubble: the receive loop runs the
     /// standing check against the LIVE group (owner / admin, any member when
@@ -1531,7 +1573,12 @@ public enum ChatStatusEvent: Equatable {
 public enum OpKind: Equatable {
     case edit
     case delete
-    case reaction
+    /// ADR-0023 as amended (reactions-and-emoji spec section 17.3): an
+    /// explicit add or remove, never a toggle. `targetAuthor` is the 32-byte
+    /// account key of the target message's author as the sender stated it
+    /// (used only to decide whether a reaction is to one of this person's
+    /// own messages, for a notification).
+    case reaction(add: Bool, targetAuthor: Data?)
     /// ADR-0024 — an ephemeral typing signal. `true` ⇒ the sender is
     /// typing now; `false` ⇒ they stopped (blur / sent). Never renders
     /// a bubble — folds into per-leaf ephemeral UI state.

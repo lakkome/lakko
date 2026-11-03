@@ -133,7 +133,7 @@ import type { ActingCommitter } from "../chat/committer-beacon";
 // timeline event. The sweep's verdict apply consumes journal rows the poll will
 // never fetch again, so it has to build events for them, and it has to build
 // them the same way the poll does.
-import { consumeRegistrarSeed, ChatClient, rosterOf, toEvent } from "../chat/client";
+import { consumeKnockSeed, consumeRegistrarSeed, ChatClient, rosterOf, toEvent } from "../chat/client";
 import { noteOwnerTransition, readRoleTableOwner } from "../ds/root-handover";
 import { keepFoundGrant } from "../reach/found-grant";
 import {
@@ -190,6 +190,10 @@ import { KeyedError } from "../l10n/keyed-error";
 import { noteCommitterEnvelopeSent, recordOwnRequest, type OwnRequest } from "../chat/membership-retry";
 import { readIntentSnapshot } from "../chat/rerequest-membership";
 import { ownPersonKeyB64, personKeyOf } from "../chat/person-key";
+import { avatarToWasm, type AvatarData } from "../profile/avatar-model";
+import { ownsGroup } from "../chat/group-owner";
+import { knockSeeds, ownerKnockSeed } from "../ds/knock-seeds";
+import type { ProfileAvatar as WasmProfileAvatar } from "../../wasm/lakko_ffi_wasm";
 import { welcomeOrder } from "./link-claims";
 import { settleAnswer, type OwedAnswerResult } from "./owed-answer";
 
@@ -204,6 +208,8 @@ export interface GroupInviteMintPreview {
   readonly groupName?: string | undefined;
   readonly inviterName?: string | undefined;
   readonly memberCount: number;
+  /** ADR-0087 section 18.4 — the group photo the link is made with. */
+  readonly avatar?: AvatarData | null | undefined;
 }
 
 export interface ContactsClientOptions {
@@ -219,6 +225,10 @@ export interface ContactsClientOptions {
    *  account mailbox. When unset, falls back to `identityProvider`, then to
    *  a throwaway `Identity.fromSeed(accountIdentitySeed)`. */
   accountIdentityProvider?: () => WasmIdentity | null;
+  /** ADR-0074 section 3.5 — the account key this account holds INSIDE
+   *  conversations (the predecessor after a rotation), for recognising the
+   *  owner of a group. Unset: the account identity alone. */
+  conversationAccountIdentityProvider?: () => WasmIdentity | null;
   /** Fires after every successful MLS state-mutating call so
    *  the route layer can persist the canonical Identity's
    *  provider snapshot to disk. Must resolve only when the snapshot
@@ -925,6 +935,8 @@ function sweepPortsFor(
           // ADR-0057 — consumed at receipt, like the poll does, never shown.
           if (event.kind === "registrarSeed") {
             await consumeRegistrarSeed(group, event);
+          } else if (event.kind === "group-setting" && event.setting?.kind === "knockSeed") {
+            await consumeKnockSeed(group, event.setting.plaintext, event.senderKey);
           } else if (event.kind === "serviceEnvelope") {
             // An unrecognised `lakko/…` service envelope: dropped, never shown.
           } else {
@@ -1200,6 +1212,7 @@ function toSweepEntry(row: PendingCommitEntry): SweepDurableEntry {
 export class ContactsClient {
   private readonly identityProvider: (() => WasmIdentity | null) | undefined;
   private readonly accountIdentityProvider: (() => WasmIdentity | null) | undefined;
+  private readonly conversationAccountIdentityProvider: (() => WasmIdentity | null) | undefined;
   private readonly onPersist: (() => Promise<void>) | undefined;
   private readonly onPersistWithCommit:
     | ((entry: NewCommitEntry) => Promise<void>)
@@ -1216,6 +1229,7 @@ export class ContactsClient {
   ) {
     this.identityProvider = options.identityProvider;
     this.accountIdentityProvider = options.accountIdentityProvider;
+    this.conversationAccountIdentityProvider = options.conversationAccountIdentityProvider;
     this.onPersist = options.onPersist;
     this.onPersistWithCommit = options.onPersistWithCommit;
     this.ownProfileEnvelope = options.ownProfileEnvelope;
@@ -3248,10 +3262,33 @@ export class ContactsClient {
    * With no other device there is no commit at all: the group stands at its
    * first epoch, and that epoch is the one claimed.
    */
-  async startGroupAlone(identity: IdentitySecrets | null): Promise<{ group: WasmGroup }> {
+  async startGroupAlone(
+    identity: IdentitySecrets | null,
+    /** ADR-0087 section 3 — runs with the new group before anything about it
+     *  leaves this device (the `@name` claim): a throw frees the group and
+     *  nothing was created. */
+    beforeFounded?: (group: WasmGroup) => Promise<void>,
+  ): Promise<{ group: WasmGroup }> {
     const wasm = await loadWasm();
     const myIdentity = await this.resolveIdentity(identity);
     const group = new wasm.Group(myIdentity, wasm.GroupKind.Group);
+    if (beforeFounded !== undefined) {
+      try {
+        await beforeFounded(group);
+      } catch (err) {
+        try {
+          group.deleteLocally(myIdentity);
+        } catch {
+          /* never stored */
+        }
+        try {
+          group.free();
+        } catch {
+          /* already freed */
+        }
+        throw err;
+      }
+    }
     const ownDevices = await this.ownOtherDevices(identity, myIdentity);
     let welcome: Uint8Array | null = null;
     if (ownDevices.length > 0) {
@@ -4544,6 +4581,17 @@ export class ContactsClient {
     const wasm = await loadWasm();
     const myIdentity = await this.resolveAccountIdentity(identity);
     const memberCount = Math.min(0xff_ff, Math.max(0, Math.floor(preview.memberCount)));
+    // ADR-0087 section 5 — the link carries the group's knock key, so the
+    // joiner seals its request to it. The owner derives it from the journal
+    // root; an admin uses the seed the owner handed it.
+    const knock = await knockKeyFor(wasm, myIdentity, group, this.conversationAccountIdentityProvider?.() ?? null);
+    if (knock === null) {
+      throw ContactsError.wrap(new Error("group-invite: this device holds no knock key for the group yet"));
+    }
+    const avatarHandle =
+      preview.avatar === undefined || preview.avatar === null
+        ? undefined
+        : avatarToWasm<WasmProfileAvatar>(wasm, preview.avatar);
     const mintWith = (names: {
       groupName?: string | undefined;
       inviterName?: string | undefined;
@@ -4555,6 +4603,9 @@ export class ContactsClient {
         names.groupName,
         names.inviterName,
         memberCount,
+        knock.publicKey,
+        knock.version,
+        avatarHandle,
       );
     let mint: WasmInviteLinkMint;
     try {
@@ -4783,7 +4834,16 @@ export class ContactsClient {
       }
     }
     const groupId = cap.groupId;
+    const knockPublicKey = cap.knockPublicKey;
+    const knockVersion = cap.knockVersion;
     cap.free();
+    // ADR-0087 section 5 — a link that carries the group's knock key is
+    // answered by a sealed request (a KeyPackage with no epoch), which waits
+    // in the queue across every commit.
+    if (knockPublicKey !== undefined && knockVersion !== undefined) {
+      await this.requestToJoinSealed(identity, groupId, knockPublicKey, knockVersion, capabilityWire);
+      return { groupId, joinerSignatureKey: myIdentity.signaturePublicKey };
+    }
     // ADR-0060 section 6 (C-69) — the committer that sweeps our approved `Add`
     // writes the Welcome to this account's closed mailbox under our `reply`
     // grant, which rides the signed attribution. Registered (7-day expiry)
@@ -4844,6 +4904,55 @@ export class ContactsClient {
       throw ContactsError.wrap(err);
     }
     return { groupId, joinerSignatureKey: myIdentity.signaturePublicKey };
+  }
+
+  /**
+   * ADR-0087 section 5 / UX 6.1 — ask to join a group: a fresh KeyPackage,
+   * the reply grant the Welcome needs (C-69), this account's profile and,
+   * from a link, the capability, all sealed to the group's knock key and
+   * knocked once. Nothing to fill in. The KeyPackage's private key lives in
+   * the provider and is the only thing that opens the Welcome, so the
+   * snapshot is made durable BEFORE the knock (fail-closed).
+   *
+   * Throws `KnockQueueFullError` when the group's queue is full; a network
+   * failure as `DsNetworkError`; a refused token as the token pool's error.
+   */
+  async requestToJoinSealed(
+    identity: IdentitySecrets | null,
+    groupId: Uint8Array,
+    knockPublicKey: Uint8Array,
+    knockVersion: number,
+    capabilityWire?: Uint8Array,
+  ): Promise<void> {
+    const wasm = await loadWasm();
+    const myIdentity = await this.resolveIdentity(identity);
+    const session = reachSession();
+    if (session === null) {
+      throw ContactsError.wrap(new KeyedError("common.error.starting_up"));
+    }
+    let replyGrant: import("../../wasm/lakko_ffi_wasm").ReachGrant;
+    try {
+      replyGrant = (await session.newReply("group-join", journalHex(groupId))).grant;
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    let row: Uint8Array;
+    try {
+      const keyPackage = myIdentity.createKeyPackage();
+      let profile: Uint8Array = new Uint8Array();
+      try {
+        profile = (await this.ownProfileEnvelope?.()) ?? new Uint8Array();
+      } catch {
+        profile = new Uint8Array();
+      }
+      row = wasm.sealKnockRow(knockPublicKey, knockVersion, keyPackage, replyGrant, profile, capabilityWire ?? null);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    } finally {
+      replyGrant.free();
+    }
+    await this.persistDurableOrThrow();
+    await this.ds.knock(groupId, [row]);
   }
 
   /** Convenience wrapper around [`addMemberToGroup`] that
@@ -5115,4 +5224,39 @@ function decodeContactRequestBody(
     linkAnswer,
     createdAt,
   };
+}
+
+/**
+ * ADR-0087 section 5 — the group's current knock key as this device holds it:
+ * the owner derives it from its journal root seed; an admin uses the seed the
+ * owner handed it (the newest version it holds). `null` when neither: a plain
+ * member, or an admin whose seed has not arrived yet.
+ */
+export async function knockKeyFor(
+  wasm: Awaited<ReturnType<typeof loadWasm>>,
+  accountIdentity: WasmIdentity,
+  group: WasmGroup,
+  /** The account key held inside conversations after an ADR-0074 rotation
+   *  (the predecessor), when there is one. */
+  conversationIdentity?: WasmIdentity | null,
+): Promise<{ readonly version: number; readonly seed: Uint8Array; readonly publicKey: Uint8Array } | null> {
+  const groupId = group.groupId;
+  if (ownsGroup(group, [accountIdentity.signaturePublicKey, conversationIdentity?.signaturePublicKey])) {
+    // The owner's current version (ADR-0087 section 5: removing an admin
+    // bumps it), persisted beside the seeds.
+    const version = await knockSeeds.ownerVersion(base64Encode(groupId));
+    // From the journal root this version was made under (an ADR-0074
+    // rotation moves the root; the boundary is recorded per group), else the
+    // current account identity's.
+    let seed = await ownerKnockSeed(groupId, base64Encode(groupId), version);
+    if (seed === null) {
+      const root = wasm.dsJournalRootSeed(accountIdentity.ed25519Seed, groupId);
+      seed = wasm.groupKnockSeed(root, version);
+      root.fill(0);
+    }
+    return { version, seed, publicKey: wasm.groupKnockPublicKey(seed) };
+  }
+  const held = await knockSeeds.latest(base64Encode(groupId));
+  if (held === null) return null;
+  return { version: held.version, seed: held.seed, publicKey: wasm.groupKnockPublicKey(held.seed) };
 }

@@ -212,13 +212,15 @@ import {
   repairPlan,
   resetCase,
 } from "../chat/reset-repair";
+import { createdHere, openCreatedGroups } from "../chat/created-groups";
 import {
+  conversationInfoSectionsFor,
   findPersonRecord,
-  groupInfoSections,
   infoHeading,
   infoOpenLabel,
   infoOpening,
   infoTargetForKind,
+  type InfoSection as InfoSectionName,
 } from "../chat/conversation-info";
 import { uiRules } from "../chat/ui-rules";
 import type { IncomingChatEvent } from "../chat/client";
@@ -230,7 +232,7 @@ import {
 // ADR-0047 — voice messages, video notes, the emoji picker and GIFs. Every
 // rule lives in a plain module under `media/` (tested there); this file wires
 // them into the timeline and the composer.
-import { EmojiPicker } from "../media/EmojiPicker";
+import { EmojiPicker, emojiSuggestions } from "../media/EmojiPicker";
 import type { MediaUpload } from "../media/MediaBubbles";
 import {
   RecordButton,
@@ -243,7 +245,29 @@ import { createMediaHub, mediaKey, type MediaHub } from "../media/media-hub";
 import { describeImage, describeVideo, type VisualPreview } from "../media/visual-thumb";
 import { createRecorder } from "../media/recording-controller";
 import type { CaptureResult } from "../media/media-capture";
-import { isSingleEmojiGrapheme } from "../media/emoji/emoji-index";
+import {
+  isSingleEmojiGrapheme,
+  loadRecentReactions,
+  pushRecent,
+  saveRecentReactions,
+} from "../media/emoji/emoji-index";
+import {
+  ALLOW_ALL,
+  reactionRow,
+  shownKinds,
+  tapVerdict,
+  type AllowedSetting,
+} from "../chat/reaction-rules";
+import { quickReactionOf } from "../chat/quick-reaction-register";
+import { GroupInfoExtras } from "../chat/GroupInfoExtras";
+import { copyMessageText } from "../chat/copy-message";
+import { retireGroupHandle } from "../chat/group-handle";
+import { HandleWriteError } from "../discovery/handle-lookup";
+import { readKnockCursor } from "../chat/knock-cursor";
+import { boundContactsAccount } from "../contacts/local-store";
+import { DsClient } from "../ds/client";
+import { markReactionsSeen, markUnseenReaction, unseenReactionIds } from "../chat/unseen-reactions";
+import { colonQueryAt, replaceColonQuery, type ColonQuery } from "../chat/colon-query";
 import { MAX_GIF_FULL_BYTES, fetchGifMedia, type GifItem } from "../media/gif-client";
 import {
   composeEnvelope,
@@ -453,6 +477,7 @@ import { createLiveText, type LiveTextInput } from "../l10n/live-text";
 import {
   applyOp,
   editDeleteAuthorized,
+  heldBy,
   OWN_REACTION_SENTINEL,
   type MessageOpState,
 } from "../chat/message-ops";
@@ -746,6 +771,11 @@ function ChatView(props: {
   // below to seed the composer from sibling-device drafts
   // and to broadcast composer edits back out.
   const sync = useDeviceGroupSync();
+  // ADR-0087 section 10 — which groups this device created (the timeline row).
+  createEffect(() => {
+    const acct = sessionAccountOf(auth.state());
+    if (acct !== null) void openCreatedGroups(acct);
+  });
   // ADR-0073 R.5 — the CONVERSATION this group belongs to. Everything a
   // person attaches to a conversation (the draft, the read position, call
   // history) is keyed on its id and never rewritten when the conversation
@@ -787,6 +817,9 @@ function ChatView(props: {
     undefined,
     {
       identityProvider: () => chats.identity(),
+      // ADR-0087 section 5 — the owner of a group is recognised by the key it
+      // holds inside conversations too (an ADR-0074 rotation).
+      conversationAccountIdentityProvider: () => chats.conversationAccountIdentity(),
       onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
       // ADR-0048 §3 — an add-by-username lookup proves the binding a username
       // verification would check.
@@ -1887,9 +1920,6 @@ function ChatView(props: {
       setGroupNameBusy(false);
     }
   }
-  /** Whether the row is editable: owner / admin, or a table-less group,
-   *  and the membership still standing. A plain member sees it read-only. */
-  const canRenameGroup = (): boolean => ownRole() !== "member" && !membershipEnded();
   const groupNameUnchanged = (): boolean =>
     groupNameInput().trim() === (groupNames.nameOf(props.entry.groupIdB64) ?? "");
   // ADR-0028 (G-3) — the minted group invite-link (the owner/admin
@@ -1982,20 +2012,22 @@ function ChatView(props: {
    * function rather than a memo so the forward references to `canRenameGroup`
    * and `membershipEnded` resolve at CALL time, which is a render.
    */
-  const groupSections = (): ReturnType<typeof groupInfoSections> =>
-    groupInfoSections(uiRules(), {
-      canManageMembers: canManageMembers(),
-      canRename: canRenameGroup(),
-      canMintInvite: canManageMembers(),
-      isOwner: isOwner(),
-      // The same two conditions `exitBlockState` hides the whole exit block
-      // on: a group with no ADR-0022 role table has no ADR-0045 proposal
-      // path, so a member has nothing to leave WITH, and a torn own-leaf read
-      // is not a licence to offer an exit. Passing it means the rule now
-      // agrees with that machine instead of being overridden by it.
+  const groupSections = (): readonly InfoSectionName[] => {
+    // A membership that ended offers nothing here: the exit block says what
+    // is left (ADR-0045 UX 6.2), and the end itself wipes the group.
+    if (membershipEnded()) return [];
+    return conversationInfoSectionsFor(uiRules(), {
+      kind: "group",
+      role: ownRole() ?? "member",
+      alone: memberCount() <= 1,
+      // A group with no ADR-0022 role table has no proposal path, so nothing
+      // to hand over or to leave WITH; a torn own-leaf read is not a licence
+      // to offer an exit either.
+      canTransfer: usesProposalPath() && ownLeaf() !== undefined,
       canLeave: usesProposalPath() && ownLeaf() !== undefined,
-      membershipEnded: membershipEnded(),
+      hasHandle: groupNames.handleOf(props.entry.groupIdB64) !== undefined,
     });
+  };
   /** The version of the accepted-contacts list the person info was built
    *  from; bumped by a rename or a remove made inside the layer. */
   const [acceptedVersion, setAcceptedVersion] = createSignal(0);
@@ -3143,6 +3175,12 @@ function ChatView(props: {
       // chat reachable.
       // ADR-0073 R.5 — a conversation is every group of its lineage this
       // device holds; the open group (the head) goes last.
+      // ADR-0087 section 9: the account's other devices are leaves of this
+      // group too. The ended register, on disk and queued for the DeviceGroup
+      // before anything is deleted here, makes each of them wipe it through
+      // `deleteAfterEndedElsewhere` at this epoch.
+      const endedEpoch = props.entry.group.epoch;
+      await sync.writeConversationEnd({ kind: 2, id: props.entry.group.groupId }, "ended", endedEpoch);
       const held = lineageView.resolve(props.entry.groupIdB64)?.held ?? [props.entry];
       await membershipEnd.deleteConversation({
         segments: held.map((g) => ({
@@ -3157,6 +3195,45 @@ function ChatView(props: {
       if (onThisScreen()) props.onLeave();
     } catch (err) {
       setError(errorText(err, "chat.error.delete_chat"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** ADR-0087 section 11 — `Delete group`, for an owner alone: the @name is
+   *  retired (freed in 30 days) and the group and its messages go. Offline:
+   *  nothing changes. */
+  async function onDeleteGroup(): Promise<void> {
+    const handle = groupNames.handleOf(props.entry.groupIdB64)?.handle ?? "";
+    const ok = await requestConfirm({
+      title: t("group_delete.title"),
+      body: t("group_delete.body", { name: handle.length > 0 ? handle : resolvePeerName() }),
+      confirmLabel: t("group_delete.confirm"),
+      cancelLabel: t("common.cancel"),
+      tone: "danger",
+    });
+    if (!ok) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const account = chats.accountIdentity();
+      if (handle.length > 0 && account !== null) {
+        const wasm = await loadWasmForCalls();
+        await retireGroupHandle({ wasm, accountIdentity: account, groupId: props.entry.group.groupId, handle });
+      }
+      const held = lineageView.resolve(props.entry.groupIdB64)?.held ?? [props.entry];
+      await membershipEnd.deleteConversation({
+        segments: held.map((g) => ({ groupIdB64: g.groupIdB64, groupIdHex: hexOf(g.group.groupId) })),
+        headGroupIdB64: props.entry.groupIdB64,
+        conversationHex: conversationHex(),
+      });
+      if (onThisScreen()) props.onLeave();
+    } catch (err) {
+      setError(
+        err instanceof HandleWriteError && err.code !== "no-such-handle"
+          ? t("group_handle.error.offline")
+          : errorText(err, "chat.error.delete_chat"),
+      );
     } finally {
       setBusy(false);
     }
@@ -3887,11 +3964,27 @@ function ChatView(props: {
     if (!targetKnown(e.target, extra)) return prev;
     if (e.senderKey === undefined) return prev;
     if (e.op === "reaction") {
+      if ((e.emoji ?? "") === "") return prev;
+      // Section 12 — another person's reaction to this person's own message
+      // counts as unseen until that message is on screen.
+      const own = ownPersonKeyB64(chats.identity());
+      const account = accountIdNow();
+      if (
+        own !== null &&
+        account !== null &&
+        e.reactionAction !== "remove" &&
+        e.senderKey !== own &&
+        authorIdentityForMessageId(e.target, extra) === own
+      ) {
+        markUnseenReaction(account, props.entry.groupIdB64, e.target);
+      }
       return applyOp(prev, {
         op: "reaction",
         target: e.target,
         emoji: e.emoji ?? "",
         reactor: e.senderKey,
+        action: e.reactionAction ?? "add",
+        at: e.messageId,
       });
     }
     // edit / delete — author-only (fail-closed, invariant #4).
@@ -4139,6 +4232,15 @@ function ChatView(props: {
         void groupNames.receive(props.entry, e).catch((err) => {
           // eslint-disable-next-line no-console
           console.warn("group name receive failed", err);
+        });
+        continue;
+      }
+      // ADR-0087 — the group photo, allowed reactions and handle, through the
+      // same role gate under the same lock. Never a timeline row.
+      if (e.kind === "group-setting") {
+        void groupNames.receiveSetting(props.entry, e).catch((err) => {
+          // eslint-disable-next-line no-console
+          console.warn("group setting receive failed", err);
         });
         continue;
       }
@@ -4947,42 +5049,130 @@ function ChatView(props: {
     leaveSelectionMode();
   }
 
-  /** React to any message with `emoji` — publish a reaction op +
-   *  toggle it locally under our own leaf. Re-reacting with the
-   *  same emoji toggles it off (the op + the local apply are both
-   *  toggles, so they stay in sync). */
+  // ----- Reactions (`docs/ux/reactions-and-emoji.md`) ------------------
+
+  const accountIdNow = (): string | null => {
+    const st = auth.state();
+    return st.kind === "session" ? st.account.accountId : null;
+  };
+
+  /** The person's account key: whose reactions "mine" means (ADR-0050). */
+  const ownReactorKey = (): string | null => ownPersonKeyB64(chats.identity());
+  /** Section 9 — what this conversation takes: a one-to-one takes every
+   *  reaction, a group what its owner or admins chose. */
+  const reactionAllowed = (): AllowedSetting =>
+    isGroupChat() ? groupNames.reactionsOf(props.entry.groupIdB64) : ALLOW_ALL;
+  const reactionStateOf = (messageId: number): MessageOpState | undefined =>
+    msgOps().get(messageId) ?? historyOps().get(messageId);
+  /** Section 5 — the six emoji of the row for this message. */
+  function reactionRowFor(messageId: number): string[] {
+    const allowed = reactionAllowed();
+    return reactionRow(
+      quickReactionOf(accountIdNow()),
+      loadRecentReactions(),
+      allowed,
+      shownKinds(reactionStateOf(messageId), allowed),
+    );
+  }
+  /** Section 10 — the message whose chips show the three-reactions line. */
+  const [capNoticeId, setCapNoticeId] = createSignal<number | null>(null);
+  let capNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+  function showCapNotice(messageId: number): void {
+    if (capNoticeTimer !== null) clearTimeout(capNoticeTimer);
+    setCapNoticeId(messageId);
+    capNoticeTimer = setTimeout(() => {
+      capNoticeTimer = null;
+      setCapNoticeId(null);
+    }, 3000);
+  }
+  onCleanup(() => {
+    if (capNoticeTimer !== null) clearTimeout(capNoticeTimer);
+  });
+
+  /** A press of `emoji` on a message: the row, a chip, the picker. The one
+   *  rule (`reactionTapVerdict`) decides add, remove or nothing; an add wakes
+   *  the conversation (section 12: the reacted-to author's devices notify),
+   *  a remove is quiet. */
   async function onReact(messageId: number, emoji: string): Promise<void> {
     // The action menu closes itself after an action; only the full picker,
     // which the view owns, has to be dismissed from here.
     setFullReactPickerId(null);
     setError(null);
-    // ADR-0047 §3 — a reaction is exactly one emoji grapheme. The wire accepts
-    // any string up to 64 bytes; this is the check that keeps the six-emoji
-    // bar and the picker one model.
+    // ADR-0047 §3 — a reaction is exactly one emoji grapheme.
     if (!isSingleEmojiGrapheme(emoji)) {
       setError(() => t("chat.reaction.single_emoji"));
       return;
     }
+    const allowed = reactionAllowed();
+    const state = reactionStateOf(messageId);
+    const verdict = tapVerdict(emoji, heldBy(state, ownReactorKey()), allowed, shownKinds(state, allowed));
+    if (verdict === "cap-reached") {
+      showCapNotice(messageId);
+      return;
+    }
+    if (verdict !== "add" && verdict !== "remove") return;
+    const reactor = ownReactorKey();
+    if (reactor === null) return;
     try {
+      let at = 0;
       if (opRouteNow() === "send") {
-        const envelopeBytes = await composeReactionEnvelope(messageId, emoji);
-        await publishQuiet(envelopeBytes);
+        let author: Uint8Array | undefined;
+        const authorKey = authorIdentityForMessageId(messageId);
+        if (authorKey !== undefined) {
+          try {
+            const b = base64Decode(authorKey);
+            author = b.length === 32 ? b : undefined;
+          } catch {
+            author = undefined;
+          }
+        }
+        const envelopeBytes = await composeReactionEnvelope(messageId, emoji, verdict, author);
+        if (verdict === "add" && reactionNotificationsWanted(author)) {
+          // Section 12 — a reaction to someone's message wakes the
+          // conversation, as a message does; every device but the author's
+          // stays silent.
+          const sent = await chat.sendMessage(props.requireIdentity(), props.entry.group, envelopeBytes);
+          at = sent.messageId;
+        } else {
+          at = (await chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes)).messageId;
+        }
       }
-      // Our own identity, not our own leaf: the chip's "mine" test
-      // and the peers' fold must agree on one value that survives a
-      // renumber.
-      const reactor = ownSignatureKeyB64() ?? OWN_REACTION_SENTINEL;
       setMsgOps(
         applyOp(msgOps(), {
           op: "reaction",
           target: messageId,
           emoji,
           reactor,
+          action: verdict,
+          at,
         }),
       );
+      if (verdict === "add") saveRecentReactions(pushRecent(loadRecentReactions(), emoji));
     } catch (err) {
       setError(errorText(err, "chat.error.react"));
     }
+  }
+
+  /** Section 12 — a reaction wakes only when it is to SOMEONE ELSE's
+   *  message: reacting to one's own wakes nobody worth waking. */
+  function reactionNotificationsWanted(author: Uint8Array | undefined): boolean {
+    if (author === undefined) return false;
+    return base64Encode(author) !== ownReactorKey();
+  }
+
+  /** Section 6 — a double click outside the text: the quick reaction. Does
+   *  nothing, silently, when the conversation does not take it. */
+  function onQuickReact(messageId: number): void {
+    const quick = quickReactionOf(accountIdNow());
+    const allowed = reactionAllowed();
+    const state = reactionStateOf(messageId);
+    const verdict = tapVerdict(quick, heldBy(state, ownReactorKey()), allowed, shownKinds(state, allowed));
+    if (verdict === "cap-reached") {
+      showCapNotice(messageId);
+      return;
+    }
+    if (verdict !== "add" && verdict !== "remove") return;
+    void onReact(messageId, quick);
   }
 
   // ----- ADR-0024 typing + read-receipt send path ----------------
@@ -5721,6 +5911,34 @@ function ChatView(props: {
   const [composerPickerOpen, setComposerPickerOpen] = createSignal(false);
   const [fullReactPickerId, setFullReactPickerId] = createSignal<number | null>(null);
   let composerInput: HTMLTextAreaElement | undefined;
+  // Reactions section 13 — the `:` suggestion strip above the composer.
+  const [colonQuery, setColonQuery] = createSignal<ColonQuery | null>(null);
+  const [colonIndex, setColonIndex] = createSignal(0);
+  const colonSuggestions = createMemo<string[]>(() => {
+    const q = colonQuery();
+    return q === null ? [] : emojiSuggestions(q.word);
+  });
+  function refreshColonQuery(): void {
+    const el = composerInput;
+    if (el === undefined || el.selectionStart !== el.selectionEnd) {
+      setColonQuery(null);
+      return;
+    }
+    const q = colonQueryAt(el.value, el.selectionStart ?? el.value.length);
+    setColonQuery(q);
+    setColonIndex(0);
+  }
+  function pickColonSuggestion(emoji: string): void {
+    const q = colonQuery();
+    const el = composerInput;
+    if (q === null || el === undefined) return;
+    const next = replaceColonQuery(el.value, q, emoji);
+    setInput(next.text);
+    el.value = next.text;
+    el.setSelectionRange(next.caret, next.caret);
+    el.focus();
+    setColonQuery(null);
+  }
   let composerCaret: { start: number; end: number } | null = null;
   /** docs/ux section 5.2 — the field grows with the draft up to five lines
    *  (the CSS `max-height` is the cap; past it the field scrolls). Reset to
@@ -6246,6 +6464,38 @@ function ChatView(props: {
   // ADR-0027 (G-3) — reject a pending external-join request (owner / admin
   // only). Local-only: drops the retained proposal so it leaves the pending
   // list. No commit, no journal post — the joiner never receives a Welcome.
+  /** ADR-0087 UX section 8 — `Reject all`: every retained request, and the
+   *  knock queue up to the last row this admin read. */
+  async function onRejectAllJoins(): Promise<void> {
+    const ok = await requestConfirm({
+      title: t("chat.members.join.reject_all_title"),
+      body: t("chat.members.join.reject_all_body"),
+      confirmLabel: t("chat.members.join.reject_all"),
+      cancelLabel: t("common.cancel"),
+      tone: "danger",
+    });
+    if (!ok) return;
+    setError(null);
+    setBusy(true);
+    try {
+      for (const ref of pendingJoins()) {
+        disarmRetry({ kind: "approve-join", subjectKeyB64: base64Encode(ref) });
+        await contacts.rejectExternalJoin(props.requireIdentity(), props.entry.group, ref);
+      }
+      const owner = boundContactsAccount();
+      if (owner !== null) {
+        const through = readKnockCursor(props.entry.groupIdB64, owner);
+        if (through > 0) await new DsClient().deleteKnocks(props.entry.group.groupId, through);
+      }
+      setMembersVersion(membersVersion() + 1);
+      setUnkeptJoinRequest(false);
+    } catch (err) {
+      setError(errorText(err, "chat.error.reject_join"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function onRejectJoin(proposalRef: Uint8Array): Promise<void> {
     setError(null);
     showNotice(null);
@@ -7069,6 +7319,42 @@ function ChatView(props: {
    *  and nothing is said - a quote is not a promise that the original
    *  exists. */
   let highlightTimer: ReturnType<typeof setTimeout> | null = null;
+  // ----- Reactions section 12: unseen reactions --------------------------
+
+  const unseenReactions = (): readonly number[] => unseenReactionIds(accountIdNow(), props.entry.groupIdB64);
+  {
+    // A message whose reactions are unseen is seen once half of it has been
+    // in the timeline's view.
+    const io =
+      typeof IntersectionObserver === "undefined"
+        ? null
+        : new IntersectionObserver(
+            (entries) => {
+              const account = accountIdNow();
+              if (account === null) return;
+              for (const en of entries) {
+                if (!en.isIntersecting) continue;
+                const id = Number((en.target as HTMLElement).dataset.messageId);
+                if (Number.isFinite(id)) markReactionsSeen(account, props.entry.groupIdB64, id);
+                io?.unobserve(en.target);
+              }
+            },
+            { threshold: 0.5 },
+          );
+    createEffect(() => {
+      const ids = unseenReactions();
+      rows();
+      if (io === null || scrollEl === undefined || ids.length === 0) return;
+      queueMicrotask(() => {
+        for (const id of ids) {
+          const el = scrollEl?.querySelector(`[data-message-id="${String(id)}"]`);
+          if (el !== null && el !== undefined) io.observe(el);
+        }
+      });
+    });
+    onCleanup(() => io?.disconnect());
+  }
+
   function jumpToMessage(messageId: number): void {
     // A reply whose original belongs to another segment carries no jump
     // target (`held-send.ts` `replyForSend`): the quote is all there is.
@@ -7352,6 +7638,7 @@ function ChatView(props: {
             id={props.entry.groupIdB64}
             size="sm"
             personKey={isGroupChat() ? undefined : (peerKeyB64() ?? undefined)}
+            conversationKey={isGroupChat() ? props.entry.groupIdB64 : undefined}
           />
           <div class="lk-chat-title-text">
             {/* ADR-0021 follow-up: show the linked contact's user-chosen
@@ -7614,13 +7901,23 @@ function ChatView(props: {
                 once the membership has ended that is an invitation the
                 composer below can no longer accept. The terminal row that
                 follows carries the whole of what there is to say. */}
-            <Show when={!membershipEnded()}>
-              {t("chat.timeline.empty")}
+            <Show
+              when={!(isGroupChat() && createdHere(props.entry.groupIdB64))}
+              fallback={t("group_solo.created")}
+            >
+              <Show when={!membershipEnded()}>
+                {t("chat.timeline.empty")}
+              </Show>
             </Show>
           </p>
         }
       >
         <ol class="lk-timeline" classList={{ selecting: selecting() }}>
+          {/* ADR-0087 section 10 — part of the conversation: it stays when
+              a second person joins. */}
+          <Show when={isGroupChat() && createdHere(props.entry.groupIdB64)}>
+            <li class="lk-system-row">{t("group_solo.created")}</li>
+          </Show>
           <For each={timelineEntries()}>
             {(entry, i) => {
               const place = (): TimelineLayout =>
@@ -7691,6 +7988,14 @@ function ChatView(props: {
                 onSaveEdit={onSaveEdit}
                 onDeleteMessage={onDeleteMessage}
                 onReact={onReact}
+                onQuickReact={onQuickReact}
+                reactionAllowed={reactionAllowed}
+                chipConversation={isGroupChat() ? "group" : "one-to-one"}
+                reactionRowFor={reactionRowFor}
+                ownReactorKey={ownReactorKey()}
+                capNoticeId={capNoticeId()}
+                isContactKey={(k) => contactKeySet().has(k)}
+                onOpenPerson={(k) => openContactScreen(k)}
                 // ADR-0073 R.5 — a row of an older group of the conversation
                 // is read-only: no op can name it in this group's journal.
                 actionsAvailable={messageActionsAvailable() && !isHistoryRowId(rowMessageId(row()))}
@@ -7743,6 +8048,55 @@ function ChatView(props: {
             )}
           </For>
         </ol>
+      </Show>
+
+      {/* ADR-0087 section 10 — a group of one: "Only you are here." until a
+          second person lands. */}
+      <Show when={isGroupChat() && memberCount() <= 1 && !membershipEnded()}>
+        <div class="lk-solo-group" role="status">
+          <p>{t("group_solo.only_you")}</p>
+          <div class="lk-actions">
+            <Show when={groupSections().includes("add-member")}>
+              <button type="button" class="secondary" onClick={() => goToInfoScreen("add-members")}>
+                {t("group_solo.add_members")}
+              </button>
+            </Show>
+            <Show when={groupSections().includes("invite-link")}>
+              <button
+                type="button"
+                class="secondary"
+                disabled={busy()}
+                onClick={() =>
+                  void (async () => {
+                    await onCreateInviteLink();
+                    const link = inviteLink();
+                    if (link !== null) await copyMessageText(link);
+                  })()
+                }
+              >
+                {t("group_solo.copy_invite")}
+              </button>
+            </Show>
+          </div>
+        </div>
+      </Show>
+
+      {/* Reactions section 12 — the unseen-reactions button: a heart and a
+          count, above the timeline's end; a tap goes to the oldest such
+          message and highlights it. Local only. */}
+      <Show when={unseenReactions().length > 0}>
+        <button
+          type="button"
+          class="lk-unseen-reactions"
+          aria-label={t("chat.reaction.unseen_a11y", { count: unseenReactions().length })}
+          onClick={() => {
+            const first = unseenReactions()[0];
+            if (first !== undefined) jumpToMessage(first);
+          }}
+        >
+          <Icon name="heart" size={18} />
+          <span class="lk-unseen-reactions-count">{unseenReactions().length}</span>
+        </button>
       </Show>
 
       {/* ADR-0045 UX §6.2.5 — the terminal row.
@@ -8069,6 +8423,24 @@ function ChatView(props: {
           </div>
         )}
       </Show>
+      <Show when={colonQuery() !== null && colonSuggestions().length > 0}>
+        <div class="lk-colon-strip" role="listbox" aria-label={t("chat.emoji.suggestions")}>
+          <For each={colonSuggestions()}>
+            {(emoji, i) => (
+              <button
+                type="button"
+                role="option"
+                aria-selected={i() === colonIndex()}
+                classList={{ active: i() === colonIndex() }}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => pickColonSuggestion(emoji)}
+              >
+                {emoji}
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
       <form onSubmit={onSend} class="lk-composer">
         <Show when={composerPickerOpen() && !recorderBusy(recorder)}>
           <EmojiPicker
@@ -8122,6 +8494,13 @@ function ChatView(props: {
           onInput={(e) => {
             draftSeed.touched();
             setInput(e.currentTarget.value);
+            refreshColonQuery();
+          }}
+          onClick={() => refreshColonQuery()}
+          onKeyUp={(e) => {
+            if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "Home" || e.key === "End") {
+              refreshColonQuery();
+            }
           }}
           onPaste={(e) => {
             const images = pastedImages(e.clipboardData);
@@ -8130,6 +8509,33 @@ function ChatView(props: {
             void processFiles(images);
           }}
           onKeyDown={(e) => {
+            // Reactions section 13 — the strip takes the arrows, Enter, Tab
+            // and Escape while it is open.
+            const strip = colonSuggestions();
+            if (colonQuery() !== null && strip.length > 0 && !e.isComposing) {
+              if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+                e.preventDefault();
+                setColonIndex((colonIndex() + 1) % strip.length);
+                return;
+              }
+              if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+                e.preventDefault();
+                setColonIndex((colonIndex() - 1 + strip.length) % strip.length);
+                return;
+              }
+              if (e.key === "Enter" || e.key === "Tab") {
+                e.preventDefault();
+                const pick = strip[colonIndex()];
+                if (pick !== undefined) pickColonSuggestion(pick);
+                return;
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setColonQuery(null);
+                return;
+              }
+            }
+            if (e.key === " ") setColonQuery(null);
             if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
               e.preventDefault();
               e.currentTarget.form?.requestSubmit();
@@ -8259,6 +8665,17 @@ function ChatView(props: {
               follows with this group. Not a block of the shared info rule
               (`lakko-ui-rules`): it is shown in every group this device is
               still a member of. */}
+          {/* ADR-0087 — the photo, the header line, the @name, Who can join
+              and Reactions (`chat/GroupInfoExtras.tsx`). */}
+          <GroupInfoExtras
+            entry={props.entry}
+            role={ownRole() ?? "member"}
+            memberCount={members().length}
+            title={resolvePeerName()}
+            groupName={groupNames.nameOf(props.entry.groupIdB64)}
+            ended={membershipEnded()}
+            sections={groupSections()}
+          />
           <Show when={!membershipEnded()}>
             <ShareChannelsSwitch entry={props.entry} />
           </Show>
@@ -8469,8 +8886,24 @@ function ChatView(props: {
                     margin: "0 0 0.2rem 0",
                   }}
                 >
-                  {t("chat.members.join.heading", { count: pendingJoins().length })}
+                  {pendingJoins().length >= 64
+                    ? t("chat.members.join.heading_full")
+                    : t("chat.members.join.heading", { count: pendingJoins().length })}
                 </h3>
+                {/* ADR-0087 UX section 8 — at 64 the list stops growing. */}
+                <Show when={pendingJoins().length >= 64}>
+                  <p style={{ "font-size": "0.7rem", color: "var(--surface-muted)", margin: "0 0 0.4rem 0" }}>
+                    {t("chat.members.join.more_waiting")}
+                  </p>
+                </Show>
+                {/* `Reject all`, with two or more: every request waiting,
+                    including ones not seen yet (the knock queue up to the
+                    last row read). */}
+                <Show when={pendingJoins().length >= 2}>
+                  <button type="button" class="ghost small" disabled={busy()} onClick={() => void onRejectAllJoins()}>
+                    {t("chat.members.join.reject_all")}
+                  </button>
+                </Show>
                 {/* ADR-0027 / §7.1 — a request the quarantine turned away. It
                     is in no list below, because the core never kept it, and it
                     gets no Approve for the same reason: there is nothing to
@@ -9019,7 +9452,28 @@ function ChatView(props: {
                     {DELETE_CHAT_CONTROL()}
                   </button>
                 </Show>
-                <Show when={ownerExit()}>
+                {/* ADR-0087 sections 10 and 11 — an owner alone deletes the
+                    group instead of handing it over. */}
+                <Show when={groupSections().includes("delete-group")}>
+                  <button
+                    type="button"
+                    disabled={busy()}
+                    onClick={() => void onDeleteGroup()}
+                    style={{
+                      "font-size": "0.8rem",
+                      padding: "0.3rem 0.6rem",
+                      "border-radius": "var(--radius-sm)",
+                      border: "1px solid var(--surface-border)",
+                      background: "transparent",
+                      color: "var(--danger, #c0392b)",
+                      cursor: "pointer",
+                      "align-self": "flex-start",
+                    }}
+                  >
+                    {t("group_delete.action")}
+                  </button>
+                </Show>
+                <Show when={groupSections().includes("transfer-ownership") ? ownerExit() : null}>
                   {(owner) => (
                     <>
                       {/* NOT destructive-styled at rest. Red would file it with
@@ -9695,6 +10149,10 @@ function timelineRowToPersisted(
   if (row.event.kind === "profileRequest") {
     // ADR-0048 §2 trigger 4 — answered by the profile provider, never a
     // timeline row. Never persist it.
+    return null;
+  }
+  if (row.event.kind === "group-setting") {
+    // ADR-0087 — consumed by the group settings gate; never in the transcript.
     return null;
   }
   if (row.event.kind === "group-name") {

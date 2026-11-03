@@ -261,3 +261,49 @@ public enum EmojiIndex {
         return pictographic
     }
 }
+
+/// Reactions-and-emoji spec section 13 — the `:` suggestions while typing:
+/// `:` at the start of a word followed by two or more letters, ending at the
+/// caret.
+enum ColonQuery {
+    /// The query and the UTF-16 range of `:word` to replace, or `nil`.
+    static func find(in text: String, caretUtf16: Int?) -> (query: String, range: Range<Int>)? {
+        let utf16 = Array(text.utf16)
+        let caret = min(max(caretUtf16 ?? utf16.count, 0), utf16.count)
+        var start = caret
+        while start > 0 {
+            let unit = utf16[start - 1]
+            guard let scalar = Unicode.Scalar(unit), !CharacterSet.whitespacesAndNewlines.contains(scalar)
+            else { break }
+            start -= 1
+        }
+        guard start < caret, utf16[start] == UInt16(UInt8(ascii: ":")) else { return nil }
+        let word = String(utf16CodeUnits: Array(utf16[(start + 1)..<caret]), count: caret - start - 1)
+        guard word.count >= 2, !word.contains(":"),
+              word.unicodeScalars.allSatisfy({ CharacterSet.letters.contains($0) || $0 == "_" })
+        else { return nil }
+        return (word, start..<caret)
+    }
+
+    /// Up to eight matching emoji, the person's recent ones first.
+    static func suggestions(_ dataset: EmojiDataset, query: String, recent: [String]) -> [String] {
+        let found = EmojiIndex.search(dataset, query: query).map(\.emoji)
+        let recentHits = recent.filter { found.contains($0) }
+        var out: [String] = []
+        for emoji in recentHits + found where !out.contains(emoji) {
+            out.append(emoji)
+            if out.count == 8 { break }
+        }
+        return out
+    }
+
+    /// Replace `range` in `text` with `emoji`; returns the new caret offset.
+    static func replace(_ range: Range<Int>, in text: inout String, with emoji: String) -> Int {
+        var units = Array(text.utf16)
+        guard range.lowerBound >= 0, range.upperBound <= units.count else { return units.count }
+        let insert = Array(emoji.utf16)
+        units.replaceSubrange(range, with: insert)
+        text = String(utf16CodeUnits: units, count: units.count)
+        return range.lowerBound + insert.count
+    }
+}

@@ -23,7 +23,8 @@ import { loadOwnerMoved, markOwnerMoved } from "../channels/owner-moved";
 import { useChats } from "../chat/ChatContext";
 import { DiscoveryHttpError } from "../discovery/client";
 import { journalHex } from "../ds/access";
-import { takeOverOwnedJournals } from "../ds/rotation-takeover";
+import { recordOwnedHandleRekeys, rotateOwnedKnockKeys, takeOverOwnedJournals } from "../ds/rotation-takeover";
+import { base64Encode } from "../auth/account-id";
 import {
   resendRequestsAfterRotation,
   revokeLinksAfterRotation,
@@ -153,6 +154,25 @@ export function useKeyRotation(): KeyRotationRuntime {
             old.free();
             oldSeed.fill(0);
           }
+        }
+        case "knock-keys":
+        case "handles": {
+          const oldSeed = await auth.keyRotation.predecessorSigningSeed();
+          if (oldSeed === null) return "later";
+          const wasm = await loadWasm();
+          const old = wasm.Identity.fromSeed(oldSeed);
+          let oldKeyB64: string;
+          try {
+            oldKeyB64 = base64Encode(old.signaturePublicKey);
+          } finally {
+            old.free();
+            oldSeed.fill(0);
+          }
+          const moved =
+            step === "knock-keys"
+              ? await rotateOwnedKnockKeys(oldKeyB64)
+              : await recordOwnedHandleRekeys(oldKeyB64);
+          return moved === null ? "later" : "done";
         }
         case "channels": {
           const next = chats.accountIdentity();

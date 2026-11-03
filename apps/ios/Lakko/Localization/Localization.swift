@@ -245,6 +245,13 @@ final class Localization: ObservableObject {
                     }
                 }
             }
+            // Reactions-and-emoji spec section 12 — the reaction line, with
+            // two markers the extension replaces with the name and the emoji.
+            if let line = built?.format(
+                key: "notification.reaction.body",
+                texts: ["name": ReactionNotificationMirror.nameMark, "emoji": ReactionNotificationMirror.emojiMark], counts: [:]) {
+                words["notification.reaction.body"] = line
+            }
             SharedStorage.setNotificationWords(words)
         }
     }

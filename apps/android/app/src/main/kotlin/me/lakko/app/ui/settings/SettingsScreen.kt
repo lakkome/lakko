@@ -113,6 +113,9 @@ public fun SettingsScreen(
     /** ADR-0075 / UX 19.1 — Settings > Account: how the account is
      *  protected (status line, banner, recovery email, recovery phrase). */
     accountProtection: @Composable () -> Unit = {},
+    /** reactions-and-emoji D3 / D4 — Appearance > Quick reaction: save the
+     *  account's quick reaction (synced to its other devices). */
+    onSetQuickReaction: (String) -> Unit = {},
 ) {
     val mode by ThemePreference.mode.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -175,8 +178,8 @@ public fun SettingsScreen(
             // asking why their phone did not ring. Nothing is shown when
             // notifications are on — a row confirming that things work is a row
             // nobody needs.
+            SectionLabel(t("settings.section.notifications"))
             if (!notificationsEnabled) {
-                SectionLabel(t("settings.section.notifications"))
                 SettingsRow(
                     title = t(NOTIFICATIONS_OFF_TITLE_KEY),
                     icon = Icons.Filled.NotificationsOff,
@@ -184,6 +187,8 @@ public fun SettingsScreen(
                     supporting = t(NOTIFICATIONS_OFF_NOTICE_KEY),
                 )
             }
+            // reactions-and-emoji section 12 — the one Reactions switch.
+            ReactionNotificationsRow()
 
             SectionLabel(t("settings.section.account"))
             SettingsRow(t("settings.section.profile"), Icons.Filled.Person, onOpenProfile)
@@ -264,6 +269,8 @@ public fun SettingsScreen(
                 }
             }
             Spacer(Modifier.height(8.dp))
+            // reactions-and-emoji D4 — the quick reaction lives in Appearance.
+            QuickReactionSettingRow(onSet = onSetQuickReaction)
             // docs/ux/localization.md section 1: a top-level row after Appearance.
             LanguageSettingsRow(onClick = onOpenLanguage)
 

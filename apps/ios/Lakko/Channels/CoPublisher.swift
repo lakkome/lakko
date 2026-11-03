@@ -137,12 +137,21 @@ public enum CoPublisher {
         accountIdB64: String?
     ) async throws -> String {
         let groupId = try publisherGroup.groupId()
+        // ADR-0087 section 5 — the co-publisher's request is a sealed row to
+        // the PublisherGroup's knock key, which the owner derives from the
+        // journal root (the owner is the only one who mints these links).
+        var root = try dsJournalRootSeed(accountIdentitySeed: identity.ed25519Seed(), journalId: groupId)
+        defer { RootHandover.wipe(&root) }
+        var knockSeed = try groupKnockSeed(journalRootSeed: root, version: ChatRepository.currentKnockVersion)
+        defer { RootHandover.wipe(&knockSeed) }
         let mint = try composeCoPublisherInviteCapability(
             issuerSigningSeed: identity.ed25519Seed(),
             groupId: groupId,
             expiryMs: 0,
             channelId: try publisherGroup.channelId(),
-            channelName: channelName
+            channelName: channelName,
+            knockPublicKey: try groupKnockPublicKey(knockSeed: knockSeed),
+            knockVersion: ChatRepository.currentKnockVersion
         )
         // ADR-0078 section 10: the ledger row carries a key minted for this
         // link alone. No use limit: the owner's approval is the boundary.
@@ -329,6 +338,18 @@ public enum CoPublisher {
                     }
                     continue
                 }
+                // ADR-0087 section 5 — a sealed row to the PublisherGroup's
+                // knock key (web and Android co-publishers send these). The
+                // owner derives the seed of the row's version from the
+                // journal root; only a row carrying a link of this group is
+                // kept. Receive side only; this client still knocks with the
+                // proposal form.
+                if let version = knockRowVersion(row: row.payload) {
+                    await retainSealedKnock(
+                        identity: identity, publisherGroup: publisherGroup, groupId: groupId,
+                        version: version, row: row.payload)
+                    continue
+                }
                 _ = try? publisherGroup.processKnock(identity: identity, bytes: row.payload)
             }
             // ADR-0060 section 6 — a co-publisher's attribution carries its
@@ -348,6 +369,37 @@ public enum CoPublisher {
         return PollOutcome(
             pendingCount: try publisherGroup.pendingExternalJoins().count,
             knockCursor: knockCursor)
+    }
+
+    /// Open one sealed co-publisher request and retain its KeyPackage.
+    /// Anything that does not open, names no link of this group, or is not
+    /// admissible is dropped.
+    private static func retainSealedKnock(
+        identity: Identity, publisherGroup: PublisherGroup, groupId: Data, version: UInt16, row: Data
+    ) async {
+        guard var root = try? dsJournalRootSeed(
+            accountIdentitySeed: identity.ed25519Seed(), journalId: groupId) else { return }
+        defer { RootHandover.wipe(&root) }
+        guard var seed = try? groupKnockSeed(journalRootSeed: root, version: version) else { return }
+        defer { RootHandover.wipe(&seed) }
+        guard let request = try? openKnockRow(knockSeed: seed, row: row),
+              let capability = request.capability,
+              let cap = try? GroupInviteCapability.decodeAndVerify(wire: capability),
+              cap.groupId() == groupId,
+              let kept = try? publisherGroup.retainJoinRequest(
+                  identity: identity, keyPackage: request.keyPackage) else { return }
+        switch kept.outcome {
+        case .retained, .alreadyPending:
+            let account = ((try? keyPackageAccountKey(keyPackage: request.keyPackage)) ?? nil)
+                ?? kept.joinerSignatureKey
+            await MainActor.run {
+                _ = ReachCenter.shared.keep(
+                    request.replyGrant, carrier: .request,
+                    fromAccountKeyB64: base64Encode(account), scopeHex: nil)
+            }
+        case .queueFull, .alreadyMember, .notAdmissible:
+            return
+        }
     }
 
     /// The pending co-publisher external-join requests — each a 32-byte joiner

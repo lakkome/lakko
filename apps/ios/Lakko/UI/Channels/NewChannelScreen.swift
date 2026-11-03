@@ -15,7 +15,7 @@ struct NewChannelScreen: View {
     /// MLS PublisherGroup founding member.
     let accountIdentitySeed: Data
     /// G4-5 — bearer token provider for the session-token-gated `@handle`
-    /// registration (`/discovery/channel/register`). `nil` → cannot claim a
+    /// claim (`/discovery/handle/claim`, ADR-0087). `nil` → cannot claim a
     /// handle (an empty handle skips discovery entirely, so create still
     /// works).
     var sessionTokenProvider: () -> String? = { nil }
@@ -122,9 +122,12 @@ struct NewChannelScreen: View {
                 do {
                     _ = try await ChannelDiscovery.registerChannelHandle(
                         handle: wantedHandle,
-                        channelIdHex: id
+                        channelIdHex: id,
+                        ownerIdentitySeed: accountIdentitySeed,
+                        name: name.trimmingCharacters(in: .whitespaces),
+                        description: description.trimmingCharacters(in: .whitespacesAndNewlines)
                     )
-                } catch let DiscoveryClientError.http(status, _, _) where status == 409 {
+                } catch let refusal as DiscoveryClient.HandleWriteError where refusal.code == "name-taken" {
                     if let accountIdB64 {
                         PendingChannelHandleStore.forget(handle: cleanHandle, accountIdB64: accountIdB64)
                     }

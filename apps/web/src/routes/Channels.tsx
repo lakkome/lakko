@@ -75,7 +75,7 @@ import { pollForCoPublishWelcome, requestToCoPublish } from "../channels/copubli
 import { LegacyChannelError } from "../channels/legacy-v1";
 import { coPublisherJoinFailure } from "../channels/copublisher-join-failure";
 import { JOIN_TRY_AGAIN } from "./join-group-failure";
-import { DiscoveryHttpError, registerChannelHandle } from "../channels/channel-discovery";
+import { DiscoveryHttpError, HandleWriteError, registerChannelHandle } from "../channels/channel-discovery";
 import { channelTitle, displayHandle } from "../channels/channel-row";
 import { knownSubscriberCount } from "../channels/ui-cache";
 import { channelInfoSections, infoHeading, infoOpenLabel } from "../chat/conversation-info";
@@ -543,18 +543,27 @@ const NewChannel: Component = () => {
         channelsState.keysByChannel().get(id)?.signingKeySeed,
       );
 
-      // G4-5: claim the optional `@handle` before the channel exists
-      // on the channels service so a first-come-first-served collision
-      // (409) aborts cleanly without leaving a half-created channel. An
-      // empty handle skips discovery entirely. The mapping is `@handle ->
-      // channel_id`; the OPRF hash is all the server ever sees. The same id
+      // ADR-0087 sections 1 to 4: claim the optional `@name` before the
+      // channel exists on the channels service, so a held name aborts
+      // cleanly without leaving a half-created channel. The handle key comes
+      // from the PublisherGroup's journal root (it names no account); the
+      // public record is sealed under the name and its words. The same id
       // claims it again, so a create that failed below can be retried.
       if (wantedHandle.length > 0) {
         try {
-          await registerChannelHandle(wantedHandle, id, secrets.sessionToken);
+          await registerChannelHandle(
+            wantedHandle,
+            id,
+            identity,
+            { name: name().trim(), description: description().trim() },
+            account,
+          );
         } catch (err) {
           const taken = `@${wantedHandle}`;
-          if (err instanceof DiscoveryHttpError && err.status === 409) {
+          if (
+            (err instanceof HandleWriteError && (err.status === 409 || err.code === "name-taken")) ||
+            (err instanceof DiscoveryHttpError && err.status === 409)
+          ) {
             if (account !== null) forgetClaimedHandle(account, wantedHandle);
             setError(() => t("channels.new.error.handle_taken", { handle: taken }));
           } else if (anonTokenMessage(err, "") !== null) {

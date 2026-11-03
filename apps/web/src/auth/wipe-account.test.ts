@@ -142,6 +142,9 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     // ADR-0084: the decrypted-avatar cache, one row per blob.
     { db: "lakko-avatars", store: "blobs", row: { id: `${acct}|blob1`, ciphertext: ct } },
     byId("lakko-group-names", "rows"),
+    // ADR-0087: the small sealed rows (group photo, reactions, handle, knock
+    // seeds, requests sent).
+    { db: "lakko-account-kv", store: "rows", row: { id: `${acct}|group-photos`, ciphertext: ct } },
     byId("lakko-group-closed", "rows"),
     byId("lakko-membership-end", "rows"),
     byId("lakko-registrar-seeds", "rows"),
@@ -249,6 +252,9 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.last-observed-owner.v1.${acct}.${G}`, "\"owner\"");
   put(`lakko.leave-requested.v1.${acct}.${G}`, "5");
   put(`lakko.lineage.unsent.v1.${acct}`, "1");
+  put(`lakko.quick-reaction.unsent.v1.${acct}`, "1");
+  put(`lakko.unseen-reactions.v1:${acct}`, "{}");
+  put(`lakko.emoji.recent-reactions:${acct}`, "[]");
   put(`lakko.device-cards.v1.${acct}`, "{}");
   put(`lakko.device-city.v1.${acct}`, "{}");
   put(`lakko.device-city-shown.v1.${acct}`, "0");
@@ -662,6 +668,12 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko/publisher-group-unclaimed/v2/": "account",
   "lakko:group-calls:": "account",
   "lakko.emoji.recent:": "account",
+  "lakko.emoji.recent-reactions:": "account",
+  "lakko.quick-reaction.unsent.v1.": "account",
+  "lakko.unseen-reactions.v1:": "account",
+  "lakko-account-kv": "account",
+  // Reactions section 12: this device's notification filter.
+  "lakko.notify.reactions.off": "device",
   "lakko.emoji.tones:": "account",
   // retired device-wide rows
   "lakko.contacts.v1": "retired",

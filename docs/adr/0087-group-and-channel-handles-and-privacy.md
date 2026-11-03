@@ -284,11 +284,16 @@ under each search term, with a new payload kind:
 
 ```text
 version ‖ kind(1 group, 2 channel) ‖ updated_at_ms(8) ‖ id_len ‖ id
-        ‖ key(32) ‖ name_len ‖ name ‖ description_len(2) ‖ description ‖ size_band(1)
+        ‖ key(32) ‖ knock_version(2) ‖ name_len ‖ name ‖ description_len(2) ‖ description
+        ‖ size_band(1)
 ```
 
 - `id` is the `group_id` (32) or `channel_id` (16). `key` is the group's knock
-  public key (section 5) or the channel's read key (section 6).
+  public key (section 5) or the channel's read key (section 6). `knock_version` is the
+  version that knock key belongs to, so a person who found the group by search names it
+  in the row they seal; removing an admin bumps it (section 5). A channel's is 0. Added
+  2026-11-03 (the payload's first byte moves to `0x43`): without it a searcher could only
+  guess version 0 after an admin was removed, and no admin could open the request.
 - The search terms are the handle plus the ADR-0060 name terms, so a public group
   is found by `@name` exactly and by the start of a word from 3 letters. Each
   term costs the publisher one `discovery-lookup` token, once per name.
@@ -336,6 +341,14 @@ plain = key_package ‖ reply_grant ‖ profile ‖ capability?
   registrar-seed envelope shape. Removing an admin bumps `v`; older versions stay
   derivable, so older links still open. An ex-admin cannot read rows anyway, since
   knocks need a write-tier proof (`get_knocks`).
+- **A key rotation of the owner (ADR-0074 section 3.5) moves the journal root, and so
+  every `knock_seed(v)`.** Added 2026-11-03. The rotating device therefore bumps `v`
+  as one of its owed steps: versions up to the old `v` stay derived from the
+  predecessor's root seed (kept with the own predecessors), the next version and
+  every later one from the new root; the owner records the boundary per group, hands
+  the new seed to the admins, and republishes the public record of a public group.
+  Rows naming an older version still open, so links made before the rotation keep
+  working.
 - **No epoch.** A KeyPackage has none, so a request can wait in a queue for days
   and survive every commit. `Group::retain_join_request(identity, key_package)`
   replaces `process_knock` and `retain_external_join`: it validates the package and

@@ -58,8 +58,9 @@ pub(crate) const MAX_NAME_RESULTS: usize = 20;
 /// The longest public record accepted: the longest public record the codec
 /// composes, a person's or a group's or channel's (ADR-0087 section 4).
 /// `migrations/0035_one_namespace_handles.sql` created its column and
-/// `migrations/0037_public_record_photo_width.sql` widened it to this
-/// (pinned by a test).
+/// `migrations/0037_public_record_photo_width.sql` (the photo) and
+/// `migrations/0039_public_record_knock_version.sql` (the knock version)
+/// widened it to this (pinned by a test).
 pub(crate) const MAX_PUBLIC_RECORD_LEN: usize = PUBLIC_RECORD_MAX_LEN;
 
 /// `public_records.kind` / `search_terms.kind` of a person in Everyone (the
@@ -526,8 +527,8 @@ mod tests {
 
     #[test]
     fn the_public_record_column_fits_the_longest_record() {
-        assert_eq!(MAX_PUBLIC_RECORD_LEN, 7582);
-        let migration = include_str!("../migrations/0037_public_record_photo_width.sql");
+        assert_eq!(MAX_PUBLIC_RECORD_LEN, 7584);
+        let migration = include_str!("../migrations/0039_public_record_knock_version.sql");
         let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             normalised.contains(&format!("MODIFY record VARBINARY({MAX_PUBLIC_RECORD_LEN})")),

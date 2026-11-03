@@ -133,6 +133,14 @@ pub enum InfoSection {
     /// A channel's publishers (on screen; co-publishers in the protocol).
     /// Owner, and publishers read-only.
     Admins,
+    /// `Reactions`: which reactions the conversation takes, opening the
+    /// Reactions screen (`docs/ux/reactions-and-emoji.md` section 9). A
+    /// group's owner and admins (the group setting is an owner-or-admin
+    /// envelope, checked at receipt like the group name); a channel's owner
+    /// (the setting rides the channel metadata record, ADR-0087 section
+    /// 13a). Never in a one-to-one, which takes every reaction. Appended last
+    /// so earlier uniffi ordinals stay put.
+    Reactions,
 }
 
 impl InfoSection {
@@ -171,6 +179,7 @@ impl InfoSection {
                 | Self::InvitePeople
                 | Self::Subscribers
                 | Self::Admins
+                | Self::Reactions
         )
     }
 
@@ -210,6 +219,7 @@ impl InfoSection {
             Self::InvitePeople => "invite-people",
             Self::Subscribers => "subscribers",
             Self::Admins => "admins",
+            Self::Reactions => "reactions",
         }
     }
 }
@@ -380,6 +390,11 @@ pub fn group_info_sections(caps: GroupInfoCapabilities) -> Vec<InfoSection> {
     if caps.can_mint_invite {
         sections.push(InfoSection::InviteLink);
     }
+    // Owner or admin, and still a member: the same authority as a rename
+    // (both are owner-or-admin group envelopes checked at receipt).
+    if caps.can_rename {
+        sections.push(InfoSection::Reactions);
+    }
     if caps.is_owner {
         sections.push(InfoSection::TransferOwnership);
     }
@@ -502,6 +517,8 @@ pub fn conversation_info_sections(caps: ConversationInfoCapabilities) -> Vec<Inf
             }
             if manager {
                 sections.push(InfoSection::InviteLink);
+                // Owner and admins choose a group's reactions.
+                sections.push(InfoSection::Reactions);
             }
             if owner {
                 sections.push(InfoSection::GroupType);
@@ -521,7 +538,10 @@ pub fn conversation_info_sections(caps: ConversationInfoCapabilities) -> Vec<Inf
             if manager {
                 sections.push(InfoSection::Admins);
             }
+            // The owner's: the setting rides the channel metadata record
+            // (ADR-0087 section 13a), which a publisher does not re-issue.
             if owner {
+                sections.push(InfoSection::Reactions);
                 sections.push(InfoSection::GroupType);
             }
         },
@@ -910,6 +930,7 @@ mod tests {
             InfoSection::Roles,
             InfoSection::TransferOwnership,
             InfoSection::LeaveGroup,
+            InfoSection::Reactions,
         ];
         for s in marked {
             assert!(s.group_only(), "{s:?} must be classified group-only");
@@ -980,6 +1001,7 @@ mod tests {
             InfoSection::InvitePeople,
             InfoSection::Subscribers,
             InfoSection::Admins,
+            InfoSection::Reactions,
         ];
         let mut names: Vec<&str> = all.iter().map(|s| s.name()).collect();
         names.sort_unstable();
@@ -1129,6 +1151,60 @@ mod tests {
             true,
         ));
         assert!(solo.contains(&InfoSection::DeleteGroup));
+    }
+
+    /// `docs/ux/reactions-and-emoji.md` section 9: a group's owner and
+    /// admins, a channel's owner, and nobody else; never on a person, never
+    /// once a group membership has ended.
+    #[test]
+    fn the_reactions_row_is_for_those_who_choose_them() {
+        for (kind, role, shown) in [
+            (ConversationInfoKind::Group, ConversationRole::Owner, true),
+            (ConversationInfoKind::Group, ConversationRole::Admin, true),
+            (ConversationInfoKind::Group, ConversationRole::Member, false),
+            (ConversationInfoKind::Channel, ConversationRole::Owner, true),
+            (
+                ConversationInfoKind::Channel,
+                ConversationRole::Admin,
+                false,
+            ),
+            (
+                ConversationInfoKind::Channel,
+                ConversationRole::Member,
+                false,
+            ),
+        ] {
+            for alone in [false, true] {
+                assert_eq!(
+                    conversation_info_sections(caps(kind, role, alone))
+                        .contains(&InfoSection::Reactions),
+                    shown,
+                    "{kind:?} {role:?} alone={alone}"
+                );
+            }
+        }
+
+        assert!(group_info_sections(group(false)).contains(&InfoSection::Reactions));
+        let mut member = group(false);
+        member.can_manage_members = false;
+        member.can_rename = false;
+        member.can_mint_invite = false;
+        member.is_owner = false;
+        assert!(!group_info_sections(member).contains(&InfoSection::Reactions));
+        assert!(!group_info_sections(group(true)).contains(&InfoSection::Reactions));
+
+        for ended in [false, true] {
+            for is_contact in [false, true] {
+                assert!(!person_info_sections(PersonInfoCapabilities {
+                    membership_ended: ended,
+                    is_contact,
+                    contacts_of_contacts_on: true,
+                })
+                .contains(&InfoSection::Reactions));
+            }
+        }
+        assert!(InfoSection::Reactions.group_only());
+        assert_eq!(InfoSection::Reactions.name(), "reactions");
     }
 
     #[test]

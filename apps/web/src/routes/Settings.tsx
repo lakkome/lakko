@@ -13,6 +13,8 @@
  * `privacy-groups` (the chosen groups and channels) a page under Privacy. Account is last:
  * it holds the export and the danger zone.
  */
+import { chooseQuickReaction, quickReactionOf } from "../chat/quick-reaction-register";
+import { EmojiPicker } from "../media/EmojiPicker";
 import { createSignal, onMount, Show, type JSX } from "solid-js";
 import { A, useParams } from "@solidjs/router";
 
@@ -42,6 +44,7 @@ import { paths } from "./paths";
 import { isDesktop } from "../platform";
 import {
   AntiCensorshipCard,
+  BrowserNotificationsSection,
   DesktopNotificationsSection,
   KeyboardShortcutsCard,
 } from "../settings/DesktopSettings";
@@ -67,8 +70,8 @@ const ALL_SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconNam
   { id: "profile", labelKey: "settings.section.profile", icon: "user" },
   { id: "privacy", labelKey: "settings.section.privacy", icon: "eye" },
   { id: "security", labelKey: "settings.section.security", icon: "shield" },
-  // docs/ux/desktop.md section 3.1 - desktop only; the web has no
-  // Notifications section.
+  // docs/ux/desktop.md section 3.1; the browser build's has the reactions
+  // switch alone (docs/ux/reactions-and-emoji.md section 12).
   { id: "notifications", labelKey: "settings.section.notifications", icon: "bell" },
   // docs/ux/chat-folders.md section 4 - between Notifications and Appearance.
   { id: "folders", labelKey: "settings.section.folders", icon: "folder" },
@@ -79,7 +82,7 @@ const ALL_SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconNam
   { id: "account", labelKey: "settings.section.account", icon: "logout" },
 ];
 
-/** The sections this build has: Notifications only in the desktop app. */
+/** The sections this build has. */
 const SECTIONS = sectionsForBuild(ALL_SECTIONS, isDesktop());
 
 /** The interface language in its own name: the Language row's trailing text. */
@@ -198,7 +201,9 @@ export default function Settings(): JSX.Element {
             <RecoveryPage />
           </Show>
           <Show when={shown() === "notifications"}>
-            <DesktopNotificationsSection />
+            <Show when={isDesktop()} fallback={<BrowserNotificationsSection />}>
+              <DesktopNotificationsSection />
+            </Show>
           </Show>
           <Show when={shown() === "folders"}>
             <ChatFoldersSection />
@@ -373,7 +378,55 @@ function AppearanceSection(): JSX.Element {
           ))}
         </div>
       </section>
+      <QuickReactionCard />
     </>
+  );
+}
+
+/** `docs/ux/reactions-and-emoji.md` section 6 (D4) — Settings > Appearance >
+ *  Quick reaction: the current emoji; a tap opens the picker in reaction
+ *  mode, a pick saves (to the account, D3) and closes. */
+function QuickReactionCard(): JSX.Element {
+  const auth = useAuth();
+  const [open, setOpen] = createSignal(false);
+  const account = (): string | null => {
+    const st = auth.state();
+    return st.kind === "session" ? st.account.accountId : null;
+  };
+  return (
+    <section class="lk-card" style={{ position: "relative" }}>
+      <div class="lk-card-row">
+        <span class="lk-card-row-icon" aria-hidden="true">
+          {quickReactionOf(account())}
+        </span>
+        <div class="lk-card-row-body">
+          <span class="lk-card-row-title">{t("settings.appearance.quick_reaction")}</span>
+          <span class="lk-card-row-sub">{t("settings.appearance.quick_reaction_sub")}</span>
+        </div>
+        <button
+          type="button"
+          class="lk-card-row-action"
+          data-picker-toggle
+          aria-label={t("settings.appearance.quick_reaction_change")}
+          disabled={account() === null}
+          onClick={() => setOpen(!open())}
+        >
+          {quickReactionOf(account())}
+        </button>
+      </div>
+      <Show when={open()}>
+        <EmojiPicker
+          mode="reaction"
+          onEmoji={(emoji) => {
+            const a = account();
+            if (a !== null) chooseQuickReaction(a, emoji);
+          }}
+          onClose={() => setOpen(false)}
+          sessionToken={() => null}
+          align="right"
+        />
+      </Show>
+    </section>
   );
 }
 

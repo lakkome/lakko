@@ -6,8 +6,10 @@
  * (`docs/ux/desktop.md` sections 3.1 and 5).
  */
 
-/** Settings sections only the desktop app has. */
-export const DESKTOP_ONLY_SECTIONS: ReadonlySet<string> = new Set(["notifications"]);
+/** Settings sections only the desktop app has. Notifications is in both
+ *  builds since the reactions switch (`docs/ux/reactions-and-emoji.md`
+ *  section 12); the browser's has that switch alone. */
+export const DESKTOP_ONLY_SECTIONS: ReadonlySet<string> = new Set([]);
 
 /** The sections this build shows: the desktop-only ones dropped on the web. */
 export function sectionsForBuild<T extends { readonly id: string }>(

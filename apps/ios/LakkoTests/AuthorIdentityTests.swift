@@ -197,7 +197,7 @@ final class AuthorIdentityTests: XCTestCase {
             try bobGroup.createApplicationMessage(
                 identity: bob,
                 plaintext: try AttachmentBridge.composeReactionBytes(
-                    target: bobFirst, emoji: "👍")))
+                    target: bobFirst, emoji: "👍", add: true, targetAuthor: nil)))
         // Bob's presence signals. Deliberately the SAME values Dave sends
         // below, so under a leaf key the two are byte-identical events.
         AuthorIdentityDsURLProtocol.seed(
@@ -250,7 +250,7 @@ final class AuthorIdentityTests: XCTestCase {
             try daveGroup.createApplicationMessage(
                 identity: dave,
                 plaintext: try AttachmentBridge.composeReactionBytes(
-                    target: bobFirst, emoji: "👍")))
+                    target: bobFirst, emoji: "👍", add: true, targetAuthor: nil)))
         AuthorIdentityDsURLProtocol.seed(
             try daveGroup.createApplicationMessage(
                 identity: dave,

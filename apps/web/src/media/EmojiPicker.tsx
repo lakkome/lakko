@@ -21,9 +21,11 @@ import {
   buildDataset,
   displayEmoji,
   loadRecent,
+  loadRecentReactions,
   loadTonePrefs,
   pushRecent,
   saveRecent,
+  saveRecentReactions,
   saveTonePrefs,
   searchEmoji,
   withTonePref,
@@ -58,6 +60,29 @@ function dataset(): ReturnType<typeof buildDataset> {
   return datasetCache;
 }
 
+/**
+ * `docs/ux/reactions-and-emoji.md` section 13 — the `:` suggestions: up to
+ * eight emoji matching `word` (the same search as the picker), the person's
+ * Recent ones first, each in the tone they chose.
+ */
+export function emojiSuggestions(word: string, max = 8): string[] {
+  const ds = dataset();
+  const found = searchEmoji(ds, word, 64);
+  if (found.length === 0) return [];
+  const tones = loadTonePrefs();
+  const recent = loadRecent();
+  const glyphs = found.map((e) => displayEmoji(e, tones));
+  const rank = (g: string): number => {
+    const i = recent.indexOf(g);
+    return i < 0 ? recent.length : i;
+  };
+  return glyphs
+    .map((g, i) => ({ g, i }))
+    .sort((a, b) => rank(a.g) - rank(b.g) || a.i - b.i)
+    .map((x) => x.g)
+    .slice(0, max);
+}
+
 /** One representative glyph per group for the jump strip. */
 const GROUP_ICONS = ["😀", "👋", "🐻", "🍔", "✈️", "⚽", "💡", "❤️", "🏁"];
 
@@ -87,6 +112,18 @@ export interface EmojiPickerProps {
   sessionToken: () => string | null;
   /** Which edge of the anchor the popover lines up with. */
   align?: "left" | "right";
+  /** Reaction mode in a conversation that takes only a list
+   *  (`docs/ux/reactions-and-emoji.md` section 5): one grid of these, in the
+   *  owner's order, the search kept, no categories. */
+  allowedOnly?: readonly string[] | undefined;
+  /** An emoji drawn dimmed that does nothing (the three-reactions cap, the
+   *  kind limit, the hundred-emoji limit of the setting screen). */
+  isDisabled?: (emoji: string) => boolean;
+  /** One line above the grid (the three-reactions line, the 100 line). */
+  notice?: string | undefined;
+  /** Stay open after a pick (the allowed-reactions screen adds and stays
+   *  open). */
+  stayOpen?: boolean;
 }
 
 export function EmojiPicker(props: EmojiPickerProps): JSX.Element {
@@ -173,7 +210,14 @@ function EmojiTab(props: EmojiPickerProps): JSX.Element {
   const [recent, setRecent] = createSignal<string[]>(loadRecent());
   const [tones, setTones] = createSignal<TonePrefs>(loadTonePrefs());
   const [toneFor, setToneFor] = createSignal<{ entry: EmojiEntry; x: number; y: number } | null>(null);
-  const results = createMemo(() => searchEmoji(ds, query()));
+  const allowedOnly = (): readonly string[] | undefined => props.allowedOnly;
+  const results = createMemo(() => {
+    const only = allowedOnly();
+    const found = searchEmoji(ds, query());
+    if (only === undefined) return found;
+    const allowed = new Set(only);
+    return found.filter((e) => allowed.has(e.emoji) || (e.tones ?? []).some((tn) => allowed.has(tn)));
+  });
   const byGroup = createMemo(() => {
     const groups: EmojiEntry[][] = ds.groups.map(() => []);
     for (const e of ds.entries) groups[e.group]?.push(e);
@@ -183,9 +227,12 @@ function EmojiTab(props: EmojiPickerProps): JSX.Element {
   const headings: (HTMLHeadingElement | undefined)[] = [];
 
   function choose(emoji: string, entry: EmojiEntry | undefined): void {
+    if (props.isDisabled?.(emoji) === true) return;
     const next = pushRecent(recent(), emoji);
     setRecent(next);
     saveRecent(next);
+    // Section 5 — the reaction row reads the person's recent REACTIONS.
+    if (props.mode === "reaction") saveRecentReactions(pushRecent(loadRecentReactions(), emoji));
     if (entry !== undefined && entry.tones !== undefined) {
       const prefs = withTonePref(tones(), entry, emoji);
       setTones(prefs);
@@ -193,7 +240,7 @@ function EmojiTab(props: EmojiPickerProps): JSX.Element {
     }
     setToneFor(null);
     props.onEmoji(emoji);
-    if (props.mode === "reaction") props.onClose();
+    if (props.mode === "reaction" && props.stayOpen !== true) props.onClose();
   }
 
   const cell = (entry: EmojiEntry | undefined, glyph: string): JSX.Element => (
@@ -205,6 +252,8 @@ function EmojiTab(props: EmojiPickerProps): JSX.Element {
       onMouseDown={(e) => {
         if (props.mode === "compose") e.preventDefault();
       }}
+      classList={{ dimmed: props.isDisabled?.(glyph) === true }}
+      aria-disabled={props.isDisabled?.(glyph) === true ? "true" : undefined}
       onClick={() => choose(glyph, entry)}
       onContextMenu={(e) => {
         if (entry?.tones === undefined) return;
@@ -235,6 +284,26 @@ function EmojiTab(props: EmojiPickerProps): JSX.Element {
         />
       </div>
       <div ref={body} class="lakko-picker-body" style={{ position: "relative" }}>
+        <Show when={props.notice}>{(n) => <p class="lakko-picker-notice" role="status">{n()}</p>}</Show>
+        <Show
+          when={allowedOnly() === undefined}
+          fallback={
+            <Show
+              when={query().trim().length === 0}
+              fallback={
+                <Show when={results().length > 0} fallback={<p class="lakko-picker-empty">{t("chat.emoji.no_results")}</p>}>
+                  <div class="lakko-emoji-grid">
+                    <For each={results()}>{(e) => cell(e, e.emoji)}</For>
+                  </div>
+                </Show>
+              }
+            >
+              <div class="lakko-emoji-grid">
+                <For each={allowedOnly() ?? []}>{(glyph) => cell(ds.byEmoji.get(glyph), glyph)}</For>
+              </div>
+            </Show>
+          }
+        >
         <Show
           when={query().trim().length === 0}
           fallback={
@@ -264,6 +333,7 @@ function EmojiTab(props: EmojiPickerProps): JSX.Element {
             )}
           </For>
         </Show>
+        </Show>
         <Show when={toneFor()}>
           {(tone) => (
             <div
@@ -290,7 +360,7 @@ function EmojiTab(props: EmojiPickerProps): JSX.Element {
           )}
         </Show>
       </div>
-      <Show when={query().trim().length === 0}>
+      <Show when={query().trim().length === 0 && allowedOnly() === undefined}>
         <nav class="lakko-picker-strip" aria-label={t("chat.emoji.categories")}>
           <For each={ds.groups}>
             {(name, gi) => (

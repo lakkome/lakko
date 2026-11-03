@@ -2070,6 +2070,10 @@
       "text": "Відтінки шкіри: {name}",
       "status": "machine"
     },
+    "chat.emoji.suggestions": {
+      "text": "Підказки емодзі",
+      "status": "machine"
+    },
     "chat.emoji.tab": {
       "text": "Емодзі",
       "status": "machine"
@@ -2470,12 +2474,32 @@
       "text": "Запити на приєднання ({count})",
       "status": "machine"
     },
+    "chat.members.join.heading_full": {
+      "text": "Запити на приєднання (64+)",
+      "status": "machine"
+    },
     "chat.members.join.link_unknown": {
       "text": "Посилання-запрошення невідоме",
       "status": "machine"
     },
+    "chat.members.join.more_waiting": {
+      "text": "Є ще запити. Вони з'являться, коли ви відповісте на ці.",
+      "status": "machine"
+    },
     "chat.members.join.reject": {
       "text": "Відхилити",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all": {
+      "text": "Відхилити всі",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all_body": {
+      "text": "Буде видалено всі запити, що чекають, зокрема ті, яких ви ще не бачили.",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all_title": {
+      "text": "Відхилити всі запити?",
       "status": "machine"
     },
     "chat.members.join.rejected": {
@@ -2766,6 +2790,26 @@
       "text": "Відреагувати — Відреагували: {names}",
       "status": "machine"
     },
+    "chat.reaction.cap_reached": {
+      "text": "Можна поставити не більше 3 реакцій. Приберіть одну, щоб додати іншу.",
+      "status": "machine"
+    },
+    "chat.reaction.chip_a11y": {
+      "text": "{emoji}, {count, plural, one {# реакція} few {# реакції} many {# реакцій} other {# реакції}}",
+      "status": "machine"
+    },
+    "chat.reaction.chip_yours_a11y": {
+      "text": "{emoji}, ваша реакція",
+      "status": "machine"
+    },
+    "chat.reaction.list_all": {
+      "text": "Усі {count}",
+      "status": "machine"
+    },
+    "chat.reaction.list_title": {
+      "text": "Реакції",
+      "status": "machine"
+    },
     "chat.reaction.reacted_by": {
       "text": "Відреагували: {names}",
       "status": "machine"
@@ -2778,8 +2822,16 @@
       "text": "Прибрати свою реакцію — Відреагували: {names}",
       "status": "machine"
     },
+    "chat.reaction.show_who_a11y": {
+      "text": "Показати, хто відреагував",
+      "status": "machine"
+    },
     "chat.reaction.single_emoji": {
       "text": "Реакція має бути одним емодзі.",
+      "status": "machine"
+    },
+    "chat.reaction.unseen_a11y": {
+      "text": "Нові реакції на ваші повідомлення: {count}",
       "status": "machine"
     },
     "chat.reauth.action": {
@@ -3488,6 +3540,10 @@
     },
     "chats.row.unread_overflow": {
       "text": "99+",
+      "status": "machine"
+    },
+    "chats.row.unseen_reactions": {
+      "text": "Нові реакції",
       "status": "machine"
     },
     "chats.search.clear": {
@@ -5774,6 +5830,274 @@
       "text": "Якщо нічого не відбувається, запит можна надіслати знову.",
       "status": "machine"
     },
+    "group_delete.action": {
+      "text": "Видалити групу",
+      "status": "machine"
+    },
+    "group_delete.body": {
+      "text": "Групу та її повідомлення буде видалено з усіх ваших пристроїв, а @{name} звільниться через 30 днів. Це не можна скасувати.",
+      "status": "machine"
+    },
+    "group_delete.confirm": {
+      "text": "Видалити",
+      "status": "machine"
+    },
+    "group_delete.title": {
+      "text": "Видалити цю групу?",
+      "status": "machine"
+    },
+    "group_handle.error.bad_form": {
+      "text": "Від 3 до 32 символів: літери a-z, цифри та _.",
+      "status": "machine"
+    },
+    "group_handle.error.failed": {
+      "text": "Не вдалося зберегти. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "group_handle.error.held": {
+      "text": "Це @ім'я недоступне. Спробуйте інше.",
+      "status": "machine"
+    },
+    "group_handle.error.offline": {
+      "text": "Не вдалося зв'язатися з Lakko. Перевірте з'єднання й спробуйте ще раз.",
+      "status": "machine"
+    },
+    "group_handle.error.taken": {
+      "text": "Це @ім'я зайняте.",
+      "status": "machine"
+    },
+    "group_handle.error.too_many": {
+      "text": "Ви сьогодні створили багато груп. Спробуйте завтра.",
+      "status": "machine"
+    },
+    "group_info.handle.choose": {
+      "text": "Вибрати",
+      "status": "machine"
+    },
+    "group_info.handle.copy_a11y": {
+      "text": "Копіювати @ім'я",
+      "status": "machine"
+    },
+    "group_info.handle.lapsed": {
+      "text": "У цієї групи немає @імені. Виберіть його.",
+      "status": "machine"
+    },
+    "group_info.header.aria": {
+      "text": "Група",
+      "status": "machine"
+    },
+    "group_info.header.private": {
+      "text": "Закрита група · {count, plural, one {# учасник} few {# учасники} many {# учасників} other {# учасника}}",
+      "status": "machine"
+    },
+    "group_info.header.public": {
+      "text": "Відкрита група · {count, plural, one {# учасник} few {# учасники} many {# учасників} other {# учасника}}",
+      "status": "machine"
+    },
+    "group_photo.error.limit": {
+      "text": "Ви досягли ліміту на надсилання файлів. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "group_photo.error.not_allowed": {
+      "text": "Фото можуть змінювати лише власник і адміністратори.",
+      "status": "machine"
+    },
+    "group_photo.error.upload": {
+      "text": "Не вдалося завантажити фото. Перевірте з'єднання й спробуйте ще раз.",
+      "status": "machine"
+    },
+    "group_photo.gone": {
+      "text": "Фото більше недоступне. Виберіть інше.",
+      "status": "machine"
+    },
+    "group_photo.owed": {
+      "text": "Застосується, коли ви знову будете в мережі.",
+      "status": "machine"
+    },
+    "group_photo.remove.body": {
+      "text": "Усі в групі побачать замість нього ініціали.",
+      "status": "machine"
+    },
+    "group_photo.remove.confirm": {
+      "text": "Видалити",
+      "status": "machine"
+    },
+    "group_photo.remove.title": {
+      "text": "Видалити фото групи?",
+      "status": "machine"
+    },
+    "group_reactions.add": {
+      "text": "Додати",
+      "status": "machine"
+    },
+    "group_reactions.all": {
+      "text": "Усі реакції",
+      "status": "machine"
+    },
+    "group_reactions.all_sub": {
+      "text": "Учасники можуть реагувати будь-яким емодзі.",
+      "status": "machine"
+    },
+    "group_reactions.choose_one": {
+      "text": "Виберіть хоча б одну.",
+      "status": "machine"
+    },
+    "group_reactions.max": {
+      "text": "Можна вибрати до 100.",
+      "status": "machine"
+    },
+    "group_reactions.none": {
+      "text": "Без реакцій",
+      "status": "machine"
+    },
+    "group_reactions.none_sub": {
+      "text": "Учасники не можуть реагувати на повідомлення.",
+      "status": "machine"
+    },
+    "group_reactions.remove_a11y": {
+      "text": "Прибрати {emoji}",
+      "status": "machine"
+    },
+    "group_reactions.save_failed": {
+      "text": "Не вдалося зберегти. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "group_reactions.some": {
+      "text": "Деякі реакції",
+      "status": "machine"
+    },
+    "group_reactions.some_sub": {
+      "text": "Учасники можуть реагувати лише вибраними вами емодзі.",
+      "status": "machine"
+    },
+    "group_reactions.title": {
+      "text": "Реакції",
+      "status": "machine"
+    },
+    "group_reactions.unsaved_body": {
+      "text": "Зміни буде втрачено, якщо їх не зберегти.",
+      "status": "machine"
+    },
+    "group_reactions.value.all": {
+      "text": "Усі",
+      "status": "machine"
+    },
+    "group_reactions.value.count": {
+      "text": "{count, plural, one {# реакція} few {# реакції} many {# реакцій} other {# реакції}}",
+      "status": "machine"
+    },
+    "group_reactions.value.off": {
+      "text": "Вимк.",
+      "status": "machine"
+    },
+    "group_solo.add_members": {
+      "text": "Додати учасників",
+      "status": "machine"
+    },
+    "group_solo.copy_invite": {
+      "text": "Копіювати посилання-запрошення",
+      "status": "machine"
+    },
+    "group_solo.created": {
+      "text": "Ви створили цю групу",
+      "status": "machine"
+    },
+    "group_solo.only_you": {
+      "text": "Тут лише ви.",
+      "status": "machine"
+    },
+    "group_type.confirm.private.body": {
+      "text": "Група зникне з пошуку. Приєднатися можна буде лише за запрошенням власника чи адміністратора. Усі учасники залишаться.",
+      "status": "machine"
+    },
+    "group_type.confirm.private.confirm": {
+      "text": "Зробити закритою",
+      "status": "machine"
+    },
+    "group_type.confirm.private.title": {
+      "text": "Зробити групу закритою?",
+      "status": "machine"
+    },
+    "group_type.confirm.private.waiting": {
+      "text": "{count, plural, one {# людина чекає на вступ. Ви ще можете їй відповісти.} few {# людини чекають на вступ. Ви ще можете їм відповісти.} many {# людей чекають на вступ. Ви ще можете їм відповісти.} other {# людини чекають на вступ. Ви ще можете їм відповісти.}}",
+      "status": "machine"
+    },
+    "group_type.confirm.public.body": {
+      "text": "Будь-хто зможе знайти її та попросити приєднатися. Її назва, фото, опис і приблизний розмір стануть видимі всім.",
+      "status": "machine"
+    },
+    "group_type.confirm.public.confirm": {
+      "text": "Зробити відкритою",
+      "status": "machine"
+    },
+    "group_type.confirm.public.title": {
+      "text": "Зробити групу відкритою?",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.body": {
+      "text": "Старе @ім'я одразу перестане працювати. Воно залишиться за цією групою 30 днів.",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.confirm": {
+      "text": "Змінити",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.title": {
+      "text": "Змінити @ім'я?",
+      "status": "machine"
+    },
+    "group_type.handle": {
+      "text": "@ім'я",
+      "status": "machine"
+    },
+    "group_type.handle_private": {
+      "text": "Це бачать лише учасники.",
+      "status": "machine"
+    },
+    "group_type.handle_public": {
+      "text": "За цим ім'ям групу може знайти будь-хто.",
+      "status": "machine"
+    },
+    "group_type.needs_name": {
+      "text": "Відкрита група повинна мати назву.",
+      "status": "machine"
+    },
+    "group_type.not_saved": {
+      "text": "Не вдалося зберегти, хто може приєднатися. Відкрийте, щоб спробувати знову.",
+      "status": "machine"
+    },
+    "group_type.owed": {
+      "text": "Застосується, коли ви знову будете в мережі.",
+      "status": "machine"
+    },
+    "group_type.pending": {
+      "text": "Очікує збереження",
+      "status": "machine"
+    },
+    "group_type.private": {
+      "text": "Закрита",
+      "status": "machine"
+    },
+    "group_type.private_desc": {
+      "text": "Приєднатися можна лише за запрошенням адміністратора. Групи немає в пошуку.",
+      "status": "machine"
+    },
+    "group_type.public": {
+      "text": "Відкрита",
+      "status": "machine"
+    },
+    "group_type.public_desc": {
+      "text": "Будь-хто може знайти цю групу й попросити приєднатися.",
+      "status": "machine"
+    },
+    "group_type.title": {
+      "text": "Тип групи",
+      "status": "machine"
+    },
+    "group_type.who_can_join": {
+      "text": "Хто може приєднатися",
+      "status": "machine"
+    },
     "guest.claim.error.generic": {
       "text": "Не вдалося створити обліковий запис. Спробуйте ще раз.",
       "status": "machine"
@@ -6422,6 +6746,10 @@
       "text": "Групи",
       "status": "machine"
     },
+    "new_group.error.secure_setup": {
+      "text": "Не вдалося створити групу. Нічого не створено. Спробуйте ще раз.",
+      "status": "machine"
+    },
     "new_group.error.sign_in": {
       "text": "Увійдіть знову, щоб створити групу.",
       "status": "machine"
@@ -6512,6 +6840,10 @@
     },
     "notification.message.new": {
       "text": "Нове повідомлення",
+      "status": "machine"
+    },
+    "notification.reaction.body": {
+      "text": "{name} реагує {emoji} на ваше повідомлення",
       "status": "machine"
     },
     "open_in_app.button": {
@@ -7282,6 +7614,22 @@
       "text": "слово {position}",
       "status": "machine"
     },
+    "requests_sent.ask_again": {
+      "text": "Запитати знову",
+      "status": "machine"
+    },
+    "requests_sent.no_answer": {
+      "text": "Поки немає відповіді.",
+      "status": "machine"
+    },
+    "requests_sent.title": {
+      "text": "Надіслані запити",
+      "status": "machine"
+    },
+    "requests_sent.waiting": {
+      "text": "Чекаємо на адміністратора.",
+      "status": "machine"
+    },
     "restore_identity.device_intro": {
       "text": "Пристрій, на якому ви ще не вийшли з облікового запису, покаже шестизначний код; введіть його тут. Камера не потрібна; за бажанням можна скористатися QR-кодом.",
       "status": "machine"
@@ -7424,6 +7772,46 @@
     },
     "restore_identity.title": {
       "text": "Відновіть ключі облікового запису",
+      "status": "machine"
+    },
+    "search.conversation.channel_line": {
+      "text": "Відкритий канал · {band} підписників",
+      "status": "machine"
+    },
+    "search.conversation.group_line": {
+      "text": "Відкрита група · {band} учасників",
+      "status": "machine"
+    },
+    "search.conversation.open": {
+      "text": "Відкрити",
+      "status": "machine"
+    },
+    "search.conversation.out_of_requests": {
+      "text": "Ви сьогодні попросилися в багато груп. Спробуйте завтра.",
+      "status": "machine"
+    },
+    "search.conversation.queue_full": {
+      "text": "У цій групі зараз забагато запитів. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "search.conversation.request": {
+      "text": "Попросити приєднатися",
+      "status": "machine"
+    },
+    "search.conversation.request_sent": {
+      "text": "Запит надіслано. Адміністратор побачить його, коли наступного разу відкриє Lakko.",
+      "status": "machine"
+    },
+    "search.conversation.request_sent_button": {
+      "text": "Запит надіслано",
+      "status": "machine"
+    },
+    "search.conversation.subscribe": {
+      "text": "Підписатися",
+      "status": "machine"
+    },
+    "search.conversations.heading": {
+      "text": "Групи та канали",
       "status": "machine"
     },
     "search.people.add_contact": {
@@ -7662,6 +8050,18 @@
       "text": "Тема на цьому пристрої.",
       "status": "machine"
     },
+    "settings.appearance.quick_reaction": {
+      "text": "Швидка реакція",
+      "status": "machine"
+    },
+    "settings.appearance.quick_reaction_change": {
+      "text": "Змінити швидку реакцію",
+      "status": "machine"
+    },
+    "settings.appearance.quick_reaction_sub": {
+      "text": "Двічі торкніться повідомлення, щоб надіслати її.",
+      "status": "machine"
+    },
     "settings.appearance.theme": {
       "text": "Тема",
       "status": "machine"
@@ -7884,6 +8284,14 @@
     },
     "settings.notifications.off.title": {
       "text": "Увімкніть сповіщення",
+      "status": "machine"
+    },
+    "settings.notifications.reactions": {
+      "text": "Реакції",
+      "status": "machine"
+    },
+    "settings.notifications.reactions_sub": {
+      "text": "Коли хтось реагує на ваші повідомлення",
       "status": "machine"
     },
     "settings.passkeys.add": {

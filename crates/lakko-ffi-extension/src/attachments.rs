@@ -135,6 +135,55 @@ pub struct ParsedBody {
     /// ADR-0073 R.7: the DS `messageId` of that first send.
     #[uniffi(default = None)]
     pub resend_origin_message_id: Option<i64>,
+    /// UX reactions-and-emoji section 12: add or take off (`Some` only for
+    /// `Reaction`). The extension notifies only on an add, and a remove
+    /// withdraws the notification an add raised.
+    #[uniffi(default = None)]
+    pub reaction_action: Option<ReactionAction>,
+    /// UX reactions-and-emoji section 12: the 32-byte account key of the
+    /// reacted-to message's author as the reactor states it (`Some` only for
+    /// `Reaction`, when it decoded). The reactor's claim: the extension
+    /// notifies only when it names this account, and never treats it as an
+    /// identity.
+    #[uniffi(default = None)]
+    pub reaction_target_author: Option<Vec<u8>>,
+}
+
+/// Add or take off a reaction (UX reactions-and-emoji section 17), the
+/// same enum the full surface exposes.
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReactionAction {
+    /// Add the emoji to the sender's reactions on the target.
+    Add,
+    /// Take the emoji off the sender's reactions on the target.
+    Remove,
+}
+
+impl From<inner::ReactionAction> for ReactionAction {
+    fn from(a: inner::ReactionAction) -> Self {
+        match a {
+            inner::ReactionAction::Add => Self::Add,
+            inner::ReactionAction::Remove => Self::Remove,
+        }
+    }
+}
+
+impl ParsedBody {
+    /// A body of `kind` with every optional field empty.
+    const fn of(kind: MessageBodyKind) -> Self {
+        Self {
+            kind,
+            text: String::new(),
+            attachments: Vec::new(),
+            target: None,
+            emoji: None,
+            is_typing: None,
+            resend_origin_group_b64: None,
+            resend_origin_message_id: None,
+            reaction_action: None,
+            reaction_target_author: None,
+        }
+    }
 }
 
 /// Decode an MLS Application message body into a classified [`ParsedBody`]
@@ -155,85 +204,49 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             resend,
             ..
         } => ParsedBody {
-            kind: MessageBodyKind::Chat,
             text,
             attachments: refs_to_ffi(attachments),
-            target: None,
-            emoji: None,
-            is_typing: None,
             resend_origin_group_b64: resend.as_ref().map(|r| r.group_id_b64.clone()),
             resend_origin_message_id: resend.map(|r| r.message_id),
+            ..ParsedBody::of(MessageBodyKind::Chat)
         },
         inner::MessageBody::Edit { target, text } => ParsedBody {
-            kind: MessageBodyKind::Edit,
             text,
-            attachments: Vec::new(),
             target: Some(target),
-            emoji: None,
-            is_typing: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
+            ..ParsedBody::of(MessageBodyKind::Edit)
         },
         inner::MessageBody::Delete { target } => ParsedBody {
-            kind: MessageBodyKind::Delete,
-            text: String::new(),
-            attachments: Vec::new(),
             target: Some(target),
-            emoji: None,
-            is_typing: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
+            ..ParsedBody::of(MessageBodyKind::Delete)
         },
-        inner::MessageBody::Reaction { target, emoji, .. } => ParsedBody {
-            kind: MessageBodyKind::Reaction,
-            text: String::new(),
-            attachments: Vec::new(),
+        // UX reactions-and-emoji section 12: the action and the stated
+        // target author are what the extension needs to notify on an add to
+        // this account's message and to stay quiet on a remove.
+        inner::MessageBody::Reaction {
+            target,
+            emoji,
+            action,
+            target_author,
+        } => ParsedBody {
             target: Some(target),
             emoji: Some(emoji),
-            is_typing: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
+            reaction_action: Some(action.into()),
+            reaction_target_author: target_author.map(|k| k.to_vec()),
+            ..ParsedBody::of(MessageBodyKind::Reaction)
         },
         inner::MessageBody::Typing { is_typing } => ParsedBody {
-            kind: MessageBodyKind::Typing,
-            text: String::new(),
-            attachments: Vec::new(),
-            target: None,
-            emoji: None,
             is_typing: Some(is_typing),
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
+            ..ParsedBody::of(MessageBodyKind::Typing)
         },
         inner::MessageBody::ReadReceipt { up_to } => ParsedBody {
-            kind: MessageBodyKind::ReadReceipt,
-            text: String::new(),
-            attachments: Vec::new(),
             target: Some(up_to),
-            emoji: None,
-            is_typing: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
+            ..ParsedBody::of(MessageBodyKind::ReadReceipt)
         },
         inner::MessageBody::Unsupported { version } => ParsedBody {
-            kind: MessageBodyKind::Unsupported,
-            text: String::new(),
-            attachments: Vec::new(),
             target: Some(i64::from(version)),
-            emoji: None,
-            is_typing: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
+            ..ParsedBody::of(MessageBodyKind::Unsupported)
         },
-        inner::MessageBody::ServiceEnvelope => ParsedBody {
-            kind: MessageBodyKind::ServiceEnvelope,
-            text: String::new(),
-            attachments: Vec::new(),
-            target: None,
-            emoji: None,
-            is_typing: None,
-            resend_origin_group_b64: None,
-            resend_origin_message_id: None,
-        },
+        inner::MessageBody::ServiceEnvelope => ParsedBody::of(MessageBodyKind::ServiceEnvelope),
     }
 }
 
@@ -298,6 +311,28 @@ mod tests {
         assert_eq!(got.duration_ms, Some(4200));
         assert_eq!(got.waveform, Some(vec![9, 8, 7]));
         assert!(got.thumb.is_none());
+    }
+
+    #[test]
+    fn a_reaction_carries_its_action_and_target_author() {
+        let author = [7u8; inner::REACTION_TARGET_AUTHOR_LEN];
+        let add = parse_body_envelope(
+            inner::compose_reaction(42, "👍", inner::ReactionAction::Add, Some(&author)).unwrap(),
+        );
+        assert_eq!(add.kind, MessageBodyKind::Reaction);
+        assert_eq!(add.target, Some(42));
+        assert_eq!(add.reaction_action, Some(ReactionAction::Add));
+        assert_eq!(add.reaction_target_author, Some(author.to_vec()));
+
+        let remove = parse_body_envelope(
+            inner::compose_reaction(42, "👍", inner::ReactionAction::Remove, None).unwrap(),
+        );
+        assert_eq!(remove.reaction_action, Some(ReactionAction::Remove));
+        assert!(remove.reaction_target_author.is_none());
+
+        let chat = parse_body_envelope(inner::compose("hi", Vec::new()).unwrap());
+        assert!(chat.reaction_action.is_none());
+        assert!(chat.reaction_target_author.is_none());
     }
 
     #[test]

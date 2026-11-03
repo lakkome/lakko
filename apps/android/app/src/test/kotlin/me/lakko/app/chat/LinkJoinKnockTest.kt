@@ -125,12 +125,15 @@ class LinkJoinKnockTest {
 
     @Test
     fun `both joiners persist the proposal's keys fail-closed before the knock`() {
-        // The chat link joiner: the durable persist, never the best-effort one,
-        // inside the proposal builder.
+        // The chat link joiner (ADR-0087 section 5: a sealed KeyPackage): the
+        // durable persist, never the best-effort one, between minting the
+        // KeyPackage and sealing the knock row.
         val chat = source("chat/ChatRepository.kt")
-        val chatBuilder = chat.substringAfter("buildProposal = { epoch ->").substringBefore("buildAttribution")
-        assertTrue(chatBuilder.contains("persistSnapshotDurableOrThrow()"))
-        assertTrue(!chatBuilder.contains("persistSnapshotBestEffort"))
+        for (builder in chat.split("val keyPackage = identity.createKeyPackage()").drop(1).map { it.substringBefore("sealKnockRow(") }) {
+            assertTrue(builder.contains("persistSnapshotDurableOrThrow()"))
+            assertTrue(!builder.contains("persistSnapshotBestEffort"))
+        }
+        assertTrue(chat.contains("sealKnockRow("))
         // The channel co-publisher joiner: the persist it is handed, before the
         // proposal is returned to the knock.
         val coPublisher = source("channels/CoPublisher.kt")

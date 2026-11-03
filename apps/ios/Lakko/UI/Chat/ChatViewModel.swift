@@ -447,6 +447,23 @@ public final class ChatViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        repository.$unseenReactionsRevision
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        // ADR-0087 — the group's photo or allowed reactions changed.
+        repository.$groupSettingsRevision
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        // Reactions-and-emoji spec section 6 — the quick reaction (synced).
+        QuickReactionSetting.shared.$chosen
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
     }
 
     /// ADR-0024 — `true` while ``ChatScreen`` is on-screen. The screen
@@ -1536,11 +1553,16 @@ public final class ChatViewModel: ObservableObject {
     }
 
     func pendingJoinLabel(_ ref: Data) -> String {
-        Self.pendingJoinLabel(
+        // UX section 8 — a contact shows their contact name; otherwise the
+        // name the request carries (a claim, unverified, no mark).
+        let carried = AcceptedContactsStore.boundAccountIdB64.flatMap {
+            repository.groupSettingsStore.requestNames(accountIdB64: $0, groupIdHex: groupIdHex)[base64Encode(ref)]
+        }
+        return Self.pendingJoinLabel(
             accountKeyName: repository
                 .pendingExternalJoinAccountKey(groupIdHex: groupIdHex, joinerSignatureKey: ref)
                 .map { ProfileDirectory.shared.resolve(signatureKey: $0) },
-            leafName: personName(signatureKeyB64: base64Encode(ref)))
+            leafName: carried ?? personName(signatureKeyB64: base64Encode(ref)))
     }
 
     /// Pure rule behind ``pendingJoinLabel(_:)``: a name the account key
@@ -1580,6 +1602,8 @@ public final class ChatViewModel: ObservableObject {
         // from another client is still keyed as a chat here.
         if let shared = groupName { return shared }
         if !presentsAsGroup, let peer = oneToOnePeerName { return peer }
+        // ADR-0087 / UX 4.3 — a solo group with no name is titled `@name`.
+        if isAloneInGroup, let handle = groupHandle { return "@" + handle.handle }
         return ConversationTitle.groupTitle(
             otherMemberNames: ChatListViewModel.otherMemberNames(
                 repository: repository, groupIdHex: groupIdHex))
@@ -1607,6 +1631,108 @@ public final class ChatViewModel: ObservableObject {
     /// plain member sees the name read-only.
     var canRenameGroup: Bool {
         repository.ownRole(groupIdHex: groupIdHex) != .member && !membershipHasEnded
+    }
+
+    // MARK: - ADR-0087 section 18 — the group photo
+
+    /// UX 4.5.2 — the header states after `Use` or `Remove`.
+    enum GroupPhotoStatus: Equatable {
+        case idle
+        case uploading
+        case failed
+        case limited
+        case owed
+        case notAllowed
+    }
+
+    @Published var groupPhotoStatus: GroupPhotoStatus = .idle
+    /// The photo or video being uploaded, kept for `Try again`.
+    private var groupPhotoRetry: PendingAvatarMedia?
+
+    /// UX 4.5.1 — the same people who rename it.
+    var canSetGroupPhoto: Bool { canRenameGroup }
+
+    /// The photo this device holds (initials when `nil`).
+    var groupPhoto: ProfileAvatar? { repository.groupPhoto(groupIdHex: groupIdHex) }
+
+    /// UX 4.5.2 — `Use` on the crop screen: upload, then send.
+    func useGroupPhoto(_ media: PendingAvatarMedia) {
+        guard canSetGroupPhoto else {
+            groupPhotoStatus = .notAllowed
+            return
+        }
+        groupPhotoRetry = media
+        groupPhotoStatus = .uploading
+        Task { @MainActor in
+            let avatar: ProfileAvatar
+            do {
+                avatar = try await ProfileAvatarUpload.upload(media)
+            } catch AttachmentBridgeError.uploadLimited {
+                groupPhotoStatus = .limited
+                return
+            } catch {
+                groupPhotoStatus = .failed
+                return
+            }
+            // Demoted while the crop screen was open: nothing is sent.
+            guard canSetGroupPhoto else {
+                BlobLifecycle.shared.delete([avatar.still.blobId] + (avatar.video.map { [$0.blobId] } ?? []))
+                groupPhotoStatus = .notAllowed
+                return
+            }
+            do {
+                try await repository.setGroupPhoto(groupIdHex: groupIdHex, avatar: avatar)
+                groupPhotoStatus = .idle
+                groupPhotoRetry = nil
+            } catch {
+                // Uploaded and recorded as owed: sent when the device is back.
+                groupPhotoStatus = repository.groupPhotoOwed(groupIdHex: groupIdHex) ? .owed : .failed
+            }
+        }
+    }
+
+    /// `Try again` after a failed upload.
+    func retryGroupPhoto() {
+        if let media = groupPhotoRetry { useGroupPhoto(media) }
+    }
+
+    /// UX 4.5.2 — `Remove` after the confirmation.
+    func removeGroupPhoto() {
+        guard canSetGroupPhoto else {
+            groupPhotoStatus = .notAllowed
+            return
+        }
+        Task { @MainActor in
+            do {
+                try await repository.setGroupPhoto(groupIdHex: groupIdHex, avatar: nil)
+                groupPhotoStatus = .idle
+            } catch {
+                groupPhotoStatus = repository.groupPhotoOwed(groupIdHex: groupIdHex) ? .owed : .failed
+            }
+        }
+    }
+
+    // MARK: - Reactions-and-emoji spec section 9 — allowed reactions
+
+    /// Section 9 — the Info row's value.
+    var allowedReactionsSummary: String {
+        switch allowedReactions {
+        case .all: return Localization.text("group_reactions.value.all")
+        case .off: return Localization.text("group_reactions.value.off")
+        case .only(let list):
+            return Localization.text("group_reactions.value.count", counts: ["count": UInt64(list.count)])
+        }
+    }
+
+    /// Section 9 — save the group's reactions setting.
+    func saveAllowedReactions(_ value: FfiAllowedReactions) async -> Bool {
+        do {
+            try await repository.setAllowedReactions(groupIdHex: groupIdHex, value)
+            return true
+        } catch {
+            NSLog("allowed reactions save failed: %@", error.localizedDescription)
+            return false
+        }
     }
 
     /// ADR-0051 §3 — send the new name (an empty string clears it). The store
@@ -2101,6 +2227,100 @@ public final class ChatViewModel: ObservableObject {
             refreshMembers()
         } catch {
             reportMembershipFailure(error, op: "onRejectJoin", key: "chat.error.reject_join")
+        }
+    }
+
+    /// This device's role in the group (`nil` with no role table).
+    var ownRole: Role? { repository.ownRole(groupIdHex: groupIdHex) }
+
+    /// UX section 10 — this account created the group here.
+    var createdHere: Bool {
+        guard presentsAsGroup, let accountIdB64 = AcceptedContactsStore.boundAccountIdB64 else { return false }
+        return repository.groupSettingsStore.createdHere(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+    }
+
+    /// ADR-0087 section 10 — nobody else is in this group.
+    var isAloneInGroup: Bool { !membershipHasEnded && repository.isAloneInGroup(groupIdHex: groupIdHex) }
+
+    /// ADR-0087 section 10 — `Copy invite link` on the solo block: mint (or
+    /// reuse) a link and hand it back for the clipboard.
+    func mintInviteLinkForCopy() async -> String? {
+        if let inviteLink { return inviteLink }
+        do {
+            let link = try await repository.createGroupInviteLink(groupIdHex: groupIdHex)
+            inviteLink = link
+            return link
+        } catch {
+            reportMembershipFailure(error, op: "mintInviteLinkForCopy", key: "chat.error.create_link")
+            return nil
+        }
+    }
+
+    /// ADR-0087 section 11 — `Delete group` after its confirmation. The
+    /// @name is retired first; offline, nothing changes and the error shows.
+    func onDeleteAloneGroup(onDone: @escaping () -> Void) {
+        guard !membershipBusy else { return }
+        membershipBusy = true
+        membershipError = nil
+        Task { @MainActor in
+            defer { membershipBusy = false }
+            do {
+                if try await repository.deleteAloneGroupRetiringName(groupIdHex: groupIdHex) { onDone() }
+            } catch {
+                membershipError = .key("group_handle.error.offline")
+            }
+        }
+    }
+
+    /// UX 4.1 — a flag change is still owed.
+    var groupTypeOwed: Bool { repository.groupTypeOwed(groupIdHex: groupIdHex) }
+
+    /// UX 4.1 — save the Group type screen; `nil` when it applied, else the
+    /// catalog key of the line the screen shows.
+    func saveGroupType(handle: String, isPublic: Bool) async -> String? {
+        do {
+            switch try await repository.saveGroupType(groupIdHex: groupIdHex, handle: handle, isPublic: isPublic) {
+            case .applied: return nil
+            case .owed: return "group_photo.owed"
+            }
+        } catch let refusal as DiscoveryClient.HandleWriteError {
+            if refusal.code == "name-taken" { return "group_handle.error.held" }
+            if refusal.status == 429 { return "group_handle.error.too_many" }
+            return "group_handle.error.failed"
+        } catch let DiscoveryClientError.network(_, _) {
+            return "group_handle.error.offline"
+        } catch {
+            return "group_handle.error.failed"
+        }
+    }
+
+    /// ADR-0087 section 4 — `@name` and the header line of group info.
+    var groupHandle: StoredGroupHandle? { repository.groupHandle(groupIdHex: groupIdHex) }
+
+    /// Section 4 — "Private group · 12 members" / "Public group · ...".
+    var groupHeaderLine: String {
+        let count = UInt64(max(1, repository.peopleCount(groupIdHex: groupIdHex)))
+        return Localization.text(
+            groupHandle?.isPublic == true ? "group_info.header.public" : "group_info.header.private",
+            counts: ["count": count])
+    }
+
+    /// UX section 8 — `Reject all` after its confirmation.
+    func onRejectAllJoins() {
+        guard !membershipBusy else { return }
+        membershipBusy = true
+        membershipError = nil
+        Task { @MainActor in
+            defer { membershipBusy = false }
+            do {
+                for ref in pendingJoins { disarmRetry(.approveJoin(subjectKeyB64: base64Encode(ref))) }
+                try await repository.rejectAllExternalJoins(groupIdHex: groupIdHex)
+                repository.clearUnkeptExternalJoin(groupIdHex: groupIdHex)
+                refreshMembers()
+            } catch {
+                refreshMembers()
+                reportMembershipFailure(error, op: "onRejectAllJoins", key: "chat.error.reject_join")
+            }
         }
     }
 
@@ -3120,22 +3340,95 @@ public final class ChatViewModel: ObservableObject {
         case notLanded
     }
 
-    /// React to `message` with `emoji` — toggles on the receive
-    /// side + locally. Available on any message with a messageId.
+    // MARK: - Reactions (reactions-and-emoji spec)
+
+    /// Section 10 — the message whose "You can add up to 3 reactions" line
+    /// shows under its chips, for about three seconds.
+    @Published public private(set) var capLineMessageId: Int64?
+    private var capLineTask: Task<Void, Never>?
+
+    /// Section 9 — what this conversation takes.
+    var allowedReactions: FfiAllowedReactions { repository.allowedReactions(groupIdHex: groupIdHex) }
+
+    /// Section 7 — the chip shape for this conversation.
+    var chipConversation: FfiChipConversation { presentsAsGroup ? .group : .oneToOne }
+
+    /// Section 5 — the row the menu offers for `message`.
+    func reactionRow(for message: ChatMessage) -> ReactionRowModel {
+        ReactionRules.row(
+            message: message, own: ownIdentity, quick: QuickReactionSetting.shared.chosen,
+            recent: RecentReactions.load(accountIdB64: AcceptedContactsStore.boundAccountIdB64),
+            allowed: allowedReactions)
+    }
+
+    /// Section 7 — the chips under `message`.
+    func reactionChips(for message: ChatMessage) -> FfiChipRow {
+        ReactionRules.chips(
+            message: message, own: ownIdentity, conversation: chipConversation, allowed: allowedReactions)
+    }
+
+    /// Sections 5, 7 — press `emoji` on `message` (the row, a chip, the
+    /// picker): the shared rule decides add, remove, or nothing.
     func react(to message: ChatMessage, emoji: String) {
         let target = message.messageId
-        guard target > 0, !emoji.isEmpty else { return }
+        guard target > 0, !emoji.isEmpty, !message.deleted else { return }
+        let verdict = ReactionRules.verdict(
+            emoji: emoji, message: message, own: ownIdentity, allowed: allowedReactions)
+        let add: Bool
+        switch verdict {
+        case .add: add = true
+        case .remove: add = false
+        case .capReached:
+            showCapLine(messageId: message.id)
+            return
+        case .notAllowed, .kindLimit:
+            return
+        }
+        if add { RecentReactions.push(emoji, accountIdB64: AcceptedContactsStore.boundAccountIdB64) }
         Task { @MainActor in
             do {
                 try await repository.reactToMessage(
                     groupIdHex: groupIdHex,
                     target: target,
-                    emoji: emoji
+                    emoji: emoji,
+                    add: add,
+                    targetAuthorB64: message.authorKeyB64
                 )
             } catch {
                 sendError = Self.errorText(for: error, fallbackKey: "chat.error.react")
                 NSLog("reaction failed: %@", error.localizedDescription)
             }
+        }
+    }
+
+    /// Section 6 — a double tap on the bubble: the quick reaction, or nothing,
+    /// silently, when it does not apply.
+    func quickReact(to message: ChatMessage) {
+        guard messageActionsAvailable, message.messageId > 0, !message.deleted,
+              message.direction != .system else { return }
+        react(to: message, emoji: QuickReactionSetting.shared.current)
+    }
+
+    /// Section 12 — own messages with unseen reactions, oldest first.
+    var unseenReactionIds: [Int64] { repository.unseenReactionIds(groupIdHex: groupIdHex) }
+
+    func repositoryMarkSeen(_ messageId: Int64) {
+        repository.markReactionsSeen(groupIdHex: groupIdHex, messageId: messageId)
+    }
+
+    /// Section 12 — a row was on screen.
+    func noteRowShown(_ message: ChatMessage) {
+        guard message.direction == .outgoing, message.messageId > 0 else { return }
+        repository.markReactionsSeen(groupIdHex: groupIdHex, messageId: message.messageId)
+    }
+
+    private func showCapLine(messageId: Int64) {
+        capLineMessageId = messageId
+        capLineTask?.cancel()
+        capLineTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled, self?.capLineMessageId == messageId else { return }
+            self?.capLineMessageId = nil
         }
     }
 

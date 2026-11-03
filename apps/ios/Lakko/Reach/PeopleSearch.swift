@@ -274,6 +274,9 @@ public enum PeopleNetworkState: Equatable {
 public struct PeopleSearchAnswer: Equatable {
     public var people: [FoundPerson]
     public var channel: FoundChannel?
+    /// ADR-0087 section 5 — public groups and channels found by `@name` and
+    /// by name ("Groups and channels").
+    var conversations: [ConversationHandles.Found] = []
     public var allowanceUsed: Bool
     public var failed: Bool
 
@@ -965,14 +968,34 @@ public enum PeopleSearch {
 
     /// One network search of the field: the people (username, name term,
     /// introductions) and the channel handle, asked at the same time.
-    public static func answer(
+    static func answer(
         query: String,
         records: [Data],
         known: (Data) -> KnownPerson = { _ in .unknown },
         ownAccountKey: Data? = nil,
         ports: PeopleSearchPorts,
-        lookupChannel: @escaping (String) async throws -> String?
+        lookupChannel: @escaping (String) async throws -> String?,
+        searchConversations: (@Sendable (String) async throws -> [ConversationHandles.Found])? = nil
     ) async -> PeopleSearchAnswer {
+        // ADR-0087 section 5 — one network query finds people, groups and
+        // channels; the channel-only leg answers only without it.
+        if let searchConversations {
+            async let found: (list: [ConversationHandles.Found], quota: Bool, failed: Bool) = {
+                do {
+                    return (try await searchConversations(query), false, false)
+                } catch {
+                    let quota = AnonTokenUnavailable.isQuotaExhausted(error)
+                    return ([], quota, !quota)
+                }
+            }()
+            let legs = await networkLegs(
+                query: query, records: records, known: known, ownAccountKey: ownAccountKey, ports: ports)
+            let f = await found
+            var answer = PeopleSearchAnswer(
+                legs: legs, channel: nil, channelAllowanceUsed: f.quota, channelFailed: f.failed)
+            answer.conversations = f.list
+            return answer
+        }
         async let channel = channelLeg(query: query, lookup: lookupChannel)
         let legs = await networkLegs(
             query: query, records: records, known: known, ownAccountKey: ownAccountKey, ports: ports)

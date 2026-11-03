@@ -33,11 +33,10 @@ export type UiRules = Pick<
   // (`docs/ux/conversation-info.md`).
   | "InfoTarget"
   | "PersonInfoCapabilities"
-  | "GroupInfoCapabilities"
   | "ChannelInfoCapabilities"
   | "infoTarget"
   | "personInfoSections"
-  | "groupInfoSections"
+  | "conversationInfoSections"
   | "channelInfoSections"
   // Whether an arriving call offer rings, and for how long
   // (`docs/ux/calls.md` section 2.1). The ring window is here because it is a

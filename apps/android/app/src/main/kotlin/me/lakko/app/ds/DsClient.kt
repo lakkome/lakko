@@ -415,6 +415,30 @@ public class DsClient(
         )
     }
 
+    /**
+     * ADR-0087 section 5 — `DELETE /ds/group/{hex}/knocks?through=<id>` behind
+     * `Reject all`: the rows up to the last one this admin saw go; a request
+     * that arrived after stays. Write tier, proven like a read.
+     */
+    public suspend fun deleteKnocks(groupId: ByteArray, through: Long, signer: DsJournalSigner? = null) {
+        if (groupId.isEmpty()) {
+            throw DsClientArgError("groupId must be non-empty")
+        }
+        val endpoint = "/ds/group/${pseudonymHex(groupId)}/knocks"
+        val response = exchange(
+            method = HttpMethod.Delete,
+            endpoint = endpoint,
+            query = "through=$through",
+            body = ByteArray(0),
+            contentType = null,
+            waitSecs = null,
+            journal = Journal.group(groupId, signer),
+        )
+        if (!response.status.isSuccess()) {
+            throw DsHttpError(status = response.status.value, endpoint = endpoint, body = response.safeReadBody())
+        }
+    }
+
     private suspend fun doFetch(
         endpoint: String,
         after: Long?,

@@ -107,7 +107,7 @@ describe("the inline form is gone (2026-10-19): an inline URL is a dead link", (
   });
 
   it("an inline /g/ link opens nothing and asks the ledger nothing", async () => {
-    const m = wasm.composeGroupInviteCapability(bytes(32, 0x01), bytes(32, 0xa1), 0n);
+    const m = wasm.composeGroupInviteCapability(bytes(32, 0x01), bytes(32, 0xa1), 0n, bytes(32, 0x5a), 0);
     const slug = base64UrlEncodeNoPad(m.sealed);
     const hash = `#${base64UrlEncodeNoPad(m.linkSecret)}`;
     m.free();
@@ -219,7 +219,7 @@ describe("sealed links: compose, upload shape, open, damaged (all three kinds)",
   const x25519 = bytes(32, 0x09);
 
   function mintGroup(seed = seedA, group = groupA) {
-    const m = wasm.composeGroupInviteCapabilityWithPreview(seed, group, 0n, "Team", "Anna", 4);
+    const m = wasm.composeGroupInviteCapabilityWithPreview(seed, group, 0n, "Team", "Anna", 4, bytes(32, 0x5a), 0);
     const out = { sealed: m.sealed, secret: m.linkSecret, issuer: m.issuerPubkey };
     m.free();
     return out;
@@ -396,7 +396,7 @@ describe("the /g/ preview opens under the same secret", () => {
   const groupA = bytes(32, 0xa1);
 
   function mint() {
-    const m = wasm.composeGroupInviteCapabilityWithPreview(seedA, groupA, 0n, "Team", "Anna", 4);
+    const m = wasm.composeGroupInviteCapabilityWithPreview(seedA, groupA, 0n, "Team", "Anna", 4, bytes(32, 0x5a), 0);
     const cap = wasm.GroupInviteCapability.openLink(m.sealed, m.linkSecret);
     const out = { cap, secret: m.linkSecret };
     m.free();
@@ -417,7 +417,7 @@ describe("the /g/ preview opens under the same secret", () => {
   });
 
   it("a link minted without a preview shows the page without one", () => {
-    const m = wasm.composeGroupInviteCapability(seedA, groupA, 0n);
+    const m = wasm.composeGroupInviteCapability(seedA, groupA, 0n, bytes(32, 0x5a), 0);
     const cap = wasm.GroupInviteCapability.openLink(m.sealed, m.linkSecret);
     expect(cap.hasPreview).toBe(false);
     expect(resolveInvitePreview(cap, m.linkSecret)).toEqual({ kind: "none" });

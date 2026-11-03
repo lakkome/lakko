@@ -353,16 +353,19 @@ public enum AttachmentBridge {
         try composeDeleteEnvelope(target: target)
     }
 
-    /// ADR-0023 — compose a **reaction** op envelope: react to the
-    /// message identified by the DS `target` id with `emoji`. Any
-    /// member may react; re-sending the same emoji toggles it off
-    /// on the receive side. Throws if `emoji` is empty or exceeds
-    /// the Rust-side `MAX_EMOJI_BYTES` cap (64 bytes).
+    /// ADR-0023 as amended — compose a **reaction** op envelope: add or
+    /// remove `emoji` on the message identified by the DS `target` id. Any
+    /// member may react. `targetAuthor` is the target message's author account
+    /// key (32 bytes) when known. Throws if `emoji` is empty or exceeds the
+    /// Rust-side `MAX_EMOJI_BYTES` cap (64 bytes).
     public static func composeReactionBytes(
         target: Int64,
-        emoji: String
+        emoji: String,
+        add: Bool,
+        targetAuthor: Data?
     ) throws -> Data {
-        try composeReactionEnvelope(target: target, emoji: emoji)
+        try composeReactionEnvelope(
+            target: target, emoji: emoji, action: add ? .add : .remove, targetAuthor: targetAuthor)
     }
 
     /// Format an attachment size for UI display — `42 B`,

@@ -173,7 +173,7 @@ final class AnonTokenPoolTests: XCTestCase {
             "discovery-lookup", "discovery-register", "invite-consume", "ds-knock",
             "push-register", "channel-subscribe", "directory-search",
             "vault-claim", "blob-upload", "blob-read", "mailbox-write", "call-join",
-            "circle-claim",
+            "circle-claim", "channel-react", "channel-comment",
         ])
         XCTAssertEqual(AnonTokenRoute.headerName, "x-lakko-anon-token")
     }
@@ -223,6 +223,7 @@ final class AnonTokenPoolTests: XCTestCase {
             .mailboxWrite: 4,
             .circleClaim: 2,
             .callJoin: 4,
+            .channelReact: 4, .channelComment: 4,
         ]
         XCTAssertEqual(Set(expected.keys), Set(AnonTokenContext.allCases), "every context has a pinned policy")
         let issuer = FakeIssuer()
@@ -777,14 +778,15 @@ final class AnonTokenRoutePrivacyTests: XCTestCase {
 
     private let consumeOK = #"{"used_count":1,"max_uses":5,"already_consumed":false}"#
 
-    /// Discovery: the OPRF step, the channel-name register and the three
+    /// Discovery: the OPRF step, the `@name` claim (ADR-0087) and the three
     /// consumes each spend one token of their context and carry NO session,
     /// even from a client that holds one.
     func testDiscoveryTokenRoutesCarryATokenAndNoSession() async throws {
         let host = AnonRouteRecorder.scope { request, body in
             switch request.url?.path ?? "" {
             case "/discovery/oprf": return (200, #"{"evaluated":"AA=="}"#)
-            case "/discovery/channel/register": return (200, #"{"ok":true}"#)
+            case "/discovery/handle/claim":
+                return (200, #"{"handle_certificate_b64":"AA==","lease_until_ms":1}"#)
             default: return (200, self.consumeOK)
             }
         }
@@ -800,7 +802,7 @@ final class AnonTokenRoutePrivacyTests: XCTestCase {
         let cap = Data([1, 2, 3])
 
         _ = try await client.oprfEvaluate(OprfRequest(blinded: "AA=="))
-        _ = try await client.channelRegister(ChannelRegisterRequest(oprfHash: "AA==", channelId: "AA=="))
+        _ = try await client.handleWrite(route: .claim, statementB64: "AA==")
         _ = try await client.consumeInvite(blobId: blobId, capabilityBytes: cap, joinerAccountId: joiner)
         _ = try await client.consumeCallInvite(blobId: blobId, capabilityBytes: cap, joinerAccountId: joiner)
         _ = try await client.consumeGroupInvite(blobId: blobId, capabilityBytes: cap, joinerAccountId: joiner)
@@ -808,7 +810,7 @@ final class AnonTokenRoutePrivacyTests: XCTestCase {
         let seen = AnonRouteRecorder.requests(host)
         XCTAssertEqual(seen.map(\.path), [
             "/discovery/oprf",
-            "/discovery/channel/register",
+            "/discovery/handle/claim",
             "/discovery/invite/BwcHBwcH/consume",
             "/discovery/call-invite/BwcHBwcH/consume",
             "/discovery/group-invite/BwcHBwcH/consume",
@@ -840,7 +842,6 @@ final class AnonTokenRoutePrivacyTests: XCTestCase {
             antiCensorship: .disarmed,
             tokens: tokens)
         _ = try await client.lookupRaw(LookupRequest(oprfHash: "AA=="))
-        _ = try await client.channelLookupRaw(ChannelLookupRequest(oprfHash: "AA=="))
         for request in AnonRouteRecorder.requests(host) {
             XCTAssertNil(request.authorization, request.path)
             XCTAssertNil(request.anonToken, request.path)

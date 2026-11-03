@@ -255,8 +255,9 @@ pub use handle::{
 };
 pub use handle_record::{
     compose_handle_record, open_handle_record, open_search_record, HandleRecordError,
-    HandleRecordKind, HandleRecordPayload, SearchRecord, HANDLE_RECORD_PAYLOAD_MAX_LEN,
-    HANDLE_RECORD_PAYLOAD_MIN_LEN, HANDLE_RECORD_PAYLOAD_VERSION_V2, MAX_SIZE_BAND,
+    HandleRecordKind, HandleRecordPayload, SearchRecord, HANDLE_RECORD_KNOCK_VERSION_LEN,
+    HANDLE_RECORD_PAYLOAD_MAX_LEN, HANDLE_RECORD_PAYLOAD_MIN_LEN, HANDLE_RECORD_PAYLOAD_VERSION_V3,
+    MAX_SIZE_BAND,
 };
 pub use incoming_envelope::{dispatch_incoming_envelope, DispatchError, IncomingEnvelope};
 pub use introduction::{

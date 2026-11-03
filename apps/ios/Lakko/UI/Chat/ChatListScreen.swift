@@ -137,6 +137,10 @@ public struct ChatListScreen: View {
     /// half filters what this device holds; the network half asks by itself
     /// (`docs/ux/who-can-find-me.md` section 6.1, ``PeopleSearchModel``).
     @State private var searchText: String = ""
+    /// UX 6.2 — the `Requests sent` list.
+    @State private var requestsSentOpen = false
+    /// UX 5.1 — the card of a public group or channel opened from search.
+    @State private var foundCard: ConversationHandles.Found?
 
     // MARK: Chat folders (`docs/ux/chat-folders.md`)
 
@@ -337,7 +341,9 @@ public struct ChatListScreen: View {
                     membershipState(
                         isActive: !thread.membershipEnded, leaveRequestedAtMs: nil)),
                 markedUnread: flags?.unreadOverride == true,
-                personKey: kind == .group ? nil : viewModel.peerSignatureKey(groupIdHex: thread.groupIdHex))
+                personKey: kind == .group ? nil : viewModel.peerSignatureKey(groupIdHex: thread.groupIdHex),
+                photoGroupIdHex: kind == .group ? thread.groupIdHex : nil,
+                hasUnseenReactions: viewModel.hasUnseenReactions(groupIdHex: thread.groupIdHex))
         }
     }
 
@@ -411,6 +417,29 @@ public struct ChatListScreen: View {
                 center: viewModel.endNotices, onClose: viewModel.closeEndNotice(groupIdHex:))
             if let accountNotice { accountNotice }
             if let recalledNotice { recalledNotice }
+            // UX 6.2 — the requests to join this device sent, with a count.
+            let requests = viewModel.requestsSent
+            if !requests.isEmpty {
+                Button { requestsSentOpen = true } label: {
+                    HStack {
+                        Label(l10n.t("requests_sent.title"), systemImage: "paperplane")
+                            .foregroundStyle(Color.lakkoText)
+                        Spacer()
+                        Text(requests.count.formatted(.number.locale(l10n.locale)))
+                            .foregroundStyle(Color.lakkoTextMuted)
+                        Image(systemName: "chevron.forward")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .sheet(isPresented: $requestsSentOpen) {
+                    RequestsSentList(viewModel: viewModel)
+                }
+            }
         }
         .listRowInsets(EdgeInsets())
         .listRowSeparator(.hidden)
@@ -495,7 +524,9 @@ public struct ChatListScreen: View {
                                 model: peopleSearch, includesChannels: true, showsLocalContacts: true,
                                 emptyText: l10n.t("chats.search.no_results"),
                                 onOpenPerson: onOpenPerson, onOpenChannel: openFoundChannel,
-                                channelName: foundChannelName)
+                                channelName: foundChannelName,
+                                onOpenConversation: { foundCard = $0 })
+                            .sheet(item: $foundCard) { found in foundCardScreen(found) }
                         } else {
                             Text(l10n.t("chats.search.no_results"))
                                 .foregroundStyle(Color.lakkoTextMuted)
@@ -560,7 +591,8 @@ public struct ChatListScreen: View {
                             viewModel.peerSignatureKey(groupIdHex: $0.id)
                         }),
                         onOpenPerson: onOpenPerson, onOpenChannel: openFoundChannel,
-                                channelName: foundChannelName)
+                                channelName: foundChannelName, onOpenConversation: { foundCard = $0 })
+                        .sheet(item: $foundCard) { found in foundCardScreen(found) }
                         .listRowSeparator(.hidden)
                 }
             }
@@ -761,6 +793,22 @@ public struct ChatListScreen: View {
     /// as it was for the lookup row this replaced.
     private func foundChannelName(_ channelIdHex: String) -> String? {
         channels.channels.first { $0.id == channelIdHex }.map(\.title)
+    }
+
+    private func foundCardScreen(_ found: ConversationHandles.Found) -> some View {
+        ConversationCardScreen(
+            found: found, repository: viewModel.repository, openHeld: openHeldGroup,
+            subscribe: openFoundChannel, onClose: { foundCard = nil })
+    }
+
+    /// UX 5.1 — `Open` on the card of a group this device holds.
+    private func openHeldGroup(_ groupIdHex: String) -> Bool {
+        let rows = Self.chatRows(
+            viewModel: viewModel, flags: deviceGroupSync.flags, readCursors: deviceGroupSync.readCursors)
+        guard let row = rows.first(where: { $0.id == groupIdHex }) else { return false }
+        searchText = ""
+        onOpen(row)
+        return true
     }
 
     private func openFoundChannel(_ channelIdHex: String, _ handle: String) {
@@ -977,7 +1025,8 @@ struct ConversationRowView: View {
             InitialsAvatar(
                 // The id is hashed for the tint only, never shown.
                 name: row.title, identity: row.id, size: 40,
-                photo: row.personKey.map(AvatarPhoto.person))
+                isGroup: row.kind == .group,
+                photo: row.personKey.map(AvatarPhoto.person) ?? row.photoGroupIdHex.map(AvatarPhoto.group))
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(row.title)
@@ -1032,6 +1081,12 @@ struct ConversationRowView: View {
                     .font(.caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
+            if row.hasUnseenReactions {
+                Image(systemName: "heart.fill")
+                    .font(.caption2)
+                    .foregroundStyle(Color.lakkoAccent)
+                    .accessibilityLabel(Localization.text("chats.row.unseen_reactions"))
+            }
             if row.showsUnread {
                 // Accent capsule; a muted conversation renders it grey so a
                 // muted-but-unread row still surfaces a hint without grabbing
@@ -1071,7 +1126,7 @@ public final class ChatListViewModel: ObservableObject {
 
     @Published public private(set) var threads: [ChatThread] = []
 
-    private let repository: ChatRepository
+    let repository: ChatRepository
     private var cancellables: Set<AnyCancellable> = []
 
     public init(repository: ChatRepository) {
@@ -1097,6 +1152,61 @@ public final class ChatListViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        // ADR-0087 / reactions spec section 12 — a group photo, or unseen
+        // reactions, changed.
+        repository.$groupSettingsRevision
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        repository.$unseenReactionsRevision
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+    }
+
+    /// UX 6.2 — the open requests to join this device sent.
+    var requestsSent: [RequestsSentStore.Entry] {
+        guard let accountIdB64 = AcceptedContactsStore.boundAccountIdB64 else { return [] }
+        return RequestsSentStore.open(
+            accountIdB64: accountIdB64, heldGroups: Set(threads.map(\.groupIdHex)))
+    }
+
+    /// UX 6.2 — `Ask again` on a request over 7 days old.
+    func askAgain(_ entry: RequestsSentStore.Entry) async {
+        guard let accountIdB64 = AcceptedContactsStore.boundAccountIdB64 else { return }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        // A request from search: sealed again to the key the record named.
+        if let keyB64 = entry.knockKeyB64, let key = Data(base64Encoded: keyB64),
+           let groupId = ChatRepository.hexToBytes(entry.groupIdHex) {
+            let outcome = await repository.requestToJoinPublicGroup(
+                groupId: groupId, knockKey: key, knockVersion: entry.knockVersion ?? 0)
+            if outcome == .sent {
+                RequestsSentStore.recordPublic(
+                    groupId: groupId, name: entry.name ?? "", handle: entry.handle ?? "", knockKey: key,
+                    knockVersion: entry.knockVersion ?? 0, accountIdB64: accountIdB64, nowMs: nowMs)
+                objectWillChange.send()
+            }
+            return
+        }
+        guard let cap = RequestsSentStore.capability(entry) else { return }
+        do {
+            let result = try await repository.requestToJoinFromLink(
+                capabilityWire: cap.wire, nowMs: UInt64(nowMs), blobId: cap.blobId)
+            RequestsSentStore.record(
+                groupId: result.groupId, name: entry.name, capabilityWire: cap.wire,
+                blobId: cap.blobId, accountIdB64: accountIdB64, nowMs: nowMs)
+            objectWillChange.send()
+        } catch {
+            NSLog("requests sent: ask again failed: %@", String(describing: error))
+        }
+    }
+
+    /// Reactions-and-emoji spec section 12 — the small heart beside the
+    /// unread badge.
+    func hasUnseenReactions(groupIdHex: String) -> Bool {
+        !repository.unseenReactionIds(groupIdHex: groupIdHex).isEmpty
     }
 
     /// ADR-0050 section 2.9 — whether groups the pairing bundle named are not
@@ -1136,6 +1246,11 @@ public final class ChatListViewModel: ObservableObject {
         }
         if let peer = repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) {
             return ProfileDirectory.shared.resolve(signatureKey: peer).name
+        }
+        // ADR-0087 / UX 4.3 — a solo group with no name is titled `@name`.
+        if repository.isAloneInGroup(groupIdHex: groupIdHex),
+           let handle = repository.groupHandle(groupIdHex: groupIdHex) {
+            return "@" + handle.handle
         }
         return ConversationTitle.groupTitle(
             otherMemberNames: Self.otherMemberNames(repository: repository, groupIdHex: groupIdHex))
@@ -1288,5 +1403,55 @@ struct MembershipEndBanner: View {
             .padding(.vertical, 4)
             .background(Color.lakkoSurface)
         }
+    }
+}
+
+
+/// UX 6.2 — the requests to join this device sent: avatar, name, one line;
+/// `Ask again` after 7 days with no answer. A request is never withdrawn, and
+/// the person is never told one was refused.
+struct RequestsSentList: View {
+    @ObservedObject var viewModel: ChatListViewModel
+    @ObservedObject private var l10n = Localization.shared
+    @State private var asking: String?
+
+    var body: some View {
+        NavigationStack {
+            List(viewModel.requestsSent) { entry in
+                let now = Int64(Date().timeIntervalSince1970 * 1000)
+                let late = RequestsSentStore.mayAskAgain(entry, nowMs: now)
+                HStack(spacing: 12) {
+                    InitialsAvatar(
+                        name: entry.name ?? "", identity: entry.groupIdHex, size: 40, isGroup: true,
+                        photo: .group(entry.groupIdHex))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(entry.name ?? l10n.t("group_info.header.aria"))
+                            .foregroundStyle(Color.lakkoText)
+                        if let handle = entry.handle {
+                            Text("@" + handle).font(.footnote).foregroundStyle(Color.lakkoTextMuted)
+                        }
+                        Text(l10n.t(late ? "requests_sent.no_answer" : "requests_sent.waiting"))
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                    Spacer()
+                    if late {
+                        Button(l10n.t("requests_sent.ask_again")) {
+                            asking = entry.id
+                            Task {
+                                await viewModel.askAgain(entry)
+                                asking = nil
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(Color.lakkoAccent)
+                        .disabled(asking != nil)
+                    }
+                }
+            }
+            .navigationTitle(l10n.t("requests_sent.title"))
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .presentationDetents([.medium, .large])
     }
 }

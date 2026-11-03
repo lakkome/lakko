@@ -408,11 +408,28 @@ struct LakkoApp: App {
             // ADR-0087 section 9 — step 2 of an owed end waits for this.
             chat?.applyHeardEnds()
             chat?.resumeOwedEnds()
+            // ADR-0087 section 18 — the group photos drawn by the avatar
+            // component, and any photo set here but not yet sent.
+            chat?.refreshGroupPhotos()
+            Task { await chat?.sendOwedGroupPhotos() }
+            // ADR-0087 section 3 — renew this account's names before their
+            // lease lapses, quietly, once per session.
+            Task { @MainActor in
+                await HandleLeaseRenewal.shared.runIfDue(
+                    accountIdB64: chat?.currentAccountIdB64,
+                    accountIdentity: { chat?.accountIdentity },
+                    groupFacts: { chat?.publicGroupFacts(journalIdHex: $0) })
+            }
             // ADR-0076 — the own-username register: seeded once from the
             // local name, or a name written elsewhere adopted.
             Task { await auth?.ownUsernameRegisterChanged(sync?.ownUsername) }
         }
         auth.storeOwnUsername = { [weak sync] name in await sync?.setOwnUsername(name) ?? false }
+        // Reactions-and-emoji spec section 6 (D3) — the quick reaction is the
+        // account's, written through its synced state.
+        QuickReactionSetting.shared.onChoose = { [weak sync] emoji in
+            Task { _ = await sync?.setQuickReaction(emoji) }
+        }
         auth.heldRecoveryAddress = { [weak sync] in sync?.recoveryEmail }
         accountProtection.usernameWatch = sync.$ownUsername
             .removeDuplicates()
@@ -1425,7 +1442,10 @@ private final class SessionModels: ObservableObject {
                     },
                     ownAccountKey: ReachCenter.shared.ownAccountKey,
                     ports: contacts.peopleSearchPorts(),
-                    lookupChannel: { try await DiscoveryClient().lookupChannel(handle: $0) })
+                    lookupChannel: { try await ChannelDiscovery.resolveChannelHandle($0) },
+                    searchConversations: { query in
+                        try await ConversationHandles.search(discovery: DiscoveryClient(), query: query)
+                    })
             },
             reachCheck: { mailbox, seed in
                 try await contacts.peopleSearchPorts().reachCheck(mailbox, seed)

@@ -7,6 +7,7 @@
  * computer, and the keyboard shortcut list under About. Settings renders
  * neither outside the desktop app.
  */
+import { reactionNotificationsOn, setReactionNotificationsOn } from "../chat/reaction-notify-pref";
 import { createEffect, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 
 import { t } from "../l10n";
@@ -227,6 +228,48 @@ export function DesktopNotificationsSection(): JSX.Element {
             {t("settings.desktop.read_failed")}
           </p>
         </Show>
+        <ReactionNotificationsRow />
+      </section>
+    </>
+  );
+}
+
+/** `docs/ux/reactions-and-emoji.md` section 12 — this device's filter, in
+ *  both builds. */
+export function ReactionNotificationsRow(): JSX.Element {
+  return (
+    <div class="lk-card-row">
+      <span class="lk-card-row-icon">
+        <Icon name="heart" size={18} />
+      </span>
+      <div class="lk-card-row-body">
+        <span class="lk-card-row-title">{t("settings.notifications.reactions")}</span>
+        <span class="lk-card-row-sub">{t("settings.notifications.reactions_sub")}</span>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={reactionNotificationsOn()}
+        class="lk-card-row-action"
+        classList={{ primary: reactionNotificationsOn() }}
+        onClick={() => setReactionNotificationsOn(!reactionNotificationsOn())}
+      >
+        {reactionNotificationsOn() ? t("common.on") : t("common.off")}
+      </button>
+    </div>
+  );
+}
+
+/** The browser build's Notifications section: the reactions switch (what
+ *  the system shows is the browser's own setting). */
+export function BrowserNotificationsSection(): JSX.Element {
+  return (
+    <>
+      <div class="lk-page-head">
+        <h1>{t("settings.section.notifications")}</h1>
+      </div>
+      <section class="lk-card">
+        <ReactionNotificationsRow />
       </section>
     </>
   );

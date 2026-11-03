@@ -56,6 +56,7 @@ import { OwedDeviceRemovals } from "./devices/OwedDeviceRemovals";
 import { OwedKeyRotation } from "./devices/OwedKeyRotation";
 import { AccountNotices } from "./auth/protect/AccountNotices";
 import { RenameResume } from "./auth/rename-runtime";
+import { GroupHandleRuntime } from "./chat/GroupHandleRuntime";
 import { BlobAccessRuntime } from "./storage/BlobAccessRuntime";
 import { GroupClosedProvider } from "./chat/GroupClosedContext";
 import { GroupNameProvider } from "./chat/GroupNameContext";
@@ -250,6 +251,9 @@ const App: Component = () => (
           <RenameResume />
           {/* ADR-0065 - blob passes, owed deletes and the keep tick. */}
           <BlobAccessRuntime />
+          {/* ADR-0087 sections 3 to 5 - owed @name writes, lease renewal,
+              and the public record published again when the knock key moves. */}
+          <GroupHandleRuntime />
           {/*
            * A Welcome this device could not open. Top level for the same
            * reason as the update banner below: it is received for the whole

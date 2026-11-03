@@ -19,7 +19,16 @@
  * one of these read Dave as Bob.
  */
 
-import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { beforeAll, describe, it, expect } from "vitest";
+
+import init from "../../wasm/lakko_ffi_wasm";
+
+beforeAll(async () => {
+  const wasmPath = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
+  await init({ module_or_path: readFileSync(wasmPath) });
+});
 import {
   authorIdentityToPersisted,
   OWN_REACTION_SENTINEL,
@@ -168,11 +177,15 @@ describe("ADR-0023 author gate — leaf reuse impersonation", () => {
 // ---------------------------------------------------------------
 
 describe("ADR-0023 reactions — leaf reuse", () => {
+  let at = 0;
   const react = (
     prev: Map<number, MessageOpState>,
     reactor: MemberIdentity,
-  ): Map<number, MessageOpState> =>
-    applyOp(prev, { op: "reaction", target: 7, emoji: "👍", reactor });
+    action: "add" | "remove" = "add",
+  ): Map<number, MessageOpState> => {
+    at += 1;
+    return applyOp(prev, { op: "reaction", target: 7, emoji: "👍", reactor, action, at });
+  };
 
   it("a newcomer at a vacated leaf cannot toggle OFF the departed member's reaction", () => {
     const bob = resolveMemberIdentity(ROSTER_BEFORE, REUSED_LEAF) as MemberIdentity;
@@ -189,9 +202,9 @@ describe("ADR-0023 reactions — leaf reuse", () => {
     expect(m.get(7)?.reactions.get("👍")?.size).toBe(2);
   });
 
-  it("the real reactor can still toggle their OWN reaction off", () => {
+  it("the real reactor can still take their OWN reaction off", () => {
     let m = react(new Map(), BOB);
-    m = react(m, BOB);
+    m = react(m, BOB, "remove");
     expect(m.get(7)?.reactions.has("👍")).toBe(false);
   });
 

@@ -86,6 +86,8 @@ internal fun PeopleSearchSection(
     chatPeersB64: Set<String> = emptySet(),
     /** The name of a channel this device knows, by its id; `null` when none. */
     channelName: (channelIdHex: String) -> String? = { null },
+    /** ADR-0087 section 5 — public groups and channels under People. */
+    conversations: ConversationSearchPort? = null,
 ) {
     val context = LocalContext.current
     val profileVersion by me.lakko.app.profile.ProfileDirectory.get(context).version.collectAsState()
@@ -142,6 +144,8 @@ internal fun PeopleSearchSection(
                 onOpenContact = onOpenContact,
             )
         }
+        // ADR-0087 section 5 — "Groups and channels", below People.
+        if (conversations != null) GroupsAndChannelsSection(query = query, port = conversations)
         if (channel != null) {
             Heading(t("nav.channels"), searching = false)
             ChannelRow(

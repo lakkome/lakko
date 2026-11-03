@@ -117,6 +117,8 @@ describe("the rotation's order (ADR-0074 section 3.2)", () => {
       "key-package",
       "device-group-root",
       "journals",
+      "knock-keys",
+      "handles",
       "channels",
       "reach",
       "profile",
@@ -246,7 +248,7 @@ describe("the rotation's order (ADR-0074 section 3.2)", () => {
   it("after the commit a failure is a retry of exactly the steps that did not land", async () => {
     const h = harness({ later: ["journals"] });
     const out = await runRotation(newRotation(DEVICE, 1), h.ports, { grant: "g" });
-    expect(out).toEqual({ kind: "publishing", owed: ["journals", "channels", "reach", "profile", "links", "requests", "backup"] });
+    expect(out).toEqual({ kind: "publishing", owed: ["journals", "knock-keys", "handles", "channels", "reach", "profile", "links", "requests", "backup"] });
     const record = last(h.saved) as RotationOwed;
     expect(record.attestationB64Url).toBe("ATT");
     expect(record.keyGeneration).toBe("3");
@@ -254,7 +256,7 @@ describe("the rotation's order (ADR-0074 section 3.2)", () => {
     expect(rotationWithholdsPhrase(record)).toBe(true);
     const again = harness();
     expect(await runRotation(record, again.ports, { grant: null })).toEqual({ kind: "complete" });
-    expect(again.calls).toEqual(["journals", "channels", "reach", "profile", "links", "requests", "backup"]);
+    expect(again.calls).toEqual(["journals", "knock-keys", "handles", "channels", "reach", "profile", "links", "requests", "backup"]);
   });
 
   it("what was granted before is spent: the links and the unanswered requests are owed steps (3.5a rule 5)", async () => {

@@ -343,7 +343,7 @@ export class DsClient implements StatementSender, CommitSender {
    * signed byte-for-byte. Returns the 2xx response or throws.
    */
   private async send(req: {
-    readonly method: "GET" | "POST" | "PUT";
+    readonly method: "GET" | "POST" | "PUT" | "DELETE";
     readonly path: string;
     readonly query: string;
     readonly body: Uint8Array;
@@ -653,6 +653,22 @@ export class DsClient implements StatementSender, CommitSender {
     const ok = await this.finish(req, response);
     const json = (await ok.json()) as { ids: number[]; epoch: number | null };
     return { ids: json.ids ?? [], epoch: json.epoch ?? null };
+  }
+
+  /** ADR-0087 section 5 — `DELETE /ds/group/{hex}/knocks?through=<id>`
+   *  behind `Reject all`: the rows up to the last one this admin saw go, a
+   *  request that arrived after stays. Write tier, proven like a read. */
+  async deleteKnocks(groupId: Uint8Array, through: number): Promise<void> {
+    if (groupId.length === 0) throw new DsClientArgError("groupId must be non-empty");
+    const params = new URLSearchParams();
+    params.set("through", String(through));
+    await this.send({
+      method: "DELETE",
+      path: `/ds/group/${pseudonymHex(groupId)}/knocks`,
+      query: params.toString(),
+      body: new Uint8Array(0),
+      plan: this.groupPlan(groupId, undefined),
+    });
   }
 
   /** `GET /ds/group/{hex}/knocks?after=&limit=&wait=` - the members read what

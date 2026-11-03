@@ -135,6 +135,7 @@ import {
   publishHeldAddress,
 } from "../../auth/protect/address-register";
 import { installUsernameRegister, publishRegisterUsername } from "../../auth/username-register";
+import { installQuickReactionRegister, publishQuickReaction } from "../../chat/quick-reaction-register";
 import { receiveServiceEnvelope } from "../../reach/service-envelope-intake";
 import {
   bindDeviceCards,
@@ -516,6 +517,7 @@ export function DeviceGroupSyncProvider(props: {
   let wasmSync: Awaited<ReturnType<typeof loadWasm>> | null = null;
   let uninstallAddressRegister: (() => void) | null = null;
   let uninstallUsernameRegister: (() => void) | null = null;
+  let uninstallQuickReactionRegister: (() => void) | null = null;
   void loadWasm().then((w) => {
     wasmSync = w;
   });
@@ -684,6 +686,8 @@ export function DeviceGroupSyncProvider(props: {
       publishHeldAddress(activeAccountIdB64, synced.recoveryEmail() ?? null);
       // ADR-0076: the account's username as its devices agree on it.
       publishRegisterUsername(activeAccountIdB64, synced.ownUsername() ?? null);
+      // Reactions D3: the account's quick reaction.
+      publishQuickReaction(activeAccountIdB64, synced.quickReaction() ?? null);
     }
     setStateVersion((v) => v + 1);
   }
@@ -916,6 +920,9 @@ export function DeviceGroupSyncProvider(props: {
     void flushUnsentLinkRecords();
     uninstallUsernameRegister?.();
     uninstallUsernameRegister = installUsernameRegister({ accountIdB64, set: setOwnUsernameImpl });
+    void flushUnsentQuickReaction();
+    uninstallQuickReactionRegister?.();
+    uninstallQuickReactionRegister = installQuickReactionRegister({ accountIdB64, set: setQuickReactionImpl });
   }
 
   function startPollLoop(accountIdB64: string, deviceKey: DeviceCipher): void {
@@ -1018,6 +1025,7 @@ export function DeviceGroupSyncProvider(props: {
     void flushUnsentLineage();
     void flushUnsentRecoveryEmail();
     void flushUnsentOwnUsername();
+    void flushUnsentQuickReaction();
     void flushUnsentDeviceAcks();
     void flushUnsentLinkRecords();
   }
@@ -1088,6 +1096,8 @@ export function DeviceGroupSyncProvider(props: {
     uninstallAddressRegister = null;
     uninstallUsernameRegister?.();
     uninstallUsernameRegister = null;
+    uninstallQuickReactionRegister?.();
+    uninstallQuickReactionRegister = null;
     activeAccountIdB64 = null;
     boundSyncGeneration = null;
     ownDeviceGroupId = null;
@@ -1210,6 +1220,9 @@ export function DeviceGroupSyncProvider(props: {
       // ADR-0076 - and the own-username register, the same way.
       const ownUsername = synced.ownUsernameEnvelope();
       if (ownUsername !== undefined) await sendLineageEnvelopes([ownUsername]);
+      // Reactions D3 - and the quick-reaction register, the same way.
+      const quick = synced.quickReactionEnvelope();
+      if (quick !== undefined) await sendLineageEnvelopes([quick]);
       // ADR-0079 - and every link record, each with its original stamp.
       await sendLineageEnvelopes(synced.linkRecordEnvelopes());
     } catch (err) {
@@ -1348,6 +1361,59 @@ export function DeviceGroupSyncProvider(props: {
       /* storage unavailable: the send below is the only attempt */
     }
     await sendOwnUsernameRegister(account);
+  }
+
+  // ----- Reactions D3: the quick-reaction register --------------
+
+  const quickReactionUnsentKey = (account: string): string => `lakko.quick-reaction.unsent.v1.${account}`;
+
+  async function sendQuickReactionRegister(account: string): Promise<void> {
+    if (synced === null) return;
+    try {
+      const envelope = synced.quickReactionEnvelope();
+      if (envelope !== undefined) await sendLineageEnvelopes([envelope]);
+      localStorage.removeItem(quickReactionUnsentKey(account));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "quick-reaction register send failed; retried at the next start",
+        err instanceof Error ? err.name : "unknown",
+      );
+    }
+  }
+
+  async function flushUnsentQuickReaction(): Promise<void> {
+    const account = activeAccountIdB64;
+    if (account === null || synced === null) return;
+    try {
+      if (localStorage.getItem(quickReactionUnsentKey(account)) === null) return;
+    } catch {
+      return;
+    }
+    await sendQuickReactionRegister(account);
+  }
+
+  /** Write the register, fold it here at once and send it to the account's
+   *  other devices. Never throws. */
+  async function setQuickReactionImpl(emoji: string): Promise<void> {
+    if (synced === null) return;
+    let written: boolean;
+    try {
+      written = synced.setQuickReaction(mintHlc(), emoji);
+    } catch {
+      // Not one emoji: nothing is kept.
+      return;
+    }
+    if (!written) return;
+    refresh();
+    const account = activeAccountIdB64;
+    if (account === null) return;
+    try {
+      localStorage.setItem(quickReactionUnsentKey(account), "1");
+    } catch {
+      /* storage unavailable: the send below is the only attempt */
+    }
+    await sendQuickReactionRegister(account);
   }
 
   // ----- Identity-recovery 17.5: the device-acknowledgement register -----
@@ -2549,6 +2615,18 @@ export function DeviceGroupSyncProvider(props: {
       if (wasmSync !== null && wasmSync.isDeviceAckEnvelope(parsed.serviceEnvelope)) {
         try {
           if (synced?.applyDeviceAckEnvelope(parsed.serviceEnvelope) === true) {
+            observeHlc(synced.maxHlc());
+            refresh();
+          }
+        } catch {
+          // A malformed register is dropped, never folded.
+        }
+        return;
+      }
+      // Reactions D3 - the quick-reaction register, the same way.
+      if (wasmSync !== null && wasmSync.isQuickReactionEnvelope(parsed.serviceEnvelope)) {
+        try {
+          if (synced?.applyQuickReactionEnvelope(parsed.serviceEnvelope) === true) {
             observeHlc(synced.maxHlc());
             refresh();
           }

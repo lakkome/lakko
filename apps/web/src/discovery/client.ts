@@ -21,13 +21,14 @@
  *      string.
  *
  * ADR-0054 S3: no route here takes a proof of work any more. The anonymous
- * routes a signed-in person uses - the OPRF evaluation, the channel-name
- * register and the three invite consumes - each spend one anonymous token
+ * routes a signed-in person uses - the OPRF evaluation and the three invite
+ * consumes - each spend one anonymous token
  * (`../tokens/anon-token-pool.ts`) and carry NO session: they are sent with
  * `anonymousFetchInit`, never through `authHeaders()`. The bearer routes
  * (register, identity, KeyPackage, the invite uploads) carry only the
  * session and can answer `429 {"code": "rate-limited"}`. `/discovery/lookup`
- * and `/discovery/channel/lookup` carry neither.
+ * carries neither. A channel's `@name` is a handle (ADR-0087 section 1,
+ * `discovery/handle-lookup.ts`); the old channel-name routes are gone.
  *
  * Errors mirror the auth-side surface — `DiscoveryClientArgError` /
  * `DiscoveryHttpError` / `DiscoveryNetworkError` — so the UI can
@@ -53,10 +54,6 @@ import { sessionFetch } from "../auth/session-fetch";
 import { errorCodeOf } from "../auth/session-401";
 import { finalizeOprf } from "./oprf-pair";
 import type {
-  ChannelLookupRequest,
-  ChannelLookupResponse,
-  ChannelRegisterRequest,
-  ChannelRegisterResponse,
   IdentityFetchResponse,
   IdentityUploadRequest,
   IdentityUploadResponse,
@@ -112,27 +109,6 @@ export interface LookupResult {
   publicRecordIdentityPk?: Uint8Array | null;
 }
 
-/** Result of `DiscoveryClient.registerChannelName` (G4-5,
- *  ADR-0010). Mirror of [`RegisterResult`] for the channel
- *  namespace. */
-export interface ChannelRegisterResult {
-  /** The canonical `@channelname` actually claimed (after the
-   *  same NFKC + lowercase + trim + leading-`@` strip the
-   *  username path applies via `OprfBlinder.blind`). */
-  normalisedHandle: string;
-}
-
-/** Result of `DiscoveryClient.lookupChannel` (G4-5, ADR-0010).
- *  The server returns 404 for an unknown `@channelname`; the
- *  high-level orchestrator surfaces that as `channel: null`
- *  rather than an exception, so a not-found is visible in the
- *  type — same shape as [`LookupResult`]. */
-export interface ChannelLookupResult {
-  normalisedHandle: string;
-  /** Raw 16-byte `channel_id`, or `null` when the handle is not
-   *  registered. */
-  channel: Uint8Array | null;
-}
 
 /** Result of `DiscoveryClient.consumeInvite` (Phase 1.18d2a +
  *  1.18d3c).
@@ -731,49 +707,6 @@ export class DiscoveryClient {
       );
     }
     return (await response.json()) as LookupResponse;
-  }
-
-  /** `POST /discovery/channel/register` — bind an OPRF-hashed
-   *  `@channelname` to a `channel_id`. Spends one `discovery-register`
-   *  anonymous token and carries no session (ADR-0054 S3). */
-  async channelRegister(
-    req: ChannelRegisterRequest,
-  ): Promise<ChannelRegisterResponse> {
-    return this.tokenPostJson("discovery-register", "/discovery/channel/register", req);
-  }
-
-  /**
-   * `POST /discovery/channel/lookup`. Returns the raw response on
-   * 200, `null` on 404 (the typed not-found path), throws on any
-   * other non-2xx. Mirror of [`lookupRaw`] for the channel
-   * namespace — unauthenticated, so no bearer header.
-   */
-  async channelLookupRaw(
-    req: ChannelLookupRequest,
-  ): Promise<ChannelLookupResponse | null> {
-    const url = `${this.baseUrl}/discovery/channel/lookup`;
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(req),
-      });
-    } catch (err) {
-      throw new DiscoveryNetworkError("/discovery/channel/lookup", err);
-    }
-    if (response.status === 404) {
-      return null;
-    }
-    if (!response.ok) {
-      const text = await safeReadBody(response);
-      throw new DiscoveryHttpError(
-        response.status,
-        "/discovery/channel/lookup",
-        text,
-      );
-    }
-    return (await response.json()) as ChannelLookupResponse;
   }
 
   // -----------------------------------------------------------------
@@ -1609,7 +1542,9 @@ export class DiscoveryClient {
     const lookupResp = await this.lookupRaw({
       oprf_hash: lookupKeyB64,
     });
-    if (lookupResp === null) {
+    // ADR-0087 section 1: a group or channel answers a name lookup with no
+    // account; a person lookup finds nobody there.
+    if (lookupResp === null || lookupResp.account_id === undefined || lookupResp.kind === "handle") {
       return { normalisedUsername, account: null };
     }
     const account = base64Decode(lookupResp.account_id);
@@ -1635,101 +1570,6 @@ export class DiscoveryClient {
       }
     }
     return { normalisedUsername, account, mailboxBinding, publicRecordIdentityPk };
-  }
-
-  // -----------------------------------------------------------------
-  // High-level: @channel discovery (G4-5, ADR-0010)
-  //
-  // The channel namespace reuses the SAME OPRF flow as @username
-  // (the `/discovery/oprf` evaluate endpoint is namespace-agnostic
-  // — one static key over the blinded handle). Only the second
-  // endpoint differs: `/discovery/channel/{register,lookup}`
-  // instead of `/discovery/{register,lookup}`, and the id type is
-  // a 16-byte channel_id pseudonym rather than a 16-byte account
-  // UUIDv7.
-  // -----------------------------------------------------------------
-
-  /**
-   * Bind `@channelname` to a 16-byte `channel_id`.
-   *
-   * Flow: OPRF blind → POST `/discovery/oprf` (one `discovery-lookup`
-   * token) → finalize → POST `/discovery/channel/register` (one
-   * `discovery-register` token). Identical to
-   * [`registerUsername`] modulo the id type + second endpoint.
-   *
-   * Handle normalisation (NFKC + lowercase + trim + leading-`@`
-   * strip) happens inside `OprfBlinder.blind`; the canonical form
-   * is surfaced back via `ChannelRegisterResult.normalisedHandle`.
-   *
-   * The write is session-token-gated (a DoS rate-limit role, not
-   * an ownership proof — see `services/discovery/src/channel_names.rs`).
-   * Throws `DiscoveryHttpError` with `status === 409` when the
-   * handle is already registered (first-come-first-served).
-   */
-  async registerChannelName(
-    channelId: Uint8Array,
-    handle: string,
-  ): Promise<ChannelRegisterResult> {
-    if (channelId.length !== 16) {
-      throw new DiscoveryClientArgError("channelId must be 16 bytes");
-    }
-    const wasm = await loadWasm();
-    const blinder = wasm.OprfBlinder.blindChannel(handle);
-    const normalisedHandle = blinder.normalizedUsername;
-
-    const oprfResp = await this.oprfEvaluate({ blinded: blinder.blindedB64 });
-
-    // ADR-0060 section 5: discovery receives the lookup key only; the raw
-    // OPRF output stays on this device (it keys sealed records).
-    const lookupKeyB64 = base64Encode(
-      finalizeOprf(blinder, oprfResp.evaluated).lookupKey,
-    );
-
-    const registerResp = await this.channelRegister({
-      oprf_hash: lookupKeyB64,
-      channel_id: base64Encode(channelId),
-    });
-    if (!registerResp.ok) {
-      throw new DiscoveryHttpError(
-        200,
-        "/discovery/channel/register",
-        "server reported ok=false",
-      );
-    }
-    return { normalisedHandle };
-  }
-
-  /**
-   * Resolve `@channelname` to its raw 16-byte `channel_id`, or
-   * `null` when the handle is not registered.
-   *
-   * Same flow as [`registerChannelName`] modulo the second
-   * endpoint: OPRF → POST `/discovery/channel/lookup`.
-   * Exact-match only (the server does no prefix search).
-   */
-  async lookupChannel(handle: string): Promise<ChannelLookupResult> {
-    const wasm = await loadWasm();
-    const blinder = wasm.OprfBlinder.blindChannel(handle);
-    const normalisedHandle = blinder.normalizedUsername;
-
-    const oprfResp = await this.oprfEvaluate({ blinded: blinder.blindedB64 });
-
-    // ADR-0060 section 5: discovery receives the lookup key only; the raw
-    // OPRF output stays on this device (it keys sealed records).
-    const lookupKeyB64 = base64Encode(
-      finalizeOprf(blinder, oprfResp.evaluated).lookupKey,
-    );
-
-    const lookupResp = await this.channelLookupRaw({
-      oprf_hash: lookupKeyB64,
-    });
-    if (lookupResp === null) {
-      return { normalisedHandle, channel: null };
-    }
-    return {
-      normalisedHandle,
-      channel: base64Decode(lookupResp.channel_id),
-    };
   }
 
   // -----------------------------------------------------------------

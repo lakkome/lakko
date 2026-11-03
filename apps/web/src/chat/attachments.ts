@@ -664,12 +664,15 @@ export function isUnsupportedPlaceholder(text: string): boolean {
  *   - `"chat"`     → a normal text + attachments bubble.
  *   - `"edit"`     → fold into the target message's text.
  *   - `"delete"`   → tombstone the target message.
- *   - `"reaction"` → toggle `(reactorLeaf, emoji)` on the target.
+ *   - `"reaction"` → add or take off `(reactor, emoji)` on the target.
  *
  * `target` is the DS `messageId` (already converted to a plain
  * JS `number` here; the wasm side hands it as a `bigint`). Ops
  * never carry attachments.
  */
+/** An explicit reaction op: add the emoji, or take it off. */
+export type ReactionAction = "add" | "remove";
+
 export type ParsedBodyResult =
   | {
       kind: "chat";
@@ -690,7 +693,19 @@ export type ParsedBodyResult =
     }
   | { kind: "edit"; target: number; text: string }
   | { kind: "delete"; target: number }
-  | { kind: "reaction"; target: number; emoji: string }
+  | {
+      kind: "reaction";
+      target: number;
+      emoji: string;
+      /** UX reactions-and-emoji section 17: an explicit add or remove, never a
+       *  toggle, so two devices of one person pressing at once cannot cancel
+       *  each other. */
+      action: ReactionAction;
+      /** The 32-byte account key of the reacted-to message's author as the
+       *  reactor saw it, or `undefined`. A claim, never an identity: only the
+       *  reaction notification reads it. */
+      targetAuthor?: Uint8Array;
+    }
   // ADR-0024 — ephemeral status signals (typing / read receipt).
   // Neither renders a bubble; the receive loop folds them into the
   // ephemeral typing registry / the monotone read watermark.
@@ -739,10 +754,13 @@ export async function parseBodyEnvelope(
       return { kind: "delete", target: Number(parsed.target ?? 0n) };
     }
     if (kind === "reaction") {
+      const author = parsed.reactionTargetAuthor;
       return {
         kind: "reaction",
         target: Number(parsed.target ?? 0n),
         emoji: parsed.emoji ?? "",
+        action: parsed.reactionAction === "remove" ? "remove" : "add",
+        ...(author !== undefined && author.length === 32 ? { targetAuthor: author } : {}),
       };
     }
     // ADR-0024 — typing signal. `isTyping` is the new wasm getter
@@ -867,16 +885,20 @@ export async function composeDeleteEnvelope(
 /**
  * ADR-0023 — compose a **reaction** op envelope: react to the
  * message identified by DS `targetMessageId` with `emoji`. Any
- * member may react; re-sending the same emoji toggles it off on
- * the receive side. Throws if `emoji` is empty or exceeds the
- * wasm-side `MAX_EMOJI_BYTES` cap (64 bytes).
+ * member may react. `action` says add or take off (an add of an emoji
+ * the person holds, or a remove of one they do not, is a no-op on
+ * every receiver); `targetAuthor` is the reacted-to message's author
+ * account key, which lets that author's devices notify. Throws if
+ * `emoji` is empty or exceeds the wasm-side `MAX_EMOJI_BYTES` cap.
  */
 export async function composeReactionEnvelope(
   targetMessageId: number,
   emoji: string,
+  action: ReactionAction,
+  targetAuthor?: Uint8Array,
 ): Promise<Uint8Array> {
   const wasm = await loadWasm();
-  return wasm.composeReactionEnvelope(BigInt(targetMessageId), emoji);
+  return wasm.composeReactionEnvelope(BigInt(targetMessageId), emoji, action, targetAuthor ?? null);
 }
 
 /**

@@ -281,7 +281,7 @@ Telegram's setting, in groups and channels. One-to-one chats always take every
 reaction and have no setting (as in Telegram).
 
 **Where:** the info screen of a group or channel, a `Reactions` row, shown to
-the owner and admins only, with the current value on the right: `All`, `Off`,
+the owner and admins of a group and to the owner of a channel, with the current value on the right: `All`, `Off`,
 or the number chosen ("12 reactions"). Members and subscribers do not see the
 row; they see its effect in the menu.
 
@@ -316,8 +316,10 @@ there is; in a group the same rule holds for the same reason (a group member's
 client is the only one that can refuse).
 
 **Who may change it:** in a group, the owner and admins (ADR-0022 roles,
-checked by each member at receipt as for the group name); in a channel, its
-publishers (owner and admins).
+checked by each member at receipt as for the group name); in a channel, the
+owner, since the setting lives in the channel metadata record, whose one writer
+is the owner (ADR-0087 sections 13a and 15; corrected 2026-11-03, it read
+"its publishers").
 
 ## 10. How many reactions one person gives
 

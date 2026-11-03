@@ -71,6 +71,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -194,6 +196,23 @@ public fun ChatListScreen(
     onOpenContacts: () -> Unit = {},
 ) {
     val state by repository.state.collectAsStateWithLifecycle()
+    // ADR-0087 section 5 — public groups and channels in search.
+    val conversationSearch = remember(repository) {
+        object : ConversationSearchPort {
+            override suspend fun search(query: String) = repository.searchPublicConversations(query)
+            override suspend fun requestToJoin(found: me.lakko.app.chat.FoundConversation) =
+                repository.requestToJoinPublicGroup(found)
+            override fun isMember(idHex: String): Boolean = repository.holdsGroup(idHex)
+            override fun open(found: me.lakko.app.chat.FoundConversation) {
+                val hex = found.id.joinToString("") { "%02x".format(it) }
+                if (found.kind == uniffi.lakko_ffi_uniffi.FfiHandleRecordKind.GROUP) {
+                    onOpenThread(hex)
+                } else {
+                    onSubscribeToChannel(hex, found.handle)
+                }
+            }
+        }
+    }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val knownChannels = channels?.channels?.collectAsStateWithLifecycle()?.value.orEmpty()
@@ -398,6 +417,16 @@ public fun ChatListScreen(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                     )
                 }
+                // group-and-channel-privacy section 6.2 — `Requests sent`,
+                // above the list while one is open.
+                val requestsSentFlow = remember(repository) { repository.requestsSent() }
+                val requestsSent by requestsSentFlow.collectAsStateWithLifecycle()
+                val openRequests = remember(requestsSent, state) {
+                    requestsSent.filter { !repository.holdsGroup(it.idHex) }
+                }
+                if (!searching) {
+                    RequestsSentRow(requests = openRequests, onAskAgain = { repository.askAgain(it) })
+                }
                 // docs/ux/chat-folders.md 2.1 — the bar exists once one folder
                 // does; a search hides it and searches everything (2.4).
                 if (showBar) {
@@ -456,6 +485,7 @@ public fun ChatListScreen(
                                 query = ""
                                 onOpenContact(key)
                             },
+                            conversations = conversationSearch,
                         )
                     }
                     searching && foundNoRow -> NoMatchPanel()
@@ -485,6 +515,7 @@ public fun ChatListScreen(
                                     },
                                     excludeKeysB64 = visibleInvitedKeys,
                                     chatPeersB64 = visibleChatPeers,
+                                    conversations = conversationSearch,
                                 )
                             }
                         } else {
@@ -1401,6 +1432,7 @@ internal fun ConversationRowBody(row: ConversationListRow, modifier: Modifier = 
             size = 40.dp,
             group = row.kind != ConversationRowKind.CHAT,
             personKey = me.lakko.app.ui.components.personKeyBytes(row.peerKeyB64.takeIf { row.kind == ConversationRowKind.CHAT }),
+            groupIdHex = row.id.takeIf { row.kind != ConversationRowKind.CHAT },
         )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
@@ -1453,6 +1485,21 @@ internal fun ConversationRowBody(row: ConversationListRow, modifier: Modifier = 
                         contentDescription = t("chats.row.pinned"),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(16.dp),
+                    )
+                }
+                // reactions-and-emoji section 12 — a small heart beside the
+                // badge while others' reactions to own messages are unseen.
+                val unseenVersion by me.lakko.app.chat.UnseenReactions.version.collectAsStateWithLifecycle()
+                val unseen = remember(unseenVersion, row.id) {
+                    row.kind != ConversationRowKind.CHANNEL && me.lakko.app.chat.UnseenReactions.any(row.id)
+                }
+                if (unseen) {
+                    Spacer(Modifier.width(6.dp))
+                    val heartLabel = t("chats.row.unseen_reactions")
+                    Text(
+                        text = "\u2764\uFE0F",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.semanticsLabel(heartLabel),
                     )
                 }
                 if (row.unread > 0) {
@@ -1549,3 +1596,7 @@ private fun NoMatchPanel() {
         )
     }
 }
+
+/** A plain spoken label on a decorative glyph. */
+private fun Modifier.semanticsLabel(label: String): Modifier =
+    this.semantics { contentDescription = label }

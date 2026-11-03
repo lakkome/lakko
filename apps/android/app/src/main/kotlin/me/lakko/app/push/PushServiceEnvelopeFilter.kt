@@ -259,6 +259,12 @@ private fun isServiceEnvelopeOtherThanCall(
     // it next reads the journal.
     if (me.lakko.app.chat.looksLikeGroupClosedEnvelope(payload)) return true
 
+    // Kind 5c — ADR-0087: the group photo, the allowed reactions, the
+    // conversation handle and the knock seed. NUL-terminated domains, the same
+    // peek the foreground classifier uses; suppressed only (storing is a write,
+    // C-59).
+    if (me.lakko.app.chat.groupSettingKindOf(payload) != null) return true
+
     // Kind 6 — ADR-0048 trigger 4, the "introduce yourselves" request. The
     // same NUL-terminated-prefix shape again, and the same foreground peek.
     // Suppressed only: ANSWERING is a publish (an MLS application message,

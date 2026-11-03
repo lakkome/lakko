@@ -262,6 +262,14 @@ enum AccountLocalDataWipe {
         step("snapshot-leaf-key") { SnapshotLeafKeyStore().clear(accountIdB64: accountIdB64) }
         step("known-groups") { KnownGroupsStore().clear(accountIdB64: accountIdB64) }
         step("group-names") { GroupNameStore().clear(accountIdB64: accountIdB64) }
+        // ADR-0087 — group photos, allowed reactions, @names, knock seeds,
+        // the names this account holds, unseen reactions and recent ones.
+        step("group-settings") { GroupSettingsStore().clear(accountIdB64: accountIdB64) }
+        step("held-handles") { standard.removeObject(forKey: HeldHandleStore.key(accountIdB64)) }
+        step("unseen-reactions") { UnseenReactionsStore().clear(accountIdB64: accountIdB64) }
+        step("recent-reactions") { standard.removeObject(forKey: RecentReactions.key(accountIdB64)) }
+        step("knock-versions") { standard.removeObject(forKey: KnockVersionStore.key(accountIdB64)) }
+        step("requests-sent") { standard.removeObject(forKey: RequestsSentStore.key(accountIdB64)) }
         step("shared-pins") { SharedPinStore().clear(accountIdB64: accountIdB64) }
         step("personal-pins") { PersonalPinStore().clear(accountIdB64: accountIdB64) }
         step("read-watermarks") { ReadWatermarkStore().clear(accountIdB64: accountIdB64) }
@@ -410,6 +418,7 @@ enum AccountLocalDataWipe {
         // 7. Calls and media.
         step("call-history") { CallHistoryStore.shared.forget(accountIdB64: accountIdB64) }
         step("call-peer-names") { CallPeerNameMirror.clear(accountIdB64: accountIdB64) }
+        step("person-names") { PersonNameMirror.clear(accountIdB64: accountIdB64) }
         step("conversation-mutes") { ConversationMuteMirror.clear(accountIdB64: accountIdB64) }
         step("media-played") { MediaPrefs().clearPlayed(accountIdB64: accountIdB64) }
         step("emoji-recents-and-tones") { EmojiIndex.clear(accountIdB64: accountIdB64, standard) }

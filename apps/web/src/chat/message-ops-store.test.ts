@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { beforeAll, describe, expect, it } from "vitest";
+
+import init from "../../wasm/lakko_ffi_wasm";
+
+beforeAll(async () => {
+  const wasmPath = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
+  await init({ module_or_path: readFileSync(wasmPath) });
+});
 
 import { applyOp } from "./message-ops";
 import {
@@ -10,12 +19,18 @@ import {
   persistedWithOps,
   type IncomingOp,
 } from "./message-ops-store";
-import type { MessageOpState } from "./message-ops";
+import type { HeldReactionRecord, MessageOpState } from "./message-ops";
 import type { PersistedMessage } from "./message-log-store";
 
 const T = "2026-09-22T12:00:00Z";
-const ALICE = "alice-key-b64";
-const BOB = "bob-key-b64";
+const keyB64 = (n: number): string => btoa(String.fromCharCode(...new Uint8Array(32).fill(n)));
+const ALICE = keyB64(1);
+const BOB = keyB64(2);
+
+/** The stored reactions without their journal positions. */
+function strip(rs: readonly { reactorKeyB64: string; emoji: string }[] | undefined) {
+  return rs?.map(({ reactorKeyB64, emoji }) => ({ reactorKeyB64, emoji }));
+}
 
 function row(over: Partial<PersistedMessage> = {}): PersistedMessage {
   return {
@@ -39,7 +54,11 @@ const attachment = {
 };
 
 function state(over: Partial<MessageOpState> = {}): MessageOpState {
-  return { reactions: new Map(), ...over };
+  const reactions = over.reactions ?? new Map<string, Set<string>>();
+  const held: HeldReactionRecord[] = [];
+  let at = 0;
+  for (const [emoji, people] of reactions) for (const person of people) held.push({ person, emoji, at: ++at });
+  return { held, ...over, reactions };
 }
 
 describe("persistedWithOps", () => {
@@ -90,7 +109,7 @@ describe("persistedWithOps", () => {
       row(),
       state({ deleted: true, reactions: new Map([["👍", new Set([ALICE])]]) }),
     );
-    expect(out.reactions).toEqual([{ reactorKeyB64: ALICE, emoji: "👍" }]);
+    expect(strip(out.reactions)).toEqual([{ reactorKeyB64: ALICE, emoji: "👍" }]);
   });
 
   it("stores reactions sorted, so an unchanged re-persist is byte-identical", () => {
@@ -114,8 +133,8 @@ describe("persistedWithOps", () => {
         ]),
       }),
     );
-    expect(one.reactions).toEqual(two.reactions);
-    expect(one.reactions).toEqual([
+    expect(strip(one.reactions)).toEqual(strip(two.reactions));
+    expect(strip(one.reactions)).toEqual([
       { reactorKeyB64: BOB, emoji: "👍" },
       { reactorKeyB64: ALICE, emoji: "🙏" },
       { reactorKeyB64: BOB, emoji: "🙏" },
@@ -236,19 +255,28 @@ describe("foldOpsIntoStored", () => {
       [row()],
       [{ op: "reaction", target: 7, text: "", emoji: "👍", senderKey: BOB }],
     );
-    expect(out[0]?.reactions).toEqual([{ reactorKeyB64: BOB, emoji: "👍" }]);
+    expect(strip(out[0]?.reactions)).toEqual([{ reactorKeyB64: BOB, emoji: "👍" }]);
   });
 
-  it("toggles a reaction off when the same member sends it twice", () => {
-    const react: IncomingOp = {
+  it("takes a reaction off on an explicit remove", () => {
+    const add: IncomingOp = {
       op: "reaction",
       target: 7,
       text: "",
       emoji: "👍",
       senderKey: BOB,
+      reactionAction: "add",
+      messageId: 10,
     };
-    const out = foldOpsIntoStored([row()], [react, react]);
+    const remove: IncomingOp = { ...add, reactionAction: "remove", messageId: 11 };
+    const out = foldOpsIntoStored([row()], [add, remove]);
     expect(out[0]?.reactions).toBeUndefined();
+  });
+
+  it("a second add of the same emoji is not a toggle", () => {
+    const add: IncomingOp = { op: "reaction", target: 7, text: "", emoji: "👍", senderKey: BOB, messageId: 10 };
+    const out = foldOpsIntoStored([row()], [add, { ...add, messageId: 11 }]);
+    expect(strip(out[0]?.reactions)).toEqual([{ reactorKeyB64: BOB, emoji: "👍" }]);
   });
 
   it("drops a reaction carrying no emoji", () => {
@@ -268,7 +296,7 @@ describe("foldOpsIntoStored", () => {
       [{ op: "reaction", target: 7, text: "", emoji: "❤️", senderKey: BOB }],
     );
     expect(out[0]?.deleted).toBe(true);
-    expect(out[0]?.reactions).toEqual([{ reactorKeyB64: BOB, emoji: "❤️" }]);
+    expect(strip(out[0]?.reactions)).toEqual([{ reactorKeyB64: BOB, emoji: "❤️" }]);
   });
 
   it("leaves rows the ops do not name alone", () => {

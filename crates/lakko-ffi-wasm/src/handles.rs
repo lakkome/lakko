@@ -228,7 +228,8 @@ pub struct WasmHandleRecordPayload {
 #[wasm_bindgen(js_class = HandleRecordPayload)]
 impl WasmHandleRecordPayload {
     /// Build a payload: `kind` `"group"` (32-byte id, knock key) or
-    /// `"channel"` (16-byte id, read key).
+    /// `"channel"` (16-byte id, read key). `knock_version` is the version of
+    /// the group's knock key; omitted means `0`, which a channel must carry.
     ///
     /// # Errors
     ///
@@ -245,6 +246,7 @@ impl WasmHandleRecordPayload {
         description: String,
         size_band: u8,
         avatar: Option<ProfileAvatar>,
+        knock_version: Option<u16>,
     ) -> Result<WasmHandleRecordPayload, String> {
         let kind = match kind {
             "group" => HandleRecordKind::Group,
@@ -261,6 +263,7 @@ impl WasmHandleRecordPayload {
                 updated_at_ms,
                 id: id.to_vec(),
                 key: fixed("handleRecord", "record key", key)?,
+                knock_version: knock_version.unwrap_or(0),
                 handle,
                 name,
                 description,
@@ -300,6 +303,14 @@ impl WasmHandleRecordPayload {
     #[must_use]
     pub fn key(&self) -> Vec<u8> {
         self.inner.key.to_vec()
+    }
+
+    /// The version of the group's knock key, named in the knock row a
+    /// searcher seals to it; `0` for a channel.
+    #[wasm_bindgen(getter, js_name = knockVersion)]
+    #[must_use]
+    pub fn knock_version(&self) -> u16 {
+        self.inner.knock_version
     }
 
     /// The canonical `@name`.
@@ -468,8 +479,10 @@ mod tests {
             String::new(),
             1,
             None,
+            Some(9),
         )
         .unwrap();
+        assert_eq!(payload.knock_version(), 9);
         let term = [0x33_u8; 64];
         let record = compose_handle_record(&payload, &term, 10).unwrap();
         assert_eq!(
@@ -478,7 +491,28 @@ mod tests {
         );
         let hit = open_search_record(&record, &term).unwrap().unwrap();
         assert_eq!(hit.kind(), "conversation");
+        assert_eq!(hit.conversation().map(|c| c.knock_version()), Some(9));
         assert_eq!(hit.conversation(), Some(payload));
+        let channel = |knock_version| {
+            WasmHandleRecordPayload::new(
+                "channel",
+                3,
+                &[0x42; 16],
+                &[0x4B; 32],
+                "book_news".into(),
+                "Book news".into(),
+                String::new(),
+                1,
+                None,
+                knock_version,
+            )
+            .unwrap()
+        };
+        assert_eq!(channel(None).knock_version(), 0);
+        assert!(compose_handle_record(&channel(None), &term, 10).is_ok());
+        assert!(compose_handle_record(&channel(Some(1)), &term, 10)
+            .unwrap_err()
+            .starts_with("handleRecord.channelKnockVersion"));
         assert!(WasmHandleRecordPayload::new(
             "x",
             0,
@@ -488,6 +522,7 @@ mod tests {
             String::new(),
             String::new(),
             0,
+            None,
             None
         )
         .is_err());

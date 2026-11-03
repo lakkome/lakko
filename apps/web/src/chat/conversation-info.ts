@@ -86,6 +86,15 @@ const SECTION_NAMES = [
   "manage-channel",
   "unsubscribe",
   "channel-members",
+  /* ADR-0087 (group-and-channel-privacy.md section 18). */
+  "handle",
+  "group-type",
+  "delete-group",
+  "invite-people",
+  "subscribers",
+  "admins",
+  /* reactions-and-emoji.md section 9: group owner and admins, channel owner. */
+  "reactions",
 ] as const;
 
 /**
@@ -107,7 +116,7 @@ export type InfoSection = (typeof SECTION_NAMES)[number];
  * Rust, which is not on the wasm surface; this list is what the tests check
  * `personInfoSections` against, under every capability combination, so the
  * defect cannot come back. Its own drift is caught by the test asserting that
- * every entry is actually reachable from `groupInfoSections`.
+ * every entry is actually reachable from `conversationInfoSections`.
  */
 export const GROUP_ONLY_SECTIONS: readonly InfoSection[] = [
   "group-name",
@@ -137,32 +146,6 @@ export interface PersonInfoCapabilities {
    *  be named in the setting (`docs/ux/who-can-find-me.md` section 5.1). Left
    *  out it reads off. */
   readonly contactsOfContactsOn?: boolean;
-}
-
-/** What the viewer may do in a group, as the chat already knows it. */
-export interface GroupInfoCapabilities {
-  /** Owner or admin, and still a member (ADR-0022). */
-  readonly canManageMembers: boolean;
-  /** Owner or admin, and still a member (ADR-0051). */
-  readonly canRename: boolean;
-  /** Owner or admin, and still a member (ADR-0028). */
-  readonly canMintInvite: boolean;
-  /** The owner, and still a member (ADR-0045). */
-  readonly isOwner: boolean;
-  /**
-   * Whether this device can actually leave.
-   *
-   * ADR-0045's member exit is a `Leave` PROPOSAL, so a group carrying no
-   * ADR-0022 role table has no proposal path and there is nothing for the
-   * control to do; also false when this device cannot tell which leaf is its
-   * own. It is the same condition `ownership-transfer.ts` already hides the
-   * exit block on - which is why it is a field: the rule used to offer
-   * `leave-group` unconditionally and both this client and Android overrode
-   * it in their own view, which is a rule nobody was following.
-   */
-  readonly canLeave: boolean;
-  /** This device's membership is over (ADR-0045 UX 6.2): read-only. */
-  readonly membershipEnded: boolean;
 }
 
 /** What the viewer is to a channel. */
@@ -295,36 +278,45 @@ export function infoOpening(
   return "nothing";
 }
 
+/** What the viewer is to a group or channel, for the ADR-0087 rule. */
+export interface ConversationInfoInput {
+  readonly kind: "group" | "channel";
+  readonly role: "owner" | "admin" | "member";
+  /** Only this person is in it (a group of one). */
+  readonly alone: boolean;
+  /** The owner can hand the group over (a role table, someone to take it). */
+  readonly canTransfer: boolean;
+  /** A member can leave (the proposal path, an own leaf read). */
+  readonly canLeave: boolean;
+  /** It holds an `@name`. */
+  readonly hasHandle: boolean;
+}
+
 /**
- * The blocks a group's info shows (spec section 2.2), decided by the shared
- * rule.
- *
- * Which of these this client actually GATES on, and which it only receives, is
- * worth stating so nobody deletes a branch expecting a control to disappear.
- * `rename-group`, `add-member` and `invite-link` are read by the view as the
- * condition for rendering. `transfer-ownership`, `leave-group` and
- * `delete-chat` are the exit block, whose live control is picked by ADR-0045's
- * own state machine (`exitBlockState` in the view) - the rule now agrees with
- * that machine on whether there is an exit at all (`canLeave`), where it used
- * to contradict it and be overridden.
+ * The blocks a group's or channel's info shows under ADR-0087
+ * (`group-and-channel-privacy.md` sections 4, 10, 11, 12.1, 15 and 18),
+ * decided by the shared rule (`conversationInfoSections`). An unknown name the
+ * core adds later is dropped, never guessed at.
  */
-export function groupInfoSections(
+export function conversationInfoSectionsFor(
   rules: UiRules | null,
-  caps: GroupInfoCapabilities,
+  input: ConversationInfoInput,
 ): readonly InfoSection[] {
   if (rules === null) return [];
-  return known(
-    rules.groupInfoSections(
-      new rules.GroupInfoCapabilities(
-        caps.canManageMembers,
-        caps.canRename,
-        caps.canMintInvite,
-        caps.isOwner,
-        caps.canLeave,
-        caps.membershipEnded,
+  try {
+    return known(
+      rules.conversationInfoSections(
+        input.kind,
+        input.role,
+        input.alone,
+        input.canTransfer,
+        input.canLeave,
+        input.hasHandle,
       ),
-    ),
-  );
+    );
+  } catch {
+    return [];
+  }
 }
 
 /** The blocks a channel's info shows (spec section 2.3), decided by the
