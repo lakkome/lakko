@@ -574,6 +574,48 @@ pub struct ParsedBody {
     /// ADR-0073 — the DS `messageId` of the original in that conversation.
     #[uniffi(default = None)]
     pub resend_origin_message_id: Option<i64>,
+    /// UX reactions-and-emoji section 17: add or take off (`Some` only for
+    /// `Reaction`). A reaction without a recognised op degrades to `Chat` in
+    /// the core, so a `Reaction` always carries one.
+    #[uniffi(default = None)]
+    pub reaction_action: Option<ReactionAction>,
+    /// UX reactions-and-emoji section 17: the 32-byte account key of the
+    /// reacted-to message's author as the reactor saw it, or `None`. The
+    /// reactor's claim, used to match the target when ids differ; never an
+    /// identity.
+    #[uniffi(default = None)]
+    pub reaction_target_author: Option<Vec<u8>>,
+    /// ADR-0087 section 14: a channel invitation card riding beside the text
+    /// (`Some` only for `Chat`). Open it with `openChannelInviteCard`.
+    #[uniffi(default = None)]
+    pub channel_invite: Option<Vec<u8>>,
+}
+
+/// Add or take off a reaction (UX reactions-and-emoji section 17).
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReactionAction {
+    /// Add the emoji to the sender's reactions on the target.
+    Add,
+    /// Take the emoji off the sender's reactions on the target.
+    Remove,
+}
+
+impl From<inner::ReactionAction> for ReactionAction {
+    fn from(a: inner::ReactionAction) -> Self {
+        match a {
+            inner::ReactionAction::Add => Self::Add,
+            inner::ReactionAction::Remove => Self::Remove,
+        }
+    }
+}
+
+impl From<ReactionAction> for inner::ReactionAction {
+    fn from(a: ReactionAction) -> Self {
+        match a {
+            ReactionAction::Add => Self::Add,
+            ReactionAction::Remove => Self::Remove,
+        }
+    }
 }
 
 /// Build an EDIT envelope (ADR-0023) replacing the target message's
@@ -603,13 +645,49 @@ pub fn compose_delete_envelope(target: i64) -> Result<Vec<u8>, FfiError> {
 ///
 /// [`FfiError::Attachment`] if `emoji` is empty or exceeds
 /// `MAX_EMOJI_BYTES`, or on serialisation failure.
+///
+/// `action` adds or takes off the emoji (UX reactions-and-emoji section 17);
+/// `target_author` is the 32-byte account key of the reacted-to message's
+/// author as this device resolved it, or `None`.
+#[uniffi::export(default(target_author = None))]
+pub fn compose_reaction_envelope(
+    target: i64,
+    emoji: String,
+    action: ReactionAction,
+    target_author: Option<Vec<u8>>,
+) -> Result<Vec<u8>, FfiError> {
+    let author = target_author
+        .map(|k| {
+            <[u8; inner::REACTION_TARGET_AUTHOR_LEN]>::try_from(k.as_slice()).map_err(|_| {
+                FfiError::Attachment(format!(
+                    "reaction target author must be {} bytes, got {}",
+                    inner::REACTION_TARGET_AUTHOR_LEN,
+                    k.len()
+                ))
+            })
+        })
+        .transpose()?;
+    inner::compose_reaction(target, &emoji, action.into(), author.as_ref()).map_err(Into::into)
+}
+
+/// Build a chat envelope carrying a channel invitation card (ADR-0087
+/// section 14) beside `text` (which may be empty). The card comes from
+/// `composeChannelInviteCard`.
+///
+/// # Errors
+///
+/// [`FfiError::Attachment`] for an empty card or one longer than
+/// [`max_channel_invite_bytes`].
 #[uniffi::export]
-pub fn compose_reaction_envelope(target: i64, emoji: String) -> Result<Vec<u8>, FfiError> {
-    // Mechanical bridge after the core gained an explicit add / remove op
-    // and an optional target-author key (UX reactions-and-emoji section 17):
-    // this surface still sends an add without the key until the FFI work
-    // exposes both parameters.
-    inner::compose_reaction(target, &emoji, inner::ReactionAction::Add, None).map_err(Into::into)
+pub fn compose_channel_invite_envelope(text: String, card: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    inner::compose_channel_invite(&text, &card).map_err(Into::into)
+}
+
+/// The longest channel invitation card the chat envelope carries.
+#[uniffi::export]
+#[must_use]
+pub fn max_channel_invite_bytes() -> u32 {
+    u32::try_from(inner::MAX_CHANNEL_INVITE_BYTES).unwrap_or(u32::MAX)
 }
 
 /// Build an ephemeral TYPING envelope (ADR-0024).
@@ -647,7 +725,7 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             reply,
             forward,
             resend,
-            ..
+            channel_invite,
         } => ParsedBody {
             kind: MessageBodyKind::Chat,
             text,
@@ -665,6 +743,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             forward_origin_message_id: forward.and_then(|f| f.origin.map(|o| o.message_id)),
             resend_origin_group_b64: resend.as_ref().map(|r| r.group_id_b64.clone()),
             resend_origin_message_id: resend.map(|r| r.message_id),
+            reaction_action: None,
+            reaction_target_author: None,
+            channel_invite,
         },
         inner::MessageBody::Edit { target, text } => ParsedBody {
             kind: MessageBodyKind::Edit,
@@ -681,6 +762,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             forward_origin_message_id: None,
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
+            reaction_action: None,
+            reaction_target_author: None,
+            channel_invite: None,
         },
         inner::MessageBody::Delete { target } => ParsedBody {
             kind: MessageBodyKind::Delete,
@@ -697,8 +781,16 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             forward_origin_message_id: None,
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
+            reaction_action: None,
+            reaction_target_author: None,
+            channel_invite: None,
         },
-        inner::MessageBody::Reaction { target, emoji, .. } => ParsedBody {
+        inner::MessageBody::Reaction {
+            target,
+            emoji,
+            action,
+            target_author,
+        } => ParsedBody {
             kind: MessageBodyKind::Reaction,
             text: String::new(),
             attachments: Vec::new(),
@@ -713,6 +805,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             forward_origin_message_id: None,
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
+            reaction_action: Some(action.into()),
+            reaction_target_author: target_author.map(|k| k.to_vec()),
+            channel_invite: None,
         },
         inner::MessageBody::Typing { is_typing } => ParsedBody {
             kind: MessageBodyKind::Typing,
@@ -729,6 +824,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             forward_origin_message_id: None,
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
+            reaction_action: None,
+            reaction_target_author: None,
+            channel_invite: None,
         },
         inner::MessageBody::ReadReceipt { up_to } => ParsedBody {
             kind: MessageBodyKind::ReadReceipt,
@@ -745,6 +843,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             forward_origin_message_id: None,
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
+            reaction_action: None,
+            reaction_target_author: None,
+            channel_invite: None,
         },
         inner::MessageBody::Unsupported { version } => ParsedBody {
             kind: MessageBodyKind::Unsupported,
@@ -761,6 +862,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             forward_origin_message_id: None,
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
+            reaction_action: None,
+            reaction_target_author: None,
+            channel_invite: None,
         },
         inner::MessageBody::ServiceEnvelope => ParsedBody {
             kind: MessageBodyKind::ServiceEnvelope,
@@ -777,6 +881,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             forward_origin_message_id: None,
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
+            reaction_action: None,
+            reaction_target_author: None,
+            channel_invite: None,
         },
     }
 }
@@ -997,11 +1104,35 @@ mod tests {
 
     #[test]
     fn reaction_envelope_round_trips_through_parse_body() {
-        let bytes = compose_reaction_envelope(9, "\u{1F44D}".to_string()).unwrap();
+        let bytes = compose_reaction_envelope(
+            9,
+            "\u{1F44D}".to_string(),
+            ReactionAction::Remove,
+            Some(vec![4; 32]),
+        )
+        .unwrap();
         let body = parse_body_envelope(bytes);
         assert_eq!(body.kind, MessageBodyKind::Reaction);
         assert_eq!(body.target, Some(9));
         assert_eq!(body.emoji, Some("\u{1F44D}".to_string()));
+        assert_eq!(body.reaction_action, Some(ReactionAction::Remove));
+        assert_eq!(body.reaction_target_author, Some(vec![4; 32]));
+        assert!(
+            compose_reaction_envelope(9, "x".into(), ReactionAction::Add, Some(vec![4; 31]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn channel_invite_rides_beside_the_text() {
+        let card = vec![0x5A; 300];
+        let bytes = compose_channel_invite_envelope("Join us".into(), card.clone()).unwrap();
+        let body = parse_body_envelope(bytes);
+        assert_eq!(body.kind, MessageBodyKind::Chat);
+        assert_eq!(body.text, "Join us");
+        assert_eq!(body.channel_invite, Some(card));
+        assert!(compose_channel_invite_envelope(String::new(), Vec::new()).is_err());
+        assert!(max_channel_invite_bytes() >= 1);
     }
 
     #[test]

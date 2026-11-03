@@ -635,6 +635,76 @@ pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<String> {
     .collect()
 }
 
+/// What a group's or channel's info holds under ADR-0087 (UX
+/// `group-and-channel-privacy.md` sections 4, 10, 11, 12.1 and 15), as
+/// kebab-case section names. `kind` is `"group"` or `"channel"`, `role`
+/// `"owner"`, `"admin"` or `"member"`. Replaces `groupInfoSections` and
+/// `channelInfoSections` once the clients move to it.
+///
+/// # Errors
+///
+/// Throws `info.badKind` / `info.badRole` for another value.
+#[wasm_bindgen(js_name = conversationInfoSections)]
+#[allow(clippy::fn_params_excessive_bools)]
+pub fn conversation_info_sections(
+    kind: &str,
+    role: &str,
+    alone: bool,
+    can_transfer: bool,
+    can_leave: bool,
+    has_handle: bool,
+) -> Result<Vec<String>, String> {
+    use lakko_ui_rules::info::{
+        conversation_info_sections as rust_sections, ConversationInfoCapabilities,
+        ConversationInfoKind, ConversationRole,
+    };
+    let kind = match kind {
+        "group" => ConversationInfoKind::Group,
+        "channel" => ConversationInfoKind::Channel,
+        _ => return Err("info.badKind: kind must be \"group\" or \"channel\"".to_string()),
+    };
+    let role = match role {
+        "owner" => ConversationRole::Owner,
+        "admin" => ConversationRole::Admin,
+        "member" => ConversationRole::Member,
+        _ => return Err("info.badRole: role must be owner, admin or member".to_string()),
+    };
+    Ok(rust_sections(ConversationInfoCapabilities {
+        kind,
+        role,
+        alone,
+        can_transfer,
+        can_leave,
+        has_handle,
+    })
+    .into_iter()
+    .map(|s| s.name().to_string())
+    .collect())
+}
+
+/// The `@name` to prefill for a new group (`kind` `"group"`) or channel
+/// (`"channel"`) named `name`; `random` is the caller's randomness (a
+/// `bigint`).
+///
+/// # Errors
+///
+/// Throws `handle.badKind` for another kind.
+#[wasm_bindgen(js_name = suggestHandle)]
+pub fn suggest_handle(
+    name: &str,
+    kind: &str,
+    private: bool,
+    random: u64,
+) -> Result<String, String> {
+    use lakko_ui_rules::handle::{suggest_handle as rust_suggest, HandleKind};
+    let kind = match kind {
+        "group" => HandleKind::Group,
+        "channel" => HandleKind::Channel,
+        _ => return Err("handle.badKind: kind must be \"group\" or \"channel\"".to_string()),
+    };
+    Ok(rust_suggest(name, kind, private, random))
+}
+
 /// What a group's info holds — section 2.2.
 #[wasm_bindgen(js_name = groupInfoSections)]
 #[must_use]
@@ -2308,5 +2378,16 @@ mod tests {
             t.sample("", None, odd);
             t.decide_floor(Vec::new(), odd);
         }
+    }
+
+    #[test]
+    fn conversation_info_and_handle_suggestion() {
+        let sections =
+            conversation_info_sections("group", "owner", true, false, false, true).unwrap();
+        assert_eq!(sections.first().map(String::as_str), Some("handle"));
+        assert!(conversation_info_sections("dm", "owner", true, false, false, true).is_err());
+        assert!(suggest_handle("Book Club", "group", false, 0)
+            .unwrap()
+            .starts_with("book_club"));
     }
 }

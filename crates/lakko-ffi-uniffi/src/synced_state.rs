@@ -1423,6 +1423,229 @@ impl SyncedState {
             .map_err(|e| FfiError::SyncedState(format!("{}: {e}", e.code())))
     }
 
+    // -----------------------------------------------------------------
+    // Quick reaction (UX reactions-and-emoji section 6)
+    // -----------------------------------------------------------------
+
+    /// Set the account's quick reaction, stamped `hlc`. `true` when the
+    /// register now holds it: send [`Self::quick_reaction_envelope`] to the
+    /// account's other devices in a DeviceGroup service envelope. Offer only
+    /// what `isSingleEmoji` accepts.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for an empty or over-long value;
+    /// [`FfiError::LockPoisoned`].
+    pub fn set_quick_reaction(&self, hlc: u64, emoji: String) -> Result<bool, FfiError> {
+        self.with(|s| s.set_quick_reaction(hlc, &emoji))?
+            .map_err(synced_err)
+    }
+
+    /// The account's quick reaction, or `None` when never chosen (then use
+    /// `defaultQuickReaction()`).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn quick_reaction(&self) -> Result<Option<String>, FfiError> {
+        self.with(|s| s.quick_reaction())
+    }
+
+    /// The envelope carrying the held quick reaction with its original stamp
+    /// (the live send and the catch-up re-send); `None` when never written.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn quick_reaction_envelope(&self) -> Result<Option<Vec<u8>>, FfiError> {
+        self.with(|s| s.quick_reaction_envelope())
+    }
+
+    /// Fold in a quick-reaction envelope (route on
+    /// [`is_quick_reaction_envelope`]). Fail closed. Returns whether
+    /// anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"`.
+    pub fn apply_quick_reaction_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_quick_reaction_envelope(&envelope))?
+            .map_err(|e| FfiError::SyncedState(format!("{}: {e}", e.code())))
+    }
+
+    // -----------------------------------------------------------------
+    // Own channel reactions and comments (ADR-0087 section 13a)
+    // -----------------------------------------------------------------
+
+    /// Record that this account reacted (`reacted`) or took the reaction
+    /// off, `emoji` under the post at `post_cursor` of `channel_id` (posted at
+    /// `post_at_ms`, which drives the 30-day retention). Returns the envelope
+    /// to send to the account's other devices, or `None` when nothing
+    /// changed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"bounds: ..."` for a fourth own reaction on
+    /// one post or a bad argument; [`FfiError::LockPoisoned`].
+    pub fn set_channel_reaction(
+        &self,
+        hlc: u64,
+        channel_id: Vec<u8>,
+        post_cursor: u64,
+        emoji: String,
+        reacted: bool,
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, FfiError> {
+        let channel =
+            fixed::<{ core::CHANNEL_REACTION_CHANNEL_ID_LEN }>(&channel_id, "channel id")?;
+        self.with(|s| {
+            s.set_channel_reaction(hlc, channel, post_cursor, &emoji, reacted, post_at_ms)
+        })?
+        .map_err(synced_err)
+    }
+
+    /// Whether this account holds `emoji` on the post.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for a bad channel id; [`FfiError::LockPoisoned`].
+    pub fn has_channel_reaction(
+        &self,
+        channel_id: Vec<u8>,
+        post_cursor: u64,
+        emoji: String,
+    ) -> Result<bool, FfiError> {
+        let channel =
+            fixed::<{ core::CHANNEL_REACTION_CHANNEL_ID_LEN }>(&channel_id, "channel id")?;
+        self.with(|s| s.has_channel_reaction(&channel, post_cursor, &emoji))
+    }
+
+    /// The emoji this account holds on the post.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for a bad channel id; [`FfiError::LockPoisoned`].
+    pub fn channel_reactions_on(
+        &self,
+        channel_id: Vec<u8>,
+        post_cursor: u64,
+    ) -> Result<Vec<String>, FfiError> {
+        let channel =
+            fixed::<{ core::CHANNEL_REACTION_CHANNEL_ID_LEN }>(&channel_id, "channel id")?;
+        self.with(|s| s.channel_reactions_on(&channel, post_cursor))
+    }
+
+    /// Every held own channel reaction as envelopes (the catch-up re-send).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn channel_reaction_envelopes(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        self.with(|s| s.channel_reaction_envelopes())
+    }
+
+    /// Fold in an own-channel-reaction envelope (route on
+    /// [`is_channel_reaction_envelope`]). Fail closed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"`.
+    pub fn apply_channel_reaction_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_channel_reaction_envelope(&envelope))?
+            .map_err(|e| FfiError::SyncedState(format!("{}: {e}", e.code())))
+    }
+
+    /// Record a comment this account wrote: its 16-byte `comment_nonce`
+    /// (what derives its write key) under the post. Returns the envelope to
+    /// send, or `None` when it was already held or the client cap is reached.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for a bad argument; [`FfiError::LockPoisoned`].
+    pub fn record_channel_comment(
+        &self,
+        hlc: u64,
+        channel_id: Vec<u8>,
+        post_cursor: u64,
+        comment_nonce: Vec<u8>,
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, FfiError> {
+        let channel =
+            fixed::<{ core::CHANNEL_REACTION_CHANNEL_ID_LEN }>(&channel_id, "channel id")?;
+        let nonce = fixed::<{ core::CHANNEL_COMMENT_NONCE_LEN }>(&comment_nonce, "comment nonce")?;
+        self.with(|s| s.record_channel_comment(hlc, channel, post_cursor, nonce, post_at_ms))
+    }
+
+    /// Record that this account deleted one of its comments. Returns the
+    /// envelope to send, or `None` when it was already deleted.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for a bad argument; [`FfiError::LockPoisoned`].
+    pub fn delete_channel_comment(
+        &self,
+        hlc: u64,
+        channel_id: Vec<u8>,
+        post_cursor: u64,
+        comment_nonce: Vec<u8>,
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, FfiError> {
+        let channel =
+            fixed::<{ core::CHANNEL_REACTION_CHANNEL_ID_LEN }>(&channel_id, "channel id")?;
+        let nonce = fixed::<{ core::CHANNEL_COMMENT_NONCE_LEN }>(&comment_nonce, "comment nonce")?;
+        self.with(|s| s.delete_channel_comment(hlc, channel, post_cursor, nonce, post_at_ms))
+    }
+
+    /// The nonces of this account's live comments under the post.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for a bad channel id; [`FfiError::LockPoisoned`].
+    pub fn channel_comments_on(
+        &self,
+        channel_id: Vec<u8>,
+        post_cursor: u64,
+    ) -> Result<Vec<Vec<u8>>, FfiError> {
+        let channel =
+            fixed::<{ core::CHANNEL_REACTION_CHANNEL_ID_LEN }>(&channel_id, "channel id")?;
+        self.with(|s| {
+            s.channel_comments_on(&channel, post_cursor)
+                .iter()
+                .map(|n| n.to_vec())
+                .collect()
+        })
+    }
+
+    /// Every held own comment record as envelopes (the catch-up re-send).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn channel_comment_envelopes(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        self.with(|s| s.channel_comment_envelopes())
+    }
+
+    /// Fold in an own-channel-comment envelope (route on
+    /// [`is_channel_comment_envelope`]). Fail closed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"`.
+    pub fn apply_channel_comment_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_channel_comment_envelope(&envelope))?
+            .map_err(|e| FfiError::SyncedState(format!("{}: {e}", e.code())))
+    }
+
+    /// Drop own channel reactions and comments whose post is past the 30-day
+    /// retention at `now_ms`. Returns how many registers were dropped.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn prune_channel_activity(&self, now_ms: u64) -> Result<u64, FfiError> {
+        self.with(|s| u64::try_from(s.prune_channel_activity(now_ms)).unwrap_or(u64::MAX))
+    }
+
     /// Write one of the account's invite links (ADR-0079 section 4), stamped
     /// `hlc`: at mint, and for any change. `true` when written; then send
     /// [`Self::link_record_envelope_for`] in a DeviceGroup service envelope.
@@ -1779,6 +2002,35 @@ pub fn lineage_group_id_max_len() -> u32 {
 /// service envelope, asked before the `lakko-contacts` dispatcher. Says
 /// nothing about validity; [`SyncedState::apply_recovery_email_envelope`]
 /// decides that.
+/// Whether `bytes` is a quick-reaction envelope (route a DeviceGroup
+/// service envelope to [`SyncedState::apply_quick_reaction_envelope`]).
+#[uniffi::export]
+#[must_use]
+pub fn is_quick_reaction_envelope(bytes: Vec<u8>) -> bool {
+    core::is_quick_reaction_envelope(&bytes)
+}
+
+/// Whether `bytes` is an own-channel-reaction envelope.
+#[uniffi::export]
+#[must_use]
+pub fn is_channel_reaction_envelope(bytes: Vec<u8>) -> bool {
+    core::is_channel_reaction_envelope(&bytes)
+}
+
+/// Whether `bytes` is an own-channel-comment envelope.
+#[uniffi::export]
+#[must_use]
+pub fn is_channel_comment_envelope(bytes: Vec<u8>) -> bool {
+    core::is_channel_comment_envelope(&bytes)
+}
+
+/// The most own reactions one post takes (3).
+#[uniffi::export]
+#[must_use]
+pub fn channel_reactions_per_post_max() -> u32 {
+    u32::try_from(core::CHANNEL_REACTIONS_PER_POST_MAX).unwrap_or(u32::MAX)
+}
+
 #[uniffi::export]
 #[must_use]
 pub fn is_recovery_email_envelope(bytes: Vec<u8>) -> bool {
@@ -2918,5 +3170,46 @@ mod tests {
         assert!(is_valid_folder_name("Work".into()));
         assert!(!is_valid_folder_name(" Work".into()));
         assert_eq!(mint_folder_id().len(), 16);
+    }
+
+    #[test]
+    fn quick_reaction_and_own_channel_activity_sync_through_envelopes() {
+        let a = SyncedState::new();
+        let b = SyncedState::new();
+        assert!(a.set_quick_reaction(1, "\u{1F44D}".into()).unwrap());
+        let env = a.quick_reaction_envelope().unwrap().unwrap();
+        assert!(is_quick_reaction_envelope(env.clone()));
+        assert!(b.apply_quick_reaction_envelope(env).unwrap());
+        assert_eq!(b.quick_reaction().unwrap(), Some("\u{1F44D}".to_string()));
+
+        let channel = vec![3_u8; 16];
+        let env = a
+            .set_channel_reaction(2, channel.clone(), 7, "\u{1F44D}".into(), true, 1_000)
+            .unwrap()
+            .unwrap();
+        assert!(is_channel_reaction_envelope(env.clone()));
+        assert!(b.apply_channel_reaction_envelope(env).unwrap());
+        assert!(b
+            .has_channel_reaction(channel.clone(), 7, "\u{1F44D}".into())
+            .unwrap());
+        assert_eq!(a.channel_reaction_envelopes().unwrap().len(), 1);
+
+        let env = a
+            .record_channel_comment(3, channel.clone(), 7, vec![9; 16], 1_000)
+            .unwrap()
+            .unwrap();
+        assert!(is_channel_comment_envelope(env.clone()));
+        assert!(b.apply_channel_comment_envelope(env).unwrap());
+        assert_eq!(
+            b.channel_comments_on(channel.clone(), 7).unwrap(),
+            vec![vec![9; 16]]
+        );
+        assert!(a
+            .delete_channel_comment(4, channel.clone(), 7, vec![9; 16], 1_000)
+            .unwrap()
+            .is_some());
+        assert!(a.channel_comments_on(channel, 7).unwrap().is_empty());
+        assert_eq!(a.prune_channel_activity(u64::MAX).unwrap(), 2);
+        assert_eq!(channel_reactions_per_post_max(), 3);
     }
 }

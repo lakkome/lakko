@@ -43,9 +43,12 @@ pub mod attachments;
 pub mod auth;
 pub mod backup;
 pub mod call_relay;
+pub mod channel_access;
+pub mod channel_feedback;
 pub mod channels;
 pub mod circle;
 pub mod contacts;
+pub mod conversation_meta;
 pub mod device_card;
 pub mod device_link;
 pub mod discover;
@@ -54,9 +57,11 @@ pub mod ds_proof;
 pub mod ds_statement;
 pub mod email_vault;
 pub mod feed;
+pub mod handles;
 pub mod journal_epoch;
 pub mod key_reset;
 pub mod key_rotation;
+pub mod knock;
 pub mod l10n;
 pub mod link_claim;
 pub mod link_founded;
@@ -68,6 +73,7 @@ pub mod passkey_vault;
 pub mod phrase_check;
 pub mod pow;
 pub mod push_wake;
+pub mod reaction_rules;
 pub mod release;
 pub mod scoped_discovery;
 pub mod sframe;
@@ -2116,6 +2122,24 @@ impl Group {
         Ok(g.approve_external_join(&identity.inner, &proposal_ref)?)
     }
 
+    /// ADR-0087 section 5 — retain a request to join carried as a bare
+    /// KeyPackage (opened from a knock row with `openKnockRow`). A kept
+    /// request is approved or rejected exactly like an external-join
+    /// proposal. Never advances the epoch or changes the roster.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError`] when the bytes are not one KeyPackage or it does not
+    /// validate; nothing is changed.
+    pub fn retain_join_request(
+        &self,
+        identity: &Identity,
+        key_package: Vec<u8>,
+    ) -> Result<FfiJoinRequest, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.retain_join_request(&identity.inner, &key_package)?.into())
+    }
+
     /// Reject a retained external-join proposal — discards it locally without
     /// adding the joiner or advancing the epoch (ADR-0027).
     /// `identity` is what the durable copy of the pending set is written
@@ -2949,6 +2973,55 @@ pub fn key_package_account_key(key_package: Vec<u8>) -> Result<Option<Vec<u8>>, 
 // composers consume.)
 // ============================================================================
 
+/// What [`Group::retain_join_request`] did with a request read off a knock
+/// row (ADR-0087 section 5).
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiJoinRequestOutcome {
+    /// Kept. An approve can act on it.
+    Retained,
+    /// The same joiner was already waiting; an approve can still act on it.
+    AlreadyPending,
+    /// The joiner's leaf is already in the group. Nothing kept.
+    AlreadyMember,
+    /// The pending set is full. Nothing kept: stop the knock cursor before
+    /// this row so it is read again once a request is decided.
+    QueueFull,
+    /// The request can never join this group. Nothing kept; drop the row.
+    NotAdmissible,
+}
+
+impl From<lakko_mls::JoinRequestOutcome> for FfiJoinRequestOutcome {
+    fn from(o: lakko_mls::JoinRequestOutcome) -> Self {
+        use lakko_mls::JoinRequestOutcome as O;
+        match o {
+            O::Retained => Self::Retained,
+            O::AlreadyPending => Self::AlreadyPending,
+            O::AlreadyMember => Self::AlreadyMember,
+            O::QueueFull => Self::QueueFull,
+            O::NotAdmissible => Self::NotAdmissible,
+        }
+    }
+}
+
+/// The answer of [`Group::retain_join_request`].
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiJoinRequest {
+    /// The joiner's leaf signature key: the handle `approveExternalJoin` /
+    /// `rejectExternalJoin` take.
+    pub joiner_signature_key: Vec<u8>,
+    /// What was done with the request.
+    pub outcome: FfiJoinRequestOutcome,
+}
+
+impl From<lakko_mls::JoinRequest> for FfiJoinRequest {
+    fn from(r: lakko_mls::JoinRequest) -> Self {
+        Self {
+            joiner_signature_key: r.joiner_signature_key,
+            outcome: r.outcome.into(),
+        }
+    }
+}
+
 /// Persistent MLS-group wrapper for one Lakko channel's
 /// publisher tier (ADR-0010 Tier 1).
 ///
@@ -3133,6 +3206,44 @@ impl PublisherGroup {
     pub fn pending_external_joins(&self) -> Result<Vec<Vec<u8>>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.inner().pending_external_joins())
+    }
+
+    /// ADR-0087 section 5 — retain a co-publisher's request to join read off
+    /// the channel's knock (`openKnockRow`); approve it with
+    /// [`Self::approve_external_join`].
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError`] when the bytes are not one KeyPackage or it does not
+    /// validate; nothing is changed.
+    pub fn retain_join_request(
+        &self,
+        identity: &Identity,
+        key_package: Vec<u8>,
+    ) -> Result<FfiJoinRequest, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.retain_join_request(&identity.inner, &key_package)?.into())
+    }
+
+    /// ADR-0087 section 7 — encrypt an application message for the
+    /// publishers at the current epoch (the admission-seed envelope a channel
+    /// owner hands its co-publishers). Read it on the other side with
+    /// `processIncomingVerifyingRoles`; publish it to the PublisherGroup
+    /// journal like any group message.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError`] when MLS refuses to encrypt.
+    pub fn create_application_message(
+        &self,
+        identity: &Identity,
+        plaintext: Vec<u8>,
+    ) -> Result<Vec<u8>, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let msg = g
+            .inner_mut()
+            .create_application_message(&identity.inner, &plaintext)?;
+        Ok(group::encode_message(&msg)?)
     }
 
     /// ADR-0028 OQ3 — approve a retained co-publisher external-join; returns

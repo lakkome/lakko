@@ -750,10 +750,35 @@ pub struct ParsedBody {
     forward_origin_message_id: Option<i64>,
     resend_origin_group_b64: Option<String>,
     resend_origin_message_id: Option<i64>,
+    reaction_action: Option<&'static str>,
+    reaction_target_author: Option<Vec<u8>>,
+    channel_invite: Option<Vec<u8>>,
 }
 
 #[wasm_bindgen]
 impl ParsedBody {
+    /// UX reactions-and-emoji section 17: `"add"` or `"remove"`, set only
+    /// on `kind == "reaction"`.
+    #[wasm_bindgen(getter, js_name = reactionAction)]
+    pub fn reaction_action(&self) -> Option<String> {
+        self.reaction_action.map(str::to_string)
+    }
+
+    /// UX reactions-and-emoji section 17: the 32-byte account key of the
+    /// reacted-to message's author as the reactor saw it, or `undefined`.
+    /// The reactor's claim, never an identity.
+    #[wasm_bindgen(getter, js_name = reactionTargetAuthor)]
+    pub fn reaction_target_author(&self) -> Option<Vec<u8>> {
+        self.reaction_target_author.clone()
+    }
+
+    /// ADR-0087 section 14: a channel invitation card beside the text, set
+    /// only on `kind == "chat"`. Open it with `openChannelInviteCard`.
+    #[wasm_bindgen(getter, js_name = channelInvite)]
+    pub fn channel_invite(&self) -> Option<Vec<u8>> {
+        self.channel_invite.clone()
+    }
+
     /// ADR-0052 — on a forwarded message, the ORIGINAL author's display name
     /// as a snapshot: a label, never a verified identity or a route to them.
     #[wasm_bindgen(getter, js_name = forwardedFrom)]
@@ -906,13 +931,54 @@ pub fn compose_delete_envelope(target: i64) -> Result<Vec<u8>, JsError> {
 ///
 /// `Error` if `emoji` is empty or exceeds `MAX_EMOJI_BYTES`, or on
 /// serialisation failure.
+///
+/// `action` is `"add"` or `"remove"` (UX reactions-and-emoji section 17);
+/// `targetAuthor` the 32-byte account key of the reacted-to message's author
+/// as this device resolved it, or `undefined`.
 #[wasm_bindgen(js_name = composeReactionEnvelope)]
-pub fn compose_reaction_envelope(target: i64, emoji: &str) -> Result<Vec<u8>, JsError> {
-    // Mechanical bridge after the core gained an explicit add / remove op
-    // and an optional target-author key (UX reactions-and-emoji section 17):
-    // this surface still sends an add without the key until the FFI work
-    // exposes both parameters.
-    inner::compose_reaction(target, emoji, inner::ReactionAction::Add, None).map_err(attachment_err)
+pub fn compose_reaction_envelope(
+    target: i64,
+    emoji: &str,
+    action: &str,
+    target_author: Option<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
+    let action = match action {
+        "add" => inner::ReactionAction::Add,
+        "remove" => inner::ReactionAction::Remove,
+        _ => return Err("reaction.badAction: action must be \"add\" or \"remove\"".to_string()),
+    };
+    let author = target_author
+        .map(|k| {
+            <[u8; inner::REACTION_TARGET_AUTHOR_LEN]>::try_from(k.as_slice()).map_err(|_| {
+                format!(
+                    "reaction.badTargetAuthor: target author must be {} bytes, got {}",
+                    inner::REACTION_TARGET_AUTHOR_LEN,
+                    k.len()
+                )
+            })
+        })
+        .transpose()?;
+    inner::compose_reaction(target, emoji, action, author.as_ref())
+        .map_err(|e| format!("reaction.invalid: {e}"))
+}
+
+/// Build a chat envelope carrying a channel invitation card (ADR-0087
+/// section 14) beside `text` (may be empty); the card comes from
+/// `composeChannelInviteCard`.
+///
+/// # Errors
+///
+/// Throws for an empty card or one longer than `maxChannelInviteBytes()`.
+#[wasm_bindgen(js_name = composeChannelInviteEnvelope)]
+pub fn compose_channel_invite_envelope(text: &str, card: &[u8]) -> Result<Vec<u8>, String> {
+    inner::compose_channel_invite(text, card).map_err(|e| format!("channelInvite.invalid: {e}"))
+}
+
+/// The longest channel invitation card the chat envelope carries.
+#[wasm_bindgen(js_name = maxChannelInviteBytes)]
+#[must_use]
+pub fn max_channel_invite_bytes() -> u32 {
+    u32::try_from(inner::MAX_CHANNEL_INVITE_BYTES).unwrap_or(u32::MAX)
 }
 
 /// Build an ephemeral TYPING envelope (ADR-0024).
@@ -949,7 +1015,7 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             reply,
             forward,
             resend,
-            ..
+            channel_invite,
         } => ParsedBody {
             kind: "chat",
             text,
@@ -967,6 +1033,9 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             forward_origin_message_id: forward.and_then(|f| f.origin.map(|o| o.message_id)),
             resend_origin_group_b64: resend.as_ref().map(|r| r.group_id_b64.clone()),
             resend_origin_message_id: resend.map(|r| r.message_id),
+            reaction_action: None,
+            reaction_target_author: None,
+            channel_invite,
         },
         inner::MessageBody::Edit { target, text } => ParsedBody {
             kind: "edit",
@@ -983,6 +1052,9 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             forward_origin_message_id: None,
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
+            reaction_action: None,
+            reaction_target_author: None,
+            channel_invite: None,
         },
         inner::MessageBody::Delete { target } => ParsedBody {
             kind: "delete",
@@ -999,8 +1071,16 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             forward_origin_message_id: None,
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
+            reaction_action: None,
+            reaction_target_author: None,
+            channel_invite: None,
         },
-        inner::MessageBody::Reaction { target, emoji, .. } => ParsedBody {
+        inner::MessageBody::Reaction {
+            target,
+            emoji,
+            action,
+            target_author,
+        } => ParsedBody {
             kind: "reaction",
             text: String::new(),
             attachments: Vec::new(),
@@ -1015,6 +1095,12 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             forward_origin_message_id: None,
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
+            reaction_action: Some(match action {
+                inner::ReactionAction::Add => "add",
+                inner::ReactionAction::Remove => "remove",
+            }),
+            reaction_target_author: target_author.map(|k| k.to_vec()),
+            channel_invite: None,
         },
         inner::MessageBody::Typing { is_typing } => ParsedBody {
             kind: "typing",
@@ -1031,6 +1117,9 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             forward_origin_message_id: None,
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
+            reaction_action: None,
+            reaction_target_author: None,
+            channel_invite: None,
         },
         inner::MessageBody::ReadReceipt { up_to } => ParsedBody {
             kind: "read-receipt",
@@ -1047,6 +1136,9 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             forward_origin_message_id: None,
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
+            reaction_action: None,
+            reaction_target_author: None,
+            channel_invite: None,
         },
         // ADR-0061 section 6: a newer wire version; the client renders its
         // own sentence. The version rides `target`, as on UniFFI.
@@ -1065,6 +1157,9 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             forward_origin_message_id: None,
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
+            reaction_action: None,
+            reaction_target_author: None,
+            channel_invite: None,
         },
         // A Lakko service envelope this build did not recognise: never render.
         inner::MessageBody::ServiceEnvelope => ParsedBody {
@@ -1082,6 +1177,9 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             forward_origin_message_id: None,
             resend_origin_group_b64: None,
             resend_origin_message_id: None,
+            reaction_action: None,
+            reaction_target_author: None,
+            channel_invite: None,
         },
     }
 }
@@ -1475,5 +1573,20 @@ mod tests {
         let body = parse_body_envelope(&compose_envelope_text("hi").unwrap());
         assert_eq!(body.forwarded_from(), None);
         assert_eq!(body.forward_origin_message_id(), None);
+    }
+
+    #[test]
+    fn reaction_op_and_channel_invite_cross_the_boundary() {
+        let bytes = compose_reaction_envelope(9, "\u{1F44D}", "remove", Some(vec![4; 32])).unwrap();
+        let body = parse_body_envelope(&bytes);
+        assert_eq!(body.kind(), "reaction");
+        assert_eq!(body.reaction_action(), Some("remove".to_string()));
+        assert_eq!(body.reaction_target_author(), Some(vec![4; 32]));
+        assert!(compose_reaction_envelope(9, "x", "toggle", None).is_err());
+        assert!(compose_reaction_envelope(9, "x", "add", Some(vec![4; 31])).is_err());
+        let card = vec![0x5A; 300];
+        let body = parse_body_envelope(&compose_channel_invite_envelope("Join", &card).unwrap());
+        assert_eq!(body.kind(), "chat");
+        assert_eq!(body.channel_invite(), Some(card));
     }
 }

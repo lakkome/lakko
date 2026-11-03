@@ -498,7 +498,7 @@ impl TryFrom<FfiIntroductionPayload> for RustIntroductionPayload {
     }
 }
 
-fn oprf64(bytes: &[u8]) -> Result<[u8; OPRF_OUTPUT_LEN], FfiError> {
+pub(crate) fn oprf64(bytes: &[u8]) -> Result<[u8; OPRF_OUTPUT_LEN], FfiError> {
     <[u8; OPRF_OUTPUT_LEN]>::try_from(bytes).map_err(|_| {
         FfiError::Introduction(format!(
             "oprfLength: an OPRF output must be {OPRF_OUTPUT_LEN} bytes, got {}",

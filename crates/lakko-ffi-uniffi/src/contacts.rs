@@ -2514,6 +2514,16 @@ pub enum FfiIncomingEnvelopeKind {
     /// (ADR-0087 section 7). `payload` is the whole envelope; the typed
     /// decode and open are the FFI step. Never render it. Appended last.
     AdmissionSeed,
+    /// A group's photo (ADR-0087 section 18.1). The decoded photo rides the
+    /// `group_photo` field; `payload` is empty. Admit it only from an owner
+    /// or admin resolved at receipt and keep it only when
+    /// `groupPhotoIsNewer`. Never render it. Appended last.
+    GroupPhoto,
+    /// A group's allowed reactions (ADR-0087 section 13a). The decoded value
+    /// rides the `group_reactions` field; `payload` is empty. Admit it only
+    /// from an owner or admin resolved at receipt and keep it only when
+    /// `groupReactionsIsNewer`. Never render it. Appended last.
+    GroupReactions,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2594,6 +2604,16 @@ pub struct FfiIncomingEnvelope {
     /// every other kind. Defaults to `None` so existing initialisers compile.
     #[uniffi(default = None)]
     pub link_founded: Option<crate::link_founded::FfiLinkFounded>,
+    /// Set only for `GroupPhoto` (ADR-0087 section 18.1): the decoded photo.
+    /// `None` for every other kind. Defaults to `None` so existing
+    /// initialisers compile.
+    #[uniffi(default = None)]
+    pub group_photo: Option<crate::conversation_meta::FfiGroupPhoto>,
+    /// Set only for `GroupReactions` (ADR-0087 section 13a): the decoded
+    /// value. `None` for every other kind. Defaults to `None` so existing
+    /// initialisers compile.
+    #[uniffi(default = None)]
+    pub group_reactions: Option<crate::conversation_meta::FfiGroupReactions>,
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts.
@@ -2714,6 +2734,14 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             payload: plaintext.clone(),
             ..FfiIncomingEnvelope::of(K::AdmissionSeed)
         },
+        IncomingEnvelope::GroupPhoto(photo) => FfiIncomingEnvelope {
+            group_photo: Some(photo.into()),
+            ..FfiIncomingEnvelope::of(K::GroupPhoto)
+        },
+        IncomingEnvelope::GroupReactions(value) => FfiIncomingEnvelope {
+            group_reactions: Some(value.into()),
+            ..FfiIncomingEnvelope::of(K::GroupReactions)
+        },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),
             ..FfiIncomingEnvelope::of(K::IntroMessage)
@@ -2744,6 +2772,8 @@ impl FfiIncomingEnvelope {
             device_card: None,
             link_claim: None,
             link_founded: None,
+            group_photo: None,
+            group_reactions: None,
         }
     }
 }
@@ -3458,6 +3488,133 @@ pub struct GroupInvitePreview {
     /// (then `group_name` is the channel's name, `inviter_name` is `None` and
     /// `member_count` 0). `None` for a group link.
     pub channel_id: Option<Vec<u8>>,
+    /// ADR-0087 section 18.4: the photo of the group or channel when the link
+    /// was made, or `None`. Its keys are readable by whoever holds the link.
+    #[uniffi(default = None)]
+    pub avatar: Option<FfiAvatar>,
+    /// ADR-0087 sections 7 and 14: set on a channel subscriber invitation
+    /// (then `channel_id` is set, `group_name` is the channel's name,
+    /// `inviter_name` is `None` and `member_count` 0). `None` otherwise.
+    #[uniffi(default = None)]
+    pub subscriber: Option<FfiSubscriberInvite>,
+}
+
+/// How a channel subscriber invitation lets its holder read the channel
+/// (ADR-0087 sections 6, 7 and 14).
+#[derive(uniffi::Enum, Clone, PartialEq, Eq)]
+pub enum FfiChannelAccess {
+    /// A private channel: prove the invitation with the invite key derived
+    /// from `invite_seed` and seal an admission ticket to
+    /// `admission_public_key` of version `admission_version`.
+    Private {
+        /// The link's 32-byte invite seed. SECRET: whoever holds it can
+        /// subscribe.
+        invite_seed: Vec<u8>,
+        /// The channel's 32-byte X25519 admission public key.
+        admission_public_key: Vec<u8>,
+        /// The version of that admission key.
+        admission_version: u16,
+    },
+    /// A public channel: the 32-byte read key that opens its public seed
+    /// envelopes.
+    Public {
+        /// The channel's read key.
+        read_key: Vec<u8>,
+    },
+}
+
+impl core::fmt::Debug for FfiChannelAccess {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Private {
+                admission_version, ..
+            } => f
+                .debug_struct("Private")
+                .field("admission_version", admission_version)
+                .finish_non_exhaustive(),
+            Self::Public { .. } => f.debug_struct("Public").finish_non_exhaustive(),
+        }
+    }
+}
+
+/// What a channel subscriber invitation carries beyond the channel id and
+/// name (preview kind 3).
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiSubscriberInvite {
+    /// Private or public, with the keys each needs.
+    pub access: FfiChannelAccess,
+    /// The channel description as the inviter's device holds it; may be
+    /// empty.
+    pub description: String,
+}
+
+/// The knock key a `/g/` capability names (ADR-0087 section 5).
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiGroupKnockKey {
+    /// The 32-byte X25519 knock public key the joiner seals its row to.
+    pub public_key: Vec<u8>,
+    /// The knock-key version.
+    pub version: u16,
+}
+
+impl From<lakko_contacts::group_invite::ChannelAccess> for FfiChannelAccess {
+    fn from(a: lakko_contacts::group_invite::ChannelAccess) -> Self {
+        use lakko_contacts::group_invite::ChannelAccess as A;
+        match a {
+            A::Private {
+                invite_seed,
+                admission_public_key,
+                admission_version,
+            } => Self::Private {
+                invite_seed: invite_seed.to_vec(),
+                admission_public_key: admission_public_key.to_vec(),
+                admission_version,
+            },
+            A::Public { read_key } => Self::Public {
+                read_key: read_key.to_vec(),
+            },
+        }
+    }
+}
+
+fn key32(what: &str, bytes: &[u8]) -> Result<[u8; 32], FfiError> {
+    <[u8; 32]>::try_from(bytes)
+        .map_err(|_| FfiError::Contacts(format!("{what} must be 32 bytes, got {}", bytes.len())))
+}
+
+impl TryFrom<FfiChannelAccess> for lakko_contacts::group_invite::ChannelAccess {
+    type Error = FfiError;
+
+    fn try_from(a: FfiChannelAccess) -> Result<Self, FfiError> {
+        Ok(match a {
+            FfiChannelAccess::Private {
+                invite_seed,
+                admission_public_key,
+                admission_version,
+            } => Self::Private {
+                invite_seed: key32("inviteSeed", &invite_seed)?,
+                admission_public_key: key32("admissionPublicKey", &admission_public_key)?,
+                admission_version,
+            },
+            FfiChannelAccess::Public { read_key } => Self::Public {
+                read_key: key32("readKey", &read_key)?,
+            },
+        })
+    }
+}
+
+fn preview_to_ffi(p: RustGroupInvitePreview) -> GroupInvitePreview {
+    GroupInvitePreview {
+        group_name: p.group_name,
+        inviter_name: p.inviter_name,
+        member_count: p.member_count,
+        channel_id: p.channel_id.map(|c| c.to_vec()),
+        avatar: p.avatar.map(Into::into),
+        subscriber: p.subscriber.map(|s| FfiSubscriberInvite {
+            access: s.access.into(),
+            description: s.description,
+        }),
+    }
 }
 
 /// Mint a `/g/` capability that carries a sealed preview (ADR-0028 v2) and
@@ -3471,7 +3628,11 @@ pub struct GroupInvitePreview {
 ///
 /// * [`FfiError::Contacts`] for a bad seed / group id, or a name the rule
 ///   refuses.
-#[uniffi::export]
+///
+/// `avatar` (ADR-0087 section 18.4) is the group's photo at mint time; its
+/// keys become readable by whoever holds the link.
+#[uniffi::export(default(avatar = None))]
+#[allow(clippy::too_many_arguments)] // one argument per preview field
 pub fn compose_group_invite_capability_with_preview(
     issuer_signing_seed: Vec<u8>,
     group_id: Vec<u8>,
@@ -3481,6 +3642,7 @@ pub fn compose_group_invite_capability_with_preview(
     member_count: u16,
     knock_public_key: Vec<u8>,
     knock_version: u16,
+    avatar: Option<FfiAvatar>,
 ) -> Result<InviteLinkMint, FfiError> {
     let knock = group_knock_key(&knock_public_key, knock_version)?;
     if issuer_signing_seed.len() != 32 {
@@ -3502,6 +3664,7 @@ pub fn compose_group_invite_capability_with_preview(
         member_count,
         channel_id: None,
         subscriber: None,
+        avatar: avatar.map(TryInto::try_into).transpose()?,
     };
     let link_key = rust_generate_link_key();
     let wire = rust_group_invite_compose_with_preview(
@@ -3532,7 +3695,8 @@ pub fn compose_group_invite_capability_with_preview(
 ///
 /// * [`FfiError::Contacts`] for a bad seed, group id or channel id, or a name
 ///   the display-name rule refuses.
-#[uniffi::export]
+#[uniffi::export(default(avatar = None))]
+#[allow(clippy::too_many_arguments)] // one argument per preview field
 pub fn compose_co_publisher_invite_capability(
     issuer_signing_seed: Vec<u8>,
     group_id: Vec<u8>,
@@ -3541,6 +3705,7 @@ pub fn compose_co_publisher_invite_capability(
     channel_name: Option<String>,
     knock_public_key: Vec<u8>,
     knock_version: u16,
+    avatar: Option<FfiAvatar>,
 ) -> Result<InviteLinkMint, FfiError> {
     let knock = group_knock_key(&knock_public_key, knock_version)?;
     let seed: [u8; 32] = issuer_signing_seed
@@ -3563,6 +3728,7 @@ pub fn compose_co_publisher_invite_capability(
         member_count: 0,
         channel_id: Some(channel),
         subscriber: None,
+        avatar: avatar.map(TryInto::try_into).transpose()?,
     };
     let link_key = rust_generate_link_key();
     let wire = rust_group_invite_compose_with_preview(
@@ -3687,13 +3853,127 @@ impl GroupInviteCapability {
         }
         let mut key = [0u8; GROUP_INVITE_LINK_SECRET_LEN];
         key.copy_from_slice(&link_key);
-        Ok(self.inner.open_preview(&key)?.map(|p| GroupInvitePreview {
-            group_name: p.group_name,
-            inviter_name: p.inviter_name,
-            member_count: p.member_count,
-            channel_id: p.channel_id.map(|c| c.to_vec()),
-        }))
+        Ok(self.inner.open_preview(&key)?.map(preview_to_ffi))
     }
+
+    /// The group's knock key the joiner seals its request to (ADR-0087
+    /// section 5); `None` on a channel subscriber invitation.
+    pub fn knock(&self) -> Option<FfiGroupKnockKey> {
+        self.inner.knock.map(|k| FfiGroupKnockKey {
+            public_key: k.public_key.to_vec(),
+            version: k.version,
+        })
+    }
+}
+
+/// ADR-0087 sections 7 and 14 — mint a channel SUBSCRIBER invitation: a
+/// `/g/` capability over the 16-byte `channel_id` (it is the capability's
+/// group id) with no knock key, whose sealed preview (kind 3) carries the
+/// channel's name (required, the channel-name rule), its description, its
+/// photo and the access keys. Returns the [`InviteLinkMint`].
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] for a bad seed, channel id or key, a name or
+/// description the channel rules refuse, or a photo out of bounds.
+#[uniffi::export(default(avatar = None))]
+pub fn compose_channel_subscriber_invite_capability(
+    issuer_signing_seed: Vec<u8>,
+    channel_id: Vec<u8>,
+    expiry_ms: u64,
+    channel_name: String,
+    description: String,
+    access: FfiChannelAccess,
+    avatar: Option<FfiAvatar>,
+) -> Result<InviteLinkMint, FfiError> {
+    let seed = key32("issuerSigningSeed", &issuer_signing_seed)?;
+    let signing = SigningKey::from_seed(&seed);
+    let channel: [u8; 16] = channel_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Contacts("channelId must be 16 bytes".to_string()))?;
+    let preview = RustGroupInvitePreview {
+        group_name: Some(channel_name),
+        inviter_name: None,
+        member_count: 0,
+        channel_id: Some(channel),
+        subscriber: Some(lakko_contacts::group_invite::SubscriberInvite {
+            access: access.try_into()?,
+            description,
+        }),
+        avatar: avatar.map(TryInto::try_into).transpose()?,
+    };
+    let link_key = rust_generate_link_key();
+    let wire = rust_group_invite_compose_with_preview(
+        &signing, &channel, expiry_ms, None, &preview, &link_key,
+    )?;
+    seal_mint(
+        &signing,
+        |secret| rust_group_invite_seal_link(secret, &wire),
+        link_key,
+    )
+}
+
+/// A channel invitation card opened (ADR-0087 section 14).
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiOpenedChannelInviteCard {
+    /// The 6-byte discovery ledger id of the link (consume it on Subscribe).
+    pub ledger_id: Vec<u8>,
+    /// The 12-byte link secret. SECRET.
+    pub link_secret: Vec<u8>,
+    /// The sealed `/g/` blob the ledger holds.
+    pub sealed: Vec<u8>,
+    /// The verified plaintext capability wire
+    /// (`GroupInviteCapability.decodeAndVerify`).
+    pub capability_wire: Vec<u8>,
+    /// The preview: always a subscriber invitation.
+    pub preview: GroupInvitePreview,
+}
+
+/// Encode a channel invitation card for the chat envelope's
+/// `channel_invite` field (`composeChannelInviteEnvelope`): the link's
+/// ledger id, its secret and the sealed blob.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] for a wrong-length id or secret, or a sealed blob
+/// no `/g/` link can have.
+#[uniffi::export]
+pub fn compose_channel_invite_card(
+    ledger_id: Vec<u8>,
+    link_secret: Vec<u8>,
+    sealed: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let card = lakko_contacts::group_invite::ChannelInviteCard {
+        ledger_id: ledger_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| FfiError::Contacts("ledgerId must be 6 bytes".to_string()))?,
+        link_secret: rust_link_secret_from_slice(&link_secret)?,
+        sealed,
+    };
+    Ok(card.encode()?)
+}
+
+/// Decode a channel invitation card, open its link under its own secret and
+/// check it carries a subscriber invitation. Does NOT check expiry.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] / [`FfiError::InviteLinkDamaged`] when the card is
+/// malformed, the link does not open, or it is not a subscriber invitation.
+#[uniffi::export]
+pub fn open_channel_invite_card(card: Vec<u8>) -> Result<FfiOpenedChannelInviteCard, FfiError> {
+    let card = lakko_contacts::group_invite::ChannelInviteCard::decode(&card)?;
+    let (_, capability_wire) = rust_group_invite_open_link(&card.link_secret, &card.sealed)?;
+    let (_, preview) = card.open()?;
+    Ok(FfiOpenedChannelInviteCard {
+        ledger_id: card.ledger_id.to_vec(),
+        link_secret: card.link_secret.to_vec(),
+        sealed: card.sealed.clone(),
+        capability_wire,
+        preview: preview_to_ffi(preview),
+    })
 }
 
 // ============================================================================
@@ -5303,6 +5583,7 @@ mod tests {
             4,
             vec![0x4B; 32],
             1,
+            None,
         )
         .expect("mint");
         let cap = GroupInviteCapability::open_link(mint.sealed.clone(), mint.link_secret.clone())
@@ -5342,6 +5623,7 @@ mod tests {
             Some("Daily notes".to_string()),
             vec![0x4B; 32],
             1,
+            None,
         )
         .expect("mint");
         let cap = GroupInviteCapability::open_link(mint.sealed.clone(), mint.link_secret.clone())
@@ -5363,8 +5645,87 @@ mod tests {
             None,
             vec![0x4B; 32],
             1,
+            None,
         )
         .is_err());
+    }
+
+    #[test]
+    fn a_subscriber_invitation_card_opens_to_its_access_and_photo() {
+        let avatar = FfiAvatar {
+            still: FfiAvatarRef {
+                blob_id: vec![1; 32],
+                key: vec![2; 32],
+                nonce: vec![3; 12],
+                size: 1000,
+                side: 320,
+            },
+            video: None,
+            video_duration_ms: None,
+        };
+        let access = FfiChannelAccess::Public {
+            read_key: vec![0x5D; 32],
+        };
+        let mint = compose_channel_subscriber_invite_capability(
+            vec![7u8; 32],
+            vec![0xC4; 16],
+            0,
+            "Daily notes".to_string(),
+            "One note a day".to_string(),
+            access.clone(),
+            Some(avatar.clone()),
+        )
+        .expect("mint");
+        let cap = GroupInviteCapability::open_link(mint.sealed.clone(), mint.link_secret.clone())
+            .expect("open");
+        assert_eq!(cap.knock(), None);
+        let card =
+            compose_channel_invite_card(vec![9; 6], mint.link_secret.clone(), mint.sealed.clone())
+                .expect("card");
+        let opened = open_channel_invite_card(card).expect("opened");
+        assert_eq!(opened.ledger_id, vec![9; 6]);
+        assert_eq!(opened.capability_wire, cap.wire());
+        assert_eq!(opened.preview.avatar, Some(avatar));
+        let sub = opened.preview.subscriber.expect("subscriber");
+        assert_eq!(sub.access, access);
+        assert_eq!(sub.description, "One note a day");
+        // A group link names its knock key and is not a card.
+        let group =
+            compose_group_invite_capability(vec![7u8; 32], vec![1; 4], 0, vec![0x4B; 32], 2)
+                .expect("plain");
+        let cap = GroupInviteCapability::open_link(group.sealed.clone(), group.link_secret.clone())
+            .expect("open");
+        assert_eq!(cap.knock().map(|k| k.version), Some(2));
+        let card =
+            compose_channel_invite_card(vec![9; 6], group.link_secret, group.sealed).expect("card");
+        assert!(open_channel_invite_card(card).is_err());
+    }
+
+    #[test]
+    fn group_photo_and_reactions_dispatch_as_their_own_kinds() {
+        let photo = crate::conversation_meta::compose_group_photo_envelope(
+            crate::conversation_meta::FfiGroupPhoto {
+                avatar: None,
+                updated_at_ms: 5,
+            },
+        )
+        .unwrap();
+        let d = dispatch_incoming_envelope(photo).unwrap();
+        assert_eq!(d.kind, FfiIncomingEnvelopeKind::GroupPhoto);
+        assert_eq!(d.group_photo.map(|p| p.updated_at_ms), Some(5));
+        let reactions = crate::conversation_meta::compose_group_reactions_envelope(
+            crate::conversation_meta::FfiGroupReactions {
+                reactions: crate::conversation_meta::FfiAllowedReactions::Off,
+                updated_at_ms: 6,
+            },
+        )
+        .unwrap();
+        let d = dispatch_incoming_envelope(reactions).unwrap();
+        assert_eq!(d.kind, FfiIncomingEnvelopeKind::GroupReactions);
+        assert_eq!(
+            d.group_reactions.map(|g| g.reactions),
+            Some(crate::conversation_meta::FfiAllowedReactions::Off)
+        );
     }
 
     #[test]

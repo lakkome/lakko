@@ -1213,6 +1213,24 @@ impl Group {
         Ok(())
     }
 
+    /// ADR-0087 section 5 — retain a request to join carried as a bare
+    /// KeyPackage (opened from a knock row with `openKnockRow`); approve or
+    /// reject it like an external-join proposal. Never advances the epoch.
+    #[wasm_bindgen(js_name = retainJoinRequest)]
+    pub fn retain_join_request(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<JoinRequest, JsValue> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        Ok(g.retain_join_request(&identity.inner, key_package)
+            .map_err(mls_err)?
+            .into())
+    }
+
     /// Signature keys of the external-join proposals awaiting a decision
     /// (ADR-0027), flat-concatenated — each is a fixed 32-byte Ed25519 key, so
     /// the caller slices into 32-byte chunks (the role-table FFI convention).
@@ -2318,6 +2336,51 @@ impl Group {
 // path the prior implementation used.)
 // ============================================================================
 
+/// What `retainJoinRequest` did with a request read off a knock row
+/// (ADR-0087 section 5).
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoinRequest {
+    joiner_signature_key: Vec<u8>,
+    outcome: &'static str,
+}
+
+impl From<lakko_mls::JoinRequest> for JoinRequest {
+    fn from(r: lakko_mls::JoinRequest) -> Self {
+        use lakko_mls::JoinRequestOutcome as O;
+        Self {
+            joiner_signature_key: r.joiner_signature_key,
+            outcome: match r.outcome {
+                O::Retained => "retained",
+                O::AlreadyPending => "already-pending",
+                O::AlreadyMember => "already-member",
+                O::QueueFull => "queue-full",
+                O::NotAdmissible => "not-admissible",
+            },
+        }
+    }
+}
+
+#[wasm_bindgen]
+impl JoinRequest {
+    /// The joiner's leaf signature key: the handle `approveExternalJoin` /
+    /// `rejectExternalJoin` take.
+    #[wasm_bindgen(getter, js_name = joinerSignatureKey)]
+    #[must_use]
+    pub fn joiner_signature_key(&self) -> Vec<u8> {
+        self.joiner_signature_key.clone()
+    }
+
+    /// `"retained"`, `"already-pending"` (an approve can act on both),
+    /// `"already-member"`, `"queue-full"` (stop the knock cursor before this
+    /// row) or `"not-admissible"` (drop the row).
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn outcome(&self) -> String {
+        self.outcome.to_string()
+    }
+}
+
 /// Persistent MLS-group wrapper for one Lakko channel's
 /// publisher tier (ADR-0010 Tier 1). Mirror of the
 /// UniFFI `PublisherGroup` (`crates/lakko-ffi-uniffi`).
@@ -2583,6 +2646,45 @@ impl PublisherGroup {
                 retained,
             } => ProcessedMessage::external_join(joiner_signature_key, retained),
         })
+    }
+
+    /// ADR-0087 section 5 — retain a request to join carried as a bare
+    /// KeyPackage (a co-publisher's, opened from the channel's knock with `openKnockRow`);
+    /// approve it with `approveExternalJoin`.
+    #[wasm_bindgen(js_name = retainJoinRequest)]
+    pub fn retain_join_request(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<JoinRequest, JsValue> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        Ok(g.retain_join_request(&identity.inner, key_package)
+            .map_err(mls_err)?
+            .into())
+    }
+
+    /// ADR-0087 section 7 — encrypt an application message for the
+    /// publishers at the current epoch (the admission-seed envelope a channel
+    /// owner hands its co-publishers); read it with
+    /// `processIncomingVerifyingRoles`.
+    #[wasm_bindgen(js_name = createApplicationMessage)]
+    pub fn create_application_message(
+        &self,
+        identity: &Identity,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, JsValue> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        let msg = g
+            .inner_mut()
+            .create_application_message(&identity.inner, plaintext)
+            .map_err(mls_err)?;
+        group::encode_message(&msg).map_err(mls_err)
     }
 
     /// ADR-0028 OQ3 — signature keys of the pending co-publisher external-join

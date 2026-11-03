@@ -53,11 +53,15 @@ use lakko_ui_rules::folder::{
     order_conversations_in_folder as rust_order_conversations_in_folder,
     FolderRule as RustFolderRule,
 };
+use lakko_ui_rules::handle::{suggest_handle as rust_suggest_handle, HandleKind as RustHandleKind};
 use lakko_ui_rules::info::{
     channel_info_sections as rust_channel_info_sections,
+    conversation_info_sections as rust_conversation_info_sections,
     group_info_sections as rust_group_info_sections, info_target as rust_info_target,
     person_info_sections as rust_person_info_sections,
     ChannelInfoCapabilities as RustChannelInfoCapabilities,
+    ConversationInfoCapabilities as RustConversationInfoCapabilities,
+    ConversationInfoKind as RustConversationInfoKind, ConversationRole as RustConversationRole,
     GroupInfoCapabilities as RustGroupInfoCapabilities, InfoSection as RustInfoSection,
     InfoTarget as RustInfoTarget, PersonInfoCapabilities as RustPersonInfoCapabilities,
 };
@@ -369,9 +373,7 @@ pub enum InfoSection {
     /// ordinal.
     TheirContactsCanFindMe,
     /// ADR-0087: a group's or channel's `@name` row. The blocks from here on
-    /// are produced only by the core's `conversation_info_sections`, which
-    /// this surface does not expose yet (the FFI step of ADR-0087); they are
-    /// mapped so the conversion stays total. Appended last.
+    /// are produced only by [`conversation_info_sections`]. Appended last.
     Handle,
     /// ADR-0087: `Who can join` / `Who can subscribe`. Owner only.
     GroupType,
@@ -1761,6 +1763,102 @@ pub fn speaking_floor_onset_ms() -> u64 {
     FLOOR_ONSET_MS
 }
 
+/// Group or channel, for [`conversation_info_sections`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ConversationInfoKind {
+    /// A group.
+    Group,
+    /// A channel.
+    Channel,
+}
+
+/// The viewer's role in a group or channel (a channel's co-publisher is its
+/// admin, "publisher" on screen).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ConversationRole {
+    /// The owner.
+    Owner,
+    /// An admin of a group, a publisher of a channel.
+    Admin,
+    /// A member of a group, a subscriber of a channel.
+    Member,
+}
+
+/// What the viewer is and may do in a group or channel (UX
+/// `group-and-channel-privacy.md` section 18): one record for both kinds.
+/// Every field is the client's decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ConversationInfoCapabilities {
+    /// Group or channel.
+    pub kind: ConversationInfoKind,
+    /// The viewer's role.
+    pub role: ConversationRole,
+    /// Nobody but the owner holds a place that blocks deleting.
+    pub alone: bool,
+    /// The owner may hand the group over now.
+    pub can_transfer: bool,
+    /// This device can leave.
+    pub can_leave: bool,
+    /// The conversation holds an `@name`.
+    pub has_handle: bool,
+}
+
+impl From<ConversationInfoCapabilities> for RustConversationInfoCapabilities {
+    fn from(c: ConversationInfoCapabilities) -> Self {
+        Self {
+            kind: match c.kind {
+                ConversationInfoKind::Group => RustConversationInfoKind::Group,
+                ConversationInfoKind::Channel => RustConversationInfoKind::Channel,
+            },
+            role: match c.role {
+                ConversationRole::Owner => RustConversationRole::Owner,
+                ConversationRole::Admin => RustConversationRole::Admin,
+                ConversationRole::Member => RustConversationRole::Member,
+            },
+            alone: c.alone,
+            can_transfer: c.can_transfer,
+            can_leave: c.can_leave,
+            has_handle: c.has_handle,
+        }
+    }
+}
+
+/// What a group's or channel's info holds under ADR-0087 (UX
+/// `group-and-channel-privacy.md` sections 4, 10, 11, 12.1 and 15). Replaces
+/// [`group_info_sections`] and [`channel_info_sections`] once the clients
+/// move to it.
+#[uniffi::export]
+#[must_use]
+pub fn conversation_info_sections(caps: ConversationInfoCapabilities) -> Vec<InfoSection> {
+    rust_conversation_info_sections(caps.into())
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
+/// Group or channel, for [`suggest_handle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum HandleKind {
+    /// A group.
+    Group,
+    /// A channel.
+    Channel,
+}
+
+/// The `@name` to prefill for a new group or channel named `name` (UX
+/// `group-and-channel-privacy.md`): from the name where it can be, with a
+/// random suffix for a private one; `random` is the caller's randomness.
+#[uniffi::export]
+#[must_use]
+pub fn suggest_handle(name: String, kind: HandleKind, private: bool, random: u64) -> String {
+    let kind = match kind {
+        HandleKind::Group => RustHandleKind::Group,
+        HandleKind::Channel => RustHandleKind::Channel,
+    };
+    rust_suggest_handle(&name, kind, private, random)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2159,5 +2257,22 @@ mod tests {
         t.sample(String::new(), Some(f64::NAN), u64::MAX);
         t.sample("a".into(), Some(f64::INFINITY), 0);
         t.decide_floor(Vec::new(), 0);
+    }
+
+    #[test]
+    fn conversation_info_and_handle_suggestion_cross_the_boundary() {
+        let caps = ConversationInfoCapabilities {
+            kind: ConversationInfoKind::Group,
+            role: ConversationRole::Owner,
+            alone: true,
+            can_transfer: false,
+            can_leave: false,
+            has_handle: true,
+        };
+        let sections = conversation_info_sections(caps);
+        assert_eq!(sections.first(), Some(&InfoSection::Handle));
+        assert!(sections.contains(&InfoSection::DeleteGroup));
+        let handle = suggest_handle("Book Club".into(), HandleKind::Group, false, 0);
+        assert!(handle.starts_with("book_club"), "{handle}");
     }
 }

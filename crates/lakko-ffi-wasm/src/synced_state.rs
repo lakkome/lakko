@@ -1438,6 +1438,168 @@ impl SyncedState {
             .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
     }
 
+    /// Set the account's quick reaction (UX reactions-and-emoji section 6),
+    /// stamped `hlc`. `true` when written: send `quickReactionEnvelope()`.
+    /// Throws `bounds: ...` for an empty or over-long value.
+    #[wasm_bindgen(js_name = setQuickReaction)]
+    pub fn set_quick_reaction(&self, hlc: u64, emoji: &str) -> Result<bool, JsError> {
+        self.with(|s| s.set_quick_reaction(hlc, emoji))?.map_err(js)
+    }
+
+    /// The account's quick reaction, or `undefined` (then use
+    /// `defaultQuickReaction()`).
+    #[wasm_bindgen(js_name = quickReaction)]
+    pub fn quick_reaction(&self) -> Result<Option<String>, JsError> {
+        self.with(|s| s.quick_reaction())
+    }
+
+    /// The envelope carrying the quick reaction with its original stamp, or
+    /// `undefined` when never written.
+    #[wasm_bindgen(js_name = quickReactionEnvelope)]
+    pub fn quick_reaction_envelope(&self) -> Result<Option<Vec<u8>>, JsError> {
+        self.with(|s| s.quick_reaction_envelope())
+    }
+
+    /// Fold in a quick-reaction envelope (route on `isQuickReactionEnvelope`).
+    /// Throws `"<code>: <reason>"`.
+    #[wasm_bindgen(js_name = applyQuickReactionEnvelope)]
+    pub fn apply_quick_reaction_envelope(&self, envelope: &[u8]) -> Result<bool, JsError> {
+        self.with(|s| s.apply_quick_reaction_envelope(envelope))?
+            .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
+    }
+
+    /// Record this account's reaction `emoji` (`reacted`) or its removal on
+    /// the post at `postCursor` of the 16-byte `channelId`, posted at
+    /// `postAtMs` (ADR-0087 section 13a). Returns the envelope to send, or
+    /// `undefined` when nothing changed. Throws `bounds: ...` for a fourth
+    /// own reaction on one post or a bad argument.
+    #[wasm_bindgen(js_name = setChannelReaction)]
+    pub fn set_channel_reaction(
+        &self,
+        hlc: u64,
+        channel_id: &[u8],
+        post_cursor: u64,
+        emoji: &str,
+        reacted: bool,
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, JsError> {
+        let channel = channel16(channel_id)?;
+        self.with(|s| {
+            s.set_channel_reaction(hlc, channel, post_cursor, emoji, reacted, post_at_ms)
+        })?
+        .map_err(js)
+    }
+
+    /// Whether this account holds `emoji` on the post.
+    #[wasm_bindgen(js_name = hasChannelReaction)]
+    pub fn has_channel_reaction(
+        &self,
+        channel_id: &[u8],
+        post_cursor: u64,
+        emoji: &str,
+    ) -> Result<bool, JsError> {
+        let channel = channel16(channel_id)?;
+        self.with(|s| s.has_channel_reaction(&channel, post_cursor, emoji))
+    }
+
+    /// The emoji this account holds on the post.
+    #[wasm_bindgen(js_name = channelReactionsOn)]
+    pub fn channel_reactions_on(
+        &self,
+        channel_id: &[u8],
+        post_cursor: u64,
+    ) -> Result<Vec<String>, JsError> {
+        let channel = channel16(channel_id)?;
+        self.with(|s| s.channel_reactions_on(&channel, post_cursor))
+    }
+
+    /// Every held own channel reaction as envelopes (the catch-up re-send).
+    #[wasm_bindgen(js_name = channelReactionEnvelopes)]
+    pub fn channel_reaction_envelopes(&self) -> Result<Vec<js_sys::Uint8Array>, JsError> {
+        self.with(|s| {
+            s.channel_reaction_envelopes()
+                .iter()
+                .map(|e| js_sys::Uint8Array::from(e.as_slice()))
+                .collect()
+        })
+    }
+
+    /// Fold in an own-channel-reaction envelope. Throws `"<code>: <reason>"`.
+    #[wasm_bindgen(js_name = applyChannelReactionEnvelope)]
+    pub fn apply_channel_reaction_envelope(&self, envelope: &[u8]) -> Result<bool, JsError> {
+        self.with(|s| s.apply_channel_reaction_envelope(envelope))?
+            .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
+    }
+
+    /// Record a comment this account wrote: its 16-byte `commentNonce` under
+    /// the post. Returns the envelope to send, or `undefined`.
+    #[wasm_bindgen(js_name = recordChannelComment)]
+    pub fn record_channel_comment(
+        &self,
+        hlc: u64,
+        channel_id: &[u8],
+        post_cursor: u64,
+        comment_nonce: &[u8],
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, JsError> {
+        let channel = channel16(channel_id)?;
+        let nonce = comment_nonce16(comment_nonce)?;
+        self.with(|s| s.record_channel_comment(hlc, channel, post_cursor, nonce, post_at_ms))
+    }
+
+    /// Record that this account deleted one of its comments. Returns the
+    /// envelope to send, or `undefined`.
+    #[wasm_bindgen(js_name = deleteChannelComment)]
+    pub fn delete_channel_comment(
+        &self,
+        hlc: u64,
+        channel_id: &[u8],
+        post_cursor: u64,
+        comment_nonce: &[u8],
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, JsError> {
+        let channel = channel16(channel_id)?;
+        let nonce = comment_nonce16(comment_nonce)?;
+        self.with(|s| s.delete_channel_comment(hlc, channel, post_cursor, nonce, post_at_ms))
+    }
+
+    /// The nonces of this account's live comments under the post,
+    /// concatenated (16 bytes each).
+    #[wasm_bindgen(js_name = channelCommentsOn)]
+    pub fn channel_comments_on(
+        &self,
+        channel_id: &[u8],
+        post_cursor: u64,
+    ) -> Result<Vec<u8>, JsError> {
+        let channel = channel16(channel_id)?;
+        self.with(|s| s.channel_comments_on(&channel, post_cursor).concat())
+    }
+
+    /// Every held own comment record as envelopes (the catch-up re-send).
+    #[wasm_bindgen(js_name = channelCommentEnvelopes)]
+    pub fn channel_comment_envelopes(&self) -> Result<Vec<js_sys::Uint8Array>, JsError> {
+        self.with(|s| {
+            s.channel_comment_envelopes()
+                .iter()
+                .map(|e| js_sys::Uint8Array::from(e.as_slice()))
+                .collect()
+        })
+    }
+
+    /// Fold in an own-channel-comment envelope. Throws `"<code>: <reason>"`.
+    #[wasm_bindgen(js_name = applyChannelCommentEnvelope)]
+    pub fn apply_channel_comment_envelope(&self, envelope: &[u8]) -> Result<bool, JsError> {
+        self.with(|s| s.apply_channel_comment_envelope(envelope))?
+            .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
+    }
+
+    /// Drop own channel reactions and comments past the 30-day retention at
+    /// `nowMs`; returns how many registers were dropped.
+    #[wasm_bindgen(js_name = pruneChannelActivity)]
+    pub fn prune_channel_activity(&self, now_ms: u64) -> Result<u32, JsError> {
+        self.with(|s| u32::try_from(s.prune_channel_activity(now_ms)).unwrap_or(u32::MAX))
+    }
+
     /// Record that the person has seen the "a device was added to your
     /// account" warning (identity-recovery 17.5) for each device whose
     /// 32-byte signature key is in `device_keys` (flat-concatenated),
@@ -1855,6 +2017,44 @@ pub fn is_device_ack_envelope(bytes: &[u8]) -> bool {
 #[must_use]
 pub fn is_own_username_envelope(bytes: &[u8]) -> bool {
     core::is_own_username_envelope(bytes)
+}
+
+fn channel16(bytes: &[u8]) -> Result<[u8; core::CHANNEL_REACTION_CHANNEL_ID_LEN], JsError> {
+    <[u8; core::CHANNEL_REACTION_CHANNEL_ID_LEN]>::try_from(bytes)
+        .map_err(|_| js("bounds: channel id must be 16 bytes"))
+}
+
+fn comment_nonce16(bytes: &[u8]) -> Result<[u8; core::CHANNEL_COMMENT_NONCE_LEN], JsError> {
+    <[u8; core::CHANNEL_COMMENT_NONCE_LEN]>::try_from(bytes)
+        .map_err(|_| js("bounds: comment nonce must be 16 bytes"))
+}
+
+/// Whether `bytes` is a quick-reaction envelope.
+#[wasm_bindgen(js_name = isQuickReactionEnvelope)]
+#[must_use]
+pub fn is_quick_reaction_envelope(bytes: &[u8]) -> bool {
+    core::is_quick_reaction_envelope(bytes)
+}
+
+/// Whether `bytes` is an own-channel-reaction envelope.
+#[wasm_bindgen(js_name = isChannelReactionEnvelope)]
+#[must_use]
+pub fn is_channel_reaction_envelope(bytes: &[u8]) -> bool {
+    core::is_channel_reaction_envelope(bytes)
+}
+
+/// Whether `bytes` is an own-channel-comment envelope.
+#[wasm_bindgen(js_name = isChannelCommentEnvelope)]
+#[must_use]
+pub fn is_channel_comment_envelope(bytes: &[u8]) -> bool {
+    core::is_channel_comment_envelope(bytes)
+}
+
+/// The most own reactions one post takes (3).
+#[wasm_bindgen(js_name = channelReactionsPerPostMax)]
+#[must_use]
+pub fn channel_reactions_per_post_max() -> u32 {
+    u32::try_from(core::CHANNEL_REACTIONS_PER_POST_MAX).unwrap_or(u32::MAX)
 }
 
 /// `true` when `bytes` open with the link-record envelope domain
@@ -2488,5 +2688,43 @@ mod tests {
             saved_max_per_change_set() as usize,
             core::SAVED_MAX_PER_CHANGE_SET
         );
+    }
+
+    #[test]
+    fn quick_reaction_and_own_channel_activity() {
+        let a = SyncedState::new();
+        let b = SyncedState::new();
+        assert!(a.set_quick_reaction(1, "\u{1F44D}").ok().unwrap());
+        let env = a.quick_reaction_envelope().ok().flatten().unwrap();
+        assert!(is_quick_reaction_envelope(&env));
+        assert!(b.apply_quick_reaction_envelope(&env).ok().unwrap());
+        assert_eq!(
+            b.quick_reaction().ok().flatten(),
+            Some("\u{1F44D}".to_string())
+        );
+        let env = a
+            .set_channel_reaction(2, &[3; 16], 7, "\u{1F44D}", true, 1_000)
+            .ok()
+            .flatten()
+            .unwrap();
+        assert!(is_channel_reaction_envelope(&env));
+        assert!(b.apply_channel_reaction_envelope(&env).ok().unwrap());
+        assert!(b
+            .has_channel_reaction(&[3; 16], 7, "\u{1F44D}")
+            .ok()
+            .unwrap());
+        let env = a
+            .record_channel_comment(3, &[3; 16], 7, &[9; 16], 1_000)
+            .ok()
+            .flatten()
+            .unwrap();
+        assert!(is_channel_comment_envelope(&env));
+        assert!(b.apply_channel_comment_envelope(&env).ok().unwrap());
+        assert_eq!(
+            b.channel_comments_on(&[3; 16], 7).ok().unwrap(),
+            vec![9; 16]
+        );
+        assert_eq!(a.prune_channel_activity(u64::MAX).ok().unwrap(), 2);
+        assert_eq!(channel_reactions_per_post_max(), 3);
     }
 }

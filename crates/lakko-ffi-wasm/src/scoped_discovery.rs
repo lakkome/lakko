@@ -551,6 +551,10 @@ pub struct IntroductionPayload {
 }
 
 impl IntroductionPayload {
+    pub(crate) const fn from_rust(inner: RustIntroductionPayload) -> Self {
+        Self { inner }
+    }
+
     fn new_inner(
         identity_pk: &[u8],
         account_id: &[u8],

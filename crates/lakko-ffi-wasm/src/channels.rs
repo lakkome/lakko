@@ -603,11 +603,12 @@ pub struct WasmChannelPostContent {
     text: Option<Vec<u8>>,
     meta: Option<ChannelMeta>,
     error: Option<String>,
+    ban_list: Option<crate::channel_feedback::WasmBanList>,
 }
 
 #[wasm_bindgen(js_class = "ChannelPostContent")]
 impl WasmChannelPostContent {
-    /// `"text"` | `"meta"` | `"malformed"`.
+    /// `"text"` | `"meta"` | `"malformed"` | `"ban-list"`.
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn kind(&self) -> String {
@@ -672,6 +673,48 @@ impl WasmChannelPostContent {
     pub fn error(&self) -> Option<String> {
         self.error.clone()
     }
+
+    /// ADR-0087 section 3: the channel's `@name` when `kind === "meta"` and
+    /// the record carries one.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn handle(&self) -> Option<crate::conversation_meta::WasmConversationHandle> {
+        self.meta
+            .as_ref()
+            .and_then(|m| m.handle.clone())
+            .map(Into::into)
+    }
+
+    /// ADR-0087 section 18.2: the channel's photo when `kind === "meta"`.
+    /// Its keys are SECRET to the subscribers.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn avatar(&self) -> Option<crate::contacts::ProfileAvatar> {
+        self.meta
+            .as_ref()
+            .and_then(|m| m.avatar.clone())
+            .map(|inner| crate::contacts::ProfileAvatar { inner })
+    }
+
+    /// ADR-0087 section 13a: which reactions the channel's posts take, when
+    /// `kind === "meta"`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn reactions(&self) -> Option<crate::conversation_meta::WasmAllowedReactions> {
+        self.meta
+            .as_ref()
+            .map(|m| crate::conversation_meta::WasmAllowedReactions {
+                inner: m.reactions.clone(),
+            })
+    }
+
+    /// ADR-0087 section 13a: the decoded ban list when
+    /// `kind === "ban-list"`. Never shown as a post.
+    #[wasm_bindgen(getter, js_name = "banList")]
+    #[must_use]
+    pub fn ban_list(&self) -> Option<crate::channel_feedback::WasmBanList> {
+        self.ban_list.clone()
+    }
 }
 
 /// Compose a channel metadata record — the PLAINTEXT to hand to
@@ -687,8 +730,11 @@ impl WasmChannelPostContent {
 /// `language.badLength` / `language.notLowercaseAscii`).
 ///
 /// `topic` (default 0, "Other"), `language` (default empty, "not set") and
-/// `listed` (default false) are the ADR-0059 §2 fields of schema version 2.
+/// `listed` (default false) are the ADR-0059 §2 fields of schema version 2;
+/// since meta v3 `listed` is the channel's PUBLIC flag (ADR-0087). `handle`,
+/// `avatar` and `reactions` (default: all) are the v3 fields.
 #[wasm_bindgen(js_name = "composeChannelMeta")]
+#[allow(clippy::too_many_arguments)] // one argument per record field
 pub fn compose_channel_meta(
     name: &str,
     description: &str,
@@ -696,6 +742,9 @@ pub fn compose_channel_meta(
     topic: Option<u8>,
     language: Option<String>,
     listed: Option<bool>,
+    handle: Option<crate::conversation_meta::WasmConversationHandle>,
+    avatar: Option<crate::contacts::ProfileAvatar>,
+    reactions: Option<crate::conversation_meta::WasmAllowedReactions>,
 ) -> Result<Vec<u8>, JsValue> {
     let meta = ChannelMeta {
         name: name.to_string(),
@@ -704,11 +753,9 @@ pub fn compose_channel_meta(
         topic: topic.unwrap_or(0),
         language: language.unwrap_or_default(),
         public: listed.unwrap_or(false),
-        // ADR-0087: the handle envelope has no FFI argument yet.
-        handle: None,
-        // ADR-0087 section 13a: the allowed-reactions field has no FFI
-        // argument yet; a record composed here allows every reaction.
-        reactions: lakko_channels::AllowedReactions::All,
+        handle: handle.map(|h| h.inner),
+        avatar: avatar.map(|a| a.inner),
+        reactions: reactions.map(|r| r.inner).unwrap_or_default(),
     };
     inner_compose_channel_meta(&meta).map_err(channel_meta_error_value)
 }
@@ -719,48 +766,33 @@ pub fn compose_channel_meta(
 #[wasm_bindgen(js_name = "classifyChannelPostPlaintext")]
 #[must_use]
 pub fn classify_channel_post_plaintext(plaintext: &[u8]) -> WasmChannelPostContent {
+    let content = |kind, text, meta, error, ban_list| WasmChannelPostContent {
+        kind,
+        text,
+        meta,
+        error,
+        ban_list,
+    };
     match classify_post_plaintext(plaintext) {
         // ADR-0087: a post is the chat envelope; the caller parses `text`
-        // with `parseBodyEnvelope` until the FFI carries the body.
-        PostContent::Message { plaintext, .. } => WasmChannelPostContent {
-            kind: "text",
-            text: Some(plaintext.to_vec()),
-            meta: None,
-            error: None,
+        // with `parseBodyEnvelope`.
+        PostContent::Message { plaintext, .. } => {
+            content("text", Some(plaintext.to_vec()), None, None, None)
         },
-        PostContent::NotAPost => WasmChannelPostContent {
-            kind: "malformed",
-            text: None,
-            meta: None,
-            error: Some("notAPost".to_string()),
+        PostContent::NotAPost => {
+            content("malformed", None, None, Some("notAPost".to_string()), None)
         },
-        PostContent::Meta(meta) => WasmChannelPostContent {
-            kind: "meta",
-            text: None,
-            meta: Some(meta),
-            error: None,
-        },
-        PostContent::Malformed(e) => WasmChannelPostContent {
-            kind: "malformed",
-            text: None,
-            meta: None,
-            error: Some(e.code()),
-        },
-        // ADR-0087 section 13a: a ban list is never shown as a post. The FFI
-        // has no ban-list surface yet, so it reaches a client as a dropped
-        // record with its own code.
-        PostContent::BanList(_) => WasmChannelPostContent {
-            kind: "malformed",
-            text: None,
-            meta: None,
-            error: Some("banList".to_string()),
-        },
-        PostContent::MalformedBanList(e) => WasmChannelPostContent {
-            kind: "malformed",
-            text: None,
-            meta: None,
-            error: Some(format!("banList.{}", e.code())),
-        },
+        PostContent::Meta(meta) => content("meta", None, Some(*meta), None, None),
+        PostContent::Malformed(e) => content("malformed", None, None, Some(e.code()), None),
+        // ADR-0087 section 13a: a ban list is never shown as a post.
+        PostContent::BanList(list) => content("ban-list", None, None, None, Some(list.into())),
+        PostContent::MalformedBanList(e) => content(
+            "malformed",
+            None,
+            None,
+            Some(format!("banList.{}", e.code())),
+            None,
+        ),
     }
 }
 
@@ -1378,6 +1410,9 @@ mod tests {
             Some(3),
             Some("en".to_string()),
             Some(true),
+            None,
+            None,
+            None,
         )
         .unwrap();
         let content = classify_channel_post_plaintext(&wire);
@@ -1433,7 +1468,8 @@ mod tests {
         let signer = WasmChannelSigningKey::generate_js();
         let seed = new_channel_seed_for_test();
         let channel_id = [0x51u8; CHANNEL_ID_LEN];
-        let record = compose_channel_meta("Lakko News", "", 42, None, None, None).unwrap();
+        let record =
+            compose_channel_meta("Lakko News", "", 42, None, None, None, None, None, None).unwrap();
         let wire = compose_channel_post(&seed, &channel_id, 1, &signer, 0, &record).unwrap();
         let post = decode_channel_post(&wire).unwrap();
         let plaintext = verify_and_decrypt_channel_post(&seed, &channel_id, &post).unwrap();
