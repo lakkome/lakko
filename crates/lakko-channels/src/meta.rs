@@ -72,6 +72,9 @@
 //!     || topic || language_len || language || public || handle_len || handle
 //!        └ 1 B ┘ └─── 1 B ────┘ └ 0/2/3 B ┘ └ 1 B ─┘ └── 2 B ───┘ └ 0 or a conversation-handle envelope ┘
 //!
+//!     || reactions_mode || [count || count x (emoji_len || emoji)]
+//!        └──── 1 B ────┘   └ 1 B ┘           └─ 1 B ──┘ └ 1..=64 B ┘
+//!
 //!                     "lakko/channel-meta/v1\x00"
 //! ```
 //!
@@ -101,6 +104,15 @@
 //!   signature as for a group (one OPRF evaluation over the name, then
 //!   `ConversationHandle::verify_signature(channel_id, handle_key)`); this
 //!   module only frames it.
+//!
+//! * `reactions_mode` — which reactions the channel's posts take
+//!   ([`AllowedReactions`], maintainer 2026-11-02, like a Telegram channel's
+//!   setting): `0x00` all, `0x01` none, `0x02` the list that follows, 1 to
+//!   [`ALLOWED_REACTIONS_MAX`] (100, chosen) distinct emoji each passing the
+//!   chat reaction rule (`lakko_attachments::is_reaction_emoji`). Any other
+//!   byte refuses the record. **The channel service cannot enforce it**: it
+//!   sees labels only, never an emoji. Readers drop the counts of reactions
+//!   the record does not allow and the composer does not offer them.
 //!
 //! Total length is between [`CHANNEL_META_MIN_LEN`] and
 //! [`CHANNEL_META_MAX_LEN`].
@@ -139,7 +151,7 @@ use core::result::Result as CoreResult;
 
 use thiserror::Error;
 
-use lakko_attachments::{parse_body, MessageBody};
+use lakko_attachments::{is_reaction_emoji, parse_body, MessageBody, MAX_EMOJI_BYTES};
 use lakko_contacts::conversation_handle::{
     compose_conversation_handle, decode_conversation_handle, ConversationHandle,
     ConversationHandleError, CONVERSATION_HANDLE_ENVELOPE_MAX_LEN,
@@ -168,8 +180,106 @@ pub const CHANNEL_META_VERSION_V3: u8 = 0x03;
 
 /// Bytes after the separator that every record carries: version,
 /// `updated_at_ms`, `name_len`, `description_len`, `topic`,
-/// `language_len`, `public`, `handle_len`.
-const FIXED_PAYLOAD_LEN: usize = 1 + 8 + 1 + 2 + 1 + 1 + 1 + 2;
+/// `language_len`, `public`, `handle_len`, `reactions_mode`.
+const FIXED_PAYLOAD_LEN: usize = 1 + 8 + 1 + 2 + 1 + 1 + 1 + 2 + 1;
+
+/// The most emoji an allowed-reactions list holds. Chosen.
+pub const ALLOWED_REACTIONS_MAX: usize = 100;
+
+const REACTIONS_ALL: u8 = 0x00;
+const REACTIONS_NONE: u8 = 0x01;
+const REACTIONS_LIST: u8 = 0x02;
+
+/// Which reactions a channel's posts take, as the owner set them.
+///
+/// Advisory by construction: the service sees labels only and cannot refuse
+/// an emoji. Readers drop what is not allowed and the composer does not
+/// offer it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AllowedReactions {
+    /// Any reaction a chat message takes.
+    #[default]
+    All,
+    /// No reactions.
+    Off,
+    /// Only these, 1 to [`ALLOWED_REACTIONS_MAX`] distinct emoji, in the
+    /// owner's order (the order a composer offers them in).
+    Only(Vec<String>),
+}
+
+impl AllowedReactions {
+    /// Whether a post of the channel takes `emoji`.
+    #[must_use]
+    pub fn allows(&self, emoji: &str) -> bool {
+        match self {
+            Self::All => is_reaction_emoji(emoji),
+            Self::Off => false,
+            Self::Only(list) => list.iter().any(|e| e == emoji),
+        }
+    }
+
+    /// Check the list bounds.
+    ///
+    /// # Errors
+    ///
+    /// [`ChannelMetaError::Reactions`] for an empty or over-long list, an
+    /// emoji failing the chat rule, or a repeat.
+    pub fn validate(&self) -> CoreResult<(), ChannelMetaError> {
+        let Self::Only(list) = self else {
+            return Ok(());
+        };
+        if list.is_empty() || list.len() > ALLOWED_REACTIONS_MAX {
+            return Err(ChannelMetaError::Reactions);
+        }
+        for (i, e) in list.iter().enumerate() {
+            if !is_reaction_emoji(e) || list[..i].contains(e) {
+                return Err(ChannelMetaError::Reactions);
+            }
+        }
+        Ok(())
+    }
+
+    fn encode_into(&self, out: &mut Vec<u8>) -> CoreResult<(), ChannelMetaError> {
+        match self {
+            Self::All => out.push(REACTIONS_ALL),
+            Self::Off => out.push(REACTIONS_NONE),
+            Self::Only(list) => {
+                out.push(REACTIONS_LIST);
+                out.push(u8::try_from(list.len()).map_err(|_| ChannelMetaError::Reactions)?);
+                for e in list {
+                    out.push(u8::try_from(e.len()).map_err(|_| ChannelMetaError::Reactions)?);
+                    out.extend_from_slice(e.as_bytes());
+                }
+            },
+        }
+        Ok(())
+    }
+
+    fn take(cur: &mut &[u8]) -> CoreResult<Self, ChannelMetaError> {
+        match take_u8(cur)? {
+            REACTIONS_ALL => Ok(Self::All),
+            REACTIONS_NONE => Ok(Self::Off),
+            REACTIONS_LIST => {
+                let count = usize::from(take_u8(cur)?);
+                if count == 0 || count > ALLOWED_REACTIONS_MAX {
+                    return Err(ChannelMetaError::Reactions);
+                }
+                let mut list = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let len = usize::from(take_u8(cur)?);
+                    if len == 0 || len > MAX_EMOJI_BYTES {
+                        return Err(ChannelMetaError::Reactions);
+                    }
+                    let e = core::str::from_utf8(take(cur, len)?)
+                        .map_err(|_| ChannelMetaError::Reactions)?;
+                    list.push(e.to_string());
+                }
+                Ok(Self::Only(list))
+            },
+            other => Err(ChannelMetaError::ReactionsMode(other)),
+        }
+    }
+}
 
 /// Shortest well-formed record: a one-byte name, no description, no
 /// language.
@@ -182,7 +292,9 @@ pub const CHANNEL_META_MAX_LEN: usize = CHANNEL_META_DOMAIN_V1.len()
     + NAME_MAX_BYTES
     + DESCRIPTION_MAX_BYTES
     + LANGUAGE_MAX_LEN
-    + CONVERSATION_HANDLE_ENVELOPE_MAX_LEN;
+    + CONVERSATION_HANDLE_ENVELOPE_MAX_LEN
+    + 1
+    + ALLOWED_REACTIONS_MAX * (1 + MAX_EMOJI_BYTES);
 
 /// A channel's name and description, as the publisher stated them.
 ///
@@ -212,6 +324,9 @@ pub struct ChannelMeta {
     /// channel id; `None` while it has none. Its flag must equal
     /// [`Self::public`].
     pub handle: Option<ConversationHandle>,
+    /// Which reactions the channel's posts take (advisory; see
+    /// [`AllowedReactions`]).
+    pub reactions: AllowedReactions,
 }
 
 impl ChannelMeta {
@@ -240,7 +355,7 @@ impl ChannelMeta {
                 return Err(ChannelMetaError::HandleFlagMismatch);
             }
         }
-        Ok(())
+        self.reactions.validate()
     }
 }
 
@@ -283,6 +398,14 @@ pub enum ChannelMetaError {
     /// The description violates a bound.
     #[error("invalid channel description: {0}")]
     Description(ChannelMetaFieldError),
+    /// The `reactions_mode` byte is none of all, none and list.
+    #[error("channel-meta record carries an unknown reactions mode {0:#04x}")]
+    ReactionsMode(u8),
+    /// The allowed-reactions list is empty, longer than
+    /// [`ALLOWED_REACTIONS_MAX`], repeats an emoji, or holds one failing the
+    /// chat reaction rule.
+    #[error("invalid allowed-reactions list")]
+    Reactions,
 }
 
 impl ChannelMetaError {
@@ -303,6 +426,8 @@ impl ChannelMetaError {
             Self::Language(e) => format!("language.{}", e.code()),
             Self::Name(e) => format!("name.{}", e.code()),
             Self::Description(e) => format!("description.{}", e.code()),
+            Self::ReactionsMode(_) => "reactionsMode".to_string(),
+            Self::Reactions => "reactions".to_string(),
         }
     }
 }
@@ -403,6 +528,7 @@ pub fn compose_channel_meta(meta: &ChannelMeta) -> CoreResult<Vec<u8>, ChannelMe
         .map_err(|_| ChannelMetaError::Handle(ConversationHandleError::BadLength))?;
     out.extend_from_slice(&handle_len.to_be_bytes());
     out.extend_from_slice(&handle);
+    meta.reactions.encode_into(&mut out)?;
     Ok(out)
 }
 
@@ -501,6 +627,7 @@ fn decode_payload(payload: &[u8]) -> CoreResult<ChannelMeta, ChannelMetaError> {
         return Err(ChannelMetaError::Handle(ConversationHandleError::BadLength));
     }
     let handle_bytes = take(&mut cur, handle_len)?;
+    let reactions = AllowedReactions::take(&mut cur)?;
     if !cur.is_empty() {
         return Err(ChannelMetaError::TrailingBytes { count: cur.len() });
     }
@@ -527,6 +654,7 @@ fn decode_payload(payload: &[u8]) -> CoreResult<ChannelMeta, ChannelMetaError> {
         language: language.to_string(),
         public,
         handle,
+        reactions,
     };
     meta.validate()?;
     Ok(meta)
@@ -564,6 +692,7 @@ mod tests {
             language: String::new(),
             public: false,
             handle: None,
+            reactions: AllowedReactions::All,
         }
     }
 
@@ -577,8 +706,8 @@ mod tests {
         out.extend_from_slice(name);
         out.extend_from_slice(&u16::try_from(description.len()).unwrap().to_be_bytes());
         out.extend_from_slice(description);
-        // topic, empty language, private, no handle
-        out.extend_from_slice(&[0, 0, 0, 0, 0]);
+        // topic, empty language, private, no handle, all reactions
+        out.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
         out
     }
 
@@ -619,7 +748,7 @@ mod tests {
         assert_eq!(&wire[sep + 10..sep + 12], b"Al");
         assert_eq!(&wire[sep + 12..sep + 14], &[0, 3]);
         assert_eq!(&wire[sep + 14..sep + 17], b"abc");
-        assert_eq!(&wire[sep + 17..], &[0, 0, 0, 0, 0]);
+        assert_eq!(&wire[sep + 17..], &[0, 0, 0, 0, 0, 0]);
 
         let v3 = ChannelMeta {
             topic: 9,
@@ -628,7 +757,7 @@ mod tests {
             ..meta("Al", "", 0)
         };
         let wire = compose_channel_meta(&v3).unwrap();
-        assert_eq!(&wire[sep + 14..], &[9, 3, b'f', b'i', b'l', 1, 0, 0]);
+        assert_eq!(&wire[sep + 14..], &[9, 3, b'f', b'i', b'l', 1, 0, 0, 0]);
         assert_eq!(decode_channel_meta(&wire).unwrap(), v3);
     }
 
@@ -648,7 +777,8 @@ mod tests {
     #[test]
     fn public_flag_and_language_are_bounded() {
         let mut wire = compose_channel_meta(&meta("Lakko", "", 1)).unwrap();
-        let flag_at = wire.len() - 3;
+        // public, handle_len(2), reactions_mode follow.
+        let flag_at = wire.len() - 4;
         wire[flag_at] = 2;
         assert_eq!(
             decode_channel_meta(&wire),
@@ -676,10 +806,10 @@ mod tests {
 
     #[test]
     fn length_bounds_are_the_documented_construction() {
-        assert_eq!(CHANNEL_META_MIN_LEN, 22 + 17 + 1);
+        assert_eq!(CHANNEL_META_MIN_LEN, 22 + 18 + 1);
         assert_eq!(
             CHANNEL_META_MAX_LEN,
-            22 + 17 + 255 + 1024 + 3 + CONVERSATION_HANDLE_ENVELOPE_MAX_LEN
+            22 + 18 + 255 + 1024 + 3 + CONVERSATION_HANDLE_ENVELOPE_MAX_LEN + 1 + 100 * 65
         );
         let min = compose_channel_meta(&meta("a", "", 0)).unwrap();
         assert_eq!(min.len(), CHANNEL_META_MIN_LEN);
@@ -695,6 +825,11 @@ mod tests {
             language: "eng".to_string(),
             public: true,
             handle: Some(handle(true, &"n".repeat(32))),
+            reactions: AllowedReactions::Only(
+                (0u8..100)
+                    .map(|i| format!("{:02}{}", i, "x".repeat(62)))
+                    .collect(),
+            ),
             ..meta(&name, &description, 0)
         })
         .unwrap();
@@ -1034,9 +1169,11 @@ mod tests {
         // A handle length outside the envelope bounds is refused before the
         // envelope is read.
         let mut short = compose_channel_meta(&meta("Lakko", "", 1)).unwrap();
+        short.pop(); // the reactions mode
         let len_at = short.len() - 2;
         short[len_at..].copy_from_slice(&5u16.to_be_bytes());
         short.extend_from_slice(&[0; 5]);
+        short.push(0);
         assert!(matches!(
             decode_channel_meta(&short),
             Err(ChannelMetaError::Handle(_))
@@ -1145,5 +1282,75 @@ mod tests {
             classify_post_plaintext(crate::ban_list::BAN_LIST_DOMAIN_V1),
             PostContent::MalformedBanList(BanListError::Truncated)
         );
+    }
+
+    #[test]
+    fn allowed_reactions_ride_the_record_and_are_bounded() {
+        let thumbs = "\u{1F44D}".to_string();
+        let heart = "\u{2764}\u{FE0F}".to_string();
+        for reactions in [
+            AllowedReactions::All,
+            AllowedReactions::Off,
+            AllowedReactions::Only(vec![heart.clone(), thumbs.clone()]),
+        ] {
+            let m = ChannelMeta {
+                reactions: reactions.clone(),
+                ..meta("Lakko", "", 1)
+            };
+            let wire = compose_channel_meta(&m).unwrap();
+            assert_eq!(decode_channel_meta(&wire).unwrap().reactions, reactions);
+        }
+        let only = AllowedReactions::Only(vec![heart.clone(), thumbs.clone()]);
+        assert!(only.allows(&thumbs));
+        assert!(!only.allows("\u{1F525}"));
+        assert!(AllowedReactions::All.allows("\u{1F525}"));
+        assert!(!AllowedReactions::All.allows(""));
+        assert!(!AllowedReactions::Off.allows(&thumbs));
+
+        let bad = |r: AllowedReactions| {
+            compose_channel_meta(&ChannelMeta {
+                reactions: r,
+                ..meta("Lakko", "", 1)
+            })
+        };
+        assert_eq!(
+            bad(AllowedReactions::Only(vec![])),
+            Err(ChannelMetaError::Reactions)
+        );
+        assert_eq!(
+            bad(AllowedReactions::Only(vec![thumbs.clone(), thumbs.clone()])),
+            Err(ChannelMetaError::Reactions)
+        );
+        assert_eq!(
+            bad(AllowedReactions::Only(vec![String::new()])),
+            Err(ChannelMetaError::Reactions)
+        );
+        assert_eq!(
+            bad(AllowedReactions::Only(vec![thumbs.clone(); 101])),
+            Err(ChannelMetaError::Reactions)
+        );
+
+        let mut wire = compose_channel_meta(&meta("Lakko", "", 1)).unwrap();
+        let last = wire.len() - 1;
+        wire[last] = 3;
+        assert_eq!(
+            decode_channel_meta(&wire),
+            Err(ChannelMetaError::ReactionsMode(3))
+        );
+        // A list count past the bound is refused before anything is read.
+        wire[last] = 2;
+        wire.push(101);
+        assert_eq!(decode_channel_meta(&wire), Err(ChannelMetaError::Reactions));
+        // A duplicate on the wire is refused by the shared validation.
+        let dup = {
+            let mut w = compose_channel_meta(&meta("Lakko", "", 1)).unwrap();
+            w.pop();
+            w.extend_from_slice(&[2, 2, 4]);
+            w.extend_from_slice(thumbs.as_bytes());
+            w.push(4);
+            w.extend_from_slice(thumbs.as_bytes());
+            w
+        };
+        assert_eq!(decode_channel_meta(&dup), Err(ChannelMetaError::Reactions));
     }
 }

@@ -31,7 +31,9 @@
 //! state and after applying envelopes; an entry for a gone post that a late
 //! envelope brings back is harmless (nothing shows it) and goes at the next
 //! prune. [`CHANNEL_REACTIONS_MAX_CLIENT`] is a client-side limit on the
-//! writer, not a decode bound, as the other registers' limits are.
+//! writer, not a decode bound, as the other registers' limits are, and so is
+//! [`CHANNEL_REACTIONS_PER_POST_MAX`]: one person gives a post at most three
+//! reactions, which the service cannot check.
 //!
 //! ## Wire
 //!
@@ -85,6 +87,14 @@ pub const CHANNEL_REACTION_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// day in many channels fits well below it. The fold never refuses an
 /// entry for it.
 pub const CHANNEL_REACTIONS_MAX_CLIENT: usize = 20_000;
+
+/// The most reactions one person gives one post (maintainer, 2026-11-02,
+/// the same rule as in a chat: `lakko_ui_rules::reaction::MAX_REACTIONS_PER_MESSAGE`).
+/// Nothing at the service can enforce it (every reaction has its own write
+/// key), so it is the writer's rule: [`super::SyncedState::set_channel_reaction`]
+/// refuses a fourth. The fold never refuses: two devices reacting at once can
+/// leave a post with four, which the next removal brings back under.
+pub const CHANNEL_REACTIONS_PER_POST_MAX: usize = 3;
 
 /// Domain separator of the channel-reaction envelope, trailing NUL included.
 /// Frozen.

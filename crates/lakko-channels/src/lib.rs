@@ -76,10 +76,10 @@
 //! - [`invite`] — a private channel's invite key, the invite proof the
 //!   service checks, and the sealed admission ticket the publisher checks.
 //!
-//! - [`post_key`], [`reaction`], [`comment`], [`ban_list`] — comments and
-//!   reactions (section 13a): the per-post key a subscriber write is signed
-//!   by and its proof, reaction labels a reader resolves against the fixed
-//!   emoji list of `lakko_ui_rules::reaction`, the sealed comment with its
+//! - [`write_key`], [`reaction`], [`comment`], [`ban_list`] — comments and
+//!   reactions (section 13a): the per-write key a subscriber write is signed
+//!   by and its proof, reaction labels a reader resolves against the emoji
+//!   it knows (any emoji, the chat rule), the sealed comment with its
 //!   per-channel author key, and the publisher's ban list, carried as a post
 //!   like the metadata record.
 //!
@@ -134,13 +134,13 @@ pub mod member_card;
 pub mod meta;
 pub mod owner;
 pub mod post;
-pub mod post_key;
 pub mod public_seed;
 pub mod reaction;
 pub mod rotation_policy;
 pub mod seed;
 pub mod subscribe;
 pub mod unsubscribe;
+pub mod write_key;
 
 pub use ban_list::{
     ban_list_is_newer, compose_ban_list, decode_ban_list, AuthorKey, BanList, BanListError,
@@ -185,8 +185,9 @@ pub use member_card::{
 };
 pub use meta::{
     channel_meta_is_newer, classify_post_plaintext, compose_channel_meta, decode_channel_meta,
-    ChannelMeta, ChannelMetaError, ChannelMetaFieldError, PostContent, CHANNEL_META_DOMAIN_V1,
-    CHANNEL_META_MAX_LEN, CHANNEL_META_MIN_LEN, CHANNEL_META_VERSION_V3,
+    AllowedReactions, ChannelMeta, ChannelMetaError, ChannelMetaFieldError, PostContent,
+    ALLOWED_REACTIONS_MAX, CHANNEL_META_DOMAIN_V1, CHANNEL_META_MAX_LEN, CHANNEL_META_MIN_LEN,
+    CHANNEL_META_VERSION_V3,
 };
 pub use owner::{
     channel_owner_seed, owner_handover_body, parse_owner_handover_body, verify_owner_proof,
@@ -197,11 +198,6 @@ pub use owner::{
 pub use post::{
     compose_post, decode_post, verify_and_decrypt, ChannelPost, MAX_PLAINTEXT_LEN,
     POST_SIG_DOMAIN_V1,
-};
-pub use post_key::{
-    channel_post_key_seed, post_key_proof_canonical_bytes, verify_post_key_proof, ChannelPostKey,
-    PostKeyProof, PostKeyProofError, PostKeyStatement, SubscriberWrite, POST_KEY_DOMAIN,
-    POST_KEY_LEN, POST_KEY_PROOF_DOMAIN, POST_KEY_PROOF_HEADER_NAME, POST_KEY_PROOF_WINDOW_MS,
 };
 pub use public_seed::{
     channel_read_key, open_public_seed, public_seed_epoch, seal_public_seed,
@@ -218,6 +214,13 @@ pub use subscribe::{
 pub use unsubscribe::{
     sign_unsubscribe_request, unsubscribe_signed_bytes, verify_unsubscribe_request,
     UNSUBSCRIBE_DOMAIN_V1, UNSUBSCRIBE_SIG_HEADER, UNSUBSCRIBE_SIG_LEN, UNSUBSCRIBE_WINDOW_MS,
+};
+pub use write_key::{
+    comment_write_seed, new_comment_nonce, reaction_write_seed, verify_write_proof,
+    write_proof_canonical_bytes, CommentWriteKey, ReactionWriteKey, SubscriberWrite, WriteProof,
+    WriteProofError, WriteStatement, COMMENT_NONCE_LEN, COMMENT_WRITE_KEY_DOMAIN,
+    REACTION_WRITE_KEY_DOMAIN, WRITE_KEY_LEN, WRITE_PROOF_DOMAIN, WRITE_PROOF_HEADER_NAME,
+    WRITE_PROOF_WINDOW_MS,
 };
 
 /// Channel identifier length — 16 bytes (the pseudonym chosen at
@@ -255,12 +258,12 @@ pub mod fuzz_api {
         crate::invite::fuzz_open_ticket(ticket)
     }
 
-    /// Parse `value` as a post key proof header (ADR-0087 section 13a) and
+    /// Parse `value` as a write proof header (ADR-0087 section 13a) and
     /// verify it for a fixed write. `None` when it does not parse;
     /// `Some(true)` when it re-encodes to the same text.
     #[must_use]
-    pub fn post_key_proof_parse(value: &str) -> Option<bool> {
-        crate::post_key::fuzz_parse_proof(value)
+    pub fn write_proof_parse(value: &str) -> Option<bool> {
+        crate::write_key::fuzz_parse_proof(value)
     }
 
     /// Open `sealed` as a comment (ADR-0087 section 13a) at a fixed place

@@ -53,9 +53,13 @@
 //! - [`channel_reaction`] — the account's own reactions under channel posts
 //!   (ADR-0087 section 13a), bounded to the posts the channel service still
 //!   holds, and their envelope.
+//! - [`channel_comment`] — the account's own comments under channel posts
+//!   (the nonce each comment's write key is derived from, so any device can
+//!   delete it), bounded the same way, and their envelope.
 //! - [`state`] — the fold ([`SyncedState`]), its queries, its persistence
 //!   codec, and [`should_send_snapshot`].
 
+pub mod channel_comment;
 pub mod channel_reaction;
 pub mod device_ack;
 pub mod entry;
@@ -65,10 +69,17 @@ pub mod own_username;
 pub mod recovery_email;
 pub mod state;
 
+pub use channel_comment::{
+    compose_channel_comment_envelope, decode_channel_comment_envelope, is_channel_comment_envelope,
+    ChannelCommentEntry, ChannelCommentEnvelopeError, CHANNEL_COMMENTS_MAX_CLIENT,
+    CHANNEL_COMMENT_ENVELOPE_DOMAIN_V1, CHANNEL_COMMENT_ENVELOPE_MAX_ENTRIES,
+    CHANNEL_COMMENT_ENVELOPE_MAX_LEN, CHANNEL_COMMENT_ENVELOPE_MIN_LEN,
+    CHANNEL_COMMENT_ENVELOPE_VERSION_V1, CHANNEL_COMMENT_NONCE_LEN, CHANNEL_COMMENT_RETENTION_MS,
+};
 pub use channel_reaction::{
     compose_channel_reaction_envelope, decode_channel_reaction_envelope,
     is_channel_reaction_envelope, ChannelReactionEntry, ChannelReactionEnvelopeError,
-    CHANNEL_REACTIONS_MAX_CLIENT, CHANNEL_REACTION_CHANNEL_ID_LEN,
+    CHANNEL_REACTIONS_MAX_CLIENT, CHANNEL_REACTIONS_PER_POST_MAX, CHANNEL_REACTION_CHANNEL_ID_LEN,
     CHANNEL_REACTION_EMOJI_MAX_BYTES, CHANNEL_REACTION_ENVELOPE_DOMAIN_V1,
     CHANNEL_REACTION_ENVELOPE_MAX_ENTRIES, CHANNEL_REACTION_ENVELOPE_MAX_LEN,
     CHANNEL_REACTION_ENVELOPE_MIN_LEN, CHANNEL_REACTION_ENVELOPE_VERSION_V1,

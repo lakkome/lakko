@@ -34,6 +34,8 @@ use sqlx::Row;
 
 use crate::config::DEFAULT_ENVELOPE_RETENTION_EPOCHS;
 use crate::directory::{DirectoryEntry, GROWTH_WINDOW_MS};
+use crate::feedback::{Label, PostReactionCounts, StoredComment, WriterKey, WRITE_NONCE_LEN};
+use crate::feedback_sql;
 use crate::storage::{
     ChannelId, ChannelStore, DirectoryQuery, InviteKeyRow, ModerationAction, PublicSeedOutcome,
     SealedTicket, StorageError, StoredListing, StoredPost, SubscriberEntry, SubscriberId,
@@ -1463,6 +1465,96 @@ impl ChannelStore for SqlChannelStore {
         delete_subscriber_row(&mut tx, channel, subscriber).await?;
         tx.commit().await.map_err(db_err)?;
         Ok(())
+    }
+
+    async fn post_exists(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+    ) -> Result<bool, StorageError> {
+        feedback_sql::has_post(&self.pool, channel, post_cursor).await
+    }
+
+    async fn add_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+        now_ms: u64,
+    ) -> Result<bool, StorageError> {
+        feedback_sql::add_reaction(&self.pool, channel, post_cursor, writer_key, label, now_ms)
+            .await
+    }
+
+    async fn delete_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+    ) -> Result<bool, StorageError> {
+        feedback_sql::delete_reaction(&self.pool, channel, post_cursor, writer_key, label).await
+    }
+
+    async fn reaction_counts(
+        &self,
+        channel: ChannelId,
+        post_cursors: &[u64],
+    ) -> Result<Vec<PostReactionCounts>, StorageError> {
+        feedback_sql::reaction_counts(&self.pool, channel, post_cursors).await
+    }
+
+    async fn add_comment(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        sealed: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<u64, StorageError> {
+        feedback_sql::add_comment(&self.pool, channel, post_cursor, writer_key, sealed, now_ms)
+            .await
+    }
+
+    async fn comment_writer(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+    ) -> Result<Option<WriterKey>, StorageError> {
+        feedback_sql::comment_writer(&self.pool, channel, post_cursor, comment_cursor).await
+    }
+
+    async fn delete_comment(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+    ) -> Result<bool, StorageError> {
+        feedback_sql::delete_comment(&self.pool, channel, post_cursor, comment_cursor).await
+    }
+
+    async fn list_comments(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredComment>, StorageError> {
+        feedback_sql::list_comments(&self.pool, channel, post_cursor, after, limit).await
+    }
+
+    async fn consume_write_nonce(
+        &self,
+        nonce: [u8; WRITE_NONCE_LEN],
+        now_ms: u64,
+    ) -> Result<bool, StorageError> {
+        feedback_sql::consume_write_nonce(&self.pool, nonce, now_ms).await
+    }
+
+    async fn prune_write_nonces_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError> {
+        feedback_sql::prune_write_nonces_older_than(&self.pool, cutoff_ms).await
     }
 
     async fn list_member_cards(

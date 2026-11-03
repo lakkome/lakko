@@ -706,6 +706,9 @@ pub fn compose_channel_meta(
         public: listed.unwrap_or(false),
         // ADR-0087: the handle envelope has no FFI argument yet.
         handle: None,
+        // ADR-0087 section 13a: the allowed-reactions field has no FFI
+        // argument yet; a record composed here allows every reaction.
+        reactions: lakko_channels::AllowedReactions::All,
     };
     inner_compose_channel_meta(&meta).map_err(channel_meta_error_value)
 }

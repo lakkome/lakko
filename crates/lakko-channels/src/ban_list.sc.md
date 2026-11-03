@@ -9,7 +9,7 @@
 
 ## Why this module exists
 
-ADR-0087 section 13a: the channel service cannot refuse a comment (it names only a per-post key), and a public channel's read key cannot be withdrawn. A ban is therefore a list of comment author keys every reader applies. It rides as the plaintext of an ordinary post, like the metadata record, so the post's seal and publisher signature make it "sealed and publisher-signed".
+ADR-0087 section 13a: the channel service cannot refuse a comment (it names only a per-comment write key), and a public channel's read key cannot be withdrawn. A ban is therefore a list of comment author keys every reader applies. It rides as the plaintext of an ordinary post, like the metadata record, so the post's seal and publisher signature make it "sealed and publisher-signed".
 
 ## Public contract
 

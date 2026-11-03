@@ -2650,7 +2650,6 @@ dependencies = [
  "lakko-attachments",
  "lakko-contacts",
  "lakko-crypto",
- "lakko-ui-rules",
  "thiserror 1.0.69",
  "tracing",
 ]

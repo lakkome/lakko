@@ -3,27 +3,28 @@
 
 //! Comments under a channel post ([ADR-0087] section 13a, "Comments").
 //!
-//! A comment is a row at the channel service, `(post, cursor, post_key,
-//! sealed)`, where `post_key` is the author's key for that post
-//! ([`crate::post_key`]) and `sealed` is at most [`COMMENT_SEALED_MAX_LEN`]
+//! A comment is a row at the channel service, `(post, cursor, writer_key,
+//! sealed)`, where `writer_key` is the key of that one comment
+//! ([`crate::write_key::CommentWriteKey`], derived from the account seed and
+//! a random comment nonce) and `sealed` is at most [`COMMENT_SEALED_MAX_LEN`]
 //! bytes the service cannot open.
 //!
 //! ## Wire
 //!
 //! ```text
 //! comment_key = HKDF-SHA-256(ikm  = the post's epoch seed,
-//!                            salt = channel_id(16) ‖ epoch_id(4, BE) ‖ post_cursor(8, BE) ‖ post_key(32),
+//!                            salt = channel_id(16) ‖ epoch_id(4, BE) ‖ post_cursor(8, BE) ‖ writer_key(32),
 //!                            info = "lakko/channel/comment-key/v1")
 //! sealed      = version(1)=0x01 ‖ nonce(12) ‖ ChaCha20-Poly1305(plaintext) ‖ tag(16)
-//! aad         = version ‖ channel_id ‖ epoch_id(4, BE) ‖ post_cursor(8, BE) ‖ post_key
+//! aad         = version ‖ channel_id ‖ epoch_id(4, BE) ‖ post_cursor(8, BE) ‖ writer_key
 //! plaintext   = author_key(32) ‖ signature(64) ‖ body
 //! body        = name_len(1) ‖ name ‖ avatar_len(1)=0|84 ‖ avatar ‖ reply(1)=0|1 ‖ [reply_to(8, BE)]
 //!               ‖ text_len(2, BE) ‖ text
 //! signature   = Ed25519_author("lakko/channel/comment-sig/v1" ‖ channel_id ‖ post_cursor(8, BE)
-//!                              ‖ post_key ‖ BLAKE3(body))
+//!                              ‖ writer_key ‖ BLAKE3(body))
 //! ```
 //!
-//! * The key is per `(post, post key)`, and the AAD binds the same, so the
+//! * The key is per `(post, writer key)`, and the AAD binds the same, so the
 //!   service cannot move a comment to another post or under another writer's
 //!   key: it then fails the authenticator. The nonce is 96 fresh random bits
 //!   per seal, in the clear.
@@ -34,8 +35,8 @@
 //!   two comments in this channel are by one author and a publisher can ban
 //!   it ([`crate::ban_list`]). It carries no account key: a comment in a
 //!   public channel is public speech under a name its author typed.
-//! * The signature binds the post and the post key, so a reader who opened a
-//!   comment cannot re-post it under its own post key, or under another post,
+//! * The signature binds the post and the writer key, so a reader who opened a
+//!   comment cannot re-post it under its own writer key, or under another post,
 //!   as the same author.
 //! * `name` follows the display-name rule (`lakko_contacts::profile`);
 //!   `avatar` is an ADR-0084 still reference (square, at most 640 px and
@@ -65,8 +66,8 @@ use thiserror::Error;
 
 use crate::epoch::{EpochId, EPOCH_ID_LEN};
 use crate::owner::ACCOUNT_SEED_LEN;
-use crate::post_key::POST_KEY_LEN;
 use crate::seed::ContentKeySeed;
+use crate::write_key::WRITE_KEY_LEN;
 use crate::CHANNEL_ID_LEN;
 
 /// The sealed comment's first byte.
@@ -182,7 +183,7 @@ pub enum CommentError {
     /// Sealing failed (impossible with valid inputs).
     #[error("comment seal failed")]
     Seal,
-    /// The authenticator refused the comment: another seed, post, post key,
+    /// The authenticator refused the comment: another seed, post, writer key,
     /// or a byte changed.
     #[error("comment did not open")]
     Open,
@@ -192,7 +193,7 @@ pub enum CommentError {
     #[error("comment plaintext is malformed")]
     Malformed,
     /// The author key is not a valid Ed25519 key of full order, or its
-    /// signature does not cover this channel, post, post key and body.
+    /// signature does not cover this channel, post, writer key and body.
     #[error("comment is not signed by its author key")]
     AuthorSignature,
     /// The name violates the display-name rule.
@@ -419,9 +420,10 @@ pub struct CommentPlace<'a> {
     pub epoch: EpochId,
     /// The post's server cursor.
     pub post_cursor: u64,
-    /// The writer's post key ([`crate::post_key::ChannelPostKey::public_key`]),
-    /// as the row names it.
-    pub post_key: &'a [u8; POST_KEY_LEN],
+    /// The comment's write key
+    /// ([`crate::write_key::CommentWriteKey::public_key`]), as the row names
+    /// it.
+    pub writer_key: &'a [u8; WRITE_KEY_LEN],
 }
 
 /// The bytes the author key signs.
@@ -429,12 +431,12 @@ pub struct CommentPlace<'a> {
 pub fn comment_signed_bytes(place: &CommentPlace<'_>, body: &[u8]) -> Vec<u8> {
     let digest = hash::blake3(body);
     let mut out = Vec::with_capacity(
-        COMMENT_SIG_DOMAIN_V1.len() + CHANNEL_ID_LEN + 8 + POST_KEY_LEN + digest.len(),
+        COMMENT_SIG_DOMAIN_V1.len() + CHANNEL_ID_LEN + 8 + WRITE_KEY_LEN + digest.len(),
     );
     out.extend_from_slice(COMMENT_SIG_DOMAIN_V1);
     out.extend_from_slice(place.channel_id);
     out.extend_from_slice(&place.post_cursor.to_be_bytes());
-    out.extend_from_slice(place.post_key);
+    out.extend_from_slice(place.writer_key);
     out.extend_from_slice(&digest);
     out
 }
@@ -544,22 +546,22 @@ fn comment_key(
     epoch_seed: &ContentKeySeed,
     place: &CommentPlace<'_>,
 ) -> Result<SecretBytes<KEY_LEN>, CommentError> {
-    let mut salt = Vec::with_capacity(CHANNEL_ID_LEN + EPOCH_ID_LEN + 8 + POST_KEY_LEN);
+    let mut salt = Vec::with_capacity(CHANNEL_ID_LEN + EPOCH_ID_LEN + 8 + WRITE_KEY_LEN);
     salt.extend_from_slice(place.channel_id);
     salt.extend_from_slice(&place.epoch.to_be_bytes());
     salt.extend_from_slice(&place.post_cursor.to_be_bytes());
-    salt.extend_from_slice(place.post_key);
+    salt.extend_from_slice(place.writer_key);
     hkdf_sha256::<KEY_LEN>(epoch_seed.as_inner_bytes(), &salt, COMMENT_KEY_INFO_V1)
         .map_err(|_| CommentError::KeyDerivation)
 }
 
 fn comment_aad(place: &CommentPlace<'_>) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(1 + CHANNEL_ID_LEN + EPOCH_ID_LEN + 8 + POST_KEY_LEN);
+    let mut aad = Vec::with_capacity(1 + CHANNEL_ID_LEN + EPOCH_ID_LEN + 8 + WRITE_KEY_LEN);
     aad.push(COMMENT_VERSION_V1);
     aad.extend_from_slice(place.channel_id);
     aad.extend_from_slice(&place.epoch.to_be_bytes());
     aad.extend_from_slice(&place.post_cursor.to_be_bytes());
-    aad.extend_from_slice(place.post_key);
+    aad.extend_from_slice(place.writer_key);
     aad
 }
 
@@ -595,7 +597,7 @@ pub(crate) fn fuzz_open(sealed: &[u8]) -> bool {
         channel_id: &[0x0C; CHANNEL_ID_LEN],
         epoch: EpochId::new(3),
         post_cursor: 7,
-        post_key: &[0x5B; POST_KEY_LEN],
+        writer_key: &[0x5B; WRITE_KEY_LEN],
     };
     let seed = ContentKeySeed::from_bytes_for_test([0x42; 32]);
     let mut holds = open_comment(&seed, &place, sealed).is_err();
@@ -617,7 +619,7 @@ pub(crate) fn fuzz_open(sealed: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::post_key::ChannelPostKey;
+    use crate::write_key::CommentWriteKey;
 
     const CHANNEL: [u8; CHANNEL_ID_LEN] = [0x0C; CHANNEL_ID_LEN];
     const ACCOUNT: [u8; 32] = [0x11; 32];
@@ -646,22 +648,22 @@ mod tests {
         }
     }
 
-    fn post_key() -> [u8; POST_KEY_LEN] {
-        ChannelPostKey::from_account_seed(&ACCOUNT, &CHANNEL, 7).public_key()
+    fn writer_key() -> [u8; WRITE_KEY_LEN] {
+        CommentWriteKey::new(&ACCOUNT, &CHANNEL, 7, &[0x31; 16]).public_key()
     }
 
-    fn place(key: &[u8; POST_KEY_LEN]) -> CommentPlace<'_> {
+    fn place(key: &[u8; WRITE_KEY_LEN]) -> CommentPlace<'_> {
         CommentPlace {
             channel_id: &CHANNEL,
             epoch: EpochId::new(3),
             post_cursor: 7,
-            post_key: key,
+            writer_key: key,
         }
     }
 
     #[test]
     fn a_comment_round_trips_and_names_its_author() {
-        let key = post_key();
+        let key = writer_key();
         let author = CommentAuthor::from_account_seed(&ACCOUNT, &CHANNEL);
         let sealed = seal_comment(&seed(), &place(&key), &author, &comment()).unwrap();
         assert!(sealed.len() <= COMMENT_SEALED_MAX_LEN);
@@ -687,7 +689,7 @@ mod tests {
 
     #[test]
     fn a_maximal_comment_fits_the_row() {
-        let key = post_key();
+        let key = writer_key();
         let author = CommentAuthor::from_account_seed(&ACCOUNT, &CHANNEL);
         // 64 four-byte scalars fills the 255-byte name bound below its char cap.
         let big = Comment {
@@ -709,13 +711,13 @@ mod tests {
     }
 
     /// The service cannot move a comment to another post, epoch, channel or
-    /// post key, and a changed byte does not open.
+    /// writer key, and a changed byte does not open.
     #[test]
     fn a_comment_opens_only_where_it_was_written() {
-        let key = post_key();
+        let key = writer_key();
         let author = CommentAuthor::from_account_seed(&ACCOUNT, &CHANNEL);
         let sealed = seal_comment(&seed(), &place(&key), &author, &comment()).unwrap();
-        let other_key = ChannelPostKey::from_account_seed(&[0x12; 32], &CHANNEL, 7).public_key();
+        let other_key = CommentWriteKey::new(&[0x12; 32], &CHANNEL, 7, &[0x31; 16]).public_key();
         let elsewhere = [
             CommentPlace {
                 post_cursor: 8,
@@ -763,11 +765,11 @@ mod tests {
         );
     }
 
-    /// Someone who opened a comment cannot re-seal it under its own post key
-    /// as the same author: the signature names the original post key.
+    /// Someone who opened a comment cannot re-seal it under its own writer key
+    /// as the same author: the signature names the original writer key.
     #[test]
-    fn a_resealed_comment_under_another_post_key_fails_the_author_signature() {
-        let key = post_key();
+    fn a_resealed_comment_under_another_writer_key_fails_the_author_signature() {
+        let key = writer_key();
         let author = CommentAuthor::from_account_seed(&ACCOUNT, &CHANNEL);
         let body = comment().encode_body().unwrap();
         let sig = author.key.sign(&comment_signed_bytes(&place(&key), &body));
@@ -775,7 +777,7 @@ mod tests {
         plaintext.extend_from_slice(&sig.to_bytes());
         plaintext.extend_from_slice(&body);
         assert!(open_plaintext(&place(&key), &plaintext).is_ok());
-        let thief = ChannelPostKey::from_account_seed(&[0x12; 32], &CHANNEL, 7).public_key();
+        let thief = CommentWriteKey::new(&[0x12; 32], &CHANNEL, 7, &[0x31; 16]).public_key();
         assert_eq!(
             open_plaintext(&place(&thief), &plaintext),
             Err(CommentError::AuthorSignature)
@@ -817,13 +819,13 @@ mod tests {
         );
         assert_ne!(
             comment_author_seed(&ACCOUNT, &CHANNEL),
-            crate::post_key::channel_post_key_seed(&ACCOUNT, &CHANNEL, 0)
+            crate::write_key::comment_write_seed(&ACCOUNT, &CHANNEL, 0, &[0; 16])
         );
     }
 
     #[test]
     fn seal_refuses_what_open_refuses() {
-        let key = post_key();
+        let key = writer_key();
         let author = CommentAuthor::from_account_seed(&ACCOUNT, &CHANNEL);
         let bad = |c: Comment| seal_comment(&seed(), &place(&key), &author, &c).unwrap_err();
         assert_eq!(

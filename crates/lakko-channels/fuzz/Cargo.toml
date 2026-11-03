@@ -119,8 +119,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "post_key_proof_parse"
-path = "fuzz_targets/post_key_proof_parse.rs"
+name = "write_proof_parse"
+path = "fuzz_targets/write_proof_parse.rs"
 test = false
 doc = false
 bench = false

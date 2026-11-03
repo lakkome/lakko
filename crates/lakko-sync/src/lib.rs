@@ -129,6 +129,7 @@ pub mod fuzz_api {
             && link_record_envelope_holds(bytes)
             && device_ack_envelope_holds(bytes)
             && channel_reaction_envelope_holds(bytes)
+            && channel_comment_envelope_holds(bytes)
             && persisted_state_holds(bytes)
     }
 
@@ -154,7 +155,34 @@ pub mod fuzz_api {
             });
         held && {
             let n = state.len();
-            state.prune_channel_reactions(u64::MAX) == n && state.is_empty()
+            state.prune_channel_activity(u64::MAX) == n && state.is_empty()
+        }
+    }
+
+    /// The own-comments envelope (ADR-0087 section 13a): canonical, folds to
+    /// exactly its registers, is carried back by `channel_comment_envelopes`,
+    /// does not apply twice, lists exactly its live nonces, and a prune past
+    /// every post removes it all.
+    fn channel_comment_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(entries) = crate::synced::decode_channel_comment_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        let held = crate::synced::compose_channel_comment_envelope(&entries).as_deref()
+            == Ok(bytes)
+            && bytes.len() <= crate::synced::CHANNEL_COMMENT_ENVELOPE_MAX_LEN
+            && state.apply_channel_comment_envelope(bytes) == Ok(true)
+            && state.channel_comment_envelopes() == vec![bytes.to_vec()]
+            && state.apply_channel_comment_envelope(bytes) == Ok(false)
+            && entries.iter().all(|e| {
+                state
+                    .channel_comments_on(&e.value.channel_id, e.value.post_cursor)
+                    .contains(&e.value.comment_nonce)
+                    != e.value.deleted
+            });
+        held && {
+            let n = state.len();
+            state.prune_channel_activity(u64::MAX) == n && state.is_empty()
         }
     }
 
@@ -275,10 +303,20 @@ pub mod fuzz_api {
                 return false;
             }
         }
+        for envelope in state.channel_comment_envelopes() {
+            if rebuilt.apply_channel_comment_envelope(&envelope).is_err() {
+                return false;
+            }
+        }
         let reactions = |s: &SyncedState| {
             s.entries()
                 .into_iter()
-                .filter(|(_, e)| matches!(e, SyncEntry::ChannelReaction(_)))
+                .filter(|(_, e)| {
+                    matches!(
+                        e,
+                        SyncEntry::ChannelReaction(_) | SyncEntry::ChannelComment(_)
+                    )
+                })
                 .collect::<Vec<_>>()
         };
         if reactions(&rebuilt) != reactions(&state) {
@@ -511,6 +549,13 @@ mod fuzz_api_tests {
             .unwrap()
             .unwrap();
         let persisted_reactions = removed.to_bytes();
+        let commented = removed
+            .record_channel_comment(12, [3; 16], 7, [9; 16], 1_000)
+            .unwrap();
+        let uncommented = removed
+            .delete_channel_comment(13, [3; 16], 7, [9; 16], 1_000)
+            .unwrap();
+        let persisted_comments = removed.to_bytes();
         for wire in [
             &envelope,
             &persisted,
@@ -525,6 +570,9 @@ mod fuzz_api_tests {
             &reacted,
             &unreacted,
             &persisted_reactions,
+            &commented,
+            &uncommented,
+            &persisted_comments,
         ] {
             assert!(decode_synced_and_check(wire));
             for i in 0..wire.len() {

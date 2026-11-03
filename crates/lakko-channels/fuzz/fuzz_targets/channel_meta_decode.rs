@@ -12,7 +12,9 @@
 //! UTF-8 / bound checks all run on attacker-chosen input. Since schema
 //! version 2 (ADR-0059 §2) that includes the topic byte, the language
 //! length prefix and code; since version 3 (ADR-0087) the public flag and
-//! the length-prefixed conversation-handle envelope. A plaintext that is not
+//! the length-prefixed conversation-handle envelope; and the allowed-reactions
+//! mode with its bounded list (count and every emoji length checked before a
+//! copy). A plaintext that is not
 //! a record goes to the chat-envelope parser (`lakko_attachments`).
 //!
 //! Three properties are asserted, not merely exercised:

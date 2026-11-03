@@ -87,8 +87,11 @@
 //! stamp tie the removal wins). Carried by
 //! [`SyncedState::channel_reaction_envelopes`] /
 //! [`SyncedState::apply_channel_reaction_envelope`], persisted with the rest
-//! (so the backup carries it), never in [`StateSnapshot`]. Unlike the other
-//! registers it is **pruned**: [`SyncedState::prune_channel_reactions`] drops
+//! (so the backup carries it), never in [`StateSnapshot`]. The own-comments
+//! register (the nonce each comment's write key comes from) is carried and
+//! folded the same way, by [`SyncedState::channel_comment_envelopes`] /
+//! [`SyncedState::apply_channel_comment_envelope`]. Unlike the other
+//! registers both are **pruned**: [`SyncedState::prune_channel_activity`] drops
 //! every register whose post has left the channel service
 //! ([`super::channel_reaction::CHANNEL_REACTION_RETENTION_MS`]). That is safe
 //! where pruning a conversation end is not: once the post is gone there is
@@ -138,10 +141,15 @@
 
 use std::collections::BTreeMap;
 
+use super::channel_comment::{
+    compose_channel_comment_envelope, decode_channel_comment_envelope, ChannelCommentEntry,
+    ChannelCommentEnvelopeError, CHANNEL_COMMENTS_MAX_CLIENT, CHANNEL_COMMENT_ENVELOPE_MAX_ENTRIES,
+    CHANNEL_COMMENT_NONCE_LEN,
+};
 use super::channel_reaction::{
     compose_channel_reaction_envelope, decode_channel_reaction_envelope, ChannelReactionEntry,
-    ChannelReactionEnvelopeError, CHANNEL_REACTIONS_MAX_CLIENT, CHANNEL_REACTION_CHANNEL_ID_LEN,
-    CHANNEL_REACTION_ENVELOPE_MAX_ENTRIES,
+    ChannelReactionEnvelopeError, CHANNEL_REACTIONS_MAX_CLIENT, CHANNEL_REACTIONS_PER_POST_MAX,
+    CHANNEL_REACTION_CHANNEL_ID_LEN, CHANNEL_REACTION_ENVELOPE_MAX_ENTRIES,
 };
 use super::device_ack::{
     compose_device_ack_envelope, decode_device_ack_envelope, DeviceAckEntry,
@@ -181,11 +189,12 @@ use super::recovery_email::{
 /// own time (`SavedSnapshot::sent_at_ms`; the two branches that made the
 /// last two changes had each called theirs `5`), `7` since the
 /// conversation-end register (ADR-0087 section 9), `8` since the
-/// own channel-reaction register (ADR-0087 section 13a). Older
+/// own channel-reaction register (ADR-0087 section 13a), `9` since the
+/// own channel-comment register (the same section, a key per write). Older
 /// versions are refused rather than read: nothing is deployed, and a build
 /// that silently accepted an older layout would be a second decoder nobody
 /// tests.
-const STATE_VERSION: u8 = 8;
+const STATE_VERSION: u8 = 9;
 
 /// A stored register value with its stamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,7 +413,8 @@ impl SyncedState {
                 | SyncEntry::OwnUsername(_)
                 | SyncEntry::LinkRecord(_)
                 | SyncEntry::DeviceAck(_)
-                | SyncEntry::ChannelReaction(_) => {},
+                | SyncEntry::ChannelReaction(_)
+                | SyncEntry::ChannelComment(_) => {},
                 other => {
                     let _ = snap.folders.push(h.hlc, other.clone());
                 },
@@ -858,7 +868,10 @@ impl SyncedState {
     ///
     /// # Errors
     ///
-    /// [`super::entry::BoundsError::ChannelReactionEmoji`].
+    /// [`super::entry::BoundsError::ChannelReactionEmoji`], or
+    /// [`super::entry::BoundsError::TooManyChannelReactions`] when the
+    /// account already stands with [`CHANNEL_REACTIONS_PER_POST_MAX`] other
+    /// reactions on the post (the client shows it and sends nothing).
     pub fn set_channel_reaction(
         &mut self,
         hlc: u64,
@@ -877,6 +890,13 @@ impl SyncedState {
         };
         value.validate()?;
         let held = self.channel_reaction_register(&channel_id, post_cursor, emoji);
+        if reacted
+            && !held.as_ref().is_some_and(|h| h.value.reacted)
+            && self.channel_reactions_on(&channel_id, post_cursor).len()
+                >= CHANNEL_REACTIONS_PER_POST_MAX
+        {
+            return Err(super::entry::BoundsError::TooManyChannelReactions);
+        }
         match &held {
             Some(h) if h.value.reacted == reacted => return Ok(None),
             None if !reacted => return Ok(None),
@@ -994,17 +1014,186 @@ impl SyncedState {
         ))
     }
 
-    /// Drop every own-reaction register whose post has left the channel
-    /// service at `now_ms` (its time plus
+    /// Drop every own-reaction and own-comment register whose post has left
+    /// the channel service at `now_ms` (its time plus
     /// [`super::channel_reaction::CHANNEL_REACTION_RETENTION_MS`] is in the
     /// past). Returns how many went.
-    pub fn prune_channel_reactions(&mut self, now_ms: u64) -> usize {
+    pub fn prune_channel_activity(&mut self, now_ms: u64) -> usize {
         let before = self.registers.len();
         self.registers.retain(|_, h| match &h.entry {
             SyncEntry::ChannelReaction(r) => !r.expired_at(now_ms),
+            SyncEntry::ChannelComment(c) => !c.expired_at(now_ms),
             _ => true,
         });
         before - self.registers.len()
+    }
+
+    // -----------------------------------------------------------------
+    // Own channel comments (ADR-0087 section 13a).
+    // -----------------------------------------------------------------
+
+    fn channel_comment_register(
+        &self,
+        channel_id: &[u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+        comment_nonce: &[u8; CHANNEL_COMMENT_NONCE_LEN],
+    ) -> Option<Stamped<ChannelCommentEntry>> {
+        match self.registers.get(&RegisterKey::ChannelComment(
+            *channel_id,
+            post_cursor,
+            *comment_nonce,
+        )) {
+            Some(Held {
+                hlc,
+                entry: SyncEntry::ChannelComment(c),
+            }) => Some(Stamped {
+                hlc: *hlc,
+                value: c.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn write_channel_comment(&mut self, hlc: u64, value: ChannelCommentEntry) -> Option<Vec<u8>> {
+        match self.apply(hlc, SyncEntry::ChannelComment(value.clone())) {
+            Ok(ApplyOutcome::Applied) => {
+                compose_channel_comment_envelope(&[Stamped { hlc, value }]).ok()
+            },
+            _ => None,
+        }
+    }
+
+    /// Record a comment the account just wrote under the post at
+    /// `post_cursor` in `channel_id`, with the nonce its write key came from,
+    /// stamped `hlc`. `post_at_ms` is the post's server time. **Write-once**:
+    /// a nonce already held writes nothing. Returns the envelope to send, or
+    /// `None` when nothing was written (already held, or at
+    /// [`CHANNEL_COMMENTS_MAX_CLIENT`]).
+    pub fn record_channel_comment(
+        &mut self,
+        hlc: u64,
+        channel_id: [u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+        comment_nonce: [u8; CHANNEL_COMMENT_NONCE_LEN],
+        post_at_ms: u64,
+    ) -> Option<Vec<u8>> {
+        if self
+            .channel_comment_register(&channel_id, post_cursor, &comment_nonce)
+            .is_some()
+            || self.channel_comment_count() >= CHANNEL_COMMENTS_MAX_CLIENT
+        {
+            return None;
+        }
+        self.write_channel_comment(
+            hlc,
+            ChannelCommentEntry {
+                channel_id,
+                post_cursor,
+                comment_nonce,
+                deleted: false,
+                post_at_ms,
+            },
+        )
+    }
+
+    /// Record that the account deleted its comment `comment_nonce`, stamped
+    /// `hlc`. Returns the envelope to send, or `None` when the register
+    /// already says deleted. A deletion of a comment this device never held
+    /// is still written, so the other devices drop it too.
+    pub fn delete_channel_comment(
+        &mut self,
+        hlc: u64,
+        channel_id: [u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+        comment_nonce: [u8; CHANNEL_COMMENT_NONCE_LEN],
+        post_at_ms: u64,
+    ) -> Option<Vec<u8>> {
+        if self
+            .channel_comment_register(&channel_id, post_cursor, &comment_nonce)
+            .is_some_and(|c| c.value.deleted)
+        {
+            return None;
+        }
+        self.write_channel_comment(
+            hlc,
+            ChannelCommentEntry {
+                channel_id,
+                post_cursor,
+                comment_nonce,
+                deleted: true,
+                post_at_ms,
+            },
+        )
+    }
+
+    fn channel_comment_count(&self) -> usize {
+        self.registers
+            .keys()
+            .filter(|k| matches!(k, RegisterKey::ChannelComment(..)))
+            .count()
+    }
+
+    /// The nonces of the account's comments on the post that are not deleted,
+    /// ascending: derive each one's write key to find the rows that are the
+    /// account's own.
+    #[must_use]
+    pub fn channel_comments_on(
+        &self,
+        channel_id: &[u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+    ) -> Vec<[u8; CHANNEL_COMMENT_NONCE_LEN]> {
+        self.registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::ChannelComment(c)
+                    if !c.deleted
+                        && c.channel_id == *channel_id
+                        && c.post_cursor == post_cursor =>
+                {
+                    Some(c.comment_nonce)
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every held own-comment register (tombstones included) with its
+    /// original stamp, as envelopes of at most
+    /// [`CHANNEL_COMMENT_ENVELOPE_MAX_ENTRIES`] entries.
+    #[must_use]
+    pub fn channel_comment_envelopes(&self) -> Vec<Vec<u8>> {
+        let held: Vec<Stamped<ChannelCommentEntry>> = self
+            .registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::ChannelComment(c) => Some(Stamped {
+                    hlc: h.hlc,
+                    value: c.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        held.chunks(CHANNEL_COMMENT_ENVELOPE_MAX_ENTRIES)
+            .filter_map(|chunk| compose_channel_comment_envelope(chunk).ok())
+            .collect()
+    }
+
+    /// Decode an own-comments envelope and fold every register in with its
+    /// original stamp. Fail closed. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`ChannelCommentEnvelopeError`].
+    pub fn apply_channel_comment_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<bool, ChannelCommentEnvelopeError> {
+        let entries = decode_channel_comment_envelope(bytes)?;
+        Ok(self.apply_all(
+            entries
+                .into_iter()
+                .map(|s| (s.hlc, SyncEntry::ChannelComment(s.value))),
+        ))
     }
 
     // -----------------------------------------------------------------
@@ -2144,15 +2333,15 @@ mod tests {
         let mut s = SyncedState::new();
         s.apply(3, SyncEntry::FolderRemoved(fid(2))).ok();
         let mut old = s.to_bytes();
-        assert_eq!(old[0], 8);
-        for version in [1u8, 2, 3, 4, 5, 6, 7] {
+        assert_eq!(old[0], 9);
+        for version in [1u8, 2, 3, 4, 5, 6, 7, 8] {
             old[0] = version;
             assert_eq!(
                 SyncedState::from_bytes(&old),
                 Err(CodecError::UnknownVersion)
             );
         }
-        assert_eq!(SyncedState::new().to_bytes(), vec![8, 0, 0, 0, 0]);
+        assert_eq!(SyncedState::new().to_bytes(), vec![9, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -2443,6 +2632,70 @@ mod tests {
         })
     }
 
+    fn channel_comment(c: u8, cursor: u64, nonce: u8, deleted: bool) -> SyncEntry {
+        SyncEntry::ChannelComment(ChannelCommentEntry {
+            channel_id: [c; 16],
+            post_cursor: cursor,
+            comment_nonce: [nonce; 16],
+            deleted,
+            post_at_ms: 1_000_u64.saturating_add(cursor),
+        })
+    }
+
+    #[test]
+    fn an_own_comment_is_recorded_deleted_carried_and_pruned() {
+        use super::super::channel_comment::CHANNEL_COMMENT_RETENTION_MS;
+        let ch = [4u8; 16];
+        let mut a = SyncedState::new();
+        let sent = a.record_channel_comment(1, ch, 7, [1; 16], 500).unwrap();
+        // Write-once.
+        assert!(a.record_channel_comment(2, ch, 7, [1; 16], 500).is_none());
+        a.record_channel_comment(3, ch, 7, [2; 16], 500).unwrap();
+        assert_eq!(a.channel_comments_on(&ch, 7), vec![[1; 16], [2; 16]]);
+        assert!(a.channel_comments_on(&ch, 8).is_empty());
+        // Another device learns the nonce and can delete the comment.
+        let mut b = SyncedState::new();
+        assert_eq!(b.apply_channel_comment_envelope(&sent), Ok(true));
+        assert_eq!(b.apply_channel_comment_envelope(&sent), Ok(false));
+        let gone = b.delete_channel_comment(4, ch, 7, [1; 16], 500).unwrap();
+        assert!(b.delete_channel_comment(5, ch, 7, [1; 16], 500).is_none());
+        assert_eq!(a.apply_channel_comment_envelope(&gone), Ok(true));
+        assert_eq!(a.channel_comments_on(&ch, 7), vec![[2; 16]]);
+        // The older record arriving late does not bring it back.
+        assert_eq!(a.apply_channel_comment_envelope(&sent), Ok(false));
+        assert_eq!(a.channel_comments_on(&ch, 7), vec![[2; 16]]);
+        // Persisted, never in the snapshot, re-sent whole.
+        assert!(a.snapshot().folders.is_empty());
+        let back = SyncedState::from_bytes(&a.to_bytes()).unwrap_or_default();
+        assert_eq!(back.entries(), a.entries());
+        assert_eq!(a.channel_comment_envelopes().len(), 1);
+        // Pruned with the post.
+        a.set_channel_reaction(6, ch, 7, "a", true, 500).ok();
+        assert_eq!(
+            a.prune_channel_activity(500 + CHANNEL_COMMENT_RETENTION_MS),
+            0
+        );
+        assert_eq!(
+            a.prune_channel_activity(501 + CHANNEL_COMMENT_RETENTION_MS),
+            3
+        );
+        assert!(a.is_empty());
+    }
+
+    #[test]
+    fn on_an_equal_stamp_a_comment_deletion_wins_in_either_order() {
+        let live = channel_comment(1, 7, 3, false);
+        let gone = channel_comment(1, 7, 3, true);
+        let mut x = SyncedState::new();
+        x.apply(5, live.clone()).ok();
+        x.apply(5, gone.clone()).ok();
+        let mut y = SyncedState::new();
+        y.apply(5, gone).ok();
+        y.apply(5, live).ok();
+        assert_eq!(x, y);
+        assert!(x.channel_comments_on(&[1; 16], 7).is_empty());
+    }
+
     #[test]
     fn an_own_reaction_is_set_taken_off_carried_and_persisted() {
         let ch = [4u8; 16];
@@ -2493,6 +2746,43 @@ mod tests {
     }
 
     #[test]
+    fn a_fourth_reaction_on_one_post_is_refused_and_a_removal_makes_room() {
+        use super::super::entry::BoundsError;
+        let ch = [4u8; 16];
+        let mut s = SyncedState::new();
+        for (i, e) in ["a", "b", "c"].iter().enumerate() {
+            assert!(s
+                .set_channel_reaction(i as u64 + 1, ch, 7, e, true, 500)
+                .unwrap()
+                .is_some());
+        }
+        assert_eq!(
+            s.set_channel_reaction(9, ch, 7, "d", true, 500),
+            Err(BoundsError::TooManyChannelReactions)
+        );
+        // Re-stating a held one is not a fourth, and another post is free.
+        assert_eq!(s.set_channel_reaction(10, ch, 7, "a", true, 500), Ok(None));
+        assert!(s
+            .set_channel_reaction(11, ch, 8, "d", true, 500)
+            .unwrap()
+            .is_some());
+        // Taking one off makes room.
+        assert!(s
+            .set_channel_reaction(12, ch, 7, "b", false, 500)
+            .unwrap()
+            .is_some());
+        assert!(s
+            .set_channel_reaction(13, ch, 7, "d", true, 500)
+            .unwrap()
+            .is_some());
+        // The fold itself never refuses a fourth (a concurrent device).
+        assert_eq!(
+            s.apply(14, channel_reaction(4, 7, "e", true)),
+            Ok(ApplyOutcome::Applied)
+        );
+    }
+
+    #[test]
     fn on_an_equal_stamp_taking_a_reaction_off_wins_in_either_order() {
         let add = channel_reaction(1, 7, "a", true);
         let off = channel_reaction(1, 7, "a", false);
@@ -2516,16 +2806,16 @@ mod tests {
             .ok();
         s.acknowledge_device(4, [9; 32], 0);
         assert_eq!(
-            s.prune_channel_reactions(1_000 + CHANNEL_REACTION_RETENTION_MS),
+            s.prune_channel_activity(1_000 + CHANNEL_REACTION_RETENTION_MS),
             0
         );
         assert_eq!(
-            s.prune_channel_reactions(1_001 + CHANNEL_REACTION_RETENTION_MS),
+            s.prune_channel_activity(1_001 + CHANNEL_REACTION_RETENTION_MS),
             1
         );
         assert!(!s.has_channel_reaction(&[1; 16], 7, "a"));
         assert!(s.has_channel_reaction(&[1; 16], 8, "a"));
-        assert_eq!(s.prune_channel_reactions(u64::MAX), 1);
+        assert_eq!(s.prune_channel_activity(u64::MAX), 1);
         // Other registers are untouched.
         assert!(s.is_device_acknowledged(&[9; 32]));
         assert_eq!(s.len(), 1);
@@ -2999,8 +3289,8 @@ mod tests {
             // Own channel reactions: two posts x two emoji, so a reaction and
             // its removal meet on one stamp often.
             (
-                hlc,
-                c,
+                hlc.clone(),
+                c.clone(),
                 0u64..2,
                 prop::sample::select(vec!["a", "b"]),
                 any::<bool>()
@@ -3009,6 +3299,10 @@ mod tests {
                     h,
                     channel_reaction(c, cursor, e, reacted)
                 )),
+            // Own channel comments: two posts x two nonces, a comment and its
+            // deletion meeting on one stamp often.
+            (hlc, c, 0u64..2, 0u8..2, any::<bool>())
+                .prop_map(|(h, c, cursor, n, deleted)| (h, channel_comment(c, cursor, n, deleted))),
         ]
     }
 
@@ -3030,6 +3324,9 @@ mod tests {
         }
         for envelope in from.channel_reaction_envelopes() {
             into.apply_channel_reaction_envelope(&envelope).unwrap();
+        }
+        for envelope in from.channel_comment_envelopes() {
+            into.apply_channel_comment_envelope(&envelope).unwrap();
         }
     }
 

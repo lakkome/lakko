@@ -714,9 +714,10 @@ They look and behave as in a group: chips under the post with a count on each, t
 person's own highlighted. Pressing a reaction adds it, pressing it again takes it off, and
 the same goes for the chip. A reaction on a comment works the same way.
 
-- The set is fixed: the emoji row of the group's quick reactions plus the list in the
-  picker, a fixed list of 64 (chosen). A group's free choice of any emoji needs each reader to
-  be told which emoji a count is for, and a channel has no way to do that cheaply.
+- Any emoji, as in a group, within what the owner allows (all, none, or a chosen list),
+  and at most 3 per person on a post (decided 2026-11-02, maintainer;
+  `docs/ux/reactions-and-emoji.md`). A reaction whose emoji this app does not know is not
+  shown.
 - The reaction shows at once on the person's device. It goes out when it can: if the
   device is out of tokens it waits and leaves with the next ones. Nothing is refused and no
   error shows. Taking a reaction off always goes out at once.

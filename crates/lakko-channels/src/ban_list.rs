@@ -4,7 +4,8 @@
 //! A public channel's ban list ([ADR-0087] section 13a, "Banning").
 //!
 //! The channel service holds no key to refuse a comment with, by design: a
-//! comment names only a post key the service cannot link to anyone. In a
+//! comment names only a per-comment write key the service cannot link to
+//! anyone. In a
 //! private channel a ban is the existing removal (no seed from the next
 //! epoch). In a public channel reading cannot be refused, so a ban is a list
 //! of comment author keys ([`crate::comment`]) every reader hides the

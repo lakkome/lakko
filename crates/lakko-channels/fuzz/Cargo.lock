@@ -451,7 +451,6 @@ dependencies = [
  "lakko-attachments",
  "lakko-contacts",
  "lakko-crypto",
- "lakko-ui-rules",
  "thiserror",
  "tracing",
 ]
@@ -492,13 +491,6 @@ dependencies = [
  "thiserror",
  "x25519-dalek",
  "zeroize",
-]
-
-[[package]]
-name = "lakko-ui-rules"
-version = "0.0.0"
-dependencies = [
- "lakko-contacts",
 ]
 
 [[package]]

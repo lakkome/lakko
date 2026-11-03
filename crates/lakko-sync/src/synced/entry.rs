@@ -266,6 +266,14 @@ pub enum BoundsError {
     /// An own channel reaction's state byte was neither reacted nor removed.
     #[error("unknown channel reaction state")]
     ChannelReactionState,
+    /// An own channel comment's state byte was neither live nor deleted.
+    #[error("unknown channel comment state")]
+    ChannelCommentState,
+    /// The account already gives the most reactions one person gives one
+    /// post ([`super::channel_reaction::CHANNEL_REACTIONS_PER_POST_MAX`], 3).
+    /// A writer-side rule, never a decode bound: the service cannot check it.
+    #[error("at most 3 reactions per post")]
+    TooManyChannelReactions,
 }
 
 /// Which kind of conversation a [`ConversationRef`] names.
@@ -992,8 +1000,11 @@ pub enum SyncEntry {
     /// warning for (identity-recovery 17.5).
     DeviceAck(super::device_ack::DeviceAckEntry),
     /// One of the account's own reactions under a channel post, or its
-    /// removal (ADR-0087 section 13a). Appended last.
+    /// removal (ADR-0087 section 13a).
     ChannelReaction(super::channel_reaction::ChannelReactionEntry),
+    /// One of the account's own comments under a channel post, or its
+    /// deletion (ADR-0087 section 13a). Appended last.
+    ChannelComment(super::channel_comment::ChannelCommentEntry),
 }
 
 /// Which register an entry writes.
@@ -1036,11 +1047,17 @@ pub enum RegisterKey {
     /// The acknowledgement register of this device key.
     DeviceAck([u8; super::device_ack::DEVICE_ACK_KEY_LEN]),
     /// The own-reaction register of this emoji under this channel post.
-    /// Appended last.
     ChannelReaction(
         [u8; super::channel_reaction::CHANNEL_REACTION_CHANNEL_ID_LEN],
         u64,
         String,
+    ),
+    /// The own-comment register of this comment nonce under this channel
+    /// post. Appended last.
+    ChannelComment(
+        [u8; super::channel_reaction::CHANNEL_REACTION_CHANNEL_ID_LEN],
+        u64,
+        [u8; super::channel_comment::CHANNEL_COMMENT_NONCE_LEN],
     ),
 }
 
@@ -1075,6 +1092,7 @@ const TAG_LINK_RECORD: u8 = 14;
 const TAG_CONVERSATION_END: u8 = 15;
 const TAG_DEVICE_ACK: u8 = 16;
 const TAG_CHANNEL_REACTION: u8 = 17;
+const TAG_CHANNEL_COMMENT: u8 = 18;
 
 impl SyncEntry {
     /// The register this entry writes.
@@ -1099,6 +1117,9 @@ impl SyncEntry {
             Self::DeviceAck(a) => RegisterKey::DeviceAck(a.device_key),
             Self::ChannelReaction(r) => {
                 RegisterKey::ChannelReaction(r.channel_id, r.post_cursor, r.emoji.clone())
+            },
+            Self::ChannelComment(c) => {
+                RegisterKey::ChannelComment(c.channel_id, c.post_cursor, c.comment_nonce)
             },
         }
     }
@@ -1131,7 +1152,8 @@ impl SyncEntry {
             | Self::ReadCursor(_)
             | Self::Draft(_)
             | Self::ConversationOrder(_)
-            | Self::DeviceAck(_) => Ok(()),
+            | Self::DeviceAck(_)
+            | Self::ChannelComment(_) => Ok(()),
         }
     }
 
@@ -1239,6 +1261,12 @@ impl SyncEntry {
             Self::ChannelReaction(r) => {
                 out.push(TAG_CHANNEL_REACTION);
                 r.encode_body(&mut out);
+            },
+            // The key first, the state byte after it: on an exact stamp tie a
+            // deletion beats the comment.
+            Self::ChannelComment(c) => {
+                out.push(TAG_CHANNEL_COMMENT);
+                c.encode_body(&mut out);
             },
             // The key (reference, message id) comes first and the state
             // byte directly after it, so on an exact stamp tie the two
@@ -1395,6 +1423,9 @@ impl SyncEntry {
             },
             TAG_CHANNEL_REACTION => Self::ChannelReaction(
                 super::channel_reaction::ChannelReactionEntry::take_body(&mut cur)?,
+            ),
+            TAG_CHANNEL_COMMENT => Self::ChannelComment(
+                super::channel_comment::ChannelCommentEntry::take_body(&mut cur)?,
             ),
             _ => return Err(CodecError::UnknownTag),
         };

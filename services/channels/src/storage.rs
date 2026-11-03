@@ -36,6 +36,9 @@ use tokio::sync::RwLock;
 
 use crate::config::DEFAULT_ENVELOPE_RETENTION_EPOCHS;
 use crate::directory::{DirectoryEntry, GROWTH_WINDOW_MS};
+use crate::feedback::{
+    Label, MemoryFeedback, PostReactionCounts, StoredComment, WriterKey, WRITE_NONCE_LEN,
+};
 
 /// Prune a per-subscriber `epoch -> envelope` map down to its
 /// highest `keep_n` epochs, dropping the lowest first
@@ -452,6 +455,10 @@ pub enum StorageError {
     /// Registering one more invite key would exceed the per-channel cap.
     #[error("too many invite keys for this channel")]
     TooManyInviteKeys,
+    /// The channel holds no post at the cursor a reaction or comment names
+    /// (ADR-0087 section 13a).
+    #[error("post not found")]
+    UnknownPost,
     /// Database-level failure — connection lost, query
     /// timeout, constraint violation, anything sqlx
     /// surfaces. The string carries the underlying
@@ -1022,6 +1029,132 @@ pub trait ChannelStore: Send + Sync {
         channel: ChannelId,
         subscriber: SubscriberId,
     ) -> Result<(), StorageError>;
+
+    // ---------------------------------------------------------
+    // Comments and reactions (ADR-0087 section 13a)
+    // ---------------------------------------------------------
+
+    /// Whether the channel holds a post at `post_cursor`: the check an add
+    /// runs before it spends a token. A keyed lookup.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn post_exists(&self, channel: ChannelId, post_cursor: u64)
+        -> Result<bool, StorageError>;
+
+    /// Store the reaction row `(post, writer_key, label)`. Returns whether it
+    /// is new (an existing row is left as it is).
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownPost`] when the channel holds no post at
+    /// `post_cursor` (never stored, or pruned).
+    async fn add_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+        now_ms: u64,
+    ) -> Result<bool, StorageError>;
+
+    /// Remove the reaction row; returns whether one was there.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn delete_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+    ) -> Result<bool, StorageError>;
+
+    /// The label counts of each post in `post_cursors`, in that order (a post
+    /// with no rows, or none at all, gets an empty list). See
+    /// [`PostReactionCounts`] for the ranking.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn reaction_counts(
+        &self,
+        channel: ChannelId,
+        post_cursors: &[u64],
+    ) -> Result<Vec<PostReactionCounts>, StorageError>;
+
+    /// Store a comment row and return its cursor.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownPost`].
+    async fn add_comment(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        sealed: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<u64, StorageError>;
+
+    /// The write key of the comment at `comment_cursor` under the post, or
+    /// `None` when there is no such comment.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn comment_writer(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+    ) -> Result<Option<WriterKey>, StorageError>;
+
+    /// Remove the comment row; returns whether one was there.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn delete_comment(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+    ) -> Result<bool, StorageError>;
+
+    /// The comments under the post with a cursor above `after`, ascending, at
+    /// most `limit`.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn list_comments(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredComment>, StorageError>;
+
+    /// Record a write-proof nonce; `false` when it was seen before.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`].
+    async fn consume_write_nonce(
+        &self,
+        nonce: [u8; WRITE_NONCE_LEN],
+        now_ms: u64,
+    ) -> Result<bool, StorageError>;
+
+    /// Forget write-proof nonces seen before `cutoff_ms`.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`].
+    async fn prune_write_nonces_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError>;
 }
 
 /// One channel's public seeds: epoch → (envelope, superseded at).
@@ -1129,6 +1262,16 @@ struct Inner {
     invite_keys: HashMap<ChannelId, BTreeMap<[u8; INVITE_KEY_LEN], InviteKeyRow>>,
     /// (Channel, Subscriber) removed by a publisher → when.
     removed: HashMap<(ChannelId, SubscriberId), u64>,
+    /// Comments and reactions (ADR-0087 section 13a).
+    feedback: MemoryFeedback,
+}
+
+impl Inner {
+    fn has_post(&self, channel: ChannelId, post_cursor: u64) -> bool {
+        self.posts
+            .get(&channel)
+            .is_some_and(|posts| posts.iter().any(|p| p.cursor == post_cursor))
+    }
 }
 
 impl Inner {
@@ -1310,6 +1453,14 @@ impl ChannelStore for InMemoryChannelStore {
             posts.retain(|p| p.server_ts_ms >= cutoff_ms);
             removed = removed.saturating_add((before - posts.len()) as u64);
         }
+        // A pruned post takes its comments and reactions with it, as the SQL
+        // foreign keys cascade.
+        let live: std::collections::HashSet<(ChannelId, u64)> = guard
+            .posts
+            .iter()
+            .flat_map(|(c, posts)| posts.iter().map(move |p| (*c, p.cursor)))
+            .collect();
+        guard.feedback.retain_posts(|c, p| live.contains(&(c, p)));
         Ok(removed)
     }
 
@@ -2048,6 +2199,141 @@ impl ChannelStore for InMemoryChannelStore {
         }
         guard.drop_subscriber(channel, subscriber);
         Ok(())
+    }
+
+    async fn post_exists(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+    ) -> Result<bool, StorageError> {
+        Ok(self.inner.read().await.has_post(channel, post_cursor))
+    }
+
+    async fn add_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+        _now_ms: u64,
+    ) -> Result<bool, StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.has_post(channel, post_cursor) {
+            return Err(StorageError::UnknownPost);
+        }
+        Ok(guard
+            .feedback
+            .add_reaction(channel, post_cursor, writer_key, label))
+    }
+
+    async fn delete_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+    ) -> Result<bool, StorageError> {
+        Ok(self.inner.write().await.feedback.delete_reaction(
+            channel,
+            post_cursor,
+            writer_key,
+            label,
+        ))
+    }
+
+    async fn reaction_counts(
+        &self,
+        channel: ChannelId,
+        post_cursors: &[u64],
+    ) -> Result<Vec<PostReactionCounts>, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .feedback
+            .reaction_counts(channel, post_cursors))
+    }
+
+    async fn add_comment(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        sealed: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<u64, StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.has_post(channel, post_cursor) {
+            return Err(StorageError::UnknownPost);
+        }
+        Ok(guard
+            .feedback
+            .add_comment(channel, post_cursor, writer_key, sealed, now_ms))
+    }
+
+    async fn comment_writer(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+    ) -> Result<Option<WriterKey>, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .feedback
+            .comment_writer(channel, post_cursor, comment_cursor))
+    }
+
+    async fn delete_comment(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .inner
+            .write()
+            .await
+            .feedback
+            .delete_comment(channel, post_cursor, comment_cursor))
+    }
+
+    async fn list_comments(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredComment>, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .feedback
+            .list_comments(channel, post_cursor, after, limit))
+    }
+
+    async fn consume_write_nonce(
+        &self,
+        nonce: [u8; WRITE_NONCE_LEN],
+        now_ms: u64,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .inner
+            .write()
+            .await
+            .feedback
+            .consume_nonce(nonce, now_ms))
+    }
+
+    async fn prune_write_nonces_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError> {
+        Ok(self
+            .inner
+            .write()
+            .await
+            .feedback
+            .prune_nonces_older_than(cutoff_ms))
     }
 
     async fn list_member_cards(

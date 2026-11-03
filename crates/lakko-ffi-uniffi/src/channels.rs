@@ -695,6 +695,9 @@ impl From<FfiChannelMeta> for ChannelMeta {
             public: m.listed,
             // ADR-0087: the handle envelope has no FFI field yet.
             handle: None,
+            // ADR-0087 section 13a: the allowed-reactions field has no FFI
+            // argument yet; a record composed here allows every reaction.
+            reactions: lakko_channels::AllowedReactions::All,
         }
     }
 }

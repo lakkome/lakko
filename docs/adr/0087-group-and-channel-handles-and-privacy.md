@@ -677,27 +677,43 @@ service, and readers get a total.
 It would hand the service one person's activity in a channel, and that profile is what an
 IP address and a time link to a person. So nothing here reuses a key from post to post.
 
-**A key per post.** `post_key = BLAKE3-derive-key("lakko/channel/post-key/v1",
-account_seed || channel_id || post_cursor)`, an Ed25519 seed. All the account's devices
-derive the same key, and two posts' keys are not linkable without the seed. A write is
-signed by it.
+**A key per write (decided 2026-11-02, maintainer).** Every reaction and every comment
+is signed by a key of its own, so the service cannot link even one person's reaction and
+comment under one post. A reaction's key is `BLAKE3-derive-key(
+"lakko/channel/reaction-write-key/v1", account_seed || channel_id || post_cursor ||
+label)`: adding and taking off one reaction use one key, two reactions of one person on
+one post have unrelated keys. A comment's key is `BLAKE3-derive-key(
+"lakko/channel/comment-write-key/v1", account_seed || channel_id || post_cursor ||
+comment_nonce)`, the 16-byte nonce random and kept in the account's own-comments register
+(below), so any of the account's devices can delete the comment. Every write carries the
+`x-lakko-channel-write-proof` header: a signature by the write key over the channel, the
+post, the write, a time and a nonce; the service refuses a nonce it has seen (a captured
+add cannot be replayed after the reaction was taken off).
 
-**Reactions.** A row is `(post, post_key_pub, label)`, unique, so one person gives one
-reaction of a kind. `label = BLAKE3-keyed(reaction_key, target || emoji)`, 16 bytes, where
-`reaction_key` derives from the epoch seed of the post, so the service holds no emoji and
-cannot compare labels between posts. A second press of the same reaction is a signed
-delete of that row. Only the holder of the post key can delete it, which needs no token.
+**Reactions.** A row is `(post, writer_key, label)`, unique. `label =
+BLAKE3-keyed(reaction_key, post_cursor || emoji)`, 16 bytes, where `reaction_key` derives
+from the epoch seed of the post, so the service holds no emoji and cannot compare labels
+between posts. Taking a reaction off is a signed delete of that row by the same key, which
+needs no token.
 
-- **Readers** get `{label: count}` for the posts in view, in one batched, cacheable call,
-  and resolve labels by trying a fixed list of 64 emoji in `lakko_ui_rules` (chosen). An
-  unknown label is dropped, so junk from someone with no seed shows nothing. Any emoji, as
-  in a group, would need one sealed name per label, and the first writer would choose it.
-- **The account's own reactions** live in a `lakko-sync` register, shared among its
-  devices over the DeviceGroup and in the backup, and are never asked of the service:
-  a request naming the keys of several posts would link exactly what the per-post keys keep
-  apart. The key itself is derived, so any device can take a reaction off. The register
-  is bounded to the channel's retained posts: a post past its 30 days takes its entries
-  with it.
+- **Any emoji, as in a chat (decided 2026-11-02, maintainer).** A reaction is any emoji
+  the chat rule accepts. Readers get `{label: count}` for the posts in view (at most 50 a
+  call, at most 64 labels a post), in one batched, cacheable call, and resolve labels by
+  trying every emoji their app knows (the bundled emoji set and their recent ones). An
+  unknown label is dropped, so junk from someone with no seed shows nothing, and an emoji
+  an older app does not know is not shown there.
+- **Allowed reactions.** The owner sets all, none, or a list of up to 100 in the channel
+  metadata. Readers and the composer hide what is not allowed. The service cannot enforce
+  it: it sees labels only.
+- **At most 3 reactions per person on a post (decided 2026-11-02, maintainer).** The app
+  enforces it from the own-reactions register; nobody else can count a person's
+  reactions, since each has its own key. A modified app can add more; two devices adding
+  at the same moment can briefly leave four.
+- **The account's own reactions and comments** live in two `lakko-sync` registers, shared
+  among its devices over the DeviceGroup and in the backup, and are never asked of the
+  service: a request naming several write keys would link exactly what they keep apart.
+  The registers are bounded to the channel's retained posts: a post past its 30 days takes
+  its entries with it.
 
 **Who may write.** One anonymous token per added reaction and per comment, in contexts of
 their own (`channel-react`, `channel-comment`, ADR-0054), so the service learns the writer
@@ -705,12 +721,17 @@ holds a token and not whose. A person out of `channel-react` tokens does not see
 the reaction is drawn at once and leaves with the next refill. Quotas are chosen with room
 to spare and are not measured. A token does not prove one person one reaction: a modified
 client can use another derivation and add up to its quota. That inflates a counter and is
-accepted.
+accepted. So is a second effect: a token holder can add labels no emoji produces, and since
+a reader gets at most 64 labels a post, a flood of them can push real reactions out of a
+busy post's counts. The order at the service is proof, nonce, the post exists, then the
+token, so a malformed or misdirected write spends nothing; a nonce row (kept 240 s) is
+written for any validly signed request, bounded by the request rate in front of the
+service.
 
-**Comments.** A row is `(post, cursor, post_key_pub, sealed)`, at most 2,048 bytes.
+**Comments.** A row is `(post, cursor, writer_key, sealed)`, at most 2,048 bytes.
 `sealed` is an AEAD under a key from the post's epoch seed over the name, an avatar
 reference, the text, a reply target and the signature of a per-channel author key, which
-exists only inside the seal. An author's delete is signed by the post key; a publisher's
+exists only inside the seal. An author's delete is signed by that comment's write key; a publisher's
 is signed by a publisher proof, as a post's is. Pages are 20 rows, cursor first. Comments
 take no attachments in this version: a file would need a pass and a lifetime of its own.
 

@@ -135,6 +135,16 @@ pub const WIRE_VERSION: u8 = 1;
 /// parser — anything longer degrades to a plain chat message.
 pub const MAX_EMOJI_BYTES: usize = 64;
 
+/// The one rule a reaction emoji passes, in a chat (ADR-0023, ADR-0047) and
+/// under a channel post (ADR-0087 section 13a): not empty and at most
+/// [`MAX_EMOJI_BYTES`] bytes. Whether the text is one emoji grapheme is the
+/// client's to check when it offers the picker; this bound is what every
+/// parser enforces.
+#[must_use]
+pub const fn is_reaction_emoji(emoji: &str) -> bool {
+    !emoji.is_empty() && emoji.len() <= MAX_EMOJI_BYTES
+}
+
 /// ADR-0052 — the longest quoted author name a reply may carry, in bytes.
 /// The profile display-name rule already caps a name at 255 bytes
 /// (`lakko-contacts::profile`), so a snapshot of one needs no more; a
@@ -1401,7 +1411,7 @@ impl Envelope {
             }
             if let Some(target) = self.react_to {
                 if let Some(emoji) = self.emoji {
-                    if !emoji.is_empty() && emoji.len() <= MAX_EMOJI_BYTES {
+                    if is_reaction_emoji(&emoji) {
                         return MessageBody::Reaction { target, emoji };
                     }
                 }
@@ -1612,7 +1622,7 @@ pub fn compose_delete(target: i64) -> Result<Vec<u8>, AttachmentError> {
 /// [`AttachmentError::WireFormat`] if `emoji` is empty or exceeds
 /// [`MAX_EMOJI_BYTES`], or if serialisation fails.
 pub fn compose_reaction(target: i64, emoji: &str) -> Result<Vec<u8>, AttachmentError> {
-    if emoji.is_empty() || emoji.len() > MAX_EMOJI_BYTES {
+    if !is_reaction_emoji(emoji) {
         return Err(AttachmentError::WireFormat(format!(
             "compose_reaction: emoji length {} not in 1..={MAX_EMOJI_BYTES}",
             emoji.len()

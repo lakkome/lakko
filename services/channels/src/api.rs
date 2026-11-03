@@ -35,6 +35,9 @@
 //! | `POST` | `/v1/channels/:id/rotate/stage` | publisher proof | Stage a chunk of the next epoch (ADR-0030). |
 //! | `POST` | `/v1/channels/:id/rotate/commit` | publisher proof | Promote the staged epoch (ADR-0030). |
 //!
+//! Comments and reactions under a post (ADR-0087 section 13a) are in
+//! [`crate::feedback_api`], which has its own route table.
+//!
 //! "Publisher proof" is [`require_publisher`]: an owner proof, or a proof by
 //! a co-publisher key the owner appointed, over the method, the routed path,
 //! the query and the exact body bytes (ADR-0059 section 9, closing G-43).
@@ -2895,6 +2898,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/health", get(health))
         .route("/version", get(version))
+        // ADR-0087 section 13a — comments and reactions.
+        .merge(crate::feedback_api::routes())
         .with_state(state)
 }
 

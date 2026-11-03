@@ -218,6 +218,18 @@ async fn run_prune_loop(
             Err(e) => warn!(error = %e, "prune: owner nonces tick failed"),
         }
 
+        // Write-proof nonces (ADR-0087 section 13a), likewise.
+        match store
+            .prune_write_nonces_older_than(
+                now_ms.saturating_sub(lakko_svc_channels::feedback_api::WRITE_NONCE_RETENTION_MS),
+            )
+            .await
+        {
+            Ok(removed) if removed > 0 => info!(removed, "prune: write nonces tick complete"),
+            Ok(_) => {},
+            Err(e) => warn!(error = %e, "prune: write nonces tick failed"),
+        }
+
         // Stale-subscriber retention — bulk DELETE +
         // envelope FK cascade.
         if subscriber_retention_secs == 0 {
